@@ -1,0 +1,11 @@
+{
+  "profile": "arm64-Neoverse-N1-cloud-block-ext4 / phase-5 gate at 2,000 tables",
+  "hostname": "ccs-oracle-1",
+  "platform": "Linux ccs-oracle-1 7.2.7 #1-NixOS SMP PREEMPT Mon Sep 21 13:09:00 UTC 2026 aarch64 GNU/Linux",
+  "hardware_and_rustc_manifest": "../evidence-full/profile.json",
+  "source_archive_sha256": "0f82b39d9c0e6c42890017fd81bac8d556180ea39bdb077af0e4879e4330d393",
+  "binary_sha256": "8fafdb61cedb7d82e3d989aa2c94f4d7f5ae2d7151ec85f0e09de83e5bdbcb4a",
+  "command": ["/home/david-bieregger/rocky-scale-08-5yYEcpri/target/release/scaling_probe", "gate", "600", "1", "16384", "128", "/home/david-bieregger/rocky-scale-08-5yYEcpri/evidence-phase5-scale08-20261005-185532", "2000"],
+  "started_unix": 1791219332,
+  "qualification_gate": "phase 5 recheck; phase 8 pending"
+}

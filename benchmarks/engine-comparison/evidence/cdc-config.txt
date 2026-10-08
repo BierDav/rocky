@@ -1,0 +1,92 @@
+turso_core 0.8.1 cdc.rs
+1: //! Change Data Capture (CDC) configuration types.
+2: //!
+3: //! These types describe the `PRAGMA capture_data_changes_conn`
+4: //! setting on a connection: which columns get captured, which table the
+5: //! changes are written to, and which CDC schema version is in use. The
+6: //! bytecode that writes the change records lives in `translate::emitter`.
+7: 
+8: use crate::{LimboError, Result};
+9: 
+10: pub const TURSO_CDC_DEFAULT_TABLE_NAME: &str = "turso_cdc";
+11: pub const TURSO_CDC_VERSION_TABLE_NAME: &str = "turso_cdc_version";
+12: 
+13: #[derive(Debug, Clone, Eq, PartialEq)]
+14: pub enum CaptureDataChangesMode {
+15:     Id,
+16:     Before,
+17:     After,
+18:     Full,
+19: }
+20: 
+21: /// CDC schema version with integer ordering for feature checks.
+22: /// Higher versions are supersets of lower versions.
+23: #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+24: #[repr(u8)]
+25: pub enum CdcVersion {
+26:     /// 8 columns: change_id, change_time, change_type, table_name, id, before, after, updates
+27:     V1 = 1,
+28:     /// 9 columns (adds change_txn_id + COMMIT records with change_type=2)
+29:     V2 = 2,
+30: }
+31: 
+32: pub const CDC_VERSION_CURRENT: CdcVersion = CdcVersion::V2;
+33: 
+34: impl CdcVersion {
+35:     /// Whether this version emits COMMIT records (change_type=2)
+36:     pub fn has_commit_record(self) -> bool {
+37:         self >= CdcVersion::V2
+38:     }
+39: }
+40: 
+41: impl std::fmt::Display for CdcVersion {
+42:     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+43:         match self {
+44:             CdcVersion::V1 => write!(f, "v1"),
+45:             CdcVersion::V2 => write!(f, "v2"),
+46:         }
+47:     }
+48: }
+49: 
+50: impl std::str::FromStr for CdcVersion {
+51:     type Err = LimboError;
+52:     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+53:         match s {
+54:             "v1" => Ok(CdcVersion::V1),
+55:             "v2" => Ok(CdcVersion::V2),
+56:             _ => Err(LimboError::InternalError(format!(
+57:                 "unexpected CDC version: {s}"
+58:             ))),
+59:         }
+60:     }
+61: }
+62: 
+63: #[derive(Debug, Clone, Eq, PartialEq)]
+64: pub struct CaptureDataChangesInfo {
+65:     pub mode: CaptureDataChangesMode,
+66:     pub table: String,
+67:     pub version: Option<CdcVersion>,
+68: }
+69: 
+70: impl CaptureDataChangesInfo {
+71:     pub fn parse(
+72:         value: &str,
+73:         version: Option<CdcVersion>,
+74:     ) -> Result<Option<CaptureDataChangesInfo>> {
+75:         let (mode, table) = value
+76:             .split_once(",")
+77:             .unwrap_or((value, TURSO_CDC_DEFAULT_TABLE_NAME));
+78:         match mode {
+79:             "off" => Ok(None),
+80:             "id" => Ok(Some(CaptureDataChangesInfo { mode: CaptureDataChangesMode::Id, table: table.to_string(), version })),
+81:             "before" => Ok(Some(CaptureDataChangesInfo { mode: CaptureDataChangesMode::Before, table: table.to_string(), version })),
+82:             "after" => Ok(Some(CaptureDataChangesInfo { mode: CaptureDataChangesMode::After, table: table.to_string(), version })),
+83:             "full" => Ok(Some(CaptureDataChangesInfo { mode: CaptureDataChangesMode::Full, table: table.to_string(), version })),
+84:             _ => Err(LimboError::InvalidArgument(
+85:                 "unexpected pragma value: expected '<mode>' or '<mode>,<cdc-table-name>' parameter where mode is one of off|id|before|after|full".to_string(),
+86:             ))
+87:         }
+88:     }
+89:     pub fn has_updates(&self) -> bool {
+90:         self.mode == CaptureDataChangesMode::Full
+91:     }

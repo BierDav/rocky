@@ -1,0 +1,552 @@
+soak os=macos arch=aarch64 durability=Full tables=2000 rows=100000 domains=3 observers=100 minimum_seconds=600 minimum_operations=5000000
+soak gaps: strong/effects, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner
+soak install_ms=99237 resident_mib=104
+soak t_s=30 main_operations=38008 writes_per_s=1267 observer_deliveries_per_s=2372 live_rows=38024 observations=71168 resident_mib=185 file_bytes=232312832 wal_bytes=14300552 retained=2141 checkpoint=9 step_us_per_write=184.72 commit_us=20331108 checkpoint_copy_us=333706 checkpoint_flush_us=371398 queue=0
+soak subphases t_s=30 admission_us_per_write=0.00 reduction_us_per_write=27.64 encoding_us_per_write=0.06 sql_us_per_write=90.93 authoring_steps=47542 incoming_steps=0 authoring_us_per_step=137.67 incoming_us_per_step=0.00 checkpoints_delta=30
+soak storage t_s=30 page_count=56717 freelist_count=0 free_pct=0.00 db_bytes=232312832 wal_bytes=14300552
+soak domain=1 writes: n=38024 p50_us<=16383 p99_us<=32767 max_us=88610
+soak domain=2 writes: n=4766 p50_us<=16383 p99_us<=32767 max_us=86993
+soak domain=3 writes: n=4762 p50_us<=16383 p99_us<=32767 max_us=87004
+soak point reads: n=2427 p50_us<=127 p99_us<=4095 max_us=451884
+soak range two pages: n=2426 p50_us<=255 p99_us<=4095 max_us=4414
+soak observer deliveries: n=71200 p50_us<=65535 p99_us<=262143 max_us=799591
+soak t_s=60 main_operations=75527 writes_per_s=1250 observer_deliveries_per_s=2336 live_rows=75543 observations=141286 resident_mib=143 file_bytes=248246272 wal_bytes=33005352 retained=2779 checkpoint=18 step_us_per_write=191.28 commit_us=20034709 checkpoint_copy_us=363144 checkpoint_flush_us=464298 queue=0
+soak subphases t_s=60 admission_us_per_write=0.00 reduction_us_per_write=32.46 encoding_us_per_write=0.06 sql_us_per_write=89.53 authoring_steps=94473 incoming_steps=0 authoring_us_per_step=143.66 incoming_us_per_step=0.00 checkpoints_delta=29
+soak storage t_s=60 page_count=60607 freelist_count=149 free_pct=0.25 db_bytes=248246272 wal_bytes=33005352
+soak domain=1 writes: n=37519 p50_us<=16383 p99_us<=65535 max_us=90658
+soak domain=2 writes: n=4706 p50_us<=16383 p99_us<=65535 max_us=80507
+soak domain=3 writes: n=4705 p50_us<=16383 p99_us<=65535 max_us=80516
+soak point reads: n=2468 p50_us<=127 p99_us<=3227 max_us=3227
+soak range two pages: n=2469 p50_us<=255 p99_us<=4095 max_us=4508
+soak observer deliveries: n=70118 p50_us<=65535 p99_us<=223874 max_us=223874
+soak t_s=90 main_operations=113346 writes_per_s=1260 observer_deliveries_per_s=2233 live_rows=100000 observations=208321 resident_mib=101 file_bytes=257228800 wal_bytes=38114152 retained=3693 checkpoint=27 step_us_per_write=188.77 commit_us=19965145 checkpoint_copy_us=401547 checkpoint_flush_us=548214 queue=1
+soak subphases t_s=90 admission_us_per_write=0.00 reduction_us_per_write=33.13 encoding_us_per_write=0.04 sql_us_per_write=78.53 authoring_steps=141772 incoming_steps=0 authoring_us_per_step=130.88 incoming_us_per_step=0.00 checkpoints_delta=29
+soak storage t_s=90 page_count=62800 freelist_count=510 free_pct=0.81 db_bytes=257228800 wal_bytes=38114152
+soak domain=1 writes: n=37819 p50_us<=16383 p99_us<=65535 max_us=117650
+soak domain=2 writes: n=4736 p50_us<=16383 p99_us<=65535 max_us=117618
+soak domain=3 writes: n=4736 p50_us<=16383 p99_us<=65535 max_us=117615
+soak point reads: n=2458 p50_us<=127 p99_us<=4095 max_us=8640
+soak range two pages: n=2458 p50_us<=255 p99_us<=4095 max_us=4186
+soak observer deliveries: n=67029 p50_us<=65535 p99_us<=262143 max_us=1412886
+soak t_s=120 main_operations=150018 writes_per_s=1222 observer_deliveries_per_s=2235 live_rows=100000 observations=275405 resident_mib=101 file_bytes=259276800 wal_bytes=15095712 retained=3453 checkpoint=36 step_us_per_write=221.23 commit_us=18921327 checkpoint_copy_us=309702 checkpoint_flush_us=479428 queue=0
+soak subphases t_s=120 admission_us_per_write=0.00 reduction_us_per_write=51.26 encoding_us_per_write=0.04 sql_us_per_write=86.26 authoring_steps=187625 incoming_steps=0 authoring_us_per_step=158.63 incoming_us_per_step=0.00 checkpoints_delta=25
+soak storage t_s=120 page_count=63300 freelist_count=377 free_pct=0.60 db_bytes=259276800 wal_bytes=15095712
+soak domain=1 writes: n=36672 p50_us<=16383 p99_us<=65535 max_us=104686
+soak domain=2 writes: n=4597 p50_us<=16383 p99_us<=65535 max_us=83604
+soak domain=3 writes: n=4598 p50_us<=16383 p99_us<=65535 max_us=83605
+soak point reads: n=2462 p50_us<=127 p99_us<=4044 max_us=4044
+soak range two pages: n=2462 p50_us<=255 p99_us<=3505 max_us=3505
+soak observer deliveries: n=67088 p50_us<=65535 p99_us<=262143 max_us=281139
+soak t_s=150 main_operations=186512 writes_per_s=1216 observer_deliveries_per_s=2265 live_rows=100000 observations=343378 resident_mib=100 file_bytes=261124096 wal_bytes=6641472 retained=3050 checkpoint=45 step_us_per_write=221.04 commit_us=18964734 checkpoint_copy_us=311464 checkpoint_flush_us=492726 queue=9
+soak subphases t_s=150 admission_us_per_write=0.00 reduction_us_per_write=52.50 encoding_us_per_write=0.03 sql_us_per_write=87.99 authoring_steps=233259 incoming_steps=0 authoring_us_per_step=161.92 incoming_us_per_step=0.00 checkpoints_delta=25
+soak storage t_s=150 page_count=63751 freelist_count=371 free_pct=0.58 db_bytes=261124096 wal_bytes=6641472
+soak domain=1 writes: n=36501 p50_us<=16383 p99_us<=65535 max_us=87142
+soak domain=2 writes: n=4570 p50_us<=16383 p99_us<=65535 max_us=87144
+soak domain=3 writes: n=4568 p50_us<=16383 p99_us<=65535 max_us=87148
+soak point reads: n=2460 p50_us<=127 p99_us<=3562 max_us=3562
+soak range two pages: n=2460 p50_us<=255 p99_us<=4095 max_us=4332
+soak observer deliveries: n=67978 p50_us<=65535 p99_us<=233990 max_us=233990
+soak t_s=180 main_operations=221966 writes_per_s=1181 observer_deliveries_per_s=2086 live_rows=100000 observations=406004 resident_mib=101 file_bytes=262422528 wal_bytes=4194304 retained=5692 checkpoint=53 step_us_per_write=233.10 commit_us=18655512 checkpoint_copy_us=338259 checkpoint_flush_us=514550 queue=0
+soak subphases t_s=180 admission_us_per_write=0.00 reduction_us_per_write=53.31 encoding_us_per_write=0.05 sql_us_per_write=92.22 authoring_steps=277593 incoming_steps=0 authoring_us_per_step=166.93 incoming_us_per_step=0.00 checkpoints_delta=25
+soak storage t_s=180 page_count=64068 freelist_count=0 free_pct=0.00 db_bytes=262422528 wal_bytes=4194304
+soak domain=1 writes: n=35447 p50_us<=16383 p99_us<=65535 max_us=89053
+soak domain=2 writes: n=4444 p50_us<=16383 p99_us<=65535 max_us=89042
+soak domain=3 writes: n=4445 p50_us<=16383 p99_us<=65535 max_us=89035
+soak point reads: n=2463 p50_us<=127 p99_us<=4095 max_us=4317
+soak range two pages: n=2463 p50_us<=255 p99_us<=4095 max_us=4471
+soak observer deliveries: n=62620 p50_us<=65535 p99_us<=262143 max_us=1557881
+soak t_s=210 main_operations=257630 writes_per_s=1186 observer_deliveries_per_s=2154 live_rows=100000 observations=470781 resident_mib=101 file_bytes=264310784 wal_bytes=28061352 retained=4454 checkpoint=62 step_us_per_write=224.96 commit_us=18961673 checkpoint_copy_us=344062 checkpoint_flush_us=552039 queue=15
+soak subphases t_s=210 admission_us_per_write=0.00 reduction_us_per_write=51.47 encoding_us_per_write=0.03 sql_us_per_write=92.67 authoring_steps=322200 incoming_steps=0 authoring_us_per_step=162.12 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=210 page_count=64529 freelist_count=198 free_pct=0.31 db_bytes=264310784 wal_bytes=28061352
+soak domain=1 writes: n=35665 p50_us<=16383 p99_us<=65535 max_us=86838
+soak domain=2 writes: n=4469 p50_us<=16383 p99_us<=65535 max_us=84754
+soak domain=3 writes: n=4471 p50_us<=16383 p99_us<=65535 max_us=84764
+soak point reads: n=2453 p50_us<=127 p99_us<=3724 max_us=3724
+soak range two pages: n=2453 p50_us<=255 p99_us<=3274 max_us=3274
+soak observer deliveries: n=64782 p50_us<=32767 p99_us<=262143 max_us=300484
+soak t_s=240 main_operations=292623 writes_per_s=1166 observer_deliveries_per_s=2164 live_rows=100000 observations=535724 resident_mib=101 file_bytes=266211328 wal_bytes=35745152 retained=2529 checkpoint=71 step_us_per_write=235.97 commit_us=18649041 checkpoint_copy_us=331606 checkpoint_flush_us=555479 queue=15
+soak subphases t_s=240 admission_us_per_write=0.00 reduction_us_per_write=53.76 encoding_us_per_write=0.03 sql_us_per_write=96.12 authoring_steps=365959 incoming_steps=0 authoring_us_per_step=168.76 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=240 page_count=64993 freelist_count=0 free_pct=0.00 db_bytes=266211328 wal_bytes=35745152
+soak domain=1 writes: n=34993 p50_us<=16383 p99_us<=65535 max_us=88861
+soak domain=2 writes: n=4382 p50_us<=16383 p99_us<=65535 max_us=82733
+soak domain=3 writes: n=4384 p50_us<=16383 p99_us<=65535 max_us=82735
+soak point reads: n=2449 p50_us<=127 p99_us<=3749 max_us=3749
+soak range two pages: n=2449 p50_us<=255 p99_us<=4095 max_us=10877
+soak observer deliveries: n=64963 p50_us<=65535 p99_us<=262143 max_us=313942
+soak t_s=270 main_operations=327690 writes_per_s=1168 observer_deliveries_per_s=2039 live_rows=100000 observations=596936 resident_mib=100 file_bytes=267833344 wal_bytes=48377072 retained=4793 checkpoint=79 step_us_per_write=234.16 commit_us=18610030 checkpoint_copy_us=383986 checkpoint_flush_us=588795 queue=9
+soak subphases t_s=270 admission_us_per_write=0.00 reduction_us_per_write=49.94 encoding_us_per_write=0.02 sql_us_per_write=89.14 authoring_steps=409814 incoming_steps=0 authoring_us_per_step=156.57 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=270 page_count=65389 freelist_count=114 free_pct=0.17 db_bytes=267833344 wal_bytes=48377072
+soak domain=1 writes: n=35066 p50_us<=16383 p99_us<=65535 max_us=88765
+soak domain=2 writes: n=4390 p50_us<=16383 p99_us<=65535 max_us=84303
+soak domain=3 writes: n=4390 p50_us<=16383 p99_us<=65535 max_us=84309
+soak point reads: n=2460 p50_us<=127 p99_us<=4095 max_us=5585
+soak range two pages: n=2460 p50_us<=255 p99_us<=3607 max_us=3607
+soak observer deliveries: n=61188 p50_us<=65535 p99_us<=262143 max_us=1838923
+soak t_s=300 main_operations=361422 writes_per_s=1123 observer_deliveries_per_s=2115 live_rows=100000 observations=660428 resident_mib=84 file_bytes=269443072 wal_bytes=4194304 retained=5705 checkpoint=87 step_us_per_write=254.28 commit_us=18162107 checkpoint_copy_us=362026 checkpoint_flush_us=605500 queue=1
+soak subphases t_s=300 admission_us_per_write=0.00 reduction_us_per_write=56.54 encoding_us_per_write=0.04 sql_us_per_write=98.22 authoring_steps=452005 incoming_steps=0 authoring_us_per_step=173.27 incoming_us_per_step=0.00 checkpoints_delta=29
+soak storage t_s=300 page_count=65782 freelist_count=249 free_pct=0.38 db_bytes=269443072 wal_bytes=4194304
+soak domain=1 writes: n=33732 p50_us<=16383 p99_us<=65535 max_us=89600
+soak domain=2 writes: n=4226 p50_us<=16383 p99_us<=65535 max_us=79130
+soak domain=3 writes: n=4222 p50_us<=16383 p99_us<=65535 max_us=84564
+soak point reads: n=2444 p50_us<=127 p99_us<=3771 max_us=3771
+soak range two pages: n=2444 p50_us<=255 p99_us<=4010 max_us=4010
+soak observer deliveries: n=63482 p50_us<=65535 p99_us<=215941 max_us=215941
+soak t_s=330 main_operations=394452 writes_per_s=1101 observer_deliveries_per_s=2060 live_rows=100000 observations=722240 resident_mib=59 file_bytes=271261696 wal_bytes=60901872 retained=5901 checkpoint=95 step_us_per_write=275.89 commit_us=17608680 checkpoint_copy_us=311707 checkpoint_flush_us=534071 queue=0
+soak subphases t_s=330 admission_us_per_write=0.00 reduction_us_per_write=67.82 encoding_us_per_write=0.05 sql_us_per_write=113.19 authoring_steps=493315 incoming_steps=0 authoring_us_per_step=202.22 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=330 page_count=66226 freelist_count=330 free_pct=0.50 db_bytes=271261696 wal_bytes=60901872
+soak domain=1 writes: n=33030 p50_us<=16383 p99_us<=65535 max_us=87768
+soak domain=2 writes: n=4144 p50_us<=16383 p99_us<=65535 max_us=85574
+soak domain=3 writes: n=4145 p50_us<=16383 p99_us<=65535 max_us=78158
+soak point reads: n=2437 p50_us<=127 p99_us<=3388 max_us=3388
+soak range two pages: n=2437 p50_us<=255 p99_us<=3761 max_us=3761
+soak observer deliveries: n=61820 p50_us<=65535 p99_us<=253509 max_us=253509
+soak t_s=360 main_operations=427910 writes_per_s=1114 observer_deliveries_per_s=1900 live_rows=100000 observations=779294 resident_mib=67 file_bytes=272654336 wal_bytes=16076272 retained=2442 checkpoint=104 step_us_per_write=264.21 commit_us=17801206 checkpoint_copy_us=374949 checkpoint_flush_us=609111 queue=9
+soak subphases t_s=360 admission_us_per_write=0.00 reduction_us_per_write=60.77 encoding_us_per_write=0.05 sql_us_per_write=102.93 authoring_steps=535161 incoming_steps=0 authoring_us_per_step=183.79 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=360 page_count=66566 freelist_count=709 free_pct=1.07 db_bytes=272654336 wal_bytes=16076272
+soak domain=1 writes: n=33465 p50_us<=16383 p99_us<=65535 max_us=105215
+soak domain=2 writes: n=4199 p50_us<=16383 p99_us<=65535 max_us=90862
+soak domain=3 writes: n=4193 p50_us<=16383 p99_us<=65535 max_us=90863
+soak point reads: n=2467 p50_us<=127 p99_us<=3440 max_us=3440
+soak range two pages: n=2467 p50_us<=255 p99_us<=4095 max_us=4261
+soak observer deliveries: n=57054 p50_us<=65535 p99_us<=262143 max_us=1684730
+soak t_s=390 main_operations=463641 writes_per_s=1190 observer_deliveries_per_s=2057 live_rows=100000 observations=841048 resident_mib=64 file_bytes=273997824 wal_bytes=40376032 retained=5368 checkpoint=112 step_us_per_write=229.83 commit_us=18669176 checkpoint_copy_us=331379 checkpoint_flush_us=576466 queue=16
+soak subphases t_s=390 admission_us_per_write=0.00 reduction_us_per_write=55.38 encoding_us_per_write=0.04 sql_us_per_write=96.96 authoring_steps=579867 incoming_steps=0 authoring_us_per_step=171.32 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=390 page_count=66894 freelist_count=536 free_pct=0.80 db_bytes=273997824 wal_bytes=40376032
+soak domain=1 writes: n=35724 p50_us<=16383 p99_us<=65535 max_us=85813
+soak domain=2 writes: n=4481 p50_us<=16383 p99_us<=65535 max_us=73544
+soak domain=3 writes: n=4482 p50_us<=16383 p99_us<=65535 max_us=72585
+soak point reads: n=2465 p50_us<=127 p99_us<=4095 max_us=5982
+soak range two pages: n=2465 p50_us<=255 p99_us<=3081 max_us=3081
+soak observer deliveries: n=61756 p50_us<=65535 p99_us<=231128 max_us=231128
+soak t_s=420 main_operations=497114 writes_per_s=1115 observer_deliveries_per_s=2105 live_rows=100000 observations=904208 resident_mib=64 file_bytes=275566592 wal_bytes=24682952 retained=6022 checkpoint=120 step_us_per_write=265.18 commit_us=17806115 checkpoint_copy_us=324133 checkpoint_flush_us=601943 queue=7
+soak subphases t_s=420 admission_us_per_write=0.00 reduction_us_per_write=62.83 encoding_us_per_write=0.06 sql_us_per_write=108.51 authoring_steps=621732 incoming_steps=0 authoring_us_per_step=193.06 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=420 page_count=67277 freelist_count=418 free_pct=0.62 db_bytes=275566592 wal_bytes=24682952
+soak domain=1 writes: n=33473 p50_us<=16383 p99_us<=65535 max_us=95432
+soak domain=2 writes: n=4199 p50_us<=16383 p99_us<=65535 max_us=87256
+soak domain=3 writes: n=4201 p50_us<=16383 p99_us<=65535 max_us=87132
+soak point reads: n=2443 p50_us<=127 p99_us<=4095 max_us=4975
+soak range two pages: n=2443 p50_us<=255 p99_us<=4095 max_us=4233
+soak observer deliveries: n=63156 p50_us<=65535 p99_us<=262143 max_us=272308
+soak t_s=450 main_operations=531012 writes_per_s=1129 observer_deliveries_per_s=1932 live_rows=100000 observations=962206 resident_mib=68 file_bytes=277434368 wal_bytes=42720336 retained=3024 checkpoint=129 step_us_per_write=253.80 commit_us=18114924 checkpoint_copy_us=364584 checkpoint_flush_us=611959 queue=0
+soak subphases t_s=450 admission_us_per_write=0.00 reduction_us_per_write=60.41 encoding_us_per_write=0.05 sql_us_per_write=103.23 authoring_steps=664130 incoming_steps=0 authoring_us_per_step=184.97 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=450 page_count=67733 freelist_count=502 free_pct=0.74 db_bytes=277434368 wal_bytes=42761512
+soak domain=1 writes: n=33898 p50_us<=16383 p99_us<=65535 max_us=96880
+soak domain=2 writes: n=4255 p50_us<=16383 p99_us<=65535 max_us=89335
+soak domain=3 writes: n=4255 p50_us<=16383 p99_us<=65535 max_us=89298
+soak point reads: n=2460 p50_us<=127 p99_us<=4095 max_us=5799
+soak range two pages: n=2460 p50_us<=255 p99_us<=4095 max_us=5212
+soak observer deliveries: n=58010 p50_us<=65535 p99_us<=262143 max_us=1362685
+soak t_s=480 main_operations=566753 writes_per_s=1191 observer_deliveries_per_s=2058 live_rows=100000 observations=1023984 resident_mib=64 file_bytes=278810624 wal_bytes=4964632 retained=5955 checkpoint=137 step_us_per_write=220.89 commit_us=18994083 checkpoint_copy_us=348417 checkpoint_flush_us=623744 queue=0
+soak subphases t_s=480 admission_us_per_write=0.00 reduction_us_per_write=46.46 encoding_us_per_write=0.02 sql_us_per_write=84.97 authoring_steps=708835 incoming_steps=0 authoring_us_per_step=148.42 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=480 page_count=68069 freelist_count=516 free_pct=0.76 db_bytes=278810624 wal_bytes=4964632
+soak domain=1 writes: n=35741 p50_us<=16383 p99_us<=65535 max_us=85435
+soak domain=2 writes: n=4480 p50_us<=16383 p99_us<=65535 max_us=78345
+soak domain=3 writes: n=4480 p50_us<=16383 p99_us<=65535 max_us=87495
+soak point reads: n=2473 p50_us<=127 p99_us<=3511 max_us=3511
+soak range two pages: n=2473 p50_us<=255 p99_us<=4095 max_us=6291
+soak observer deliveries: n=61770 p50_us<=65535 p99_us<=234334 max_us=234334
+soak t_s=510 main_operations=601965 writes_per_s=1173 observer_deliveries_per_s=2115 live_rows=100000 observations=1087454 resident_mib=63 file_bytes=279019520 wal_bytes=4194304 retained=4257 checkpoint=146 step_us_per_write=232.50 commit_us=18651007 checkpoint_copy_us=337684 checkpoint_flush_us=603393 queue=0
+soak subphases t_s=510 admission_us_per_write=0.00 reduction_us_per_write=52.02 encoding_us_per_write=0.03 sql_us_per_write=91.66 authoring_steps=752881 incoming_steps=0 authoring_us_per_step=162.56 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=510 page_count=68120 freelist_count=639 free_pct=0.94 db_bytes=279019520 wal_bytes=4194304
+soak domain=1 writes: n=35212 p50_us<=16383 p99_us<=65535 max_us=86162
+soak domain=2 writes: n=4412 p50_us<=16383 p99_us<=65535 max_us=76013
+soak domain=3 writes: n=4408 p50_us<=16383 p99_us<=65535 max_us=83747
+soak point reads: n=2473 p50_us<=127 p99_us<=3525 max_us=3525
+soak range two pages: n=2473 p50_us<=255 p99_us<=4095 max_us=6704
+soak observer deliveries: n=63470 p50_us<=65535 p99_us<=225358 max_us=225358
+soak t_s=540 main_operations=636421 writes_per_s=1148 observer_deliveries_per_s=1990 live_rows=99999 observations=1147190 resident_mib=68 file_bytes=279158784 wal_bytes=27262072 retained=5911 checkpoint=154 step_us_per_write=235.29 commit_us=18696382 checkpoint_copy_us=365961 checkpoint_flush_us=641805 queue=4
+soak subphases t_s=540 admission_us_per_write=0.00 reduction_us_per_write=50.91 encoding_us_per_write=0.04 sql_us_per_write=89.76 authoring_steps=795964 incoming_steps=0 authoring_us_per_step=159.79 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=540 page_count=68154 freelist_count=416 free_pct=0.61 db_bytes=279158784 wal_bytes=27262072
+soak domain=1 writes: n=34456 p50_us<=16383 p99_us<=65535 max_us=104193
+soak domain=2 writes: n=4316 p50_us<=16383 p99_us<=65535 max_us=84785
+soak domain=3 writes: n=4317 p50_us<=16383 p99_us<=65535 max_us=84791
+soak point reads: n=2454 p50_us<=127 p99_us<=4095 max_us=5534
+soak range two pages: n=2454 p50_us<=255 p99_us<=4095 max_us=5223
+soak observer deliveries: n=59734 p50_us<=65535 p99_us<=262143 max_us=1465736
+soak t_s=570 main_operations=669359 writes_per_s=1097 observer_deliveries_per_s=2008 live_rows=100000 observations=1207452 resident_mib=64 file_bytes=279621632 wal_bytes=58924272 retained=6049 checkpoint=162 step_us_per_write=261.38 commit_us=18105039 checkpoint_copy_us=341256 checkpoint_flush_us=631069 queue=0
+soak subphases t_s=570 admission_us_per_write=0.00 reduction_us_per_write=58.21 encoding_us_per_write=0.05 sql_us_per_write=103.24 authoring_steps=837166 incoming_steps=0 authoring_us_per_step=182.57 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=570 page_count=68267 freelist_count=494 free_pct=0.72 db_bytes=279621632 wal_bytes=58924272
+soak domain=1 writes: n=32938 p50_us<=16383 p99_us<=65535 max_us=89965
+soak domain=2 writes: n=4129 p50_us<=16383 p99_us<=65535 max_us=88424
+soak domain=3 writes: n=4129 p50_us<=16383 p99_us<=65535 max_us=78283
+soak point reads: n=2452 p50_us<=127 p99_us<=4095 max_us=5246
+soak range two pages: n=2452 p50_us<=255 p99_us<=4095 max_us=5526
+soak observer deliveries: n=60262 p50_us<=65535 p99_us<=262143 max_us=286137
+soak t_s=600 main_operations=701825 writes_per_s=1082 observer_deliveries_per_s=1973 live_rows=100000 observations=1266680 resident_mib=63 file_bytes=279764992 wal_bytes=42345392 retained=5723 checkpoint=170 step_us_per_write=265.38 commit_us=18044184 checkpoint_copy_us=371292 checkpoint_flush_us=632667 queue=0
+soak subphases t_s=600 admission_us_per_write=0.00 reduction_us_per_write=57.44 encoding_us_per_write=0.09 sql_us_per_write=103.88 authoring_steps=877757 incoming_steps=0 authoring_us_per_step=183.37 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=600 page_count=68302 freelist_count=541 free_pct=0.79 db_bytes=279764992 wal_bytes=42345392
+soak domain=1 writes: n=32466 p50_us<=16383 p99_us<=65535 max_us=109245
+soak domain=2 writes: n=4070 p50_us<=16383 p99_us<=65535 max_us=109248
+soak domain=3 writes: n=4069 p50_us<=16383 p99_us<=65535 max_us=109248
+soak point reads: n=2419 p50_us<=255 p99_us<=4095 max_us=4356
+soak range two pages: n=2419 p50_us<=255 p99_us<=4095 max_us=5304
+soak observer deliveries: n=59230 p50_us<=65535 p99_us<=262143 max_us=323495
+soak t_s=630 main_operations=726926 writes_per_s=836 observer_deliveries_per_s=1439 live_rows=100000 observations=1309866 resident_mib=66 file_bytes=279797760 wal_bytes=6814512 retained=6219 checkpoint=177 step_us_per_write=405.47 commit_us=15835498 checkpoint_copy_us=653970 checkpoint_flush_us=613675 queue=0
+soak subphases t_s=630 admission_us_per_write=0.02 reduction_us_per_write=75.73 encoding_us_per_write=0.38 sql_us_per_write=143.99 authoring_steps=909156 incoming_steps=0 authoring_us_per_step=251.21 incoming_us_per_step=0.00 checkpoints_delta=21
+soak storage t_s=630 page_count=68310 freelist_count=665 free_pct=0.97 db_bytes=279797760 wal_bytes=6814512
+soak domain=1 writes: n=25101 p50_us<=16383 p99_us<=131071 max_us=225763
+soak domain=2 writes: n=3153 p50_us<=16383 p99_us<=131071 max_us=183424
+soak domain=3 writes: n=3150 p50_us<=16383 p99_us<=131071 max_us=183424
+soak point reads: n=2383 p50_us<=255 p99_us<=4095 max_us=10987
+soak range two pages: n=2382 p50_us<=511 p99_us<=4095 max_us=32727
+soak observer deliveries: n=43198 p50_us<=65535 p99_us<=524287 max_us=2502565
+soak t_s=660 main_operations=758726 writes_per_s=1059 observer_deliveries_per_s=1951 live_rows=100000 observations=1368428 resident_mib=66 file_bytes=280023040 wal_bytes=64016592 retained=5200 checkpoint=184 step_us_per_write=286.88 commit_us=17468513 checkpoint_copy_us=379852 checkpoint_flush_us=594708 queue=10
+soak subphases t_s=660 admission_us_per_write=0.00 reduction_us_per_write=67.27 encoding_us_per_write=0.09 sql_us_per_write=119.46 authoring_steps=948949 incoming_steps=0 authoring_us_per_step=210.35 incoming_us_per_step=0.00 checkpoints_delta=24
+soak storage t_s=660 page_count=68365 freelist_count=961 free_pct=1.41 db_bytes=280023040 wal_bytes=64016592
+soak domain=1 writes: n=31800 p50_us<=16383 p99_us<=65535 max_us=112350
+soak domain=2 writes: n=3993 p50_us<=16383 p99_us<=65535 max_us=91831
+soak domain=3 writes: n=3991 p50_us<=16383 p99_us<=65535 max_us=91830
+soak point reads: n=2438 p50_us<=127 p99_us<=4095 max_us=5230
+soak range two pages: n=2439 p50_us<=255 p99_us<=4095 max_us=4106
+soak observer deliveries: n=58550 p50_us<=65535 p99_us<=262143 max_us=328139
+soak t_s=690 main_operations=794283 writes_per_s=1185 observer_deliveries_per_s=2183 live_rows=100000 observations=1433949 resident_mib=66 file_bytes=280334336 wal_bytes=67757552 retained=3856 checkpoint=193 step_us_per_write=221.65 commit_us=18962184 checkpoint_copy_us=345924 checkpoint_flush_us=672040 queue=0
+soak subphases t_s=690 admission_us_per_write=0.00 reduction_us_per_write=48.70 encoding_us_per_write=0.02 sql_us_per_write=88.74 authoring_steps=993422 incoming_steps=0 authoring_us_per_step=155.88 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=690 page_count=68441 freelist_count=677 free_pct=0.99 db_bytes=280334336 wal_bytes=67757552
+soak domain=1 writes: n=35558 p50_us<=16383 p99_us<=65535 max_us=104910
+soak domain=2 writes: n=4457 p50_us<=16383 p99_us<=65535 max_us=87058
+soak domain=3 writes: n=4456 p50_us<=16383 p99_us<=65535 max_us=87057
+soak point reads: n=2456 p50_us<=127 p99_us<=3825 max_us=3825
+soak range two pages: n=2456 p50_us<=255 p99_us<=3812 max_us=3812
+soak observer deliveries: n=65519 p50_us<=65535 p99_us<=262143 max_us=285859
+soak t_s=720 main_operations=828539 writes_per_s=1141 observer_deliveries_per_s=1979 live_rows=100000 observations=1493333 resident_mib=66 file_bytes=280424448 wal_bytes=28436272 retained=5309 checkpoint=201 step_us_per_write=240.62 commit_us=18467144 checkpoint_copy_us=386093 checkpoint_flush_us=684593 queue=15
+soak subphases t_s=720 admission_us_per_write=0.00 reduction_us_per_write=53.03 encoding_us_per_write=0.08 sql_us_per_write=95.33 authoring_steps=1036256 incoming_steps=0 authoring_us_per_step=168.49 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=720 page_count=68463 freelist_count=689 free_pct=1.01 db_bytes=280424448 wal_bytes=28436272
+soak domain=1 writes: n=34255 p50_us<=16383 p99_us<=65535 max_us=104785
+soak domain=2 writes: n=4295 p50_us<=16383 p99_us<=65535 max_us=104766
+soak domain=3 writes: n=4294 p50_us<=16383 p99_us<=65535 max_us=104775
+soak point reads: n=2462 p50_us<=127 p99_us<=4095 max_us=4203
+soak range two pages: n=2462 p50_us<=255 p99_us<=3593 max_us=3593
+soak observer deliveries: n=59404 p50_us<=32767 p99_us<=262143 max_us=1682295
+soak t_s=750 main_operations=854569 writes_per_s=867 observer_deliveries_per_s=1606 live_rows=100000 observations=1541566 resident_mib=66 file_bytes=280461312 wal_bytes=6204752 retained=2608 checkpoint=208 step_us_per_write=391.56 commit_us=15882527 checkpoint_copy_us=606947 checkpoint_flush_us=628715 queue=1
+soak subphases t_s=750 admission_us_per_write=0.02 reduction_us_per_write=71.04 encoding_us_per_write=0.26 sql_us_per_write=137.83 authoring_steps=1068825 incoming_steps=0 authoring_us_per_step=236.85 incoming_us_per_step=0.00 checkpoints_delta=22
+soak storage t_s=750 page_count=68472 freelist_count=1072 free_pct=1.57 db_bytes=280461312 wal_bytes=6204752
+soak domain=1 writes: n=26030 p50_us<=16383 p99_us<=131071 max_us=183914
+soak domain=2 writes: n=3265 p50_us<=16383 p99_us<=65535 max_us=183891
+soak domain=3 writes: n=3263 p50_us<=16383 p99_us<=65535 max_us=183888
+soak point reads: n=2404 p50_us<=255 p99_us<=4095 max_us=4435
+soak range two pages: n=2404 p50_us<=511 p99_us<=4095 max_us=4811
+soak observer deliveries: n=48215 p50_us<=65535 p99_us<=262143 max_us=522341
+soak t_s=780 main_operations=879926 writes_per_s=845 observer_deliveries_per_s=1471 live_rows=99997 observations=1585724 resident_mib=53 file_bytes=280461312 wal_bytes=4194304 retained=3364 checkpoint=214 step_us_per_write=388.60 commit_us=16453654 checkpoint_copy_us=467328 checkpoint_flush_us=587950 queue=0
+soak subphases t_s=780 admission_us_per_write=0.03 reduction_us_per_write=78.11 encoding_us_per_write=0.53 sql_us_per_write=157.01 authoring_steps=1100543 incoming_steps=0 authoring_us_per_step=268.70 incoming_us_per_step=0.00 checkpoints_delta=18
+soak storage t_s=780 page_count=68472 freelist_count=323 free_pct=0.47 db_bytes=280461312 wal_bytes=4194304
+soak domain=1 writes: n=25357 p50_us<=16383 p99_us<=131071 max_us=132258
+soak domain=2 writes: n=3187 p50_us<=16383 p99_us<=131071 max_us=132258
+soak domain=3 writes: n=3185 p50_us<=16383 p99_us<=131071 max_us=132261
+soak point reads: n=2320 p50_us<=255 p99_us<=4095 max_us=7067
+soak range two pages: n=2320 p50_us<=511 p99_us<=8191 max_us=18767
+soak observer deliveries: n=44188 p50_us<=65535 p99_us<=515873 max_us=515873
+soak t_s=810 main_operations=893791 writes_per_s=462 observer_deliveries_per_s=803 live_rows=100000 observations=1609831 resident_mib=56 file_bytes=280739840 wal_bytes=25358632 retained=4920 checkpoint=217 step_us_per_write=865.93 commit_us=12800054 checkpoint_copy_us=553721 checkpoint_flush_us=498488 queue=0
+soak subphases t_s=810 admission_us_per_write=0.21 reduction_us_per_write=139.33 encoding_us_per_write=1.08 sql_us_per_write=261.55 authoring_steps=1117901 incoming_steps=0 authoring_us_per_step=478.38 incoming_us_per_step=0.00 checkpoints_delta=11
+soak storage t_s=810 page_count=68540 freelist_count=807 free_pct=1.18 db_bytes=280739840 wal_bytes=25399832
+soak domain=1 writes: n=13865 p50_us<=32767 p99_us<=262143 max_us=396694
+soak domain=2 writes: n=1738 p50_us<=32767 p99_us<=262143 max_us=396693
+soak domain=3 writes: n=1738 p50_us<=32767 p99_us<=262143 max_us=396678
+soak point reads: n=1787 p50_us<=1023 p99_us<=32767 max_us=54919
+soak range two pages: n=1787 p50_us<=1023 p99_us<=32767 max_us=75857
+soak observer deliveries: n=24077 p50_us<=131071 p99_us<=1048575 max_us=1368442
+soak t_s=840 main_operations=919875 writes_per_s=869 observer_deliveries_per_s=1541 live_rows=100000 observations=1656077 resident_mib=67 file_bytes=280739840 wal_bytes=20991432 retained=2822 checkpoint=224 step_us_per_write=371.16 commit_us=16543065 checkpoint_copy_us=437026 checkpoint_flush_us=601139 queue=1
+soak subphases t_s=840 admission_us_per_write=0.01 reduction_us_per_write=62.26 encoding_us_per_write=0.13 sql_us_per_write=122.93 authoring_steps=1150528 incoming_steps=0 authoring_us_per_step=212.71 incoming_us_per_step=0.00 checkpoints_delta=22
+soak storage t_s=840 page_count=68540 freelist_count=758 free_pct=1.11 db_bytes=280739840 wal_bytes=20991432
+soak domain=1 writes: n=26084 p50_us<=16383 p99_us<=131071 max_us=166250
+soak domain=2 writes: n=3273 p50_us<=16383 p99_us<=131071 max_us=166231
+soak domain=3 writes: n=3273 p50_us<=16383 p99_us<=131071 max_us=166240
+soak point reads: n=2276 p50_us<=127 p99_us<=8191 max_us=22532
+soak range two pages: n=2276 p50_us<=255 p99_us<=8191 max_us=17734
+soak observer deliveries: n=46244 p50_us<=65535 p99_us<=524287 max_us=1545028
+soak t_s=870 main_operations=950628 writes_per_s=1024 observer_deliveries_per_s=1829 live_rows=99999 observations=1711003 resident_mib=68 file_bytes=280739840 wal_bytes=16228712 retained=4356 checkpoint=231 step_us_per_write=321.19 commit_us=16600044 checkpoint_copy_us=326764 checkpoint_flush_us=586497 queue=4
+soak subphases t_s=870 admission_us_per_write=0.01 reduction_us_per_write=63.35 encoding_us_per_write=0.08 sql_us_per_write=116.95 authoring_steps=1189008 incoming_steps=0 authoring_us_per_step=205.36 incoming_us_per_step=0.00 checkpoints_delta=24
+soak storage t_s=870 page_count=68540 freelist_count=1048 free_pct=1.53 db_bytes=280739840 wal_bytes=16228712
+soak domain=1 writes: n=30755 p50_us<=16383 p99_us<=131071 max_us=270936
+soak domain=2 writes: n=3866 p50_us<=16383 p99_us<=131071 max_us=220934
+soak domain=3 writes: n=3863 p50_us<=16383 p99_us<=131071 max_us=266108
+soak point reads: n=2342 p50_us<=127 p99_us<=4095 max_us=4555
+soak range two pages: n=2342 p50_us<=255 p99_us<=4095 max_us=8053
+soak observer deliveries: n=54928 p50_us<=65535 p99_us<=524287 max_us=1200199
+soak t_s=901 main_operations=967808 writes_per_s=572 observer_deliveries_per_s=1046 live_rows=100000 observations=1742407 resident_mib=60 file_bytes=280739840 wal_bytes=37788672 retained=5141 checkpoint=235 step_us_per_write=347.64 commit_us=21915773 checkpoint_copy_us=154531 checkpoint_flush_us=287725 queue=8
+soak subphases t_s=901 admission_us_per_write=0.00 reduction_us_per_write=63.80 encoding_us_per_write=0.08 sql_us_per_write=142.57 authoring_steps=1210496 incoming_steps=0 authoring_us_per_step=241.51 incoming_us_per_step=0.00 checkpoints_delta=12
+soak storage t_s=901 page_count=68540 freelist_count=603 free_pct=0.88 db_bytes=280739840 wal_bytes=37788672
+soak domain=1 writes: n=17178 p50_us<=16383 p99_us<=524287 max_us=606381
+soak domain=2 writes: n=2156 p50_us<=16383 p99_us<=524287 max_us=561872
+soak domain=3 writes: n=2155 p50_us<=16383 p99_us<=524287 max_us=606371
+soak point reads: n=2346 p50_us<=127 p99_us<=4095 max_us=29274
+soak range two pages: n=2346 p50_us<=255 p99_us<=16383 max_us=27166
+soak observer deliveries: n=31404 p50_us<=65535 p99_us<=2097151 max_us=4166189
+soak t_s=931 main_operations=986263 writes_per_s=605 observer_deliveries_per_s=1121 live_rows=100000 observations=1776611 resident_mib=61 file_bytes=280739840 wal_bytes=27340352 retained=3101 checkpoint=240 step_us_per_write=456.81 commit_us=19090835 checkpoint_copy_us=336546 checkpoint_flush_us=523336 queue=0
+soak subphases t_s=931 admission_us_per_write=0.01 reduction_us_per_write=60.75 encoding_us_per_write=0.12 sql_us_per_write=136.24 authoring_steps=1233581 incoming_steps=0 authoring_us_per_step=229.03 incoming_us_per_step=0.00 checkpoints_delta=16
+soak storage t_s=931 page_count=68540 freelist_count=1125 free_pct=1.64 db_bytes=280739840 wal_bytes=27340352
+soak domain=1 writes: n=18455 p50_us<=16383 p99_us<=262143 max_us=1107383
+soak domain=2 writes: n=2320 p50_us<=16383 p99_us<=262143 max_us=1107367
+soak domain=3 writes: n=2317 p50_us<=16383 p99_us<=262143 max_us=1107356
+soak point reads: n=2275 p50_us<=127 p99_us<=4095 max_us=137072
+soak range two pages: n=2275 p50_us<=255 p99_us<=8191 max_us=20786
+soak observer deliveries: n=34219 p50_us<=65535 p99_us<=1048575 max_us=3359894
+soak t_s=961 main_operations=1009954 writes_per_s=787 observer_deliveries_per_s=1454 live_rows=100000 observations=1820369 resident_mib=61 file_bytes=280739840 wal_bytes=55813672 retained=6298 checkpoint=245 step_us_per_write=389.55 commit_us=17652071 checkpoint_copy_us=247009 checkpoint_flush_us=454973 queue=16
+soak subphases t_s=961 admission_us_per_write=0.11 reduction_us_per_write=81.74 encoding_us_per_write=0.26 sql_us_per_write=156.94 authoring_steps=1263227 incoming_steps=0 authoring_us_per_step=277.09 incoming_us_per_step=0.00 checkpoints_delta=17
+soak storage t_s=961 page_count=68540 freelist_count=210 free_pct=0.31 db_bytes=280739840 wal_bytes=55813672
+soak domain=1 writes: n=23691 p50_us<=16383 p99_us<=131071 max_us=152006
+soak domain=2 writes: n=2975 p50_us<=16383 p99_us<=131071 max_us=152015
+soak domain=3 writes: n=2973 p50_us<=16383 p99_us<=125446 max_us=125446
+soak point reads: n=2178 p50_us<=255 p99_us<=8191 max_us=32188
+soak range two pages: n=2178 p50_us<=511 p99_us<=8191 max_us=37181
+soak observer deliveries: n=43739 p50_us<=65535 p99_us<=524287 max_us=810999
+soak t_s=991 main_operations=1043496 writes_per_s=1117 observer_deliveries_per_s=1920 live_rows=100000 observations=1878022 resident_mib=69 file_bytes=280739840 wal_bytes=61594032 retained=2949 checkpoint=254 step_us_per_write=255.76 commit_us=18032834 checkpoint_copy_us=395714 checkpoint_flush_us=686463 queue=5
+soak subphases t_s=991 admission_us_per_write=0.00 reduction_us_per_write=54.36 encoding_us_per_write=0.04 sql_us_per_write=97.85 authoring_steps=1305184 incoming_steps=0 authoring_us_per_step=172.87 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=991 page_count=68540 freelist_count=119 free_pct=0.17 db_bytes=280739840 wal_bytes=61594032
+soak domain=1 writes: n=33542 p50_us<=16383 p99_us<=65535 max_us=111245
+soak domain=2 writes: n=4202 p50_us<=16383 p99_us<=65535 max_us=111208
+soak domain=3 writes: n=4210 p50_us<=16383 p99_us<=65535 max_us=102718
+soak point reads: n=2358 p50_us<=127 p99_us<=4095 max_us=4457
+soak range two pages: n=2358 p50_us<=255 p99_us<=4095 max_us=4869
+soak observer deliveries: n=57653 p50_us<=65535 p99_us<=262143 max_us=2034467
+soak t_s=1021 main_operations=1078218 writes_per_s=1157 observer_deliveries_per_s=2155 live_rows=100000 observations=1942712 resident_mib=69 file_bytes=280920064 wal_bytes=4194304 retained=4881 checkpoint=262 step_us_per_write=236.58 commit_us=18515977 checkpoint_copy_us=370309 checkpoint_flush_us=682800 queue=0
+soak subphases t_s=1021 admission_us_per_write=0.00 reduction_us_per_write=50.87 encoding_us_per_write=0.03 sql_us_per_write=92.56 authoring_steps=1348612 incoming_steps=0 authoring_us_per_step=162.39 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1021 page_count=68584 freelist_count=196 free_pct=0.29 db_bytes=280920064 wal_bytes=4194304
+soak domain=1 writes: n=34722 p50_us<=16383 p99_us<=65535 max_us=115206
+soak domain=2 writes: n=4352 p50_us<=16383 p99_us<=65535 max_us=95650
+soak domain=3 writes: n=4348 p50_us<=16383 p99_us<=65535 max_us=95647
+soak point reads: n=2358 p50_us<=127 p99_us<=4095 max_us=7054
+soak range two pages: n=2358 p50_us<=255 p99_us<=4095 max_us=4881
+soak observer deliveries: n=64692 p50_us<=65535 p99_us<=262143 max_us=325357
+soak t_s=1051 main_operations=1103884 writes_per_s=855 observer_deliveries_per_s=1572 live_rows=100000 observations=1989899 resident_mib=65 file_bytes=280920064 wal_bytes=5990536 retained=5942 checkpoint=268 step_us_per_write=360.24 commit_us=17352972 checkpoint_copy_us=320513 checkpoint_flush_us=579274 queue=0
+soak subphases t_s=1051 admission_us_per_write=0.00 reduction_us_per_write=69.13 encoding_us_per_write=0.11 sql_us_per_write=127.84 authoring_steps=1380705 incoming_steps=0 authoring_us_per_step=223.75 incoming_us_per_step=0.00 checkpoints_delta=21
+soak storage t_s=1051 page_count=68584 freelist_count=280 free_pct=0.41 db_bytes=280920064 wal_bytes=6011136
+soak domain=1 writes: n=25666 p50_us<=16383 p99_us<=131071 max_us=285367
+soak domain=2 writes: n=3220 p50_us<=16383 p99_us<=131071 max_us=285365
+soak domain=3 writes: n=3217 p50_us<=16383 p99_us<=131071 max_us=285361
+soak point reads: n=2243 p50_us<=255 p99_us<=8191 max_us=20023
+soak range two pages: n=2243 p50_us<=255 p99_us<=16383 max_us=37409
+soak observer deliveries: n=47197 p50_us<=65535 p99_us<=524287 max_us=1069712
+soak t_s=1081 main_operations=1128923 writes_per_s=833 observer_deliveries_per_s=1376 live_rows=100000 observations=2031244 resident_mib=70 file_bytes=280920064 wal_bytes=24571712 retained=2257 checkpoint=275 step_us_per_write=400.46 commit_us=16183806 checkpoint_copy_us=417897 checkpoint_flush_us=614226 queue=4
+soak subphases t_s=1081 admission_us_per_write=0.01 reduction_us_per_write=78.79 encoding_us_per_write=0.23 sql_us_per_write=148.65 authoring_steps=1412037 incoming_steps=0 authoring_us_per_step=259.98 incoming_us_per_step=0.00 checkpoints_delta=20
+soak storage t_s=1081 page_count=68584 freelist_count=424 free_pct=0.62 db_bytes=280920064 wal_bytes=24571712
+soak domain=1 writes: n=25039 p50_us<=16383 p99_us<=126330 max_us=126330
+soak domain=2 writes: n=3145 p50_us<=16383 p99_us<=113566 max_us=113566
+soak domain=3 writes: n=3142 p50_us<=16383 p99_us<=113558 max_us=113558
+soak point reads: n=2200 p50_us<=255 p99_us<=8191 max_us=28587
+soak range two pages: n=2200 p50_us<=511 p99_us<=8191 max_us=34088
+soak observer deliveries: n=41335 p50_us<=65535 p99_us<=524287 max_us=1954399
+soak t_s=1111 main_operations=1162142 writes_per_s=1107 observer_deliveries_per_s=1988 live_rows=100000 observations=2090921 resident_mib=70 file_bytes=280981504 wal_bytes=25300952 retained=2665 checkpoint=283 step_us_per_write=257.19 commit_us=18169038 checkpoint_copy_us=368262 checkpoint_flush_us=618042 queue=9
+soak subphases t_s=1111 admission_us_per_write=0.00 reduction_us_per_write=58.08 encoding_us_per_write=0.06 sql_us_per_write=105.34 authoring_steps=1453587 incoming_steps=0 authoring_us_per_step=184.46 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=1111 page_count=68599 freelist_count=641 free_pct=0.93 db_bytes=280981504 wal_bytes=25342152
+soak domain=1 writes: n=33219 p50_us<=16383 p99_us<=65535 max_us=101694
+soak domain=2 writes: n=4168 p50_us<=16383 p99_us<=65535 max_us=82526
+soak domain=3 writes: n=4169 p50_us<=16383 p99_us<=65535 max_us=87642
+soak point reads: n=2350 p50_us<=127 p99_us<=4095 max_us=5477
+soak range two pages: n=2350 p50_us<=255 p99_us<=4095 max_us=5764
+soak observer deliveries: n=59679 p50_us<=65535 p99_us<=262143 max_us=347677
+soak t_s=1141 main_operations=1196196 writes_per_s=1135 observer_deliveries_per_s=2058 live_rows=99999 observations=2152699 resident_mib=65 file_bytes=281219072 wal_bytes=7778592 retained=3927 checkpoint=291 step_us_per_write=246.43 commit_us=18326678 checkpoint_copy_us=359674 checkpoint_flush_us=654998 queue=0
+soak subphases t_s=1141 admission_us_per_write=0.00 reduction_us_per_write=55.49 encoding_us_per_write=0.05 sql_us_per_write=99.78 authoring_steps=1496173 incoming_steps=0 authoring_us_per_step=175.98 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1141 page_count=68657 freelist_count=590 free_pct=0.86 db_bytes=281219072 wal_bytes=7778592
+soak domain=1 writes: n=34054 p50_us<=16383 p99_us<=65535 max_us=110727
+soak domain=2 writes: n=4269 p50_us<=16383 p99_us<=65535 max_us=95637
+soak domain=3 writes: n=4270 p50_us<=16383 p99_us<=65535 max_us=95638
+soak point reads: n=2347 p50_us<=127 p99_us<=4095 max_us=4737
+soak range two pages: n=2347 p50_us<=255 p99_us<=4095 max_us=4548
+soak observer deliveries: n=61788 p50_us<=65535 p99_us<=262143 max_us=358347
+soak t_s=1171 main_operations=1228951 writes_per_s=1091 observer_deliveries_per_s=1788 live_rows=100000 observations=2206373 resident_mib=70 file_bytes=281477120 wal_bytes=12059272 retained=3860 checkpoint=299 step_us_per_write=252.33 commit_us=18439965 checkpoint_copy_us=391646 checkpoint_flush_us=672179 queue=12
+soak subphases t_s=1171 admission_us_per_write=0.01 reduction_us_per_write=51.67 encoding_us_per_write=0.07 sql_us_per_write=94.97 authoring_steps=1537146 incoming_steps=0 authoring_us_per_step=166.49 incoming_us_per_step=0.00 checkpoints_delta=25
+soak storage t_s=1171 page_count=68720 freelist_count=628 free_pct=0.91 db_bytes=281477120 wal_bytes=12059272
+soak domain=1 writes: n=32759 p50_us<=16383 p99_us<=65535 max_us=114702
+soak domain=2 writes: n=4109 p50_us<=16383 p99_us<=65535 max_us=94296
+soak domain=3 writes: n=4107 p50_us<=16383 p99_us<=65535 max_us=94331
+soak point reads: n=2333 p50_us<=127 p99_us<=4095 max_us=4937
+soak range two pages: n=2333 p50_us<=255 p99_us<=4095 max_us=5100
+soak observer deliveries: n=53660 p50_us<=32767 p99_us<=524287 max_us=1732458
+soak t_s=1201 main_operations=1259811 writes_per_s=1028 observer_deliveries_per_s=1795 live_rows=100000 observations=2260261 resident_mib=70 file_bytes=281477120 wal_bytes=25626432 retained=6015 checkpoint=306 step_us_per_write=301.03 commit_us=17296032 checkpoint_copy_us=324922 checkpoint_flush_us=590115 queue=14
+soak subphases t_s=1201 admission_us_per_write=0.00 reduction_us_per_write=56.14 encoding_us_per_write=0.08 sql_us_per_write=107.62 authoring_steps=1575747 incoming_steps=0 authoring_us_per_step=188.61 incoming_us_per_step=0.00 checkpoints_delta=24
+soak storage t_s=1201 page_count=68720 freelist_count=487 free_pct=0.71 db_bytes=281477120 wal_bytes=25626432
+soak domain=1 writes: n=30856 p50_us<=16383 p99_us<=131071 max_us=149985
+soak domain=2 writes: n=3872 p50_us<=16383 p99_us<=131071 max_us=149946
+soak domain=3 writes: n=3871 p50_us<=16383 p99_us<=131071 max_us=149948
+soak point reads: n=2319 p50_us<=127 p99_us<=4095 max_us=10042
+soak range two pages: n=2319 p50_us<=255 p99_us<=8191 max_us=14853
+soak observer deliveries: n=53886 p50_us<=65535 p99_us<=524287 max_us=798917
+soak t_s=1231 main_operations=1275233 writes_per_s=513 observer_deliveries_per_s=901 live_rows=100000 observations=2287369 resident_mib=67 file_bytes=281477120 wal_bytes=55265712 retained=5027 checkpoint=310 step_us_per_write=530.97 commit_us=19347848 checkpoint_copy_us=142598 checkpoint_flush_us=267225 queue=0
+soak subphases t_s=1231 admission_us_per_write=0.00 reduction_us_per_write=47.09 encoding_us_per_write=0.05 sql_us_per_write=116.30 authoring_steps=1595049 incoming_steps=0 authoring_us_per_step=191.94 incoming_us_per_step=0.00 checkpoints_delta=11
+soak storage t_s=1231 page_count=68720 freelist_count=259 free_pct=0.38 db_bytes=281477120 wal_bytes=55265712
+soak domain=1 writes: n=15422 p50_us<=16383 p99_us<=1048575 max_us=1180576
+soak domain=2 writes: n=1935 p50_us<=16383 p99_us<=1048575 max_us=1161246
+soak domain=3 writes: n=1934 p50_us<=16383 p99_us<=1048575 max_us=1161237
+soak point reads: n=2350 p50_us<=127 p99_us<=4095 max_us=9917
+soak range two pages: n=2350 p50_us<=255 p99_us<=8191 max_us=12883
+soak observer deliveries: n=27116 p50_us<=65535 p99_us<=2097151 max_us=9852950
+soak t_s=1261 main_operations=1289200 writes_per_s=458 observer_deliveries_per_s=812 live_rows=100000 observations=2312119 resident_mib=67 file_bytes=281477120 wal_bytes=43770936 retained=2587 checkpoint=314 step_us_per_write=613.76 commit_us=18767033 checkpoint_copy_us=367220 checkpoint_flush_us=408755 queue=0
+soak subphases t_s=1261 admission_us_per_write=0.03 reduction_us_per_write=76.07 encoding_us_per_write=0.39 sql_us_per_write=189.30 authoring_steps=1612522 incoming_steps=0 authoring_us_per_step=316.36 incoming_us_per_step=0.00 checkpoints_delta=12
+soak storage t_s=1261 page_count=68720 freelist_count=583 free_pct=0.85 db_bytes=281477120 wal_bytes=43783272
+soak domain=1 writes: n=13967 p50_us<=32767 p99_us<=262143 max_us=797245
+soak domain=2 writes: n=1751 p50_us<=32767 p99_us<=262143 max_us=423991
+soak domain=3 writes: n=1751 p50_us<=32767 p99_us<=262143 max_us=423996
+soak point reads: n=2109 p50_us<=255 p99_us<=16383 max_us=43586
+soak range two pages: n=2109 p50_us<=511 p99_us<=16383 max_us=30303
+soak observer deliveries: n=24748 p50_us<=131071 p99_us<=1048575 max_us=7834744
+soak t_s=1291 main_operations=1318850 writes_per_s=988 observer_deliveries_per_s=1755 live_rows=99999 observations=2364785 resident_mib=65 file_bytes=281477120 wal_bytes=10596672 retained=3519 checkpoint=321 step_us_per_write=312.65 commit_us=17270994 checkpoint_copy_us=354021 checkpoint_flush_us=605222 queue=0
+soak subphases t_s=1291 admission_us_per_write=0.01 reduction_us_per_write=68.93 encoding_us_per_write=0.13 sql_us_per_write=127.19 authoring_steps=1649604 incoming_steps=0 authoring_us_per_step=223.21 incoming_us_per_step=0.00 checkpoints_delta=24
+soak storage t_s=1291 page_count=68720 freelist_count=885 free_pct=1.29 db_bytes=281477120 wal_bytes=10596672
+soak domain=1 writes: n=29650 p50_us<=16383 p99_us<=65535 max_us=108666
+soak domain=2 writes: n=3718 p50_us<=16383 p99_us<=65535 max_us=89436
+soak domain=3 writes: n=3716 p50_us<=16383 p99_us<=65535 max_us=89427
+soak point reads: n=2274 p50_us<=255 p99_us<=4095 max_us=9017
+soak range two pages: n=2274 p50_us<=511 p99_us<=4095 max_us=6188
+soak observer deliveries: n=52646 p50_us<=65535 p99_us<=262143 max_us=392678
+soak t_s=1321 main_operations=1354059 writes_per_s=1173 observer_deliveries_per_s=2032 live_rows=99998 observations=2425763 resident_mib=70 file_bytes=281477120 wal_bytes=52361112 retained=5933 checkpoint=329 step_us_per_write=232.35 commit_us=18546228 checkpoint_copy_us=385144 checkpoint_flush_us=667933 queue=13
+soak subphases t_s=1321 admission_us_per_write=0.00 reduction_us_per_write=50.37 encoding_us_per_write=0.03 sql_us_per_write=93.58 authoring_steps=1693630 incoming_steps=0 authoring_us_per_step=164.14 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1321 page_count=68720 freelist_count=550 free_pct=0.80 db_bytes=281477120 wal_bytes=52361112
+soak domain=1 writes: n=35209 p50_us<=16383 p99_us<=65535 max_us=101632
+soak domain=2 writes: n=4414 p50_us<=16383 p99_us<=65535 max_us=83619
+soak domain=3 writes: n=4412 p50_us<=16383 p99_us<=65535 max_us=101581
+soak point reads: n=2369 p50_us<=127 p99_us<=3850 max_us=3850
+soak range two pages: n=2369 p50_us<=255 p99_us<=3403 max_us=3403
+soak observer deliveries: n=60996 p50_us<=65535 p99_us<=262143 max_us=1317123
+soak t_s=1351 main_operations=1386003 writes_per_s=1064 observer_deliveries_per_s=1964 live_rows=100000 observations=2484725 resident_mib=70 file_bytes=281477120 wal_bytes=23768312 retained=5053 checkpoint=337 step_us_per_write=265.94 commit_us=18168145 checkpoint_copy_us=406135 checkpoint_flush_us=659064 queue=10
+soak subphases t_s=1351 admission_us_per_write=0.00 reduction_us_per_write=54.63 encoding_us_per_write=0.03 sql_us_per_write=101.39 authoring_steps=1733590 incoming_steps=0 authoring_us_per_step=176.29 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=1351 page_count=68720 freelist_count=671 free_pct=0.98 db_bytes=281477120 wal_bytes=23772432
+soak domain=1 writes: n=31944 p50_us<=16383 p99_us<=65535 max_us=141076
+soak domain=2 writes: n=4009 p50_us<=16383 p99_us<=65535 max_us=114898
+soak domain=3 writes: n=4011 p50_us<=16383 p99_us<=65535 max_us=114888
+soak point reads: n=2346 p50_us<=127 p99_us<=4095 max_us=4933
+soak range two pages: n=2346 p50_us<=255 p99_us<=4095 max_us=5305
+soak observer deliveries: n=58978 p50_us<=65535 p99_us<=262143 max_us=387185
+soak t_s=1381 main_operations=1416259 writes_per_s=1008 observer_deliveries_per_s=1930 live_rows=100000 observations=2542659 resident_mib=64 file_bytes=281477120 wal_bytes=4194304 retained=2503 checkpoint=345 step_us_per_write=299.28 commit_us=17420531 checkpoint_copy_us=376997 checkpoint_flush_us=700560 queue=1
+soak subphases t_s=1381 admission_us_per_write=0.00 reduction_us_per_write=66.80 encoding_us_per_write=0.09 sql_us_per_write=116.42 authoring_steps=1771456 incoming_steps=0 authoring_us_per_step=206.95 incoming_us_per_step=0.00 checkpoints_delta=26
+soak storage t_s=1381 page_count=68720 freelist_count=894 free_pct=1.30 db_bytes=281477120 wal_bytes=4194304
+soak domain=1 writes: n=30256 p50_us<=16383 p99_us<=65535 max_us=97385
+soak domain=2 writes: n=3795 p50_us<=16383 p99_us<=65535 max_us=94766
+soak domain=3 writes: n=3797 p50_us<=16383 p99_us<=65535 max_us=94775
+soak point reads: n=2327 p50_us<=255 p99_us<=4095 max_us=6882
+soak range two pages: n=2327 p50_us<=255 p99_us<=4095 max_us=5422
+soak observer deliveries: n=57914 p50_us<=65535 p99_us<=262143 max_us=264953
+soak t_s=1411 main_operations=1447937 writes_per_s=1056 observer_deliveries_per_s=1800 live_rows=99999 observations=2596661 resident_mib=70 file_bytes=281477120 wal_bytes=38245992 retained=5465 checkpoint=352 step_us_per_write=239.78 commit_us=19292326 checkpoint_copy_us=337027 checkpoint_flush_us=729421 queue=0
+soak subphases t_s=1411 admission_us_per_write=0.00 reduction_us_per_write=54.21 encoding_us_per_write=0.05 sql_us_per_write=94.84 authoring_steps=1811078 incoming_steps=0 authoring_us_per_step=169.19 incoming_us_per_step=0.00 checkpoints_delta=24
+soak storage t_s=1411 page_count=68720 freelist_count=644 free_pct=0.94 db_bytes=281477120 wal_bytes=38245992
+soak domain=1 writes: n=31678 p50_us<=16383 p99_us<=65535 max_us=109277
+soak domain=2 writes: n=3972 p50_us<=16383 p99_us<=65535 max_us=100983
+soak domain=3 writes: n=3973 p50_us<=16383 p99_us<=65535 max_us=100981
+soak point reads: n=2444 p50_us<=127 p99_us<=4095 max_us=4261
+soak range two pages: n=2444 p50_us<=255 p99_us<=4095 max_us=4831
+soak observer deliveries: n=54008 p50_us<=65535 p99_us<=262143 max_us=1478183
+soak t_s=1441 main_operations=1482994 writes_per_s=1168 observer_deliveries_per_s=2167 live_rows=99999 observations=2661695 resident_mib=70 file_bytes=281481216 wal_bytes=52871992 retained=3607 checkpoint=361 step_us_per_write=233.86 commit_us=18565418 checkpoint_copy_us=343937 checkpoint_flush_us=692928 queue=1
+soak subphases t_s=1441 admission_us_per_write=0.00 reduction_us_per_write=52.27 encoding_us_per_write=0.02 sql_us_per_write=92.53 authoring_steps=1854893 incoming_steps=0 authoring_us_per_step=163.06 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1441 page_count=68721 freelist_count=681 free_pct=0.99 db_bytes=281481216 wal_bytes=52871992
+soak domain=1 writes: n=35058 p50_us<=16383 p99_us<=65535 max_us=87374
+soak domain=2 writes: n=4387 p50_us<=16383 p99_us<=65535 max_us=87370
+soak domain=3 writes: n=4389 p50_us<=16383 p99_us<=65535 max_us=87367
+soak point reads: n=2456 p50_us<=127 p99_us<=3662 max_us=3662
+soak range two pages: n=2455 p50_us<=255 p99_us<=3986 max_us=3986
+soak observer deliveries: n=65032 p50_us<=65535 p99_us<=262143 max_us=271400
+soak t_s=1471 main_operations=1517729 writes_per_s=1157 observer_deliveries_per_s=2147 live_rows=100000 observations=2726149 resident_mib=70 file_bytes=281481216 wal_bytes=12850312 retained=5549 checkpoint=369 step_us_per_write=239.16 commit_us=18394973 checkpoint_copy_us=368546 checkpoint_flush_us=675396 queue=0
+soak subphases t_s=1471 admission_us_per_write=0.00 reduction_us_per_write=53.11 encoding_us_per_write=0.03 sql_us_per_write=93.41 authoring_steps=1898341 incoming_steps=0 authoring_us_per_step=165.37 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1471 page_count=68721 freelist_count=465 free_pct=0.68 db_bytes=281481216 wal_bytes=12850312
+soak domain=1 writes: n=34734 p50_us<=16383 p99_us<=65535 max_us=100788
+soak domain=2 writes: n=4351 p50_us<=16383 p99_us<=65535 max_us=83532
+soak domain=3 writes: n=4353 p50_us<=16383 p99_us<=65535 max_us=83534
+soak point reads: n=2454 p50_us<=127 p99_us<=4095 max_us=6174
+soak range two pages: n=2455 p50_us<=255 p99_us<=4095 max_us=5033
+soak observer deliveries: n=64456 p50_us<=65535 p99_us<=262143 max_us=296883
+soak t_s=1502 main_operations=1552632 writes_per_s=1163 observer_deliveries_per_s=2035 live_rows=100000 observations=2787250 resident_mib=70 file_bytes=281903104 wal_bytes=24200912 retained=3513 checkpoint=378 step_us_per_write=236.37 commit_us=18468681 checkpoint_copy_us=377483 checkpoint_flush_us=678988 queue=0
+soak subphases t_s=1502 admission_us_per_write=0.00 reduction_us_per_write=51.56 encoding_us_per_write=0.03 sql_us_per_write=90.79 authoring_steps=1941984 incoming_steps=0 authoring_us_per_step=161.16 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1502 page_count=68824 freelist_count=750 free_pct=1.09 db_bytes=281903104 wal_bytes=24217416
+soak domain=1 writes: n=34903 p50_us<=16383 p99_us<=65535 max_us=87060
+soak domain=2 writes: n=4374 p50_us<=16383 p99_us<=65535 max_us=87022
+soak domain=3 writes: n=4375 p50_us<=16383 p99_us<=65535 max_us=83843
+soak point reads: n=2453 p50_us<=127 p99_us<=3780 max_us=3780
+soak range two pages: n=2453 p50_us<=255 p99_us<=4095 max_us=8329
+soak observer deliveries: n=61111 p50_us<=65535 p99_us<=262143 max_us=1443051
+soak t_s=1532 main_operations=1587094 writes_per_s=1148 observer_deliveries_per_s=2044 live_rows=100000 observations=2848593 resident_mib=70 file_bytes=282157056 wal_bytes=13538352 retained=5164 checkpoint=386 step_us_per_write=248.30 commit_us=18132550 checkpoint_copy_us=350106 checkpoint_flush_us=672299 queue=11
+soak subphases t_s=1532 admission_us_per_write=0.00 reduction_us_per_write=57.85 encoding_us_per_write=0.03 sql_us_per_write=98.86 authoring_steps=1985089 incoming_steps=0 authoring_us_per_step=176.24 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1532 page_count=68886 freelist_count=497 free_pct=0.72 db_bytes=282157056 wal_bytes=13538352
+soak domain=1 writes: n=34462 p50_us<=16383 p99_us<=65535 max_us=99048
+soak domain=2 writes: n=4322 p50_us<=16383 p99_us<=65535 max_us=84936
+soak domain=3 writes: n=4322 p50_us<=16383 p99_us<=65535 max_us=84940
+soak point reads: n=2468 p50_us<=127 p99_us<=4095 max_us=4308
+soak range two pages: n=2468 p50_us<=255 p99_us<=4095 max_us=4177
+soak observer deliveries: n=61353 p50_us<=65535 p99_us<=254322 max_us=254322
+soak t_s=1562 main_operations=1621867 writes_per_s=1158 observer_deliveries_per_s=2128 live_rows=100000 observations=2912473 resident_mib=70 file_bytes=282337280 wal_bytes=30846472 retained=3049 checkpoint=395 step_us_per_write=233.14 commit_us=18647600 checkpoint_copy_us=376697 checkpoint_flush_us=690990 queue=3
+soak subphases t_s=1562 admission_us_per_write=0.00 reduction_us_per_write=50.63 encoding_us_per_write=0.02 sql_us_per_write=91.11 authoring_steps=2028601 incoming_steps=0 authoring_us_per_step=160.11 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1562 page_count=68930 freelist_count=813 free_pct=1.18 db_bytes=282337280 wal_bytes=30846472
+soak domain=1 writes: n=34773 p50_us<=16383 p99_us<=65535 max_us=101382
+soak domain=2 writes: n=4364 p50_us<=16383 p99_us<=65535 max_us=94682
+soak domain=3 writes: n=4363 p50_us<=16383 p99_us<=65535 max_us=94676
+soak point reads: n=2453 p50_us<=127 p99_us<=4095 max_us=4584
+soak range two pages: n=2453 p50_us<=255 p99_us<=3514 max_us=3514
+soak observer deliveries: n=63862 p50_us<=65535 p99_us<=248416 max_us=248416
+soak t_s=1592 main_operations=1657143 writes_per_s=1175 observer_deliveries_per_s=2000 live_rows=100000 observations=2972522 resident_mib=71 file_bytes=282337280 wal_bytes=48430632 retained=5523 checkpoint=403 step_us_per_write=222.95 commit_us=18939841 checkpoint_copy_us=396491 checkpoint_flush_us=692843 queue=15
+soak subphases t_s=1592 admission_us_per_write=0.00 reduction_us_per_write=49.46 encoding_us_per_write=0.02 sql_us_per_write=89.51 authoring_steps=2072700 incoming_steps=0 authoring_us_per_step=157.27 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1592 page_count=68930 freelist_count=441 free_pct=0.64 db_bytes=282337280 wal_bytes=48430632
+soak domain=1 writes: n=35276 p50_us<=16383 p99_us<=65535 max_us=101153
+soak domain=2 writes: n=4417 p50_us<=16383 p99_us<=65535 max_us=87836
+soak domain=3 writes: n=4417 p50_us<=16383 p99_us<=65535 max_us=87836
+soak point reads: n=2459 p50_us<=127 p99_us<=4095 max_us=5847
+soak range two pages: n=2459 p50_us<=255 p99_us<=3847 max_us=3847
+soak observer deliveries: n=60045 p50_us<=65535 p99_us<=262143 max_us=1717786
+soak t_s=1622 main_operations=1693370 writes_per_s=1207 observer_deliveries_per_s=2065 live_rows=99998 observations=3034511 resident_mib=71 file_bytes=282337280 wal_bytes=16846712 retained=4855 checkpoint=412 step_us_per_write=209.36 commit_us=19322656 checkpoint_copy_us=360143 checkpoint_flush_us=686051 queue=4
+soak subphases t_s=1622 admission_us_per_write=0.00 reduction_us_per_write=42.45 encoding_us_per_write=0.02 sql_us_per_write=80.25 authoring_steps=2118006 incoming_steps=0 authoring_us_per_step=139.12 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1622 page_count=68930 freelist_count=420 free_pct=0.61 db_bytes=282337280 wal_bytes=16846712
+soak domain=1 writes: n=36239 p50_us<=16383 p99_us<=65535 max_us=86907
+soak domain=2 writes: n=4540 p50_us<=16383 p99_us<=65535 max_us=82564
+soak domain=3 writes: n=4536 p50_us<=16383 p99_us<=65535 max_us=82588
+soak point reads: n=2454 p50_us<=127 p99_us<=4095 max_us=4876
+soak range two pages: n=2454 p50_us<=255 p99_us<=3525 max_us=3525
+soak observer deliveries: n=61999 p50_us<=65535 p99_us<=262143 max_us=264583
+soak t_s=1652 main_operations=1728901 writes_per_s=1184 observer_deliveries_per_s=1923 live_rows=100000 observations=3092244 resident_mib=71 file_bytes=282337280 wal_bytes=46803232 retained=3488 checkpoint=421 step_us_per_write=221.73 commit_us=18922653 checkpoint_copy_us=381464 checkpoint_flush_us=696295 queue=7
+soak subphases t_s=1652 admission_us_per_write=0.00 reduction_us_per_write=48.12 encoding_us_per_write=0.02 sql_us_per_write=86.43 authoring_steps=2162446 incoming_steps=0 authoring_us_per_step=151.96 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1652 page_count=68930 freelist_count=543 free_pct=0.79 db_bytes=282337280 wal_bytes=46803232
+soak domain=1 writes: n=35528 p50_us<=16383 p99_us<=65535 max_us=97533
+soak domain=2 writes: n=4453 p50_us<=16383 p99_us<=65535 max_us=86770
+soak domain=3 writes: n=4451 p50_us<=16383 p99_us<=65535 max_us=86767
+soak point reads: n=2471 p50_us<=127 p99_us<=2949 max_us=2949
+soak range two pages: n=2471 p50_us<=255 p99_us<=4095 max_us=8486
+soak observer deliveries: n=57727 p50_us<=65535 p99_us<=262143 max_us=1442166
+soak t_s=1682 main_operations=1764323 writes_per_s=1180 observer_deliveries_per_s=2229 live_rows=100000 observations=3159157 resident_mib=71 file_bytes=282337280 wal_bytes=28259112 retained=6117 checkpoint=429 step_us_per_write=223.84 commit_us=18831198 checkpoint_copy_us=371887 checkpoint_flush_us=726295 queue=8
+soak subphases t_s=1682 admission_us_per_write=0.00 reduction_us_per_write=48.16 encoding_us_per_write=0.02 sql_us_per_write=89.31 authoring_steps=2206748 incoming_steps=0 authoring_us_per_step=156.20 incoming_us_per_step=0.00 checkpoints_delta=29
+soak storage t_s=1682 page_count=68930 freelist_count=121 free_pct=0.18 db_bytes=282337280 wal_bytes=28259112
+soak domain=1 writes: n=35413 p50_us<=16383 p99_us<=65535 max_us=100720
+soak domain=2 writes: n=4439 p50_us<=16383 p99_us<=65535 max_us=87455
+soak domain=3 writes: n=4438 p50_us<=16383 p99_us<=65535 max_us=87450
+soak point reads: n=2451 p50_us<=127 p99_us<=4095 max_us=4246
+soak range two pages: n=2451 p50_us<=255 p99_us<=3548 max_us=3548
+soak observer deliveries: n=66909 p50_us<=32767 p99_us<=262143 max_us=318178
+soak t_s=1712 main_operations=1797932 writes_per_s=1120 observer_deliveries_per_s=2046 live_rows=100000 observations=3220577 resident_mib=71 file_bytes=282337280 wal_bytes=28568112 retained=2806 checkpoint=438 step_us_per_write=251.40 commit_us=18158295 checkpoint_copy_us=395546 checkpoint_flush_us=731667 queue=7
+soak subphases t_s=1712 admission_us_per_write=0.00 reduction_us_per_write=54.81 encoding_us_per_write=0.03 sql_us_per_write=96.93 authoring_steps=2248783 incoming_steps=0 authoring_us_per_step=171.29 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1712 page_count=68930 freelist_count=435 free_pct=0.63 db_bytes=282337280 wal_bytes=28568112
+soak domain=1 writes: n=33609 p50_us<=16383 p99_us<=65535 max_us=166207
+soak domain=2 writes: n=4213 p50_us<=16383 p99_us<=65535 max_us=121978
+soak domain=3 writes: n=4215 p50_us<=16383 p99_us<=65535 max_us=121977
+soak point reads: n=2451 p50_us<=127 p99_us<=4077 max_us=4077
+soak range two pages: n=2451 p50_us<=255 p99_us<=4095 max_us=4259
+soak observer deliveries: n=61424 p50_us<=65535 p99_us<=262143 max_us=429185
+soak t_s=1742 main_operations=1831690 writes_per_s=1125 observer_deliveries_per_s=1950 live_rows=100000 observations=3279111 resident_mib=71 file_bytes=282337280 wal_bytes=8338912 retained=3733 checkpoint=446 step_us_per_write=244.14 commit_us=18364347 checkpoint_copy_us=419433 checkpoint_flush_us=742684 queue=15
+soak subphases t_s=1742 admission_us_per_write=0.00 reduction_us_per_write=50.68 encoding_us_per_write=0.03 sql_us_per_write=90.71 authoring_steps=2290992 incoming_steps=0 authoring_us_per_step=160.09 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1742 page_count=68930 freelist_count=954 free_pct=1.38 db_bytes=282337280 wal_bytes=8338912
+soak domain=1 writes: n=33759 p50_us<=16383 p99_us<=65535 max_us=102544
+soak domain=2 writes: n=4231 p50_us<=16383 p99_us<=65535 max_us=101654
+soak domain=3 writes: n=4229 p50_us<=16383 p99_us<=65535 max_us=101653
+soak point reads: n=2459 p50_us<=127 p99_us<=4095 max_us=21200
+soak range two pages: n=2459 p50_us<=255 p99_us<=3618 max_us=3618
+soak observer deliveries: n=58550 p50_us<=65535 p99_us<=262143 max_us=1306803
+soak t_s=1772 main_operations=1866469 writes_per_s=1159 observer_deliveries_per_s=2097 live_rows=100000 observations=3342054 resident_mib=71 file_bytes=282337280 wal_bytes=32144296 retained=5690 checkpoint=454 step_us_per_write=231.94 commit_us=18739165 checkpoint_copy_us=351603 checkpoint_flush_us=667616 queue=0
+soak subphases t_s=1772 admission_us_per_write=0.00 reduction_us_per_write=52.66 encoding_us_per_write=0.02 sql_us_per_write=94.31 authoring_steps=2334500 incoming_steps=0 authoring_us_per_step=165.97 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1772 page_count=68930 freelist_count=900 free_pct=1.31 db_bytes=282337280 wal_bytes=32185496
+soak domain=1 writes: n=34778 p50_us<=16383 p99_us<=65535 max_us=102830
+soak domain=2 writes: n=4361 p50_us<=16383 p99_us<=65535 max_us=85188
+soak domain=3 writes: n=4361 p50_us<=16383 p99_us<=65535 max_us=85188
+soak point reads: n=2459 p50_us<=127 p99_us<=4095 max_us=6478
+soak range two pages: n=2459 p50_us<=255 p99_us<=4095 max_us=4185
+soak observer deliveries: n=62921 p50_us<=32767 p99_us<=262143 max_us=376176
+soak t_s=1802 main_operations=1899303 writes_per_s=1094 observer_deliveries_per_s=2068 live_rows=100000 observations=3404120 resident_mib=71 file_bytes=282337280 wal_bytes=4194304 retained=5709 checkpoint=462 step_us_per_write=227.46 commit_us=19508692 checkpoint_copy_us=350582 checkpoint_flush_us=663189 queue=14
+soak subphases t_s=1802 admission_us_per_write=0.00 reduction_us_per_write=51.07 encoding_us_per_write=0.03 sql_us_per_write=93.91 authoring_steps=2375554 incoming_steps=0 authoring_us_per_step=164.24 incoming_us_per_step=0.00 checkpoints_delta=27
+soak storage t_s=1802 page_count=68930 freelist_count=854 free_pct=1.24 db_bytes=282337280 wal_bytes=4194304
+soak domain=1 writes: n=32834 p50_us<=16383 p99_us<=131071 max_us=260550
+soak domain=2 writes: n=4113 p50_us<=16383 p99_us<=131071 max_us=211995
+soak domain=3 writes: n=4113 p50_us<=16383 p99_us<=131071 max_us=211994
+soak point reads: n=2450 p50_us<=127 p99_us<=4095 max_us=10087
+soak range two pages: n=2450 p50_us<=255 p99_us<=3683 max_us=3683
+soak observer deliveries: n=62068 p50_us<=32767 p99_us<=262143 max_us=1718661
+soak t_s=1832 main_operations=1935536 writes_per_s=1207 observer_deliveries_per_s=2077 live_rows=100000 observations=3466454 resident_mib=71 file_bytes=282337280 wal_bytes=17794312 retained=5037 checkpoint=471 step_us_per_write=211.39 commit_us=19138440 checkpoint_copy_us=399561 checkpoint_flush_us=723603 queue=0
+soak subphases t_s=1832 admission_us_per_write=0.00 reduction_us_per_write=44.74 encoding_us_per_write=0.02 sql_us_per_write=81.73 authoring_steps=2420873 incoming_steps=0 authoring_us_per_step=143.15 incoming_us_per_step=0.00 checkpoints_delta=28
+soak storage t_s=1832 page_count=68930 freelist_count=849 free_pct=1.23 db_bytes=282337280 wal_bytes=17794312
+soak domain=1 writes: n=36233 p50_us<=16383 p99_us<=65535 max_us=101774
+soak domain=2 writes: n=4536 p50_us<=16383 p99_us<=65535 max_us=93572
+soak domain=3 writes: n=4536 p50_us<=16383 p99_us<=65535 max_us=93567
+soak point reads: n=2458 p50_us<=127 p99_us<=4095 max_us=4436
+soak range two pages: n=2458 p50_us<=255 p99_us<=4095 max_us=6001
+soak observer deliveries: n=62336 p50_us<=32767 p99_us<=262143 max_us=2046697

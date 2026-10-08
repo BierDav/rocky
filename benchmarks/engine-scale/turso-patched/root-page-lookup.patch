@@ -1,0 +1,221 @@
+--- a/mvcc/database/mod.rs
++++ b/mvcc/database/mod.rs
+@@ -4357,6 +4357,10 @@
+     ///
+     /// Versioned root bindings; passive checkpoints update these at publish, not during collection.
+     pub table_id_to_rootpage: SkipMap<MVTableId, RootEntry, BasicComparator, A>,
++    /// Reverse index of `table_id_to_rootpage`: root page -> table ids bound to it, ascending.
++    /// Every write to the map goes through [`Self::set_root_entry`] /
++    /// [`Self::remove_root_entry`] under this lock, so the two never disagree.
++    rootpage_to_table_ids: RwLock<HashMap<u64, Vec<MVTableId>>>,
+     /// Unlike table rows which are stored in a single map, we have a separate map for every index
+     /// because operations like last() on an index are much easier when we don't have to take the
+     /// table identifier into account.
+@@ -4589,9 +4593,12 @@
+         let table_id_to_rootpage = SkipMap::new_in(alloc.clone());
+         // table id 1 / root page 1 is always sqlite_schema.
+         table_id_to_rootpage.try_insert(SQLITE_SCHEMA_MVCC_TABLE_ID, RootEntry::live(Some(1)))?;
++        let mut rootpage_to_table_ids = HashMap::default();
++        rootpage_to_table_ids.insert(1, vec![SQLITE_SCHEMA_MVCC_TABLE_ID]);
+         Ok(Self {
+             rows: SkipMap::new_in(alloc.clone()),
+             table_id_to_rootpage,
++            rootpage_to_table_ids: RwLock::new(rootpage_to_table_ids),
+             index_rows: SkipMap::new_in(alloc.clone()),
+             index_rows_epoch: AtomicU64::new(0),
+             txs: SkipMap::new_in(alloc.clone()),
+@@ -4677,16 +4684,79 @@
+             return Some(root_page.into());
+         }
+         let root_page = root_page as u64;
+-        self.table_id_to_rootpage
++        self.root_entries_for_page(root_page)
++            .into_iter()
++            .filter(|(_, e)| e.is_live() || snapshot_ts < e.end)
++            .min_by_key(|(_, e)| e.end)
++            .map(|(table_id, _)| table_id)
++    }
++
++    /// Every binding whose root page is `root_page`, in ascending table-id order: what a scan
++    /// of `table_id_to_rootpage` filtered on the root page yields, without the scan.
++    pub(crate) fn root_entries_for_page(
++        &self,
++        root_page: u64,
++    ) -> smallvec::SmallVec<[(MVTableId, RootEntry); 2]> {
++        let index = self.rootpage_to_table_ids.read();
++        let Some(table_ids) = index.get(&root_page) else {
++            return smallvec::SmallVec::new();
++        };
++        table_ids
+             .iter()
+-            .filter(|entry| {
+-                let e = entry.value();
+-                e.root_page == Some(root_page) && (e.is_live() || snapshot_ts < e.end)
++            .filter_map(|table_id| {
++                let entry = *self.table_id_to_rootpage.get(table_id)?.value();
++                (entry.root_page == Some(root_page)).then_some((*table_id, entry))
+             })
+-            .min_by_key(|entry| entry.value().end)
+-            .map(|entry| *entry.key())
++            .collect()
++    }
++
++    /// The only writer of `table_id_to_rootpage` entries; keeps the reverse index in step.
++    fn set_root_entry(&self, table_id: MVTableId, entry: RootEntry) {
++        let mut index = self.rootpage_to_table_ids.write();
++        let previous = self
++            .table_id_to_rootpage
++            .get(&table_id)
++            .and_then(|e| e.value().root_page);
++        if previous != entry.root_page {
++            if let Some(root_page) = previous {
++                Self::unindex_root_page(&mut index, root_page, table_id);
++            }
++            if let Some(root_page) = entry.root_page {
++                let table_ids = index.entry(root_page).or_default();
++                if let Err(at) = table_ids.binary_search(&table_id) {
++                    table_ids.insert(at, table_id);
++                }
++            }
++        }
++        self.table_id_to_rootpage.insert(table_id, entry);
++    }
++
++    /// The only remover of `table_id_to_rootpage` entries; keeps the reverse index in step.
++    fn remove_root_entry(&self, table_id: &MVTableId) {
++        let mut index = self.rootpage_to_table_ids.write();
++        let previous = self
++            .table_id_to_rootpage
++            .get(table_id)
++            .and_then(|e| e.value().root_page);
++        if let Some(root_page) = previous {
++            Self::unindex_root_page(&mut index, root_page, *table_id);
++        }
++        self.table_id_to_rootpage.remove(table_id);
+     }
+ 
++    fn unindex_root_page(
++        index: &mut HashMap<u64, Vec<MVTableId>>,
++        root_page: u64,
++        table_id: MVTableId,
++    ) {
++        if let Some(table_ids) = index.get_mut(&root_page) {
++            table_ids.retain(|id| *id != table_id);
++            if table_ids.is_empty() {
++                index.remove(&root_page);
++            }
++        }
++    }
++
+     /// Snapshot timestamp (`begin_ts`) of the given transaction, or `u64::MAX` if it is not
+     /// tracked (resolving the live root-page binding). Used to make a transaction's root-page
+     /// lookups snapshot-consistent.
+@@ -4725,13 +4795,12 @@
+     /// uncheckpointed-create with `None`). Visible to every snapshot. Checkpoint-time
+     /// allocation of a real root page goes through [`Self::record_rootpage_alloc`] instead.
+     pub fn insert_table_id_to_rootpage(&self, table_id: MVTableId, root_page: Option<u64>) {
+-        self.table_id_to_rootpage
+-            .insert(table_id, RootEntry::live(root_page));
++        self.set_root_entry(table_id, RootEntry::live(root_page));
+         self.bump_next_table_id_below(table_id, root_page);
+     }
+ 
+     pub fn remove_table_id_to_rootpage(&self, table_id: &MVTableId) {
+-        self.table_id_to_rootpage.remove(table_id);
++        self.remove_root_entry(table_id);
+         self.table_id_to_last_rowid.write().remove(table_id);
+     }
+ 
+@@ -4754,7 +4823,7 @@
+         begin_ts: u64,
+         materialized_at: WalPos,
+     ) {
+-        self.table_id_to_rootpage.insert(
++        self.set_root_entry(
+             table_id,
+             RootEntry {
+                 root_page: Some(root_page),
+@@ -4766,18 +4835,13 @@
+         // A page has one live owner. Claiming this page means it was freed+reused; retire any
+         // stale prior owner still marked live for it (drop-time retire raced collection),
+         // else two live bindings resolve to one page (integrity_check: referenced twice).
+-        let stale: Vec<(MVTableId, RootEntry)> = self
+-            .table_id_to_rootpage
+-            .iter()
+-            .filter(|entry| {
+-                let e = entry.value();
+-                e.is_live() && e.root_page == Some(root_page) && *entry.key() != table_id
+-            })
+-            .map(|entry| (*entry.key(), *entry.value()))
+-            .collect();
++        let stale = self
++            .root_entries_for_page(root_page)
++            .into_iter()
++            .filter(|(key, e)| e.is_live() && *key != table_id);
+         for (key, mut entry) in stale {
+             entry.end = begin_ts;
+-            self.table_id_to_rootpage.insert(key, entry);
++            self.set_root_entry(key, entry);
+         }
+         self.bump_next_table_id_below(table_id, Some(root_page));
+     }
+@@ -4790,7 +4854,7 @@
+         if let Some(entry) = self.table_id_to_rootpage.get(&table_id) {
+             let mut e = *entry.value();
+             e.materialized_at = materialized_at;
+-            self.table_id_to_rootpage.insert(table_id, e);
++            self.set_root_entry(table_id, e);
+         }
+     }
+ 
+@@ -4801,7 +4865,7 @@
+         if let Some(entry) = self.table_id_to_rootpage.get(&table_id) {
+             let mut e = *entry.value();
+             e.end = end_ts;
+-            self.table_id_to_rootpage.insert(table_id, e);
++            self.set_root_entry(table_id, e);
+         }
+     }
+ 
+@@ -4819,7 +4883,7 @@
+             .map(|entry| *entry.key())
+             .collect();
+         for key in &stale {
+-            self.table_id_to_rootpage.remove(key);
++            self.remove_root_entry(key);
+             self.table_id_to_last_rowid.write().remove(key);
+         }
+         stale.len()
+@@ -4918,7 +4982,11 @@
+         }
+         // Clears live and retired bindings alike: both reference pre-VACUUM root pages that
+         // would alias new objects after root-page reuse.
+-        self.table_id_to_rootpage.clear();
++        {
++            let mut index = self.rootpage_to_table_ids.write();
++            index.clear();
++            self.table_id_to_rootpage.clear();
++        }
+         self.table_id_to_last_rowid.write().clear();
+         // TODO: vacuum related code, not handling alloc errors for now
+         self.insert_table_id_to_rootpage(SQLITE_SCHEMA_MVCC_TABLE_ID, Some(1));
+--- a/mvcc/database/checkpoint_state_machine.rs
++++ b/mvcc/database/checkpoint_state_machine.rs
+@@ -1096,13 +1096,10 @@
+             _ => self.snapshot_ts,
+         };
+         self.mvstore
+-            .table_id_to_rootpage
+-            .iter()
+-            .find(|entry| {
+-                let e = entry.value();
+-                e.root_page == Some(root_page) && e.begin < drop_ts && drop_ts <= e.end
+-            })
+-            .map(|entry| *entry.key())
++            .root_entries_for_page(root_page)
++            .into_iter()
++            .find(|(_, e)| e.begin < drop_ts && drop_ts <= e.end)
++            .map(|(table_id, _)| table_id)
+     }
+ 
+     /// Resolve a table/index root during collection (`pending_alloc_roots` or shared map).

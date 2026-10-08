@@ -1,0 +1,42 @@
+trial=1 tables=10
+tables=10 domains=1 manifest_bytes=2208 validate_us=216 hash_us=13 fingerprint_us=86
+tables=10 domains=1 files=1 installed_ms=42
+tables=10 domains=1 warm-write: n=1000 throughput=5628/s p50_us=134 p99_us=734 max_us=1299
+tables=10 domains=1 reader_warmup_us=700
+tables=10 domains=1 warm-read: n=1000 throughput=39108/s p50_us=24 p99_us=41 max_us=51
+tables=10 domains=1 files=1 install_ms=42 open_ms=2 write_us=177 read_us=25 resident_mib=13
+trial=1 tables=2000
+tables=2000 domains=1 manifest_bytes=403848 validate_us=5907 hash_us=1030 fingerprint_us=4930
+tables=2000 domains=1 files=1 installed_ms=8159
+tables=2000 domains=1 warm-write: n=1000 throughput=13068/s p50_us=64 p99_us=296 max_us=499
+tables=2000 domains=1 reader_warmup_us=22523
+tables=2000 domains=1 warm-read: n=1000 throughput=34702/s p50_us=28 p99_us=47 max_us=541
+tables=2000 domains=1 files=1 install_ms=8159 open_ms=97 write_us=76 read_us=28 resident_mib=51
+trial=2 tables=10
+tables=10 domains=1 manifest_bytes=2208 validate_us=46 hash_us=6 fingerprint_us=32
+tables=10 domains=1 files=1 installed_ms=36
+tables=10 domains=1 warm-write: n=1000 throughput=9345/s p50_us=85 p99_us=388 max_us=549
+tables=10 domains=1 reader_warmup_us=626
+tables=10 domains=1 warm-read: n=1000 throughput=41412/s p50_us=23 p99_us=36 max_us=80
+tables=10 domains=1 files=1 install_ms=36 open_ms=2 write_us=107 read_us=24 resident_mib=13
+trial=2 tables=2000
+tables=2000 domains=1 manifest_bytes=403848 validate_us=6107 hash_us=1018 fingerprint_us=5488
+tables=2000 domains=1 files=1 installed_ms=8007
+tables=2000 domains=1 warm-write: n=1000 throughput=13564/s p50_us=63 p99_us=274 max_us=466
+tables=2000 domains=1 reader_warmup_us=23382
+tables=2000 domains=1 warm-read: n=1000 throughput=33846/s p50_us=29 p99_us=50 max_us=61
+tables=2000 domains=1 files=1 install_ms=8007 open_ms=103 write_us=73 read_us=29 resident_mib=50
+trial=3 tables=10
+tables=10 domains=1 manifest_bytes=2208 validate_us=45 hash_us=5 fingerprint_us=31
+tables=10 domains=1 files=1 installed_ms=38
+tables=10 domains=1 warm-write: n=1000 throughput=9533/s p50_us=86 p99_us=350 max_us=518
+tables=10 domains=1 reader_warmup_us=694
+tables=10 domains=1 warm-read: n=1000 throughput=36109/s p50_us=26 p99_us=47 max_us=73
+tables=10 domains=1 files=1 install_ms=38 open_ms=2 write_us=104 read_us=27 resident_mib=13
+trial=3 tables=2000
+tables=2000 domains=1 manifest_bytes=403848 validate_us=5907 hash_us=892 fingerprint_us=4940
+tables=2000 domains=1 files=1 installed_ms=7932
+tables=2000 domains=1 warm-write: n=1000 throughput=13628/s p50_us=62 p99_us=288 max_us=423
+tables=2000 domains=1 reader_warmup_us=22888
+tables=2000 domains=1 warm-read: n=1000 throughput=35115/s p50_us=29 p99_us=45 max_us=60
+tables=2000 domains=1 files=1 install_ms=7932 open_ms=99 write_us=73 read_us=28 resident_mib=50

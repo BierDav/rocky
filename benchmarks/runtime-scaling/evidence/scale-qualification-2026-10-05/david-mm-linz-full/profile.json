@@ -1,0 +1,45 @@
+{
+  "profile": "david-mm-linz",
+  "platform": "macOS-26.2-arm64-arm-64bit",
+  "source_archive_sha256": "0f82b39d9c0e6c42890017fd81bac8d556180ea39bdb077af0e4879e4330d393",
+  "binary_sha256": "fb29534c54f6cefd94562a98b87b48cfeb95b3381964692d17b5110246dab52c",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.95.0 (59807616e 2026-04-14)\n",
+    "stderr": ""
+  },
+  "command": [
+    "/Users/david-bieregger/rocky-scale-08-imts4Eqh/target/release/scaling_probe",
+    "soak",
+    "--directory",
+    "/Users/david-bieregger/rocky-scale-08-imts4Eqh/evidence-full/data",
+    "--seconds",
+    "10800",
+    "--operations",
+    "5000000",
+    "--rows",
+    "500000",
+    "--tables",
+    "2000",
+    "--observers",
+    "100",
+    "--interval",
+    "60",
+    "--durability",
+    "full"
+  ],
+  "started_unix": 1791206331.484382,
+  "qualification_gate": "pending",
+  "cpu": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac16,10\nhw.memsize: 17179869184\nmachdep.cpu.brand_string: Apple M4\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   228Gi   175Gi    13Gi    94%    348k  136M    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  },
+  "exit_code": 0,
+  "finished_unix": 1791217285.621475
+}

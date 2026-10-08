@@ -1,0 +1,20 @@
+checkpoint: 0 busy retries, result [[Integer(0), Integer(0), Integer(0)]]
+checkpoint: 0 busy retries, result [[Integer(0), Integer(0), Integer(0)]]
+       23.59 real        55.45 user         3.54 sys
+          1295204352  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               83242  page reclaims
+                  23  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 388  voluntary context switches
+              262012  involuntary context switches
+        901367691298  instructions retired
+        253215722255  cycles elapsed
+          1281394128  peak memory footprint

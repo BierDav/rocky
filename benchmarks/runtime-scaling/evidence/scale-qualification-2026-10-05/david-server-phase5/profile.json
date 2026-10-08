@@ -1,0 +1,31 @@
+{
+  "profile": "david-server / phase-5 gate at 2,000 tables",
+  "hostname": "david-server",
+  "platform": "Linux-7.2.7-x86_64-with-glibc2.42",
+  "source_archive_sha256": "0f82b39d9c0e6c42890017fd81bac8d556180ea39bdb077af0e4879e4330d393",
+  "binary_sha256": "c14614edbabf8bceb51b826c8d2cd171319fd59c2e3611f1e2032390846cca28",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.95.0 (59807616e 2026-04-14)\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1       394G  273G  104G  73% /\n",
+    "stderr": ""
+  },
+  "command": [
+    "/home/david-bieregger/rocky-scale-08-Zbigh44w/target/release/scaling_probe",
+    "gate",
+    "600",
+    "1",
+    "16384",
+    "128",
+    "/home/david-bieregger/rocky-scale-08-Zbigh44w/evidence-phase5-scale08-20261005-183811",
+    "2000"
+  ],
+  "started_unix": 1791218291.4456477,
+  "qualification_gate": "phase 5 recheck; phase 8 pending",
+  "exit_code": 0,
+  "finished_unix": 1791218914.3347023
+}

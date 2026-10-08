@@ -1,0 +1,13 @@
+erp sync: rate=250/s duration_s=120 tables=2000 backlog=300000 files=1 durability=Full instrument=true
+erp sync: preloading backlog on the peer (excluded from the measured window)
+erp sync: preloaded 300000 operations in 40.1s
+erp sync local writes: n=30000 throughput=250/s p50_us<=5600 p99_us<=13100 max_us=57564
+erp sync local writes: p99_9_us<=40900
+erp sync: backlog_apply_s=80.8 pages=9375 received=300000 dropped_sends=0
+erp sync writer delta: groups=28417 steps=39375 authoring_steps=30000 incoming_steps=9375 step_us=14439878 authoring_step_us=106 incoming_step_us=756 commit_us=99960403
+erp sync local samples n=30000 p50_us=5572 p99_us=13017 p99_9_us=40835 max_us=57564 overlapping_checkpoint=266 (0.9%) dropped_samples=0
+erp sync tail overlap: p99 samples=300 overlapping=227 (75.7%); p99_9 samples=30 overlapping=30 (100.0%); intervals=31 dropped_intervals=0
+erp sync during-backlog local samples n=20190 p50_us=6645 p99_us=15359 p99_9_us=43359 max_us=57564
+erp sync after-backlog local samples n=9810 p50_us=3940 p99_us=9415 p99_9_us=29782 max_us=40835
+erp sync cpu: process_cpu=28.530s writer_thread_cpu=n/a wall=120.000s
+erp sync storage: db_bytes=152616960 wal_bytes=23026712 page_count=37260 freelist_count=181

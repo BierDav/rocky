@@ -1,0 +1,41 @@
+turso_core 0.8.1 mvcc/database/mod.rs
+3528:                 };
+3529:                 let owned_self = self.own_logical_log_record(mvcc_store, ticket, owner_tx)?;
+3530:                 self.state = self.advance_group_or_sync(end_ts, mvcc_store.logical_log_allocator());
+3531:                 if owned_self {
+3532:                     inject_transition_yield!(self, CommitYieldPoint::LogicalLogOwned);
+3533:                 }
+3534:                 Ok(TransitionResult::Continue)
+3535:             }
+3536: 
+3537:             CommitState::SyncLogicalLog { end_ts } => {
+3538:                 // Skip fsync unless this transaction or a written group member uses FULL.
+3539:                 // NORMAL mode skips fsync on commit (but still fsyncs on checkpoint).
+3540:                 if !self.log_sync_required() {
+3541:                     tracing::debug!("Skipping fsync of logical log (synchronous!=full)");
+3542:                     self.state = CommitState::EndCommitLogicalLog { end_ts: *end_ts };
+3543:                     return Ok(TransitionResult::Continue);
+3544:                 }
+3545:                 let c = mvcc_store.storage.sync(self.pager.get_sync_type())?;
+3546:                 self.state = CommitState::EndCommitLogicalLog { end_ts: *end_ts };
+3547:                 if c.succeeded() {
+3548:                     Ok(TransitionResult::Continue)
+3549:                 } else {
+3550:                     Ok(TransitionResult::Io(IOCompletions(c)))
+3551:                 }
+3552:             }
+3553:             CommitState::SyncGroupPrefix { end_ts, ticket } => {
+3554:                 let (end_ts, ticket) = (*end_ts, *ticket);
+3555:                 if !self.log_sync_required() {
+3556:                     self.state = CommitState::GroupPrefixSynced { end_ts, ticket };
+3557:                     return Ok(TransitionResult::Continue);
+3558:                 }
+3559:                 let c = mvcc_store.storage.sync(self.pager.get_sync_type())?;
+3560:                 self.state = CommitState::GroupPrefixSynced { end_ts, ticket };
+3561:                 if c.succeeded() {
+3562:                     Ok(TransitionResult::Continue)
+3563:                 } else {
+3564:                     Ok(TransitionResult::Io(IOCompletions(c)))
+3565:                 }
+3566:             }
+3567:             CommitState::GroupPrefixSynced { end_ts, ticket } => {

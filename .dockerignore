@@ -1,0 +1,35 @@
+# Keep the container build context to the workspace Cargo needs. The workspace
+# members are `crates/*`, `examples/*` and `benchmarks/runtime-scaling`; the
+# rest of the repository is documentation, tooling or excluded sub-workspaces.
+
+target
+.jj
+.git
+.idea
+.DS_Store
+build
+local
+scripts
+docs
+sdks
+kotlin
+kotlin.bat
+project.yaml
+
+# Excluded from the Cargo workspace, so the build never reads them.
+benchmarks/engine-comparison
+benchmarks/engine-scale
+examples/shoppinglist-app
+
+# Local data and secrets.
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal

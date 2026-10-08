@@ -1,0 +1,6 @@
+product: jvm/amper-plugin
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../build-logic
+

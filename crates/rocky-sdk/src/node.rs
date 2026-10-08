@@ -1,0 +1,2508 @@
+//! One open secure database: its replica, identity, sessions and optional
+//! network service, and the JSON calls of the native ABI. See
+//! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod partition;
+use crate::{
+    Failure,
+    domain::Domain,
+    enrollment::{Contact, Settings, Terms, answer, exchange, now},
+    secrets::Vault,
+    service::{Network, ServiceError},
+    sync::{self, Upstream},
+    transport::{Protocol, Stream, Transport},
+};
+use data_encoding::HEXLOWER;
+use rocky_core::{Coordinator, ResourceScope, SqlValue, TypedCommands, commitment};
+use rocky_credentials::Profile;
+use rocky_secure::{
+    CredentialChain, Delivery, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey,
+    SecureSession, SecureSql, SignedPolicy, SqlError, SqlOptions, TicketState, secure_node_id,
+    secure_principal_id,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{
+        Arc, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::{Mutex, RwLock, Semaphore, watch};
+
+const MAX_ROWS: usize = 1024;
+const MAX_SQL: usize = 64 * 1024;
+const MAX_SUBSCRIPTIONS: usize = 64;
+const MAX_SESSIONS: usize = 64;
+/// Concurrent inbound streams a node serves; more are dropped.
+const INBOUND: usize = 32;
+/// How long a closing network service lets its work finish before it
+/// cancels what remains.
+const DRAIN: Duration = Duration::from_secs(5);
+
+/// A definite refusal: retrying the same call cannot succeed.
+#[derive(Debug)]
+pub struct Refused(pub String);
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Refused {}
+fn refused(error: impl std::fmt::Display) -> Failure {
+    Box::new(Refused(error.to_string()))
+}
+
+/// An executor's refusal that a later run of the same ticket may not meet.
+#[derive(Debug)]
+struct Deferred(String);
+impl std::fmt::Display for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Deferred {}
+
+/// A bound SQL value as the JSON contract spells it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub(crate) enum Cell {
+    Null,
+    Integer(String),
+    /// The 16 hexadecimal digits of the double's bits.
+    Real(String),
+    Text(String),
+    Blob(Vec<u8>),
+}
+impl Cell {
+    pub(crate) fn sql(self) -> Result<SqlValue, Failure> {
+        Ok(match self {
+            Self::Null => SqlValue::Null,
+            Self::Integer(value) => SqlValue::Integer(value.parse()?),
+            Self::Real(bits) => SqlValue::Real(
+                u64::from_str_radix(&bits, 16)
+                    .ok()
+                    .filter(|_| bits.len() == 16)
+                    .and_then(rocky_core::Real::from_bits)
+                    .ok_or("invalid REAL bits")?,
+            ),
+            Self::Text(value) => SqlValue::Text(value),
+            Self::Blob(value) => SqlValue::Blob(value),
+        })
+    }
+}
+impl From<SqlValue> for Cell {
+    fn from(value: SqlValue) -> Self {
+        match value {
+            SqlValue::Null => Self::Null,
+            SqlValue::Integer(value) => Self::Integer(value.to_string()),
+            SqlValue::Real(value) => Self::Real(format!("{:016x}", value.bits())),
+            SqlValue::Text(value) => Self::Text(value),
+            SqlValue::Blob(value) => Self::Blob(value),
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Query {
+    sql: String,
+    #[serde(default)]
+    values: Vec<Cell>,
+    max_rows: usize,
+    /// Encoded page budget, capped at the native frame limit.
+    #[serde(default)]
+    max_bytes: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Clone)]
+struct Reader {
+    session: SecureSession<TypedCommands>,
+    sql: Arc<SecureSql<TypedCommands>>,
+}
+struct Subscription {
+    query: Query,
+    delivered: Option<String>,
+}
+
+/// One session's reader and subscriptions. Sessions share the database.
+pub(crate) struct Client {
+    reader: Mutex<Option<Reader>>,
+    cursor_key: [u8; 32],
+    subscriptions: std::sync::Mutex<BTreeMap<u64, Subscription>>,
+    next: AtomicU64,
+    closing: watch::Sender<bool>,
+    subscriptions_changed: watch::Sender<()>,
+}
+impl Client {
+    fn subscriptions(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<u64, Subscription>>, Failure> {
+        self.subscriptions
+            .lock()
+            .map_err(|_| "subscriptions poisoned".into())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Stage {
+    Open,
+    /// Accepts nothing new; admitted work finishes.
+    Draining,
+    Cancelled,
+}
+/// The attached network service.
+struct Link {
+    id: u64,
+    transport: Arc<dyn Transport>,
+    owned: bool,
+    stage: watch::Sender<Stage>,
+    server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    synchronizer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Inbound streams being served, served so far and dropped over budget.
+    active: Arc<Semaphore>,
+    served: AtomicU64,
+    refused: AtomicU64,
+}
+/// The outcome of the last sync attempt with a peer.
+struct SyncActivity(watch::Sender<&'static str>);
+impl Drop for SyncActivity {
+    fn drop(&mut self) {
+        self.0.send_replace("idle");
+    }
+}
+struct Reached {
+    at: u64,
+    error: Option<String>,
+}
+
+pub(crate) struct Node {
+    pub replica: EncryptedReplica<TypedCommands>,
+    pub domain: Domain,
+    /// The scopes this device's credentials name. A renewal keeps them.
+    granted: std::sync::Mutex<Vec<ResourceScope>>,
+    pub vault: Vault,
+    pub settings: Mutex<Settings>,
+    pub path: PathBuf,
+    pub online: AtomicBool,
+    /// Set by logout; `purge` also removes local data at close.
+    pub ended: Mutex<Option<bool>>,
+    /// Calls that use the network hold it shared; attach and detach replace it.
+    network: RwLock<Option<Arc<Link>>>,
+    /// The attached link for status calls, which never wait for the network.
+    current: std::sync::Mutex<Option<Arc<Link>>>,
+    detaching: Mutex<()>,
+    links: AtomicU64,
+    clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
+    syncing: Mutex<()>,
+    sync_state: watch::Sender<&'static str>,
+    automatic: AtomicBool,
+    sync_events: watch::Sender<u64>,
+    sync_status: watch::Sender<Value>,
+    backups: Mutex<()>,
+    reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
+    /// The application's coordinator, when it composed strong commands.
+    coordinator: Option<Arc<dyn Coordinator>>,
+    /// Takes an unassigned domain of a coordination service for this
+    /// executing device, once per fencing epoch.
+    acquire: Option<Acquire>,
+    /// The coordination service commands are composed with, for its owner.
+    service: Option<crate::owner::Service>,
+}
+/// Acquires `scope` at fencing `epoch` with this device's node key.
+pub(crate) type Acquire = Arc<
+    dyn Fn(rocky_core::Scope, u64) -> rocky_core::CoordinationFuture<'static, ()> + Send + Sync,
+>;
+
+impl Node {
+    pub fn new(
+        replica: EncryptedReplica<TypedCommands>,
+        domain: Domain,
+        vault: Vault,
+        settings: Settings,
+        path: PathBuf,
+        coordinator: Option<Arc<dyn Coordinator>>,
+        acquire: Option<Acquire>,
+    ) -> Self {
+        Self {
+            replica,
+            granted: std::sync::Mutex::new(settings.granted(&domain)),
+            domain,
+            vault,
+            settings: Mutex::new(settings),
+            path,
+            online: AtomicBool::new(true),
+            ended: Mutex::new(None),
+            network: RwLock::new(None),
+            current: std::sync::Mutex::new(None),
+            detaching: Mutex::new(()),
+            links: AtomicU64::new(1),
+            clients: std::sync::Mutex::new(BTreeMap::new()),
+            syncing: Mutex::new(()),
+            sync_state: watch::channel("idle").0,
+            automatic: AtomicBool::new(false),
+            sync_events: watch::channel(0).0,
+            sync_status: watch::channel(json!({"token": "0", "state": "idle", "retry": false})).0,
+            backups: Mutex::new(()),
+            reached: std::sync::Mutex::new(BTreeMap::new()),
+            coordinator,
+            acquire,
+            service: None,
+        }
+    }
+    /// Lets the owner control its domain on this coordination service.
+    pub fn with_service(mut self, service: Option<crate::owner::Service>) -> Self {
+        self.service = service;
+        self
+    }
+    fn scopes(&self) -> Vec<ResourceScope> {
+        self.granted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn clients(&self) -> Vec<Arc<Client>> {
+        self.clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
+    }
+    /// The state of session `id`, created by its first call. Resolved as
+    /// a call arrives, so a session's end never precedes its earlier calls.
+    pub fn client(&self, id: u64) -> Result<Arc<Client>, Failure> {
+        let mut clients = self.clients.lock().map_err(|_| "sessions poisoned")?;
+        if let Some(client) = clients.get(&id) {
+            return Ok(client.clone());
+        }
+        if clients.len() >= MAX_SESSIONS {
+            return Err("session quota".into());
+        }
+        let client = Arc::new(Client {
+            reader: Mutex::new(None),
+            cursor_key: rand::random(),
+            subscriptions: std::sync::Mutex::new(BTreeMap::new()),
+            next: AtomicU64::new(1),
+            closing: watch::channel(false).0,
+            subscriptions_changed: watch::channel(()).0,
+        });
+        clients.insert(id, client.clone());
+        Ok(client)
+    }
+    /// Ends session `id`, or every session: pending waits stop, admitted
+    /// calls finish. Other sessions and the database stay open.
+    pub fn end_sessions(&self, id: Option<u64>) {
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        let ended: Vec<_> = match id {
+            Some(id) => clients.remove(&id).into_iter().collect(),
+            None => std::mem::take(&mut *clients).into_values().collect(),
+        };
+        for client in ended {
+            client.closing.send_replace(true);
+        }
+    }
+    /// A session over every collection, opened again after an authority
+    /// change ended the previous one.
+    async fn reader(&self, client: &Client) -> Result<Reader, Failure> {
+        let mut cached = client.reader.lock().await;
+        if let Some(reader) = &*cached
+            && reader.session.status().await.is_ok()
+        {
+            return Ok(reader.clone());
+        }
+        *cached = None;
+        let session = self
+            .replica
+            .session(self.scopes().into_iter().collect())
+            .await?;
+        let sql = Arc::new(session.sql(SqlOptions::default()).await?);
+        let reader = Reader { session, sql };
+        *cached = Some(reader.clone());
+        Ok(reader)
+    }
+    /// A SQL session over every granted table, for a driver connection.
+    pub(crate) async fn sql_session(
+        &self,
+        options: SqlOptions,
+    ) -> Result<(SecureSession<TypedCommands>, SecureSql<TypedCommands>), Failure> {
+        if self.ended.lock().await.is_some() {
+            return Err(refused("this device logged out of the domain"));
+        }
+        let session = self
+            .replica
+            .session(self.scopes().into_iter().collect())
+            .await?;
+        let sql = session.sql(options).await?;
+        Ok((session, sql))
+    }
+    async fn forget_readers(&self) {
+        for client in self.clients() {
+            *client.reader.lock().await = None;
+        }
+    }
+
+    /// Serves `transport` as the network service in the empty `slot`.
+    fn install(
+        self: &Arc<Self>,
+        slot: &mut Option<Arc<Link>>,
+        transport: Arc<dyn Transport>,
+        owned: bool,
+    ) -> u64 {
+        let link = Arc::new(Link {
+            id: self.links.fetch_add(1, Ordering::Relaxed),
+            transport,
+            owned,
+            stage: watch::channel(Stage::Open).0,
+            server: std::sync::Mutex::new(None),
+            synchronizer: std::sync::Mutex::new(None),
+            active: Arc::new(Semaphore::new(INBOUND)),
+            served: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+        });
+        link.transport.listen(true);
+        let synchronizer = tokio::task::spawn_local(self.clone().synchronize(link.clone()));
+        *link
+            .synchronizer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(synchronizer);
+        let server = tokio::task::spawn_local(self.clone().accept(link.clone()));
+        *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
+        let id = link.id;
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(link.clone());
+        *slot = Some(link);
+        self.wake_sync();
+        id
+    }
+    /// Installs the transport the database opened with.
+    pub async fn link(self: &Arc<Self>, transport: Arc<dyn Transport>, owned: bool) -> u64 {
+        self.install(&mut *self.network.write().await, transport, owned)
+    }
+    /// Attaches a network service of any transport kind: routes of that
+    /// kind are dialed, and the domain's identity does not depend on it.
+    pub async fn attach(self: &Arc<Self>, network: Network) -> Result<u64, Failure> {
+        let mut slot = self.network.write().await;
+        if slot.is_some() {
+            return Err(ServiceError::NetworkAttached.into());
+        }
+        if self.ended.lock().await.is_some() {
+            return Err(refused("this device logged out of the domain"));
+        }
+        let issuer = self.settings.lock().await.issuer();
+        let key = Settings::transport_key(&self.vault)?;
+        let (transport, owned) = network.start(issuer, key).await?;
+        Ok(self.install(&mut slot, transport, owned))
+    }
+    /// Detaches network service `id`, or whichever is attached. Admitted
+    /// work has `DRAIN` to finish; an owned transport is then closed, a
+    /// borrowed one is left as it was. Does nothing once detached.
+    pub async fn detach(&self, id: Option<u64>) {
+        let _detaching = self.detaching.lock().await;
+        let attached = self.network.read().await.clone();
+        let Some(link) = attached.filter(|link| id.is_none_or(|id| link.id == id)) else {
+            return;
+        };
+        link.stage.send_replace(Stage::Draining);
+        link.transport.listen(false);
+        let mut slot = match tokio::time::timeout(DRAIN, self.network.write()).await {
+            Ok(slot) => slot,
+            Err(_) => {
+                link.stage.send_replace(Stage::Cancelled);
+                self.network.write().await
+            }
+        };
+        *slot = None;
+        self.synced(json!({"state": "idle", "retry": false}));
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        drop(slot);
+        // The accept loop holds the transport's inbound queue until it ends.
+        let server = link
+            .server
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(server) = server {
+            let _ = server.await;
+        }
+        let synchronizer = link
+            .synchronizer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(synchronizer) = synchronizer {
+            let _ = synchronizer.await;
+        }
+        if link.owned {
+            link.transport.close().await;
+        }
+    }
+    /// Serves inbound streams until the service drains or the transport ends.
+    async fn accept(self: Arc<Self>, link: Arc<Link>) {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut stage = link.stage.subscribe();
+        loop {
+            let inbound = tokio::select! {
+                inbound = link.transport.accept() => inbound,
+                _ = stage.wait_for(|stage| *stage != Stage::Open) => None,
+            };
+            let Some((protocol, stream)) = inbound else {
+                break;
+            };
+            let Ok(permit) = link.active.clone().try_acquire_owned() else {
+                link.refused.fetch_add(1, Ordering::Relaxed);
+                continue;
+            };
+            link.served.fetch_add(1, Ordering::Relaxed);
+            let node = self.clone();
+            tasks.spawn_local(async move {
+                let _permit = permit;
+                let _ = node.serve(protocol, stream).await;
+            });
+            while tasks.try_join_next().is_some() {}
+        }
+        let _ =
+            tokio::time::timeout(DRAIN, async { while tasks.join_next().await.is_some() {} }).await;
+        tasks.shutdown().await;
+    }
+    /// Runs a call that uses the network. A closing service cancels it once
+    /// its drain bound passes.
+    async fn networked(
+        &self,
+        client: &Client,
+        kind: &str,
+        request: &Value,
+    ) -> Result<Value, Failure> {
+        let attached = self.network.read().await;
+        let transport = attached.as_ref().map(|link| &*link.transport);
+        let work = async {
+            match kind {
+                "pairing" => {
+                    // There is no default grant: the issuer names a profile.
+                    let profile: Profile = serde_json::from_value(request["profile"].clone())
+                        .map_err(|_| {
+                            refused("pairing needs a grant profile: reader, writer or issuer")
+                        })?;
+                    let transport = transport.ok_or(ServiceError::NetworkRequired("pairing"))?;
+                    let mut settings = self.settings.lock().await;
+                    let (uri, expires) = settings
+                        .invite(&self.path, &self.vault, transport, profile.clone())
+                        .await
+                        .map_err(refused)?;
+                    Ok(json!({"uri": uri, "expires": expires.to_string(), "profile": profile}))
+                }
+                "renew" => {
+                    self.renew(transport, true, None).await?;
+                    self.status(client).await
+                }
+                "contact" => {
+                    let transport = transport.ok_or(ServiceError::NetworkRequired("contact"))?;
+                    let settings = self.settings.lock().await.clone();
+                    let (uri, node, routes) = settings.contact(&self.vault, transport).await?;
+                    Ok(json!({"uri": uri, "node": node.to_hex(), "routes": routes}))
+                }
+                _ => self
+                    .sync(transport.ok_or(ServiceError::NetworkRequired("sync"))?)
+                    .await
+                    .map(|(report, _)| report),
+            }
+        };
+        let Some(link) = attached.as_ref() else {
+            return work.await;
+        };
+        let mut stage = link.stage.subscribe();
+        tokio::select! {
+            result = work => result,
+            _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => {
+                Err(ServiceError::Closed("network service").into())
+            }
+        }
+    }
+
+    /// Handles one call of the native ABI for a session.
+    pub async fn dispatch(&self, client: &Client, request: &Value) -> Result<Value, Failure> {
+        let kind = request["type"].as_str().unwrap_or_default();
+        if self.ended.lock().await.is_some()
+            && !matches!(kind, "domain" | "network" | "status" | "status_next")
+        {
+            return Err(refused("this device logged out of the domain"));
+        }
+        match kind {
+            "domain" => {
+                let settings = self.settings.lock().await;
+                Ok(json!({
+                    "scope": self.domain.scope,
+                    "creator": settings.issuer(),
+                    "issuer": settings.issuer(),
+                    "profile": settings.profile,
+                    "collections": settings.schema.names(),
+                    "durable_mutations": true,
+                    "transport": self.kind(),
+                }))
+            }
+            "session" => self.status(client).await,
+            "generation" => self.generation().await,
+            "retention" => self.retention(request).await,
+            "horizon" => self.horizon(request).await,
+            "retention_limits" => {
+                if let Some(limits) = request.get("limits") {
+                    self.replica
+                        .set_retention_limits(serde_json::from_value(limits.clone())?)
+                        .await?;
+                }
+                Ok(serde_json::to_value(self.replica.retention_limits().await)?)
+            }
+            "status" => self.readiness().await,
+            "status_next" => {
+                let after = request["after"]
+                    .as_str()
+                    .ok_or_else(|| refused("after must be a status token"))?;
+                self.readiness_after(client, after).await
+            }
+            "backup" => {
+                let target = request["path"]
+                    .as_str()
+                    .ok_or_else(|| refused("path must be a string"))?;
+                self.backup(std::path::Path::new(target)).await
+            }
+            "sync_start" => {
+                self.automatic.store(
+                    request
+                        .get("enabled")
+                        .map(|enabled| {
+                            enabled
+                                .as_bool()
+                                .ok_or_else(|| refused("enabled must be boolean"))
+                        })
+                        .transpose()?
+                        .unwrap_or(true),
+                    Ordering::SeqCst,
+                );
+                self.wake_sync();
+                Ok(self.sync_status.borrow().clone())
+            }
+            "sync_next" => {
+                let after = request["after"]
+                    .as_str()
+                    .ok_or_else(|| refused("after must be a sync token"))?;
+                let mut status = self.sync_status.subscribe();
+                let mut closing = client.closing.subscribe();
+                loop {
+                    let current = status.borrow_and_update().clone();
+                    if current["token"].as_str() != Some(after) {
+                        return Ok(current);
+                    }
+                    tokio::select! {
+                        _ = status.changed() => {},
+                        _ = closing.wait_for(|closing| *closing) => return Err(ServiceError::Closed("session").into()),
+                    }
+                }
+            }
+            "network" => Ok(self.network_status().await),
+            "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
+            "sql" | "next_id" => self.sql_call(client, kind, request).await,
+            kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
+            "devices" => self.devices().await,
+            "grant" | "delegate" => self.grant(request).await,
+            kind if kind.starts_with("pseudonym_") => self.pseudonym(kind, request).await,
+            "install" => self.install_supplied(client, request).await,
+            "peers" => Ok(json!({"peers": self.peers().await})),
+            "enrollment_route" => Ok(json!({"uri": crate::route_enrollment(
+                request["uri"].as_str().ok_or_else(|| refused("uri must be an invitation or issuer contact"))?,
+                request["contact"].as_str().ok_or_else(|| refused("contact must name the custody peer"))?,
+            )?})),
+            "enrollment_upstream" => {
+                let contact = request["contact"].as_str();
+                if !request["contact"].is_null() && contact.is_none() {
+                    return Err(refused("contact must be an issuer contact or null"));
+                }
+                self.configure(|settings| {
+                    if !matches!(settings.profile, Profile::Custody { .. }) || settings.issuer() {
+                        return Err("enrollment forwarding requires a custody-only node".into());
+                    }
+                    settings.enrollment_upstream = match contact {
+                        Some(contact) => {
+                            let node = settings.add_peer(&self.vault, contact)?;
+                            if !settings.issuers.contains(&node) {
+                                return Err("upstream must name an issuer".into());
+                            }
+                            Some(node)
+                        }
+                        None => None,
+                    };
+                    Ok(())
+                })
+                .await?;
+                self.wake_sync();
+                Ok(json!({}))
+            }
+            "peer_add" => {
+                let contact = request["contact"]
+                    .as_str()
+                    .ok_or("contact must be a contact URI")?;
+                let node = self
+                    .configure(|settings| settings.add_peer(&self.vault, contact))
+                    .await?;
+                self.wake_sync();
+                Ok(json!({"node": node.to_hex()}))
+            }
+            "peer_remove" => {
+                let node: PublicKey = request["node"]
+                    .as_str()
+                    .ok_or("node must be a public key")?
+                    .parse()?;
+                self.configure(|settings| {
+                    if settings.enrollment_upstream == Some(node) {
+                        return Err("clear enrollment forwarding before removing its issuer".into());
+                    }
+                    settings.remove_peer(node)
+                })
+                .await?;
+                self.reached()?.remove(&node);
+                self.wake_sync();
+                Ok(json!({}))
+            }
+            "revoke" => {
+                let node: PublicKey = request["node"]
+                    .as_str()
+                    .ok_or("node must be a public key")?
+                    .parse()?;
+                self.revoke(node).await
+            }
+            "logout" => {
+                self.logout(request["purge"].as_bool().unwrap_or(false))
+                    .await
+            }
+            "connection" => {
+                let enabled = request["online"]
+                    .as_bool()
+                    .ok_or("online must be boolean")?;
+                self.online.store(enabled, Ordering::SeqCst);
+                self.wake_sync();
+                Ok(json!({"online": enabled}))
+            }
+            "mutate" => self.mutate(client).await,
+            "mutation_progress" => {
+                let handle: Vec<u8> = serde_json::from_value(request["handle"].clone())?;
+                let handle: [u8; 32] = handle.try_into().map_err(|_| refused("handle"))?;
+                Ok(
+                    json!({"committed": self.replica.handle_committed(secure_handle(&handle)).await?}),
+                )
+            }
+            "read" => {
+                self.read(client, serde_json::from_value(request["query"].clone())?)
+                    .await
+            }
+            "subscribe" => {
+                let query: Query = serde_json::from_value(request["query"].clone())?;
+                let mut subscriptions = client.subscriptions()?;
+                if subscriptions.len() >= MAX_SUBSCRIPTIONS {
+                    return Err("subscription quota".into());
+                }
+                let id = client.next.fetch_add(1, Ordering::Relaxed);
+                subscriptions.insert(
+                    id,
+                    Subscription {
+                        query,
+                        delivered: None,
+                    },
+                );
+                Ok(json!({"subscription": id.to_string()}))
+            }
+            kind if kind.starts_with("command_") => {
+                let result = self.command(kind, request).await;
+                self.wake_sync();
+                result
+            }
+            "next" => self.next(client, subscription(request)?).await,
+            "unsubscribe" => {
+                client.subscriptions()?.remove(&subscription(request)?);
+                client.subscriptions_changed.send_replace(());
+                Ok(json!({}))
+            }
+            other => Err(refused(format!("unsupported request {other}"))),
+        }
+    }
+
+    fn reached(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<PublicKey, Reached>>, Failure> {
+        self.reached
+            .lock()
+            .map_err(|_| "peer status poisoned".into())
+    }
+    /// Applies a change of the configured peers and saves it.
+    async fn configure<T>(
+        &self,
+        change: impl FnOnce(&mut Settings) -> Result<T, Failure>,
+    ) -> Result<T, Failure> {
+        let mut settings = self.settings.lock().await;
+        let mut draft = settings.clone();
+        let result = change(&mut draft).map_err(refused)?;
+        draft.save(&self.path)?;
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
+        *settings = draft;
+        Ok(result)
+    }
+    /// Issues raw grants or a profile to a prepared device, as the
+    /// credentials it installs: signed by the publisher on an issuer, or
+    /// delegated from this device's own chain.
+    async fn grant(&self, request: &Value) -> Result<Value, Failure> {
+        let device: crate::DeviceKeys = serde_json::from_value(request["device"].clone())
+            .map_err(|_| refused("device must be the keys a prepared device reports"))?;
+        let profile = match (&request["grants"], &request["profile"]) {
+            (Value::Null, profile) => serde_json::from_value(profile.clone()),
+            (grants, Value::Null) => {
+                serde_json::from_value(grants.clone()).map(|grants| Profile::Grants { grants })
+            }
+            _ => return Err(refused("name grants or a profile, not both")),
+        }
+        .map_err(|error| refused(format!("invalid grants: {error}")))?;
+        let terms: Terms = serde_json::from_value(json!({
+            "ttl": request["ttl"],
+            "delegations": request["delegations"],
+            "authors": request["authors"],
+        }))
+        .map_err(|_| refused("ttl must be seconds, delegations 1 to 7 and authors a count"))?;
+        if request["type"] == "delegate" {
+            let supplied = self
+                .configure(|settings| settings.delegate(&self.vault, device, profile, terms))
+                .await?;
+            return Ok(json!({"supplied": supplied}));
+        }
+        let contact = match self.current() {
+            Some(link) => {
+                let settings = self.settings.lock().await.clone();
+                Some(settings.contact(&self.vault, &*link.transport).await?.0)
+            }
+            None => None,
+        };
+        let supplied = self
+            .configure(|settings| settings.grant(&self.vault, device, profile, terms, contact))
+            .await?;
+        Ok(json!({"supplied": supplied}))
+    }
+    /// Author pseudonyms: request one, assign one, keep one, find whose it
+    /// is, or claim a range. See `docs/runtime/credential-primitives.md`.
+    async fn pseudonym(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
+        let chain = |name: &str| -> Result<CredentialChain, Failure> {
+            serde_json::from_value(request[name].clone())
+                .map_err(|_| refused(format!("{name} must be a pseudonym chain")))
+        };
+        match kind {
+            "pseudonym_request" => {
+                let collection = request["collection"]
+                    .as_str()
+                    .ok_or_else(|| refused("collection must be a string"))?;
+                let settings = self.settings.lock().await.clone();
+                let made = settings
+                    .pseudonym_request(&self.vault, collection)
+                    .map_err(refused)?;
+                Ok(json!({"request": HEXLOWER.encode(&made.to_bytes()?)}))
+            }
+            "pseudonym_assign" => {
+                let bytes = HEXLOWER
+                    .decode(request["request"].as_str().unwrap_or_default().as_bytes())
+                    .map_err(|_| refused("request must be hexadecimal"))?;
+                let asked = rocky_credentials::PseudonymRequest::from_bytes(&bytes)?;
+                let assigned = self
+                    .configure(|settings| settings.assign_pseudonym(&self.vault, &asked))
+                    .await?;
+                Ok(json!({"pseudonym": assigned}))
+            }
+            "pseudonym_install" => {
+                let pseudonym = chain("pseudonym")?;
+                let (collection, author) = self
+                    .configure(|settings| settings.hold_pseudonym(&self.vault, pseudonym.clone()))
+                    .await?;
+                let key =
+                    PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{collection}"))?);
+                self.replica.register_row_author(key, pseudonym).await?;
+                Ok(json!({"collection": collection, "author": author}))
+            }
+            "pseudonym_owner" => {
+                let settings = self.settings.lock().await.clone();
+                let (node, collection, author) = settings
+                    .pseudonym_owner(&self.vault, &chain("pseudonym")?)
+                    .map_err(refused)?;
+                Ok(json!({"node": node.to_hex(), "collection": collection, "author": author}))
+            }
+            "pseudonym_range" => {
+                let number = |name: &str| {
+                    request[name]
+                        .as_u64()
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| refused(format!("{name} must be an author number")))
+                };
+                let range = rocky_credentials::AuthorRange::new(number("first")?, number("last")?)?;
+                self.configure(|settings| settings.claim_authors(range))
+                    .await?;
+                // The issuer's own capability carries the range from now on.
+                self.renew(None, false, None).await?;
+                Ok(json!({"first": range.first, "last": range.last}))
+            }
+            other => Err(refused(format!("unsupported request {other}"))),
+        }
+    }
+    /// Replaces this device's credentials with supplied ones and teaches
+    /// the replica, as a renewal does.
+    async fn install_supplied(&self, client: &Client, request: &Value) -> Result<Value, Failure> {
+        let supplied: crate::Supplied = serde_json::from_value(request["supplied"].clone())
+            .map_err(|error| refused(format!("invalid supplied credentials: {error}")))?;
+        let current = self.settings.lock().await.clone();
+        let renewed = current
+            .supplied_renewal(&self.vault, &supplied)
+            .map_err(refused)?;
+        let mut settings = self.settings.lock().await;
+        if renewed.policy.statement.epoch < settings.policy.statement.epoch {
+            return Err("a newer policy was learned meanwhile; install again".into());
+        }
+        let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
+            settings.granted(&self.domain);
+        drop(settings);
+        self.forget_readers().await;
+        self.status(client).await
+    }
+    /// The configured peers, their routes and the last attempt to sync.
+    async fn peers(&self) -> Vec<Value> {
+        let settings = self.settings.lock().await;
+        let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
+        settings
+            .peers
+            .iter()
+            .map(|(node, contact)| {
+                let last = reached.get(node);
+                let state = match last {
+                    None => "unknown",
+                    Some(Reached { error: None, .. }) => "connected",
+                    Some(_) => "unreachable",
+                };
+                let issuer = settings.issuers.contains(node);
+                json!({
+                    "node": node.to_hex(),
+                    "creator": issuer,
+                    "issuer": issuer,
+                    "routes": contact.routes,
+                    "state": state,
+                    "checked": last.map(|last| last.at.to_string()),
+                    "error": last.and_then(|last| last.error.clone()),
+                })
+            })
+            .collect()
+    }
+    /// The network service, whatever the state of the database's sessions.
+    async fn network_status(&self) -> Value {
+        let peers = self.peers().await;
+        let Some(link) = self.current() else {
+            return json!({"attached": false, "peers": peers});
+        };
+        json!({
+            "attached": true,
+            "kind": link.transport.kind(),
+            "owned": link.owned,
+            "online": self.online.load(Ordering::SeqCst),
+            "sync": self.sync_status.borrow().clone(),
+            "draining": *link.stage.borrow() != Stage::Open,
+            "inbound": {
+                "limit": INBOUND,
+                "active": INBOUND - link.active.available_permits(),
+                "served": link.served.load(Ordering::Relaxed).to_string(),
+                "refused": link.refused.load(Ordering::Relaxed).to_string(),
+            },
+            "peers": peers,
+        })
+    }
+    fn current(&self) -> Option<Arc<Link>> {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+    /// The attached network's transport kind, empty without one.
+    fn kind(&self) -> String {
+        self.current()
+            .map(|link| link.transport.kind().to_owned())
+            .unwrap_or_default()
+    }
+    async fn horizon(&self, request: &Value) -> Result<Value, Failure> {
+        let collection = request["collection"]
+            .as_str()
+            .ok_or("collection must be a table name")?;
+        let scope = if request.get("values").is_some() {
+            let mut address = request.clone();
+            address["table"] = collection.into();
+            self.partition_address(&address)?.0
+        } else {
+            self.domain
+                .scopes()
+                .find(|(name, _)| *name == collection)
+                .map(|(_, scope)| scope)
+                .filter(|scope| self.scopes().contains(scope))
+                .ok_or_else(|| refused("horizon scope is not granted"))?
+        };
+        let action = request["action"].as_str().unwrap_or("status");
+        let mut declare = action == "declare";
+        if action == "maintain" {
+            let limit = request["max_operations"].as_u64().unwrap_or(1024);
+            if limit == 0 {
+                return Err(refused("horizon operation cadence must be positive"));
+            }
+            let current = self.replica.admitted_horizon(scope).await?;
+            let finalized = self.replica.finalized_horizon(scope).await?;
+            if current.is_some() && current != finalized {
+                if !self.replica.horizon_rebootstrap_required(scope).await?
+                    && self
+                        .replica
+                        .horizon_progress(scope)
+                        .await?
+                        .waiting
+                        .is_empty()
+                {
+                    self.replica.finalize_horizon(scope).await?;
+                    self.replica.prune(scope).await?;
+                }
+            } else {
+                declare = self
+                    .replica
+                    .horizon_operations_since_finalization(scope)
+                    .await?
+                    >= limit;
+            }
+        }
+        match if declare { "declare" } else { action } {
+            "declare" => {
+                if !self.settings.lock().await.issuer() {
+                    return Err(refused("only an issuer declares a horizon"));
+                }
+                let nodes = match request.get("participants") {
+                    Some(nodes) => serde_json::from_value::<Vec<PublicKey>>(nodes.clone())?,
+                    None => self
+                        .replica
+                        .retention_policy(scope)
+                        .await?
+                        .ok_or("configure retention or name horizon participants explicitly")?
+                        .required
+                        .into_iter()
+                        .collect(),
+                };
+                let peers = self.replica.horizon_credentials(&nodes).await?;
+                let statement = self.replica.horizon_statement(scope, &peers).await?;
+                let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
+                let signed = rocky_credentials::SignedHorizon::sign(statement, &publisher)?;
+                self.replica.receive_horizon(signed).await?;
+                self.wake_sync();
+            }
+            "admit" => {
+                let bytes = HEXLOWER.decode(
+                    request["statement"]
+                        .as_str()
+                        .ok_or("statement must be canonical CBOR in hex")?
+                        .as_bytes(),
+                )?;
+                let signed = rocky_credentials::SignedHorizon::from_bytes(&bytes)?;
+                if signed.statement.scope != scope {
+                    return Err(refused("declaration differs from requested scope"));
+                }
+                self.replica.receive_horizon(signed).await?;
+            }
+            "finalize" => {
+                self.replica.finalize_horizon(scope).await?;
+                self.replica.prune(scope).await?;
+                self.wake_sync();
+            }
+            "status" | "maintain" => {}
+            _ => return Err(refused("unknown horizon action")),
+        }
+        let signed = self.replica.admitted_horizon(scope).await?;
+        let progress = if signed.is_some() {
+            Some(self.replica.horizon_progress(scope).await?)
+        } else {
+            None
+        };
+        Ok(
+            json!({"statement": signed.as_ref().map(|signed| signed.to_bytes().map(|bytes| HEXLOWER.encode(&bytes))).transpose()?,
+            "sequence": signed.as_ref().map(|signed| signed.statement.sequence),
+            "acknowledged": progress.as_ref().map(|progress| &progress.acknowledged),
+            "waiting": progress.as_ref().map(|progress| &progress.waiting),
+            "behind": progress.as_ref().map(|progress| &progress.behind),
+            "rebootstrap_required": self.replica.horizon_rebootstrap_required(scope).await?,
+            "finalized": self.replica.finalized_horizon(scope).await?.as_ref() == signed.as_ref() && signed.is_some(),
+            "operations_since_finalization": self.replica.horizon_operations_since_finalization(scope).await?}),
+        )
+    }
+    async fn retention(&self, request: &Value) -> Result<Value, Failure> {
+        let collection = request["collection"]
+            .as_str()
+            .ok_or("collection must be a table name")?;
+        let scope = self
+            .domain
+            .scopes()
+            .find(|(name, _)| *name == collection)
+            .map(|(_, scope)| scope)
+            .filter(|scope| self.scopes().contains(scope))
+            .ok_or_else(|| refused("retention scope is not granted"))?;
+        if let Some(policy) = request.get("policy") {
+            self.replica
+                .set_retention_policy(scope, serde_json::from_value(policy.clone())?)
+                .await?;
+        }
+        if request["maintain"] == true {
+            self.replica.checkpoint(scope).await?;
+            self.replica.prune(scope).await?;
+        }
+        let status = self.replica.checkpoint_status(scope).await?;
+        Ok(
+            json!({"policy": self.replica.retention_policy(scope).await?,
+            "covered": status.covered, "uncovered": status.uncovered,
+            "horizon": status.horizon, "maintenance_error": status.maintenance_error}),
+        )
+    }
+    async fn status(&self, client: &Client) -> Result<Value, Failure> {
+        let reader = self.reader(client).await?;
+        let status = reader.session.status().await?;
+        let settings = self.settings.lock().await;
+        Ok(json!({
+            "principal": status.principal.to_hex(),
+            "node": status.node.to_hex(),
+            "epoch": status.epoch.to_string(),
+            "expires": status.expires.to_string(),
+            "creator": settings.issuer(),
+            "issuer": settings.issuer(),
+            "profile": settings.profile,
+            "transport": self.kind(),
+            "readable": status.readable.len(),
+            "writable": status.writable.len(),
+            "pseudonyms": settings.pseudonyms.iter().map(|(collection, chain)| {
+                let author = chain
+                    .0
+                    .last()
+                    .and_then(|leaf| leaf.capability.authors().ok().flatten())
+                    .and_then(|range| range.single());
+                (collection.clone(), json!(author))
+            }).collect::<Map<String, Value>>(),
+            "authors": settings.minting,
+        }))
+    }
+    /// What an application shows of a database besides its rows: whether
+    /// it is ready, its generation, authority and unsettled tickets, and
+    /// the committed revision. `token` changes whenever any of it does.
+    async fn readiness(&self) -> Result<Value, Failure> {
+        let generation = self.generation().await?;
+        let settings = self.settings.lock().await.clone();
+        let logged_out = self.ended.lock().await.is_some() || settings.logged_out;
+        let expired = settings.expires() <= now()?;
+        let mut tickets = BTreeMap::<String, u64>::new();
+        for ticket in self.replica.open_tickets(usize::MAX).await? {
+            let state = crate::commands::ticket_json(&self.domain.app, &ticket)?["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            *tickets.entry(state).or_default() += 1;
+        }
+        let revision = *self.replica.observe_revision().borrow();
+        let mut bootstrapping = self.path.with_file_name("bootstrap.json").exists()
+            || *self.sync_state.borrow() == "bootstrapping";
+        for scope in &self.scopes() {
+            bootstrapping |= self.replica.rebootstrap_progress(*scope).await?.is_some()
+                || self.replica.horizon_rebootstrap_required(*scope).await?;
+        }
+        let state = if logged_out || expired || !generation["rebuilding"].is_null() {
+            "unavailable"
+        } else if bootstrapping {
+            "bootstrapping"
+        } else if *self.sync_state.borrow() == "syncing" {
+            "syncing"
+        } else {
+            "ready"
+        };
+        let mut status = json!({
+            "state": state,
+            "ready": state == "ready",
+            "revision": revision.to_string(),
+            "generation": generation,
+            "authority": {
+                "epoch": settings.policy.statement.epoch.to_string(),
+                "expires": settings.expires().to_string(),
+                "expired": expired,
+                "logged_out": logged_out,
+                "profile": settings.profile,
+            },
+            "tickets": tickets,
+            "network": {"attached": self.current().is_some()},
+        });
+        let token = HEXLOWER
+            .encode(&commitment("rocky.sdk.status.v1", status.to_string().as_bytes())[..16]);
+        status["token"] = json!(token);
+        Ok(status)
+    }
+    /// The status once it differs from the one `after` named.
+    async fn readiness_after(&self, client: &Client, after: &str) -> Result<Value, Failure> {
+        let mut revisions = self.replica.observe_revision();
+        let mut sync_state = self.sync_state.subscribe();
+        let mut closing = client.closing.subscribe();
+        let mut events = self.sync_events.subscribe();
+        let mut network = self.sync_status.subscribe();
+        loop {
+            let status = self.readiness().await?;
+            if status["token"] != after {
+                return Ok(status);
+            }
+            tokio::select! {
+                changed = revisions.changed() => {
+                    changed.map_err(|_| ServiceError::Closed("database"))?
+                }
+                _ = closing.wait_for(|closing| *closing) => {
+                    return Err(ServiceError::Closed("session").into());
+                }
+                changed = sync_state.changed() => {
+                    changed.map_err(|_| ServiceError::Closed("database"))?
+                }
+                _ = events.changed() => {},
+                _ = network.changed() => {},
+                _ = async {
+                    let expires = status["authority"]["expires"].as_str().ok_or("missing expiry")?.parse::<u64>()?;
+                    let time = now()?;
+                    if expires > time {
+                        tokio::time::sleep(Duration::from_secs(expires - time)).await;
+                    } else {
+                        std::future::pending().await
+                    }
+                    Ok::<_, Failure>(())
+                } => {},
+            }
+        }
+    }
+    /// Writes a signed backup archive to `target`: a coherent copy of the
+    /// file, the retained receipt evidence and the identity, which holds no
+    /// key. See `docs/runtime/backup-and-restore.md`.
+    async fn backup(&self, target: &std::path::Path) -> Result<Value, Failure> {
+        let _backup = self.backups.lock().await;
+        if target.exists() {
+            return Err(refused("the backup target exists"));
+        }
+        let directory = self
+            .path
+            .parent()
+            .ok_or("the identity has no data directory")?
+            .to_path_buf();
+        let staging = directory.join(format!(
+            "backup-{}",
+            HEXLOWER.encode(
+                &commitment(
+                    "rocky.sdk.backup-staging.v1",
+                    target.as_os_str().as_encoded_bytes()
+                )[..8]
+            )
+        ));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+        let result = async {
+            let settings = self.settings.lock().await;
+            let database = staging.join("rocky.sqlite");
+            let revision = self.replica.backup_into(&database).await?;
+            let snapshot = settings.clone();
+            drop(settings);
+            let settings = snapshot;
+            let identity = staging.join("identity.json");
+            std::fs::write(&identity, serde_json::to_vec(&settings)?)?;
+            let mut staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
+            let evidence = directory.join("coordinator.evidence");
+            if evidence.exists() {
+                let copy = staging.join("coordinator.evidence");
+                std::fs::copy(&evidence, &copy)?;
+                staged.push(("coordinator.evidence", copy));
+            }
+            let node = PrivateKey::from_bytes(&self.vault.get("node")?);
+            let scope = serde_json::to_value(self.domain.scope)?;
+            let target = target.to_path_buf();
+            let inventory = tokio::task::spawn_blocking(move || {
+                crate::backup::write(&target, &staged, &settings, scope, revision, &node, now()?)
+            })
+            .await??;
+            Ok::<_, Failure>(serde_json::to_value(inventory)?)
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+    /// The definition generation, the earlier ones still admitted and a
+    /// table rebuild under way.
+    async fn generation(&self) -> Result<Value, Failure> {
+        let status = self.replica.generations().await?;
+        let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema, "handler": generation.handler});
+        Ok(json!({
+            "manifest": HEXLOWER.encode(&status.manifest),
+            "current": generation(status.current),
+            "horizon": status.horizon,
+            "previous": status.previous.iter().map(|(previous, _)| generation(*previous)).collect::<Vec<_>>(),
+            "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
+        }))
+    }
+    async fn devices(&self) -> Result<Value, Failure> {
+        let settings = self.settings.lock().await;
+        let Some(authority) = &settings.authority else {
+            return Err(refused("only an issuer lists devices"));
+        };
+        let devices: Vec<Value> = authority
+            .devices
+            .iter()
+            .map(|(node, device)| {
+                json!({
+                    "node": node.to_hex(),
+                    "user": device.user.to_hex(),
+                    "enrolled": device.enrolled.to_string(),
+                    "revoked": device.revoked,
+                    "profile": device.profile,
+                })
+            })
+            .collect();
+        Ok(json!({"devices": devices}))
+    }
+    /// Revokes a device and rotates the keys it could read. The intent,
+    /// the new keys and the identity are saved before the replica learns
+    /// them, so an interruption completes at the next open.
+    async fn revoke(&self, node: PublicKey) -> Result<Value, Failure> {
+        let mut settings = self.settings.lock().await;
+        let mut draft = settings.clone();
+        draft.begin_revocation(node).map_err(refused)?;
+        draft.save(&self.path)?;
+        *settings = draft.clone();
+        let keys = draft.rotate(&self.vault)?;
+        draft.save(&self.path)?;
+        *settings = draft;
+        self.apply(&settings.policy, &settings.credentials, keys)
+            .await?;
+        let epoch = settings.policy.statement.epoch;
+        for (key, credentials) in settings.row_authors(&self.vault)? {
+            self.replica.register_row_author(key, credentials).await?;
+        }
+        for record in settings
+            .partitions
+            .values()
+            .filter(|record| record.epochs.contains(&epoch))
+        {
+            self.replica
+                .install_key_epoch(KeyMaterial {
+                    scope: record.scope,
+                    generation: epoch,
+                    key: self
+                        .vault
+                        .get(&crate::enrollment::partition_key_role(record.scope, epoch))?,
+                })
+                .await?;
+        }
+        drop(settings);
+        self.forget_readers().await;
+        Ok(json!({"epoch": epoch.to_string()}))
+    }
+    /// Teaches the replica what the identity already records: the policy,
+    /// this device's chain and new key epochs, earlier ones first.
+    async fn apply(
+        &self,
+        policy: &SignedPolicy,
+        chain: &CredentialChain,
+        mut keys: Vec<(String, u64, [u8; 32])>,
+    ) -> Result<(), Failure> {
+        self.replica.learn_policy(policy.clone()).await?;
+        self.replica.renew_credentials(chain.clone()).await?;
+        keys.sort_by_key(|(_, epoch, _)| *epoch);
+        for (name, generation, key) in keys {
+            let scope = self
+                .domain
+                .scopes()
+                .find(|(collection, _)| *collection == name)
+                .map(|(_, scope)| scope)
+                .ok_or("unknown collection")?;
+            self.replica
+                .install_key_epoch(KeyMaterial {
+                    scope,
+                    generation,
+                    key,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+    /// Renews this device's credentials: from its issuers on a member,
+    /// self-signed on an issuer, which asks the other issuers first when
+    /// `learn` is set. New reader keys arrive with the renewal.
+    async fn renew(
+        &self,
+        transport: Option<&dyn Transport>,
+        learn: bool,
+        first: Option<PublicKey>,
+    ) -> Result<(), Failure> {
+        let current = self.settings.lock().await.clone();
+        let renewed = current
+            .request_renewal(&self.vault, transport, learn, first)
+            .await?;
+        let mut settings = self.settings.lock().await;
+        if renewed.policy.statement.epoch < settings.policy.statement.epoch {
+            return Err("a newer policy was learned meanwhile; renew again".into());
+        }
+        if renewed.policy.statement.epoch > settings.policy.statement.epoch {
+            rocky_credentials::write_private(
+                &self.path.with_file_name("bootstrap.json"),
+                &serde_json::to_vec(&renewed.policy.statement.epoch)?,
+            )?;
+        }
+        let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
+            settings.granted(&self.domain);
+        drop(settings);
+        self.forget_readers().await;
+        self.wake_sync();
+        Ok(())
+    }
+    async fn logout(&self, purge: bool) -> Result<Value, Failure> {
+        let mut settings = self.settings.lock().await;
+        if settings.issuer() && !settings.another_issuer() {
+            return Err(refused(
+                "this device holds the only known copy of the domain's publisher key and cannot log out",
+            ));
+        }
+        self.replica.logout().await;
+        settings.logged_out = true;
+        settings.save(&self.path)?;
+        *self.ended.lock().await = Some(purge);
+        self.forget_readers().await;
+        for client in self.clients() {
+            client.subscriptions()?.clear();
+            client.subscriptions_changed.send_replace(());
+        }
+        self.automatic.store(false, Ordering::SeqCst);
+        self.wake_sync();
+        self.vault.forget(settings.roles())?;
+        Ok(json!({"logged_out": true, "purge": purge}))
+    }
+
+    pub(crate) async fn initial_sync(&self) -> Result<(), Failure> {
+        let network = self.network.read().await;
+        let link = network
+            .as_ref()
+            .ok_or(ServiceError::NetworkRequired("bootstrap"))?;
+        let mut stage = link.stage.subscribe();
+        tokio::select! {
+            result = self.sync(&*link.transport) => result.map(|_| ()),
+            _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => Err(ServiceError::Closed("network service").into()),
+        }
+    }
+
+    fn wake_sync(&self) {
+        self.sync_events
+            .send_modify(|event| *event = event.wrapping_add(1));
+    }
+    fn synced(&self, mut status: Value) {
+        self.sync_status.send_modify(|current| {
+            let token = current["token"]
+                .as_str()
+                .and_then(|token| token.parse::<u64>().ok())
+                .unwrap_or(0);
+            status["token"] = json!(token.wrapping_add(1).to_string());
+            *current = status;
+        });
+    }
+    /// One worker per link. A timer exists only while retrying failed work.
+    async fn synchronize(self: Arc<Self>, link: Arc<Link>) {
+        let mut stage = link.stage.subscribe();
+        let mut events = self.sync_events.subscribe();
+        let mut frames = self.replica.observe_frames().await;
+        let mut revisions = self.replica.observe_revision();
+        let mut connectivity = link.transport.connectivity();
+        let mut retry = crate::scheduling::Retry::default();
+        loop {
+            if *stage.borrow() != Stage::Open {
+                break;
+            }
+            if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) {
+                let result = tokio::select! {
+                    result = async {
+                        let attached = self.network.read().await;
+                        if attached.as_ref().is_none_or(|current| current.id != link.id) {
+                            return Ok((json!({"state": "idle"}), false));
+                        }
+                        self.sync(&*link.transport).await
+                    } => result,
+                    _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
+                };
+                let status = match result {
+                    Ok((mut status, retry)) => {
+                        status["retry"] = json!(retry);
+                        status
+                    }
+                    Err(error) => {
+                        json!({"state": "unavailable", "error": error.to_string(), "retry": error.downcast_ref::<ServiceError>().is_none_or(ServiceError::retryable)})
+                    }
+                };
+                if status["retry"] == true {
+                    retry.failed();
+                } else {
+                    retry.reset();
+                }
+                self.synced(status);
+            } else if !self.online.load(Ordering::SeqCst) {
+                self.synced(json!({"state": "offline", "retry": false}));
+            }
+            tokio::select! {
+                _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
+                changed = events.changed() => {
+                    if changed.is_err() { break; }
+                    retry.reset();
+                }
+                changed = frames.changed() => {
+                    if changed.is_err() { break; }
+                    retry.reset();
+                }
+                () = async {
+                    match &mut connectivity {
+                        Some(events) => { if events.changed().await.is_err() { connectivity = None; } },
+                        None => std::future::pending().await,
+                    }
+                } => { retry.reset(); }
+                changed = revisions.changed() => {
+                    if changed.is_err() { break; }
+                    retry.reset();
+                }
+                () = retry.wait(), if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) => {}
+            }
+        }
+    }
+
+    /// Syncs with every configured peer. One reachable peer is enough;
+    /// what each attempt did is kept for `peers` and `network`.
+    async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
+        if !self.online.load(Ordering::SeqCst) {
+            return Ok((json!({"state": "offline"}), false));
+        }
+        let _syncing = self.syncing.lock().await;
+        let _activity = SyncActivity(self.sync_state.clone());
+        self.sync_state.send_replace("syncing");
+        let settings = self.settings.lock().await.clone();
+        let member = !settings.issuer();
+        if settings.expires() < now()?.saturating_add(settings.ttl / 2) {
+            let renewed = self.renew(Some(transport), false, None).await;
+            if !member {
+                renewed?;
+            } else if renewed.is_err() && settings.expires() <= now()? {
+                return Err("credentials expired; an issuer must be reachable to renew".into());
+            }
+        }
+        let targets = self.settings.lock().await.targets();
+        let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
+        // A revocation elsewhere raised the policy epoch, or an issuer does
+        // not know this device yet: renew once, from that peer if it is an
+        // issuer. An issuer hears of revocations from the other issuers.
+        let mut renewable = member || !settings.issuers.is_empty();
+        for (peer, contact) in &targets {
+            let mut result = self.reconcile(transport, *peer, contact).await;
+            if let Err(error) = &result
+                && renewable
+                && !error.is::<ServiceError>()
+            {
+                renewable = false;
+                if self.renew(Some(transport), true, Some(*peer)).await.is_ok() {
+                    result = self.reconcile(transport, *peer, contact).await;
+                }
+            }
+            let error = result.as_ref().err().map(ToString::to_string);
+            self.reached()?.insert(*peer, Reached { at: now()?, error });
+            match result {
+                Ok((behind, pending)) => {
+                    connected += 1;
+                    newer |= behind;
+                    retry |= pending;
+                }
+                Err(error) => {
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        retry |= first.is_some();
+        match first {
+            Some(error) if connected == 0 => Err(error),
+            // A peer runs a newer generation: local changes wait for an upgrade.
+            _ if newer => Ok((
+                json!({"state": "connected", "peers": connected, "upgrade": true}),
+                retry,
+            )),
+            _ => Ok((json!({"state": "connected", "peers": connected}), retry)),
+        }
+    }
+    async fn reconcile(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+    ) -> Result<(bool, bool), Failure> {
+        let addresses = contact.addresses(transport.kind());
+        if addresses.is_empty() {
+            return Err(ServiceError::NoRoute {
+                peer: "the peer",
+                network: transport.kind().into(),
+            }
+            .into());
+        }
+        let upstream = Upstream {
+            transport,
+            addresses: &addresses,
+            peer,
+            node: PrivateKey::from_bytes(&self.vault.get("node")?),
+            credentials: self.settings.lock().await.credentials.clone(),
+        };
+        let coordinator = self
+            .coordinator
+            .as_deref()
+            .filter(|_| !self.domain.app.commands().is_empty());
+        let marker = self.path.with_file_name("bootstrap.json");
+        if marker.exists() {
+            self.sync_state.send_replace("bootstrapping");
+            let expected = std::fs::read(&marker)?;
+            let intent: Value = serde_json::from_slice(&expected)?;
+            let token = intent.get("intent").unwrap_or(&intent);
+            if token != &json!(true) && !token.as_u64().is_some_and(|epoch| epoch > 0) {
+                return Err(refused("invalid bootstrap authority intent"));
+            }
+            let epoch = self.settings.lock().await.policy.statement.epoch;
+            if token.as_u64().is_some_and(|required| required > epoch) {
+                return Err("bootstrap intent requires policy renewal".into());
+            }
+            let pending: Vec<ResourceScope> = match intent.get("pending") {
+                Some(pending) => serde_json::from_value(pending.clone())?,
+                None if intent == true || intent.is_u64() => self.scopes(),
+                None => return Err(refused("invalid bootstrap intent")),
+            };
+            if pending.iter().any(|scope| !self.scopes().contains(scope)) {
+                return Err(refused("bootstrap intent names an ungranted scope"));
+            }
+            // Keyless custody scopes cannot import a checkpoint; they sync rows.
+            let pending: Vec<ResourceScope> = {
+                let settings = self.settings.lock().await;
+                pending
+                    .into_iter()
+                    .filter(|scope| settings.reads_whole(scope))
+                    .collect()
+            };
+            // `None`: this peer offers no checkpoint; intent stays for another.
+            if let Some(completed) =
+                sync::bootstrap(&self.replica, &upstream, &pending, &marker, expected).await?
+            {
+                self.replica.flush().await?;
+                if std::fs::read(&marker)? != completed {
+                    return Err("bootstrap authority changed; retry with the new intent".into());
+                }
+                std::fs::remove_file(&marker)?;
+                #[cfg(unix)]
+                std::fs::File::open(marker.parent().ok_or("bootstrap marker has no directory")?)?
+                    .sync_all()?;
+            }
+        }
+        self.sync_state.send_replace("syncing");
+        sync::reconcile(
+            &self.replica,
+            &upstream,
+            &self.scopes(),
+            coordinator,
+            |bootstrap| {
+                self.sync_state.send_replace(if bootstrap {
+                    "bootstrapping"
+                } else {
+                    "syncing"
+                });
+            },
+        )
+        .await
+    }
+    /// Serves one inbound stream: sync for the peers this device admits,
+    /// pairing and renewal on an issuer.
+    pub async fn serve(&self, protocol: Protocol, stream: Stream) -> Result<(), Failure> {
+        if !self.online.load(Ordering::SeqCst) || self.ended.lock().await.is_some() {
+            return Err("this node is offline".into());
+        }
+        match protocol {
+            Protocol::Sync => {
+                let settings = self.settings.lock().await.clone();
+                let node = PrivateKey::from_bytes(&self.vault.get("node")?);
+                let admitted = settings.admitted();
+                let (credentials, coordinator) =
+                    (settings.credentials, self.coordinator.as_deref());
+                sync::serve(
+                    stream,
+                    &self.replica,
+                    node,
+                    credentials,
+                    admitted,
+                    coordinator,
+                )
+                .await
+            }
+            Protocol::Pair => {
+                answer(stream, async |request| {
+                    if let Some(reply) = self.forward_enrollment(Protocol::Pair, &request).await? {
+                        return Ok(reply);
+                    }
+                    let mut settings = self.settings.lock().await;
+                    if !settings.issuer() {
+                        return Err(refused("only an issuer enrolls devices"));
+                    }
+                    settings.pair(&self.path, &self.vault, &request)
+                })
+                .await
+            }
+            Protocol::Renew => {
+                answer(stream, async |request| {
+                    if let Some(reply) = self.forward_enrollment(Protocol::Renew, &request).await? {
+                        return Ok(reply);
+                    }
+                    let mut settings = self.settings.lock().await;
+                    if !settings.issuer() {
+                        return Err(refused("only an issuer renews devices"));
+                    }
+                    if request == crate::generation::OFFER {
+                        if !settings.issuer() {
+                            return Err("only an issuer offers the domain's generations".into());
+                        }
+                        return settings.offer();
+                    }
+                    settings.renew(&self.path, &self.vault, &request)
+                })
+                .await
+            }
+            // The invocation carries its caller's signature and credentials;
+            // whoever forwards it gains nothing by doing so.
+            Protocol::Command => {
+                answer(stream, async |request| {
+                    let reply = self.execute_delivered(&request).await.to_bytes()?;
+                    self.wake_sync();
+                    Ok(reply)
+                })
+                .await
+            }
+            Protocol::Coordinate => Err("a database serves no coordinator requests".into()),
+        }
+    }
+
+    /// Relays bytes only; the issuer and caller still verify the original request/answer.
+    async fn forward_enrollment(
+        &self,
+        protocol: Protocol,
+        request: &[u8],
+    ) -> Result<Option<Vec<u8>>, Failure> {
+        let settings = self.settings.lock().await.clone();
+        let Some(upstream) = settings.enrollment_upstream else {
+            return Ok(None);
+        };
+        if settings.issuer() || !matches!(settings.profile, Profile::Custody { .. }) {
+            return Err(refused(
+                "enrollment forwarding requires a custody-only node",
+            ));
+        }
+        let attached = self.network.read().await;
+        let link = attached
+            .as_ref()
+            .ok_or(ServiceError::NetworkRequired("enrollment forwarding"))?;
+        let contact = settings
+            .peers
+            .get(&upstream)
+            .ok_or_else(|| refused("enrollment upstream is not configured"))?;
+        let addresses = contact.addresses(link.transport.kind());
+        if addresses.is_empty() {
+            return Err(ServiceError::NoRoute {
+                peer: "enrollment upstream",
+                network: link.transport.kind().into(),
+            }
+            .into());
+        }
+        Ok(Some(
+            exchange(&*link.transport, &addresses, protocol, request).await?,
+        ))
+    }
+
+    fn coordinator(&self) -> Result<&dyn Coordinator, Failure> {
+        self.coordinator
+            .as_deref()
+            .ok_or_else(|| refused("no coordinator is composed with this database"))
+    }
+    #[cfg(feature = "iroh")]
+    async fn service_call(
+        &self,
+        service: &crate::owner::Service,
+        kind: &str,
+        request: &Value,
+        publisher: Option<PrivateKey>,
+        activation: Option<rocky_core::Activation>,
+    ) -> Result<Value, Failure> {
+        let user = self
+            .settings
+            .lock()
+            .await
+            .credentials
+            .0
+            .first()
+            .ok_or("missing credentials")?
+            .capability
+            .subject;
+        let transport = self
+            .network
+            .read()
+            .await
+            .as_ref()
+            .map(|link| link.transport.clone());
+        let manifest = self.domain.manifest();
+        let domain = crate::owner::Domain {
+            scope: self.domain.scope,
+            application: manifest.name.clone(),
+            owner: secure_principal_id(user),
+            schema: manifest.schema,
+            handler: self.domain.app.commands().handler(),
+            anchor: self.settings.lock().await.publisher,
+            publisher,
+            transport,
+            activation,
+            request,
+        };
+        service.call(kind, domain).await
+    }
+    #[cfg(not(feature = "iroh"))]
+    async fn service_call(
+        &self,
+        service: &crate::owner::Service,
+        _: &str,
+        _: &Value,
+        _: Option<PrivateKey>,
+        _: Option<rocky_core::Activation>,
+    ) -> Result<Value, Failure> {
+        match *service {}
+    }
+    /// Admits and executes a command another device or a gateway delivered,
+    /// through the admission a local ticket passes.
+    async fn execute_delivered(&self, envelope: &[u8]) -> Delivery {
+        match self.coordinator() {
+            Ok(coordinator) => self.replica.deliver_command(envelope, coordinator).await,
+            Err(error) => Delivery::NotSubmitted {
+                retryable: false,
+                message: error.to_string(),
+            },
+        }
+    }
+    /// The calls of typed strong commands. Submission, lookup and
+    /// cancellation are local; `command_run` is what executes or delivers.
+    async fn command(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
+        let app = &self.domain.app;
+        let handle = || -> Result<[u8; 32], Failure> {
+            let bytes: Vec<u8> = serde_json::from_value(request["handle"].clone())
+                .map_err(|_| refused("handle must be 32 bytes"))?;
+            bytes
+                .try_into()
+                .map_err(|_| refused("handle must be 32 bytes"))
+        };
+        let bytes = |name: &str| -> Result<Vec<u8>, Failure> {
+            serde_json::from_value(request[name].clone())
+                .map_err(|_| refused(format!("{name} must be bytes")))
+        };
+        let report = |ticket| crate::commands::ticket_json(app, &ticket);
+        match kind {
+            "command_identity" => {
+                let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+                let user = self
+                    .settings
+                    .lock()
+                    .await
+                    .credentials
+                    .0
+                    .first()
+                    .ok_or("missing credentials")?
+                    .capability
+                    .subject;
+                Ok(json!({
+                    "scope": self.domain.scope,
+                    "node": HEXLOWER.encode(&secure_node_id(node).0),
+                    "key": HEXLOWER.encode(node.as_bytes()),
+                    "application": self.domain.manifest().name,
+                    "principal": HEXLOWER.encode(&secure_principal_id(user).0),
+                    "handler": app.hosts(),
+                    "coordinator": self.coordinator.is_some(),
+                    "schema_generation": self.domain.manifest().schema,
+                    "handler_generation": app.commands().handler(),
+                }))
+            }
+            // What the domain's owner submits to the coordinator to activate
+            // this generation: the coordinator's head, which this device's
+            // confirmed results must have reached, and the transition.
+            "command_activation" => {
+                let coordinator = self.coordinator()?;
+                let scope = self.domain.scope;
+                let head = coordinator.head(scope).await?;
+                let manifest = self.domain.manifest();
+                if (head.schema, head.handler) == (manifest.schema, manifest.handler) {
+                    return Ok(json!({"active": true, "activation": null}));
+                }
+                let local = self.replica.confirmed_head(scope).await?;
+                if local != Some((head.sequence, head.head))
+                    && !(local.is_none() && head.sequence == 0)
+                {
+                    return Err(refused(
+                        "this device has not received every confirmed result; sync first",
+                    ));
+                }
+                let transition = self
+                    .settings
+                    .lock()
+                    .await
+                    .transition()?
+                    .ok_or_else(|| refused("this domain has no transition to activate"))?;
+                let resources: std::collections::BTreeSet<_> = app
+                    .commands()
+                    .descriptors()
+                    .iter()
+                    .flat_map(|descriptor| descriptor.resources.iter())
+                    .collect();
+                let mut state = Vec::new();
+                for name in resources {
+                    let resource = app
+                        .scope(name)
+                        .ok_or_else(|| refused("unknown command resource"))?;
+                    let snapshot = self.replica.command_snapshot(resource).await?;
+                    if !snapshot.complete {
+                        return Err(refused(
+                            "generation activation needs complete confirmed resource state",
+                        ));
+                    }
+                    let rows: Vec<_> = app
+                        .typed_rows(name, &snapshot.rows)?
+                        .into_iter()
+                        .map(crate::commands::cells)
+                        .collect();
+                    state.extend(serde_json::to_vec(&(name, rows))?);
+                }
+                if self.replica.confirmed_head(scope).await? != local {
+                    return Err(refused(
+                        "confirmed state advanced during generation verification; retry",
+                    ));
+                }
+                let activation = rocky_core::Activation {
+                    head,
+                    schema: manifest.schema,
+                    handler: manifest.handler,
+                    transition: transition.id(),
+                    state: commitment("rocky.sdk.activation-state.v1", &state),
+                };
+                if !activation.valid() {
+                    return Err(refused(
+                        "the coordinator's generation is not the one before this device's",
+                    ));
+                }
+                Ok(json!({
+                    "active": false,
+                    "commitment": HEXLOWER.encode(&activation.commitment()),
+                    "activation": activation,
+                }))
+            }
+            // The owner registers or controls this domain with its tenant
+            // key; the tenant secret stays in this process.
+            "command_service_register"
+            | "command_service_control"
+            | "command_service_usage"
+            | "command_service_activate" => {
+                let service = self.service.as_ref().ok_or_else(|| {
+                    refused("commands are not composed with a coordination service")
+                })?;
+                let settings = self.settings.lock().await.clone();
+                // Whoever may execute registers executors, not only an issuer.
+                let executes = if kind == "command_service_register" && !settings.issuer() {
+                    let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+                    settings
+                        .credentials
+                        .verify(
+                            settings.publisher,
+                            self.domain.manifest().hash(),
+                            node,
+                            &settings.policy.statement,
+                            now()?,
+                        )?
+                        .iter()
+                        .any(|grant| grant.rights.contains(&rocky_core::Right::Execute))
+                } else {
+                    settings.issuer()
+                };
+                if kind == "command_service_register" && !executes && !settings.issuer() {
+                    return Err(refused(
+                        "registering a domain's executors needs credentials holding Execute",
+                    ));
+                }
+                let publisher = if settings.issuer() {
+                    Some(PrivateKey::from_bytes(&self.vault.get("publisher")?))
+                } else {
+                    None
+                };
+                // The owner activates exactly what this device verified.
+                let activation = if kind == "command_service_activate" {
+                    let prepared = Box::pin(self.command("command_activation", request)).await?;
+                    if prepared["active"] == true {
+                        return Ok(json!({"active": true}));
+                    }
+                    Some(serde_json::from_value(prepared["activation"].clone())?)
+                } else {
+                    None
+                };
+                self.service_call(service, kind, request, publisher, activation)
+                    .await
+            }
+            // The publisher lets a tenant control key register this
+            // application's domains on a coordination service. It grants
+            // no row, key or command right.
+            "command_coordination_grant" => {
+                if !self.settings.lock().await.issuer() {
+                    return Err(refused("only an issuer holds the publisher key"));
+                }
+                // The tenant's public key, or its secret in this process.
+                let hex32 = |name: &str| -> Option<[u8; 32]> {
+                    HEXLOWER
+                        .decode(request[name].as_str()?.as_bytes())
+                        .ok()?
+                        .try_into()
+                        .ok()
+                };
+                let tenant = match (hex32("tenant"), hex32("tenant_secret")) {
+                    (Some(public), None) => public,
+                    (None, Some(secret)) => {
+                        *PrivateKey::from_bytes(&secret).public_key().as_bytes()
+                    }
+                    _ => return Err(refused("tenant must be a 64-digit hexadecimal key")),
+                };
+                let lifetime = request["lifetime"]
+                    .as_u64()
+                    .filter(|seconds| (1..=366 * 86_400).contains(seconds))
+                    .ok_or_else(|| refused("lifetime must be 1 s to 366 days"))?;
+                let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
+                let time = now()?;
+                let grant = rocky_credentials::SignedCoordinationGrant::sign(
+                    rocky_credentials::CoordinationGrant {
+                        publisher: rocky_credentials::Publisher(publisher.public_key()),
+                        application: self.domain.manifest().name,
+                        tenant: rocky_credentials::CoordinatorControl(
+                            PublicKey::from_bytes(&tenant)
+                                .map_err(|_| refused("tenant is not a valid key"))?,
+                        ),
+                        not_before: time.saturating_sub(60),
+                        expires: time.saturating_add(lifetime),
+                    },
+                    &publisher,
+                )?;
+                Ok(json!({ "grant": grant }))
+            }
+            "command_submit" => {
+                let method = request["method"]
+                    .as_str()
+                    .ok_or("method must be a string")?;
+                let version = request["version"]
+                    .as_u64()
+                    .and_then(|version| u32::try_from(version).ok())
+                    .ok_or("version must be a number")?;
+                let descriptor = app.commands().get(method, version).map_err(refused)?;
+                let cells: Vec<Cell> = serde_json::from_value(request["arguments"].clone())
+                    .map_err(|_| refused("arguments must be tagged values"))?;
+                let arguments = descriptor
+                    .encode_arguments(&crate::commands::values(cells).map_err(refused)?)
+                    .map_err(refused)?;
+                let ticket = self
+                    .replica
+                    .submit_command(handle()?, self.domain.scope, method, version, &arguments)
+                    .await?;
+                report(ticket)
+            }
+            "command_ticket" => match self.replica.ticket(handle()?).await? {
+                Some(ticket) => report(ticket),
+                None => Ok(json!({"state": "unresolved"})),
+            },
+            "command_tickets" => {
+                let tickets = self.replica.open_tickets(usize::MAX).await?;
+                let tickets: Vec<Value> =
+                    tickets.into_iter().map(report).collect::<Result<_, _>>()?;
+                Ok(json!({"tickets": tickets}))
+            }
+            "command_cancel" => report(self.replica.cancel_ticket(handle()?).await?),
+            "command_run" => {
+                let handles = match request.get("handle").filter(|handle| !handle.is_null()) {
+                    Some(_) => vec![handle()?],
+                    None => self
+                        .replica
+                        .open_tickets(usize::MAX)
+                        .await?
+                        .into_iter()
+                        .map(|ticket| ticket.handle)
+                        .collect(),
+                };
+                let mut tickets = Vec::new();
+                for handle in handles {
+                    let failure = self.run(handle).await.err();
+                    let ticket = self
+                        .replica
+                        .ticket(handle)
+                        .await?
+                        .ok_or_else(|| refused("unknown ticket"))?;
+                    let mut ticket = report(ticket)?;
+                    ticket["error"] = failure.as_ref().map_or(Value::Null, error);
+                    tickets.push(ticket);
+                }
+                Ok(json!({"tickets": tickets}))
+            }
+            // The application's statement that every settled ticket's result
+            // reached whoever needs it: the coordinator may retire those
+            // identities, and their receipt evidence is no longer pinned.
+            "command_acknowledge" => {
+                self.replica
+                    .acknowledge_tickets(self.coordinator()?)
+                    .await?;
+                Ok(json!({}))
+            }
+            // The three steps an application's own RPC or gateway forwards.
+            "command_envelope" => {
+                let envelope = self.replica.export_ticket(handle()?).await?;
+                Ok(json!({"envelope": envelope.to_bytes()?}))
+            }
+            "command_execute" => {
+                let answer = self.execute_delivered(&bytes("envelope")?).await;
+                Ok(json!({"answer": answer.to_bytes()?}))
+            }
+            "command_settle" => {
+                let answer = Delivery::from_bytes(&bytes("answer")?)?;
+                report(
+                    self.replica
+                        .settle_delivery(handle()?, answer, self.coordinator()?)
+                        .await?,
+                )
+            }
+            "command_rows" => {
+                let table = request["table"].as_str().ok_or("table must be a string")?;
+                let scope = app.scope(table).ok_or_else(|| refused("unknown table"))?;
+                let snapshot = self.replica.command_snapshot(scope).await?;
+                let rows: Vec<Vec<Cell>> = app
+                    .typed_rows(table, &snapshot.rows)?
+                    .into_iter()
+                    .map(crate::commands::cells)
+                    .collect();
+                let columns: Vec<&str> = self
+                    .domain
+                    .logical()
+                    .table(table)
+                    .ok_or_else(|| refused("unknown table"))?
+                    .columns
+                    .iter()
+                    .map(|column| column.sql_name.as_str())
+                    .collect();
+                // The confirmed sequence this device holds results through.
+                let sequence = self
+                    .replica
+                    .confirmed_head(scope.domain)
+                    .await?
+                    .map_or(0, |(sequence, _)| sequence);
+                // Without `complete`, the rows are withheld, not empty.
+                Ok(json!({
+                    "complete": snapshot.complete,
+                    "sequence": sequence.to_string(),
+                    "revision": snapshot.revision.to_string(),
+                    "columns": columns,
+                    "rows": rows,
+                }))
+            }
+            other => Err(refused(format!("unsupported request {other}"))),
+        }
+    }
+    /// Advances one ticket: executes it here when this device is the
+    /// domain's executor, otherwise delivers it to the executor among the
+    /// configured peers. Reaching a peer does not make it eligible; the
+    /// coordinator's assignment and the peer's own credentials do.
+    async fn run(&self, handle: [u8; 32]) -> Result<(), Failure> {
+        let ticket = self
+            .replica
+            .ticket(handle)
+            .await?
+            .ok_or_else(|| refused("unknown ticket"))?;
+        match ticket.state {
+            TicketState::Confirmed | TicketState::Applied => return Ok(()),
+            TicketState::Cancelled => return Err(refused("ticket was cancelled")),
+            // Settled by the coordinator: never run again or replaced.
+            TicketState::Retired | TicketState::Expired => return Ok(()),
+            _ => {}
+        }
+        let coordinator = self.coordinator()?;
+        let mut head = coordinator.head(self.domain.scope).await?;
+        if head.executor == rocky_core::NodeId([0; 16])
+            && self.domain.app.hosts()
+            && let Some(acquire) = &self.acquire
+        {
+            match acquire(self.domain.scope, head.epoch).await {
+                Ok(()) => {}
+                // Not eligible here: another executor acquires it on its next run.
+                Err(rocky_core::CoordinationError::Denied) => {
+                    return Err(Box::new(Deferred(
+                        "the domain has no executor yet; an eligible executor acquires it on its next run".into(),
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            }
+            head = coordinator.head(self.domain.scope).await?;
+        }
+        if head.executor == rocky_core::NodeId([0; 16]) {
+            return Err(Box::new(Deferred(
+                "the domain has no executor yet; an eligible executor acquires it on its next run"
+                    .into(),
+            )));
+        }
+        let executor = head.executor;
+        let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        if executor == secure_node_id(node) {
+            self.replica.run_ticket(handle, coordinator).await?;
+            return Ok(());
+        }
+        let attached = self.network.read().await;
+        let link = attached
+            .as_ref()
+            .ok_or(ServiceError::NetworkRequired("command delivery"))?;
+        let settings = self.settings.lock().await.clone();
+        let (_, contact) = settings
+            .peers
+            .iter()
+            .find(|(peer, _)| secure_node_id(**peer) == executor)
+            .ok_or_else(|| refused("the domain's executor is not a configured peer"))?;
+        let addresses = contact.addresses(link.transport.kind());
+        if addresses.is_empty() {
+            return Err(ServiceError::NoRoute {
+                peer: "the executor",
+                network: link.transport.kind().into(),
+            }
+            .into());
+        }
+        let envelope = self.replica.export_ticket(handle).await?.to_bytes()?;
+        // A closing network service cancels the wait, not the command: the
+        // ticket stays `outcome_unknown` and the same ticket settles it.
+        let mut stage = link.stage.subscribe();
+        let answer = tokio::select! {
+            // No answer: the ticket stays `outcome_unknown`; run it again.
+            answer = exchange(&*link.transport, &addresses, Protocol::Command, &envelope) => {
+                answer.map_err(|error| ServiceError::Unreachable(error.to_string()))?
+            }
+            _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => {
+                return Err(ServiceError::Closed("network service").into());
+            }
+        };
+        let answer = Delivery::from_bytes(&answer)?;
+        let failure = match &answer {
+            Delivery::Confirmed(_) => None,
+            Delivery::NotSubmitted { retryable, message } => Some((*retryable, message.clone())),
+            Delivery::Unknown(message) => Some((true, message.clone())),
+            // The ticket records the settlement; it is never run again.
+            Delivery::Settled { .. } => None,
+        };
+        self.replica
+            .settle_delivery(handle, answer, coordinator)
+            .await?;
+        match failure {
+            None => Ok(()),
+            Some((true, message)) => Err(Box::new(Deferred(message))),
+            Some((false, message)) => Err(refused(message)),
+        }
+    }
+
+    async fn mutate(&self, _: &Client) -> Result<Value, Failure> {
+        Err(refused(
+            "legacy register mutations are unsupported; use format-2 SQL transactions",
+        ))
+    }
+
+    async fn sql_call(
+        &self,
+        client: &Client,
+        kind: &str,
+        request: &Value,
+    ) -> Result<Value, Failure> {
+        // An active SQL lease checks authority itself. Asking session status
+        // would wait for the replica lock the lease already owns.
+        let cached = client.reader.lock().await.clone();
+        let reader = match cached {
+            Some(reader) => reader,
+            None => self.reader(client).await?,
+        };
+        if kind == "next_id" {
+            let table = request["table"]
+                .as_str()
+                .ok_or_else(|| refused("table must be a string"))?;
+            let id = if let Some(values) = request.get("partition_values") {
+                let values: Vec<Cell> = serde_json::from_value(values.clone())?;
+                reader
+                    .sql
+                    .next_id_partition(
+                        table,
+                        &values
+                            .into_iter()
+                            .map(Cell::sql)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )
+                    .await?
+            } else {
+                reader.sql.next_id(table).await?
+            };
+            return Ok(json!({"id":id}));
+        }
+        let sql = request["sql"]
+            .as_str()
+            .filter(|sql| sql.len() <= MAX_SQL)
+            .ok_or_else(|| refused("sql must be a bounded string"))?;
+        let values: Vec<Cell> =
+            serde_json::from_value(request.get("values").cloned().unwrap_or_else(|| json!([])))
+                .map_err(refused)?;
+        if values.len() > 256 {
+            return Err(refused("SQL parameter quota"));
+        }
+        let result = if sql.trim().eq_ignore_ascii_case("COMMIT") && request.get("handle").is_some()
+        {
+            if !values.is_empty() {
+                return Err(refused("COMMIT takes no SQL parameters"));
+            }
+            let handle: Vec<u8> =
+                serde_json::from_value(request["handle"].clone()).map_err(refused)?;
+            let handle: [u8; 32] = handle
+                .try_into()
+                .map_err(|_| refused("handle must be 32 bytes"))?;
+            reader.sql.commit(secure_handle(&handle)).await?
+        } else {
+            reader
+                .sql
+                .run(
+                    sql,
+                    values
+                        .into_iter()
+                        .map(Cell::sql)
+                        .collect::<Result<_, _>>()?,
+                )
+                .await?
+        };
+        let rows: Vec<Vec<Cell>> = result
+            .rows
+            .into_iter()
+            .map(|row| row.into_iter().map(Cell::from).collect())
+            .collect();
+        Ok(
+            json!({"columns": result.columns, "rows": rows, "changes": result.changes.to_string(), "committed": result.committed.map(|commit| json!({"handle": HEXLOWER.encode(&commit.handle), "frames": commit.frames.len()}))}),
+        )
+    }
+    async fn read(&self, client: &Client, query: Query) -> Result<Value, Failure> {
+        match self.read_once(client, query.clone()).await {
+            // An authority change ends the cached session; read again once.
+            Err(error) if is_authority(&error) => {
+                *client.reader.lock().await = None;
+                self.read_once(client, query).await
+            }
+            other => other,
+        }
+    }
+    async fn read_once(&self, client: &Client, query: Query) -> Result<Value, Failure> {
+        let max_bytes = query.max_bytes.unwrap_or(rocky_runtime::MAX_FRAME_BYTES);
+        if query.max_rows == 0
+            || query.max_rows > MAX_ROWS
+            || query.sql.len() > MAX_SQL
+            || query.values.len() > 256
+            || !(256..=rocky_runtime::MAX_FRAME_BYTES).contains(&max_bytes)
+        {
+            return Err(refused("query quota"));
+        }
+        let settings = self.settings.lock().await;
+        let authority = (settings.policy.statement.epoch, settings.expires());
+        drop(settings);
+        let mut descriptor = query.clone();
+        descriptor.cursor = None;
+        let token = |offset: usize| -> Result<String, Failure> {
+            let bytes = serde_json::to_vec(&(
+                client.cursor_key,
+                self.domain.manifest().hash(),
+                authority,
+                &descriptor,
+                offset,
+            ))?;
+            Ok(format!(
+                "page.v1:{offset}:{}",
+                HEXLOWER.encode(&commitment("rocky.sdk.cursor.v1", &bytes))
+            ))
+        };
+        let offset: usize = match &query.cursor {
+            Some(cursor) => {
+                let offset = cursor
+                    .strip_prefix("page.v1:")
+                    .and_then(|rest| rest.split_once(':'))
+                    .and_then(|(offset, _)| offset.parse().ok())
+                    .ok_or_else(|| refused("invalid cursor"))?;
+                if *cursor != token(offset)? {
+                    return Err(refused(
+                        "cursor belongs to another session, query or authority generation",
+                    ));
+                }
+                offset
+            }
+            None => 0,
+        };
+        let reader = self.reader(client).await?;
+        let revision = *self.replica.observe_revision().borrow();
+        let mut values = query
+            .values
+            .into_iter()
+            .map(Cell::sql)
+            .collect::<Result<Vec<_>, _>>()?;
+        values.push(SqlValue::Integer(i64::try_from(query.max_rows + 1)?));
+        values.push(SqlValue::Integer(i64::try_from(offset)?));
+        let sql = format!(
+            "SELECT * FROM ({}) LIMIT ? OFFSET ?",
+            query.sql.trim().trim_end_matches(';')
+        );
+        let mut result = reader.sql.run(&sql, values).await?;
+        let more = result.rows.len() > query.max_rows;
+        result.rows.truncate(query.max_rows);
+        let mut rows = Vec::new();
+        let mut used = serde_json::to_vec(&json!({
+            "scope": self.domain.scope,
+            "revision": revision.to_string(),
+            "columns": result.columns,
+            "rows": [],
+            "next": token(usize::MAX)?,
+            "next_kind": "offset",
+        }))?
+        .len()
+            + 64;
+        let mut limited = false;
+        for row in result.rows {
+            let row: Vec<Cell> = row.into_iter().map(Cell::from).collect();
+            let size = serde_json::to_vec(&row)?.len() + 1;
+            if used + size > max_bytes {
+                if rows.is_empty() {
+                    return Err(refused("one row exceeds the page byte quota"));
+                }
+                limited = true;
+                break;
+            }
+            used += size;
+            rows.push(row);
+        }
+        let next = if more || limited {
+            Some(token(
+                offset
+                    .checked_add(rows.len())
+                    .ok_or_else(|| refused("cursor quota"))?,
+            )?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "scope": self.domain.scope,
+            "revision": revision.to_string(),
+            "columns": result.columns,
+            "rows": rows,
+            "next": next,
+            "next_kind": "offset",
+        }))
+    }
+    /// The first page of a subscription's query once the committed
+    /// revision differs from the one it last delivered.
+    async fn next(&self, client: &Client, id: u64) -> Result<Value, Failure> {
+        let mut revisions = self.replica.observe_revision();
+        let mut closing = client.closing.subscribe();
+        let mut subscriptions = client.subscriptions_changed.subscribe();
+        loop {
+            let (query, delivered) = {
+                let subscriptions = client.subscriptions()?;
+                let subscription = subscriptions
+                    .get(&id)
+                    .ok_or_else(|| refused("unknown subscription"))?;
+                (subscription.query.clone(), subscription.delivered.clone())
+            };
+            let current = revisions.borrow_and_update().to_string();
+            if delivered.as_deref() != Some(current.as_str()) {
+                let page = self.read(client, query).await?;
+                if let Some(subscription) = client.subscriptions()?.get_mut(&id) {
+                    subscription.delivered = page["revision"].as_str().map(String::from);
+                }
+                return Ok(page);
+            }
+            tokio::select! {
+                changed = revisions.changed() => {
+                    changed.map_err(|_| ServiceError::Closed("database"))?
+                }
+                _ = closing.wait_for(|closing| *closing) => {
+                    return Err(ServiceError::Closed("session").into());
+                }
+                _ = subscriptions.changed() => {}
+            }
+        }
+    }
+}
+
+/// The secure handle of a mutation handle.
+fn secure_handle(handle: &[u8; 32]) -> rocky_core::Commitment {
+    commitment("rocky.sdk.mutation.v1", handle)
+}
+fn subscription(request: &Value) -> Result<u64, Failure> {
+    Ok(request["subscription"]
+        .as_str()
+        .ok_or("subscription must be a string")?
+        .parse()?)
+}
+fn is_authority(error: &Failure) -> bool {
+    error.to_string().contains("session authority changed")
+}
+
+/// The error object of a failed call: its code and whether retrying the
+/// same call may succeed.
+pub fn error(error: &Failure) -> Value {
+    let (code, retryable) = if error.is::<Refused>() {
+        ("rejected", false)
+    } else if error.is::<Deferred>() {
+        ("executor_unavailable", true)
+    } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
+        coordination_code(coordination)
+    } else if let Some(service) = error.downcast_ref::<ServiceError>() {
+        (service.code(), service.retryable())
+    } else if let Some(credentials) = error.downcast_ref::<rocky_credentials::Error>() {
+        match credentials {
+            rocky_credentials::Error::Provider(_) => ("storage", false),
+            _ => ("denied", false),
+        }
+    } else {
+        match error.downcast_ref::<Error>() {
+            Some(Error::Rejected(_) | Error::Protocol(_)) => ("rejected", false),
+            Some(Error::Incompatible(_)) => ("unsupported_generation", false),
+            Some(Error::Sql(SqlError::Denied)) => ("denied", false),
+            Some(Error::Sql(SqlError::Capture(_) | SqlError::Statement { .. })) => {
+                ("rejected", false)
+            }
+            Some(Error::Conflict) => ("conflict", true),
+            Some(Error::Backpressure) => ("quota", true),
+            Some(Error::Handler(_)) => ("handler_unavailable", true),
+            Some(Error::StrongPending(_)) => ("missing_head", true),
+            Some(Error::Coordination(coordination)) => coordination_code(coordination),
+            _ => ("storage", true),
+        }
+    };
+    json!({"code": code, "retryable": retryable, "message": error.to_string()})
+}
+/// A lost coordinator answer leaves the confirmation unknown; a stale fence
+/// or head is met again by running the same ticket.
+fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {
+    use rocky_core::CoordinationError::{
+        Backpressure, Denied, Generations, StaleEpoch, StaleHead, Unavailable,
+    };
+    match error {
+        Unavailable => ("unknown_confirmation", true),
+        // A full response window: acknowledge settled tickets or wait for expiry.
+        Backpressure => ("quota", true),
+        // Retried once the coordinator activates this device's generation.
+        Generations => ("unsupported_generation", true),
+        StaleHead | StaleEpoch => ("missing_head", true),
+        Denied => ("denied", false),
+        _ => ("rejected", false),
+    }
+}
+
+#[cfg(test)]
+mod sync_tests;

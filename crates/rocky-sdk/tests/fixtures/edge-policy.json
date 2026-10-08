@@ -1,0 +1,8 @@
+{
+  "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "application": "ledger",
+  "default": "mergeable",
+  "tables": {
+    "drafts": { "class": "local_only" }
+  }
+}

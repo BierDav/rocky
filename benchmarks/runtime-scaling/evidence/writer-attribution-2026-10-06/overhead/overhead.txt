@@ -1,0 +1,104 @@
+control: rate=100/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=false strong=false checkpoint_frames=16384
+control scheduled local writes: n=3000 throughput=100/s p50_us<=4900 p99_us<=9600 max_us=47094
+control scheduled local writes: p99_9_us<=31200
+control: offered=3000 completed=3000 dropped_sends=0 max_send_lag_ms=3.505
+control writer steps=3000 authoring_steps=0 incoming_steps=0 step_us=464546 commit_us=10733588 reads_us=0 flushes=2995
+control subphases us/write admission=0.00 reduction=0.00 encoding=0.00 sql=0.00 (of step: adm 0% red 0% enc 0% sql 0%)
+control step attribution us/write authoring=0.00 incoming=0.00 other=154.85
+control checkpoints=1 truncating=0 mean_ms=8.1 max_ms=8.1 passive: wal_flush_ms=0.08 copy_ms=4.55 file_flush_ms=3.43 intervals=0 dropped_intervals=0
+control samples total=3000 retained=3000 dropped_samples=0 p50_us=3422 p99_us=7810 p99_9_us=29281 max_us=45497 overlapping=0 (0.0%)
+control tail overlap: p99 samples=30 overlapping=0 (0.0%); p99_9 samples=3 overlapping=0 (0.0%)
+control latency no_checkpoint n=3000 p50_us=3422 p99_us=7810 p99_9_us=29281 max_us=45497 | checkpoint n=0 p50_us=0 p99_us=0 p99_9_us=0 max_us=0
+control cpu: process_cpu=1.430s writer_thread_cpu=n/a wall=30.000s process_busy=4.8%
+control storage: db_bytes=74960896 wal_bytes=57964312 page_size=4096 page_count=18301 freelist_count=0 free_pages=0.00%
+measured: rate=100/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=true strong=false checkpoint_frames=16384
+measured scheduled local writes: n=3000 throughput=100/s p50_us<=5200 p99_us<=8100 max_us=12866
+measured scheduled local writes: p99_9_us<=11200
+measured: offered=3000 completed=3000 dropped_sends=0 max_send_lag_ms=7.959
+measured writer steps=3000 authoring_steps=3000 incoming_steps=0 step_us=508003 commit_us=10755044 reads_us=0 flushes=3000
+measured subphases us/write admission=0.10 reduction=29.21 encoding=1.34 sql=93.63 (of step: adm 0% red 17% enc 1% sql 55%)
+measured step attribution us/write authoring=167.20 incoming=0.00 other=2.14
+measured checkpoints=1 truncating=0 mean_ms=8.8 max_ms=8.8 passive: wal_flush_ms=0.12 copy_ms=5.38 file_flush_ms=3.25 intervals=1 dropped_intervals=0
+measured samples total=3000 retained=3000 dropped_samples=0 p50_us=3589 p99_us=6145 p99_9_us=9383 max_us=12043 overlapping=2 (0.1%)
+measured tail overlap: p99 samples=30 overlapping=1 (3.3%); p99_9 samples=3 overlapping=1 (33.3%)
+measured latency no_checkpoint n=2998 p50_us=3589 p99_us=6145 p99_9_us=9383 max_us=9982 | checkpoint n=2 p50_us=3548 p99_us=12043 p99_9_us=12043 max_us=12043
+measured cpu: process_cpu=1.640s writer_thread_cpu=n/a wall=30.000s process_busy=5.5%
+measured storage: db_bytes=74956800 wal_bytes=57914872 page_size=4096 page_count=18300 freelist_count=0 free_pages=0.00%
+control: rate=250/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=false strong=false checkpoint_frames=16384
+control scheduled local writes: n=7500 throughput=250/s p50_us<=5100 p99_us<=11100 max_us=27217
+control scheduled local writes: p99_9_us<=19300
+control: offered=7500 completed=7500 dropped_sends=0 max_send_lag_ms=4.272
+control writer steps=7500 authoring_steps=0 incoming_steps=0 step_us=960064 commit_us=26377125 reads_us=0 flushes=7424
+control subphases us/write admission=0.00 reduction=0.00 encoding=0.00 sql=0.00 (of step: adm 0% red 0% enc 0% sql 0%)
+control step attribution us/write authoring=0.00 incoming=0.00 other=128.01
+control checkpoints=4 truncating=0 mean_ms=8.2 max_ms=12.8 passive: wal_flush_ms=0.14 copy_ms=4.19 file_flush_ms=3.85 intervals=0 dropped_intervals=0
+control samples total=7500 retained=7500 dropped_samples=0 p50_us=3909 p99_us=9551 p99_9_us=16965 max_us=26009 overlapping=0 (0.0%)
+control tail overlap: p99 samples=75 overlapping=0 (0.0%); p99_9 samples=8 overlapping=0 (0.0%)
+control latency no_checkpoint n=7500 p50_us=3909 p99_us=9551 p99_9_us=16965 max_us=26009 | checkpoint n=0 p50_us=0 p99_us=0 p99_9_us=0 max_us=0
+control cpu: process_cpu=3.130s writer_thread_cpu=n/a wall=30.000s process_busy=10.4%
+control storage: db_bytes=77062144 wal_bytes=41463712 page_size=4096 page_count=18814 freelist_count=0 free_pages=0.00%
+measured: rate=250/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=true strong=false checkpoint_frames=16384
+measured scheduled local writes: n=7500 throughput=250/s p50_us<=4600 p99_us<=10700 max_us=26630
+measured scheduled local writes: p99_9_us<=22600
+measured: offered=7500 completed=7500 dropped_sends=0 max_send_lag_ms=16.288
+measured writer steps=7500 authoring_steps=7500 incoming_steps=0 step_us=1045210 commit_us=26559533 reads_us=0 flushes=7406
+measured subphases us/write admission=0.06 reduction=19.04 encoding=0.81 sql=75.96 (of step: adm 0% red 14% enc 1% sql 55%)
+measured step attribution us/write authoring=126.02 incoming=0.00 other=13.35
+measured checkpoints=4 truncating=0 mean_ms=10.1 max_ms=14.2 passive: wal_flush_ms=0.89 copy_ms=4.96 file_flush_ms=4.15 intervals=4 dropped_intervals=0
+measured samples total=7500 retained=7500 dropped_samples=0 p50_us=3964 p99_us=9662 p99_9_us=20692 max_us=26104 overlapping=17 (0.2%)
+measured tail overlap: p99 samples=75 overlapping=13 (17.3%); p99_9 samples=8 overlapping=6 (75.0%)
+measured latency no_checkpoint n=7483 p50_us=3963 p99_us=9266 p99_9_us=14978 max_us=24580 | checkpoint n=17 p50_us=17236 p99_us=26104 p99_9_us=26104 max_us=26104
+measured cpu: process_cpu=3.320s writer_thread_cpu=n/a wall=30.000s process_busy=11.1%
+measured storage: db_bytes=77070336 wal_bytes=40779792 page_size=4096 page_count=18816 freelist_count=0 free_pages=0.00%
+control: rate=500/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=false strong=false checkpoint_frames=16384
+control scheduled local writes: n=15000 throughput=500/s p50_us<=6800 p99_us<=11100 max_us=30357
+control scheduled local writes: p99_9_us<=19200
+control: offered=15000 completed=15000 dropped_sends=0 max_send_lag_ms=8.938
+control writer steps=15000 authoring_steps=0 incoming_steps=0 step_us=1633899 commit_us=28165577 reads_us=0 flushes=7807
+control subphases us/write admission=0.00 reduction=0.00 encoding=0.00 sql=0.00 (of step: adm 0% red 0% enc 0% sql 0%)
+control step attribution us/write authoring=0.00 incoming=0.00 other=108.93
+control checkpoints=5 truncating=0 mean_ms=9.0 max_ms=12.4 passive: wal_flush_ms=0.13 copy_ms=4.41 file_flush_ms=4.38 intervals=0 dropped_intervals=0
+control samples total=15000 retained=15000 dropped_samples=0 p50_us=5827 p99_us=10208 p99_9_us=18424 max_us=29509 overlapping=0 (0.0%)
+control tail overlap: p99 samples=150 overlapping=0 (0.0%); p99_9 samples=15 overlapping=0 (0.0%)
+control latency no_checkpoint n=15000 p50_us=5827 p99_us=10208 p99_9_us=18424 max_us=29509 | checkpoint n=0 p50_us=0 p99_us=0 p99_9_us=0 max_us=0
+control cpu: process_cpu=4.560s writer_thread_cpu=n/a wall=30.000s process_busy=15.2%
+control storage: db_bytes=79888384 wal_bytes=58075552 page_size=4096 page_count=19504 freelist_count=240 free_pages=1.23%
+measured: rate=500/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=true strong=false checkpoint_frames=16384
+measured scheduled local writes: n=15000 throughput=500/s p50_us<=7000 p99_us<=11400 max_us=30334
+measured scheduled local writes: p99_9_us<=22400
+measured: offered=15000 completed=15000 dropped_sends=0 max_send_lag_ms=8.285
+measured writer steps=15000 authoring_steps=15000 incoming_steps=0 step_us=1790402 commit_us=27984679 reads_us=0 flushes=7877
+measured subphases us/write admission=0.05 reduction=12.76 encoding=0.61 sql=65.19 (of step: adm 0% red 11% enc 1% sql 55%)
+measured step attribution us/write authoring=101.42 incoming=0.00 other=17.94
+measured checkpoints=5 truncating=0 mean_ms=10.4 max_ms=13.1 passive: wal_flush_ms=0.14 copy_ms=5.36 file_flush_ms=4.86 intervals=5 dropped_intervals=0
+measured samples total=15000 retained=15000 dropped_samples=0 p50_us=5796 p99_us=10390 p99_9_us=21059 max_us=29626 overlapping=46 (0.3%)
+measured tail overlap: p99 samples=150 overlapping=34 (22.7%); p99_9 samples=15 overlapping=9 (60.0%)
+measured latency no_checkpoint n=14954 p50_us=5792 p99_us=10078 p99_9_us=15975 max_us=29626 | checkpoint n=46 p50_us=15346 p99_us=29238 p99_9_us=29238 max_us=29238
+measured cpu: process_cpu=4.870s writer_thread_cpu=n/a wall=30.000s process_busy=16.2%
+measured storage: db_bytes=79863808 wal_bytes=59196192 page_size=4096 page_count=19498 freelist_count=237 free_pages=1.22%
+control: rate=1000/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=false strong=false checkpoint_frames=16384
+control scheduled local writes: n=30000 throughput=1000/s p50_us<=7700 p99_us<=16200 max_us=41026
+control scheduled local writes: p99_9_us<=31500
+control: offered=30000 completed=30000 dropped_sends=0 max_send_lag_ms=6.205
+control writer steps=30000 authoring_steps=0 incoming_steps=0 step_us=2685762 commit_us=27054701 reads_us=0 flushes=7250
+control subphases us/write admission=0.00 reduction=0.00 encoding=0.00 sql=0.00 (of step: adm 0% red 0% enc 0% sql 0%)
+control step attribution us/write authoring=0.00 incoming=0.00 other=89.53
+control checkpoints=7 truncating=0 mean_ms=13.9 max_ms=20.8 passive: wal_flush_ms=0.62 copy_ms=7.54 file_flush_ms=5.67 intervals=0 dropped_intervals=0
+control samples total=30000 retained=30000 dropped_samples=0 p50_us=6383 p99_us=14954 p99_9_us=30357 max_us=39675 overlapping=0 (0.0%)
+control tail overlap: p99 samples=300 overlapping=0 (0.0%); p99_9 samples=30 overlapping=0 (0.0%)
+control latency no_checkpoint n=30000 p50_us=6383 p99_us=14954 p99_9_us=30357 max_us=39675 | checkpoint n=0 p50_us=0 p99_us=0 p99_9_us=0 max_us=0
+control cpu: process_cpu=6.290s writer_thread_cpu=n/a wall=30.000s process_busy=21.0%
+control storage: db_bytes=84815872 wal_bytes=34830512 page_size=4096 page_count=20707 freelist_count=0 free_pages=0.00%
+measured: rate=1000/s duration_s=30 tables=2000 files=1 durability=Full group=128 instrument=true strong=false checkpoint_frames=16384
+measured scheduled local writes: n=30000 throughput=1000/s p50_us<=7100 p99_us<=12600 max_us=37648
+measured scheduled local writes: p99_9_us<=27700
+measured: offered=30000 completed=30000 dropped_sends=0 max_send_lag_ms=4.347
+measured writer steps=30000 authoring_steps=30000 incoming_steps=0 step_us=2230275 commit_us=27531344 reads_us=0 flushes=7455
+measured subphases us/write admission=0.01 reduction=5.40 encoding=0.17 sql=42.82 (of step: adm 0% red 7% enc 0% sql 58%)
+measured step attribution us/write authoring=62.15 incoming=0.00 other=12.20
+measured checkpoints=7 truncating=0 mean_ms=14.0 max_ms=20.1 passive: wal_flush_ms=1.58 copy_ms=6.29 file_flush_ms=6.09 intervals=7 dropped_intervals=0
+measured samples total=30000 retained=30000 dropped_samples=0 p50_us=5799 p99_us=11917 p99_9_us=26571 max_us=37149 overlapping=156 (0.5%)
+measured tail overlap: p99 samples=300 overlapping=123 (41.0%); p99_9 samples=30 overlapping=30 (100.0%)
+measured latency no_checkpoint n=29844 p50_us=5794 p99_us=10983 p99_9_us=15683 max_us=19292 | checkpoint n=156 p50_us=18832 p99_us=36102 p99_9_us=37149 max_us=37149
+measured cpu: process_cpu=5.470s writer_thread_cpu=n/a wall=30.000s process_busy=18.2%
+measured storage: db_bytes=84598784 wal_bytes=43301232 page_size=4096 page_count=20654 freelist_count=0 free_pages=0.00%

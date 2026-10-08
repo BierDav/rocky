@@ -1,0 +1,1083 @@
+//! Definition generations: projection plans and signed upgrades.
+use super::*;
+use crate::replica::migrate::PlanStage;
+use crate::sql::SqlOptions;
+use crate::storage::rows;
+use rocky_core::{
+    Affinity, Collation, ColumnClass, DomainId, Generation, GenerationTransition, IndexColumn,
+    LogicalColumn, LogicalIndex, LogicalSchema, LogicalTable, ROW_IDENTITY_SCHEMA_FORMAT,
+    RowApplication, SchemaSource, Scope, SqlValue, TableClass, TypedRows, UpdatePolicy,
+};
+use rocky_credentials::SignedTransition;
+use std::collections::BTreeMap;
+
+const DOMAIN: DomainId = DomainId([1; 16]);
+
+fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
+    LogicalColumn {
+        logical: name.into(),
+        sql_name: name.into(),
+        affinity,
+        not_null,
+        default: None,
+        collation: Collation::Binary,
+        class: ColumnClass::Mergeable,
+    }
+}
+fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
+    columns.push(column("id", Affinity::Integer, true));
+    let mut kind = column("row_kind", Affinity::Integer, true);
+    kind.default = Some("0".into());
+    columns.push(kind);
+    let sql: Vec<String> = columns
+        .iter()
+        .map(|column| {
+            let kind = if column.affinity == Affinity::Integer {
+                "INTEGER"
+            } else {
+                "TEXT"
+            };
+            let null = if column.not_null { " NOT NULL" } else { "" };
+            let key = if column.logical == "key" {
+                " PRIMARY KEY"
+            } else {
+                ""
+            };
+            format!(
+                "{} {kind}{null}{key}{}",
+                column.sql_name,
+                column
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" DEFAULT {value}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
+    LogicalTable {
+        logical: name.into(),
+        sql_name: name.into(),
+        class: TableClass::Mergeable,
+        create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
+        auto_generate: false,
+        columns,
+        primary_key: vec!["key".into()],
+        partition_by: Vec::new(),
+        indexes: vec![LogicalIndex {
+            name: format!("{name}_identity"),
+            unique: true,
+            columns: vec![IndexColumn {
+                name: "id".into(),
+                descending: false,
+            }],
+            create_sql: format!("CREATE UNIQUE INDEX {name}_identity ON {name}(id)"),
+            on_conflict: None,
+        }],
+        foreign_keys: Vec::new(),
+        reuses_keys: false,
+        existence_log: false,
+    }
+}
+fn text(value: &str) -> SqlValue {
+    SqlValue::Text(value.into())
+}
+
+/// Generation 1 has `items(id,title)`; 2 adds a nullable `note` and a
+/// `tags` table; 3 adds a nullable `rank`.
+struct Lineage {
+    publisher: PrivateKey,
+    domain: Scope,
+}
+impl Lineage {
+    fn new() -> Self {
+        let publisher = PrivateKey::new();
+        let domain = Scope {
+            mesh: MeshId([1; 16]),
+            app: rocky_core::ApplicationManifest::app_id(
+                *publisher.public_key().as_bytes(),
+                "lineage",
+            ),
+            domain: DOMAIN,
+        };
+        Self { publisher, domain }
+    }
+    fn schema(&self, generation: u32) -> LogicalSchema {
+        let mut items = vec![
+            column("key", Affinity::Text, true),
+            column("title", Affinity::Text, true),
+        ];
+        if generation >= 2 {
+            items.push(column("note", Affinity::Text, false));
+        }
+        if generation >= 3 {
+            items.push(column("rank", Affinity::Integer, false));
+        }
+        let mut tables = vec![table("items", items)];
+        if generation >= 2 {
+            tables.push(table(
+                "tags",
+                vec![
+                    column("key", Affinity::Text, true),
+                    column("label", Affinity::Text, true),
+                ],
+            ));
+        }
+        LogicalSchema {
+            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            publisher: *self.publisher.public_key().as_bytes(),
+            application: "lineage".into(),
+            source: SchemaSource {
+                kind: "test".into(),
+                version: generation,
+                identity: "lineage".into(),
+            },
+            update_policy: UpdatePolicy::Changed,
+            tables,
+            views: Vec::new(),
+        }
+    }
+    /// Generation 1 with an index on `title`: a local change.
+    fn indexed(&self) -> LogicalSchema {
+        let mut schema = self.schema(1);
+        schema.tables[0].indexes.push(LogicalIndex {
+            name: "items_title".into(),
+            unique: false,
+            columns: vec![IndexColumn {
+                name: "title".into(),
+                descending: false,
+            }],
+            create_sql: "CREATE INDEX items_title ON items(title)".into(),
+            on_conflict: None,
+        });
+        schema
+    }
+    fn app(&self, generation: u32) -> TypedRows {
+        let schema = self.schema(generation);
+        let items = schema.table("items").unwrap();
+        let added = items
+            .columns
+            .iter()
+            .filter(|column| ["note", "rank"].contains(&column.logical.as_str()))
+            .map(|column| schema.field_id(items, column))
+            .collect();
+        TypedRows::new(schema.clone(), vec![DOMAIN])
+            .unwrap()
+            .at_generation(generation, added)
+            .unwrap()
+    }
+    fn definition(&self, generation: u32) -> rocky_core::ApplicationManifest {
+        self.app(generation).manifest()
+    }
+    fn manifest(&self, generation: u32) -> SignedManifest {
+        SignedManifest::sign(&self.definition(generation), &self.publisher).unwrap()
+    }
+    fn policy(&self, generation: u32) -> SignedPolicy {
+        SignedPolicy::sign(
+            PolicyStatement {
+                manifest: self.definition(generation).hash(),
+                epoch: 1,
+                revoked: BTreeSet::new(),
+            },
+            &self.publisher,
+        )
+        .unwrap()
+    }
+    fn transition(&self, from: u32, horizon: u32) -> SignedTransition {
+        let at = |generation| Generation {
+            schema: generation,
+            handler: 1,
+        };
+        SignedTransition::sign(
+            &GenerationTransition {
+                app: self.domain.app,
+                from: self.definition(from).hash(),
+                to: self.definition(from + 1).hash(),
+                before: at(from),
+                after: at(from + 1),
+                horizon,
+            },
+            &self.publisher,
+        )
+        .unwrap()
+    }
+    fn scope(&self, name: &str) -> ResourceScope {
+        let schema = self.schema(3);
+        ResourceScope {
+            domain: self.domain,
+            encryption: rocky_core::commitment("lineage.readers", name.as_bytes()),
+            table: schema.table_id(schema.table(name).unwrap()),
+        }
+    }
+    fn readers(&self, generation: u32) -> BTreeMap<String, Commitment> {
+        self.schema(generation)
+            .tables
+            .iter()
+            .map(|table| {
+                (
+                    table.sql_name.clone(),
+                    self.scope(&table.sql_name).encryption,
+                )
+            })
+            .collect()
+    }
+    fn grants(&self, generation: u32) -> Vec<ResourceGrant> {
+        let schema = self.schema(generation);
+        schema
+            .tables
+            .iter()
+            .map(|table| {
+                let fields: Vec<_> = table
+                    .columns
+                    .iter()
+                    .map(|column| schema.field_id(table, column))
+                    .collect();
+                grant(
+                    self.scope(&table.sql_name),
+                    &[
+                        Right::Read,
+                        Right::Insert,
+                        Right::Update,
+                        Right::Delete,
+                        Right::Custody,
+                    ],
+                    &fields,
+                )
+            })
+            .collect()
+    }
+    fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
+        let user = PrivateKey::new();
+        let manifest = self.definition(generation).hash();
+        let capability = |subject, kind, delegations| Capability {
+            manifest,
+            subject,
+            kind,
+            grants: self.grants(generation),
+            not_before: 0,
+            expires: u64::MAX,
+            epoch: 1,
+            delegations,
+            extension: None,
+        };
+        CredentialChain(vec![
+            SignedCapability::sign(
+                capability(user.public_key(), PrincipalKind::User, 1),
+                &self.publisher,
+            )
+            .unwrap(),
+            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)
+                .unwrap(),
+        ])
+    }
+    fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
+        let keys = ["items", "tags"]
+            .iter()
+            .take(if generation >= 2 { 2 } else { 1 })
+            .enumerate()
+            .map(|(index, name)| KeyMaterial {
+                scope: self.scope(name),
+                generation: 1,
+                key: [40 + index as u8; 32],
+            })
+            .collect();
+        SecureConfig {
+            publisher: self.publisher.public_key(),
+            manifest: self.manifest(generation),
+            policy: self.policy(generation),
+            node: node.clone(),
+            credentials: self.credentials(generation, node),
+            keys,
+        }
+    }
+    /// The upgrade from `from` to `to`, with every intermediate step.
+    fn upgrade(&self, from: u32, to: u32, horizon: u32) -> Upgrade {
+        Upgrade {
+            steps: (from..to)
+                .map(|generation| GenerationStep {
+                    manifest: self.manifest(generation),
+                    policy: self.policy(generation),
+                    transition: self.transition(generation, horizon.min(generation)),
+                })
+                .collect(),
+            tables: Some((self.schema(to), self.domain, self.readers(to))),
+        }
+    }
+    async fn open(
+        &self,
+        path: &std::path::Path,
+        node: &PrivateKey,
+        generation: u32,
+        upgrade: Option<Upgrade>,
+    ) -> Result<EncryptedReplica<TypedRows>, Error> {
+        let replica = EncryptedReplica::open_upgrading(
+            path,
+            self.app(generation),
+            self.config(generation, node),
+            upgrade,
+        )
+        .await?;
+        replica
+            .install_tables(
+                self.schema(generation),
+                self.domain,
+                self.readers(generation),
+            )
+            .await?;
+        self.register_authors(&replica, generation, node).await?;
+        Ok(replica)
+    }
+    async fn register_authors(
+        &self,
+        replica: &EncryptedReplica<TypedRows>,
+        generation: u32,
+        node: &PrivateKey,
+    ) -> Result<(), Error> {
+        for table in self.schema(generation).tables {
+            let material = rocky_core::commitment(&table.sql_name, node.as_bytes());
+            let key = PrivateKey::from_bytes(&material);
+            let number =
+                (u32::from_le_bytes(material[..4].try_into().unwrap()) & 0x7fff_ffff).max(1);
+            let grants: Vec<_> = self
+                .grants(generation)
+                .into_iter()
+                .filter(|grant| grant.scope == self.scope(&table.sql_name))
+                .collect();
+            let assigner = PrivateKey::new();
+            let root = crate::credentials::Authority {
+                publisher: &self.publisher,
+                manifest: self.definition(generation).hash(),
+            }
+            .issue_terms(
+                assigner.public_key(),
+                grants.clone(),
+                (1, Some(crate::credentials::AuthorRange::ALL)),
+                1,
+                (0, u64::MAX, 0),
+            )
+            .unwrap();
+            let chain = CredentialChain(vec![root])
+                .assign(
+                    &assigner,
+                    key.public_key(),
+                    number,
+                    node.public_key(),
+                    grants,
+                    u64::MAX,
+                    (0, u64::MAX, 0),
+                )
+                .unwrap();
+            replica.register_row_author(key, chain).await?;
+        }
+        Ok(())
+    }
+}
+async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
+    let scopes = {
+        let inner = replica.inner.lock().await;
+        inner.config.keys.iter().map(|key| key.scope).collect()
+    };
+    replica
+        .session(scopes)
+        .await
+        .unwrap()
+        .sql(SqlOptions::default())
+        .await
+        .unwrap()
+}
+async fn select(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
+    session(replica).await.run(sql, vec![]).await.unwrap().rows
+}
+async fn identity_insert(
+    session: &SecureSql<TypedRows>,
+    sql: &str,
+    mut values: Vec<SqlValue>,
+) -> Result<SecureRows, Error> {
+    let implicit = session.state().await == crate::sql::SqlState::Idle;
+    if implicit {
+        session.run("BEGIN", vec![]).await?;
+    }
+    let result = async {
+        let (head, tail) = sql.split_once(" VALUES").unwrap();
+        let name = head
+            .trim_start_matches("INSERT INTO ")
+            .split('(')
+            .next()
+            .unwrap();
+        let columns = match head.split_once('(') {
+            Some((_, columns)) => columns.trim_end_matches(')').to_string(),
+            None => session
+                .catalog()
+                .into_iter()
+                .find(|table| table.name == name)
+                .unwrap()
+                .columns
+                .iter()
+                .filter(|column| !["id", "row_kind"].contains(&column.name.as_str()))
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        let id = session.next_id(name).await?;
+        let tail = tail.trim().trim_end_matches(')');
+        // The allocator value is a checked integer; embed it without changing positional bindings.
+        let rewritten = format!(
+            "INSERT INTO {name}({columns},id) VALUES{tail},{})",
+            id.integer()
+        );
+        session.run(&rewritten, std::mem::take(&mut values)).await
+    }
+    .await;
+    if implicit {
+        match result {
+            Ok(mut result) => {
+                result.committed = session.run("COMMIT", vec![]).await?.committed;
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = session.run("ROLLBACK", vec![]).await;
+                Err(error)
+            }
+        }
+    } else {
+        result
+    }
+}
+async fn insert(replica: &EncryptedReplica<TypedRows>, ids: std::ops::Range<usize>) {
+    let session = session(replica).await;
+    session.run("BEGIN IMMEDIATE", vec![]).await.unwrap();
+    for id in ids.clone() {
+        identity_insert(
+            &session,
+            "INSERT INTO items(key,title) VALUES(?,?)",
+            vec![text(&format!("{id:04}")), text(&format!("title {id}"))],
+        )
+        .await
+        .unwrap();
+    }
+    session
+        .commit(rocky_core::commitment(
+            "generations.insert",
+            format!("{ids:?}").as_bytes(),
+        ))
+        .await
+        .unwrap();
+}
+/// Every frame `target` may receive from `source`, page by page.
+async fn frames(
+    source: &EncryptedReplica<TypedRows>,
+    target: &EncryptedReplica<TypedRows>,
+    scope: ResourceScope,
+) -> Vec<EncryptedFrame> {
+    let (node, credentials) = {
+        let inner = target.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    frames_as(source, node, &credentials, scope).await
+}
+/// Every frame a node presenting `credentials` may receive from `source`.
+async fn frames_as(
+    source: &EncryptedReplica<TypedRows>,
+    node: PublicKey,
+    credentials: &CredentialChain,
+    scope: ResourceScope,
+) -> Vec<EncryptedFrame> {
+    let mut frames = Vec::new();
+    let mut after = None;
+    loop {
+        let page = source
+            .transfer_page(node, credentials, &[scope], after, MAX_SECURE_FRAME)
+            .await
+            .unwrap();
+        frames.extend(page.frames);
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return frames,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_local_plan_survives_an_interruption_at_every_step() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    for (round, stage) in [PlanStage::Create, PlanStage::Fill, PlanStage::Switch]
+        .into_iter()
+        .enumerate()
+    {
+        let path = dir.path().join(format!("{round}.db"));
+        let replica = lineage.open(&path, &node, 1, None).await.unwrap();
+        insert(&replica, 0..150).await;
+        insert(&replica, 150..300).await;
+        // A second fill step is interrupted: the first one committed.
+        replica
+            .inject_plan_fault(stage, usize::from(stage == PlanStage::Fill))
+            .await;
+        let failed = replica
+            .install_tables(lineage.indexed(), lineage.domain, lineage.readers(1))
+            .await;
+        assert!(matches!(failed, Err(Error::InjectedFailure)), "{failed:?}");
+        let pending = replica.projection_plan().await.unwrap().unwrap();
+        assert_eq!(pending.tables, 1);
+        assert_eq!(pending.filled, usize::from(stage == PlanStage::Switch));
+        // Nothing half-built is visible; the installed table still answers.
+        assert_eq!(
+            select(&replica, "SELECT count(*) FROM items").await,
+            vec![vec![SqlValue::Integer(300)]]
+        );
+        // Another plan waits for this one.
+        let mut other = lineage.indexed();
+        other.tables[0].indexes[1].name = "items_by_title".into();
+        other.tables[0].indexes[1].create_sql =
+            "CREATE INDEX items_by_title ON items(title)".into();
+        let other = replica
+            .install_tables(other, lineage.domain, lineage.readers(1))
+            .await;
+        assert!(matches!(other, Err(Error::Incompatible(_))), "{other:?}");
+        // Writes between steps reach the shadow as well.
+        let writer = session(&replica).await;
+        writer
+            .run("UPDATE items SET title='changed' WHERE key='0001'", vec![])
+            .await
+            .unwrap();
+        writer
+            .run("DELETE FROM items WHERE key='0299'", vec![])
+            .await
+            .unwrap();
+        identity_insert(&writer, "INSERT INTO items VALUES('9999','late')", vec![])
+            .await
+            .unwrap();
+        drop(writer);
+        drop(replica);
+        // Reopening finishes the same plan before anything else runs.
+        let replica = EncryptedReplica::open(&path, lineage.app(1), lineage.config(1, &node))
+            .await
+            .unwrap();
+        assert_eq!(replica.projection_plan().await.unwrap(), None);
+        replica
+            .install_tables(lineage.indexed(), lineage.domain, lineage.readers(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            select(&replica, "SELECT count(*), max(key) FROM items").await,
+            vec![vec![SqlValue::Integer(300), text("9999")]]
+        );
+        assert_eq!(
+            select(&replica, "SELECT title FROM items WHERE key='0001'").await,
+            vec![vec![text("changed")]]
+        );
+        let indexes = {
+            let inner = replica.inner.lock().await;
+            rows(
+                &inner.conn,
+                "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='items' AND name NOT LIKE 'sqlite_%'",
+            )
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            indexes,
+            vec![vec![text("items_identity")], vec![text("items_title")]]
+        );
+        let status = replica.generations().await.unwrap();
+        assert_eq!(
+            status.current,
+            Generation {
+                schema: 1,
+                handler: 1
+            }
+        );
+        assert!(status.previous.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let replica = lineage
+        .open(&dir.path().join("a.db"), &PrivateKey::new(), 1, None)
+        .await
+        .unwrap();
+    insert(&replica, 0..10).await;
+    let mut events = replica.observe_revision();
+    let before = *events.borrow_and_update();
+    replica
+        .install_tables(lineage.indexed(), lineage.domain, lineage.readers(1))
+        .await
+        .unwrap();
+    assert!(*events.borrow() > before, "the switch is announced");
+    assert_eq!(
+        select(&replica, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(10)]]
+    );
+    let plan = {
+        let inner = replica.inner.lock().await;
+        rows(
+            &inner.conn,
+            "EXPLAIN QUERY PLAN SELECT key FROM items WHERE title='title 3'",
+        )
+        .await
+        .unwrap()
+    };
+    assert!(format!("{plan:?}").contains("items_title"), "{plan:?}");
+    // A schema the definition does not allow is refused before a plan.
+    let mut renamed = lineage.schema(1);
+    renamed.tables[0].columns[1].logical = "name".into();
+    assert!(matches!(
+        replica
+            .install_tables(renamed, lineage.domain, lineage.readers(1))
+            .await,
+        Err(Error::Incompatible(_))
+    ));
+    assert_eq!(replica.projection_plan().await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the_horizon() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice_path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&alice_path, &alice_key, 1, None)
+        .await
+        .unwrap();
+    let bob = lineage
+        .open(&dir.path().join("bob.db"), &bob_key, 1, None)
+        .await
+        .unwrap();
+    let items = lineage.scope("items");
+    insert(&alice, 0..2).await;
+    // Alice's second row has not left her device when she upgrades.
+    let sent = frames(&alice, &bob, items).await;
+    assert_eq!(sent.len(), 1);
+    for frame in sent {
+        assert_eq!(bob.receive(frame).await.unwrap(), ReceiveStatus::Applied);
+    }
+    insert(&alice, 2..3).await;
+    drop(alice);
+
+    // An unsupported change activates nothing.
+    let mut required = lineage.upgrade(1, 2, 1);
+    if let Some((schema, _, _)) = &mut required.tables {
+        schema.tables[0].columns[2].not_null = true;
+    }
+    assert!(
+        EncryptedReplica::open_upgrading(
+            &alice_path,
+            lineage.app(2),
+            lineage.config(2, &alice_key),
+            Some(required),
+        )
+        .await
+        .is_err()
+    );
+    // An activation interrupted before its commit leaves generation 1.
+    EncryptedReplica::<TypedRows>::fail_next_activation();
+    assert!(matches!(
+        lineage
+            .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+            .await,
+        Err(Error::InjectedFailure)
+    ));
+    let alice = lineage
+        .open(&alice_path, &alice_key, 1, None)
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().current.schema, 1);
+    drop(alice);
+
+    let alice = lineage
+        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .await
+        .unwrap();
+    let status = alice.generations().await.unwrap();
+    assert_eq!(
+        status.current,
+        Generation {
+            schema: 2,
+            handler: 1
+        }
+    );
+    assert_eq!(status.horizon, 1);
+    assert_eq!(status.previous.len(), 1);
+    // Existing rows gained the new column, empty; the new table exists.
+    assert_eq!(
+        select(&alice, "SELECT key,title,note FROM items ORDER BY key").await,
+        (0..3)
+            .map(|id| vec![
+                text(&format!("{id:04}")),
+                text(&format!("title {id}")),
+                SqlValue::Null
+            ])
+            .collect::<Vec<_>>()
+    );
+    let writer = session(&alice).await;
+    identity_insert(
+        &writer,
+        "INSERT INTO items VALUES('0100','new','with a note')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    identity_insert(&writer, "INSERT INTO tags VALUES('t','label')", vec![])
+        .await
+        .unwrap();
+    drop(writer);
+
+    // Bob, still at generation 1, receives Alice's pending generation 1
+    // row with its original bytes, and nothing of generation 2.
+    let sent = frames(&alice, &bob, items).await;
+    assert_eq!(sent.len(), 2);
+    let mut statuses = Vec::new();
+    for frame in sent {
+        statuses.push(bob.receive(frame).await.unwrap());
+    }
+    assert!(statuses.contains(&ReceiveStatus::Applied));
+    assert_eq!(
+        select(&bob, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+    // Bob's own generation 1 write is admitted by Alice. Bob cannot verify
+    // generation 2 credentials; Alice pulls with the ones she had before.
+    identity_insert(
+        &session(&bob).await,
+        "INSERT INTO items VALUES('0200','from bob')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let earlier = lineage.credentials(1, &alice_key);
+    for frame in frames_as(&bob, alice_key.public_key(), &earlier, items).await {
+        alice.receive(frame).await.unwrap();
+    }
+    assert_eq!(
+        select(&alice, "SELECT title,note FROM items WHERE key='0200'").await,
+        vec![vec![text("from bob"), SqlValue::Null]]
+    );
+    // A generation 2 frame forced on Bob is refused, and admitted once he
+    // upgrades.
+    let newer: Vec<_> = {
+        let inner = alice.inner.lock().await;
+        let (node, credentials) = (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        );
+        drop(inner);
+        alice
+            .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
+            .await
+            .unwrap()
+            .frames
+    };
+    let mut refused = 0;
+    for frame in newer {
+        if bob.receive(frame).await.is_err() {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 1, "only the generation 2 frame is refused");
+    assert_eq!(
+        select(&bob, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(4)]]
+    );
+    bob.audit(items).await.unwrap();
+    let bob_path = dir.path().join("bob.db");
+    drop(bob);
+    let bob = lineage
+        .open(&bob_path, &bob_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .await
+        .unwrap();
+    bob.audit(items).await.unwrap();
+    for frame in frames(&alice, &bob, items).await {
+        bob.receive(frame).await.unwrap();
+    }
+    bob.audit(items).await.unwrap();
+    assert_eq!(
+        select(&bob, "SELECT note FROM items WHERE key='0100'").await,
+        vec![vec![text("with a note")]]
+    );
+    // Reopening at generation 2 needs no upgrade; the audit replays the
+    // mixed history.
+    drop(bob);
+    let bob = lineage.open(&bob_path, &bob_key, 2, None).await.unwrap();
+    bob.audit(items).await.unwrap();
+
+    // Generation 3 moves the horizon to 2: a generation 1 device is refused
+    // explicitly, generation 2 devices are not.
+    let carol_key = PrivateKey::new();
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &carol_key, 1, None)
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&carol).await,
+        "INSERT INTO items VALUES('0300','stale')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    drop(alice);
+    let alice = lineage
+        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(2, 3, 2)))
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().horizon, 2);
+    let stale = frames_as(&carol, alice_key.public_key(), &earlier, items).await;
+    assert_eq!(stale.len(), 1);
+    for frame in stale {
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Incompatible(_))
+        ));
+    }
+    let (node, credentials) = {
+        let inner = carol.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    assert!(matches!(
+        alice
+            .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
+            .await,
+        Err(Error::Incompatible(_))
+    ));
+    let second = lineage.credentials(2, &alice_key);
+    for frame in frames_as(&bob, alice_key.public_key(), &second, items).await {
+        alice.receive(frame).await.unwrap();
+    }
+    alice.audit(items).await.unwrap();
+    assert_eq!(
+        select(&alice, "SELECT count(*), max(rank) FROM items").await,
+        vec![vec![SqlValue::Integer(5), SqlValue::Null]]
+    );
+}
+
+#[tokio::test]
+async fn a_checkpoint_of_the_previous_generation_rebootstraps_typed_rows_and_tombstones() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, bob_key, carol_key) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let alice_path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&alice_path, &alice_key, 1, None)
+        .await
+        .unwrap();
+    let bob = lineage
+        .open(&dir.path().join("bob.db"), &bob_key, 1, None)
+        .await
+        .unwrap();
+    let items = lineage.scope("items");
+    insert(&alice, 0..40).await;
+    let writer = session(&alice).await;
+    writer
+        .run("DELETE FROM items WHERE key='0003'", vec![])
+        .await
+        .unwrap();
+    writer
+        .run("UPDATE items SET title='kept' WHERE key='0004'", vec![])
+        .await
+        .unwrap();
+    drop(writer);
+    for frame in frames(&alice, &bob, items).await {
+        bob.receive(frame).await.unwrap();
+    }
+    let bob_credentials = lineage.credentials(1, &bob_key);
+    alice
+        .acknowledge_frontier(
+            bob_key.public_key(),
+            &bob_credentials,
+            &bob.frontier(items).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    alice
+        .set_retention_policy(
+            items,
+            RetentionPolicy {
+                required: [bob_key.public_key()].into(),
+                behind: [carol_key.public_key()].into(),
+                copies: 1,
+                window: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let signed = alice.checkpoint(items).await.unwrap();
+    assert!(alice.prune(items).await.unwrap().pruned > 0);
+    drop(alice);
+
+    // Alice moves to generation 2; her checkpoint is of generation 1.
+    let alice = lineage
+        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO items VALUES('0100','after','noted')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    // Carol starts at generation 2 with the lineage, and is behind Alice's
+    // horizon: she imports the generation 1 checkpoint, then catches up.
+    let carol_credentials = lineage.credentials(2, &carol_key);
+    let carol = EncryptedReplica::open_upgrading(
+        dir.path().join("carol.db"),
+        lineage.app(2),
+        lineage.config(2, &carol_key),
+        Some(lineage.upgrade(1, 2, 1)),
+    )
+    .await
+    .unwrap();
+    carol
+        .install_tables(lineage.schema(2), lineage.domain, lineage.readers(2))
+        .await
+        .unwrap();
+    let offered = alice
+        .checkpoint_offer(carol_key.public_key(), &carol_credentials, items)
+        .await
+        .unwrap()
+        .expect("a checkpoint");
+    assert_eq!(offered.id().unwrap(), signed.id().unwrap());
+    let checkpoint = offered.id().unwrap();
+    carol.begin_rebootstrap(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = alice
+            .checkpoint_page(
+                carol_key.public_key(),
+                &carol_credentials,
+                items,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        carol.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    carol.finish_rebootstrap(items).await.unwrap();
+    for frame in frames(&alice, &carol, items).await {
+        carol.receive(frame).await.unwrap();
+    }
+    carol.audit(items).await.unwrap();
+    assert_eq!(
+        select(&carol, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(40)]]
+    );
+    assert_eq!(
+        select(&carol, "SELECT title FROM items WHERE key='0004'").await,
+        vec![vec![text("kept")]]
+    );
+    assert_eq!(
+        select(&carol, "SELECT note FROM items WHERE key='0100'").await,
+        vec![vec![text("noted")]]
+    );
+    // The checkpoint retains the old numeric identity and its sequence mark.
+    let number = (u32::from_le_bytes(
+        rocky_core::commitment("items", alice_key.as_bytes())[..4]
+            .try_into()
+            .unwrap(),
+    ) & 0x7fff_ffff)
+        .max(1);
+    let old_id = rocky_core::RowIdentity::new(number, 4).unwrap();
+    assert!(
+        session(&carol)
+            .await
+            .run(
+                "INSERT INTO items(key,title,note,id) VALUES('0003','again',NULL,?)",
+                vec![SqlValue::Integer(old_id.integer())]
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (old_key, new_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice = lineage
+        .open(&dir.path().join("alice.db"), &old_key, 1, None)
+        .await
+        .unwrap();
+    insert(&alice, 0..3).await;
+    let copy = dir.path().join("copy.db");
+    alice.backup_into(&copy).await.unwrap();
+    assert!(alice.backup_into(&copy).await.is_err(), "never overwritten");
+    let restore = |node: &PrivateKey, predecessor: PublicKey| {
+        EncryptedReplica::open_restored(
+            &copy,
+            lineage.app(1),
+            lineage.config(1, node),
+            None,
+            predecessor,
+        )
+    };
+    assert!(restore(&old_key, old_key.public_key()).await.is_err());
+    assert!(
+        restore(&new_key, PrivateKey::new().public_key())
+            .await
+            .is_err()
+    );
+    // Copying a file is not opening it: its identity is the old node's.
+    assert!(
+        EncryptedReplica::open(&copy, lineage.app(1), lineage.config(1, &new_key))
+            .await
+            .is_err()
+    );
+    let restored = restore(&new_key, old_key.public_key()).await.unwrap();
+    restored
+        .install_tables(lineage.schema(1), lineage.domain, lineage.readers(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.predecessors().await.unwrap(),
+        [old_key.public_key()]
+    );
+    assert_eq!(
+        select(&restored, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+    lineage
+        .register_authors(&restored, 1, &new_key)
+        .await
+        .unwrap();
+    insert(&restored, 3..4).await;
+    let items = lineage.scope("items");
+    let authors: BTreeSet<_> = frames(&restored, &alice, items)
+        .await
+        .iter()
+        .map(|frame| frame.operation().unwrap().header.public_key)
+        .collect();
+    assert_eq!(
+        authors,
+        [
+            PrivateKey::from_bytes(&rocky_core::commitment("items", old_key.as_bytes()))
+                .public_key(),
+            PrivateKey::from_bytes(&rocky_core::commitment("items", new_key.as_bytes()))
+                .public_key()
+        ]
+        .into()
+    );
+    restored.audit(items).await.unwrap();
+    drop(restored);
+    // Rebinding happened once; reopening is ordinary.
+    let reopened = restore(&new_key, old_key.public_key()).await.unwrap();
+    assert_eq!(
+        reopened.predecessors().await.unwrap(),
+        [old_key.public_key()]
+    );
+}

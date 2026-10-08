@@ -1,0 +1,232 @@
+package rocky
+
+import java.io.File
+import kotlinx.serialization.json.*
+
+fun main(args: Array<String>) {
+    val samples = schema("samples") {
+        table("samples") {
+            text("sensor"); integer("sequence"); real("reading", nullable = true); blob("raw", nullable = true)
+            primaryKey("sensor", "sequence")
+            index("samples_by_reading", listOf(IndexColumn("reading", descending = true)))
+        }
+    }
+    val data = Json.parseToJsonElement(samples.definitionJson("09".repeat(32))).jsonObject
+    check(data.getValue("format").jsonPrimitive.int == 2)
+    check(runCatching { schema("reserved") { table("t") { text("id"); primaryKey("id") } } }.isFailure)
+    check(runCatching { schema("reserved") { table("t") { integer("row_kind"); primaryKey("id") } } }.isFailure)
+    val table = data.getValue("tables").jsonArray.single().jsonObject
+    check(table.getValue("primary_key").jsonArray.map { it.jsonPrimitive.content } == listOf("sensor", "sequence"))
+    check(table.getValue("columns").jsonArray.map { it.jsonObject.getValue("type").jsonPrimitive.content } == listOf("text", "integer", "real", "blob"))
+    check(table.getValue("indexes").jsonArray.single().jsonObject.getValue("columns").jsonArray.single().jsonObject.getValue("descending").jsonPrimitive.boolean)
+    check(runCatching { schema("bad") { table("bad") { text("x", nullable = true); primaryKey("x") } } }.isFailure)
+    File(args[0]).mkdirs()
+    File(args[0], "samples.json").writeText(samples.definitionJson("09".repeat(32)))
+    val root = File(args[1])
+    // Exports from before row identity carry a text id; they are refusal inputs, not edited exports.
+    val legacyShoppingExport = File(root, "sdks/kotlin/schema-qualification/fixtures/legacy/shopping-text-id.json").readText()
+    check(runCatching { schemaFromRoom("shopping", legacyShoppingExport) }.exceptionOrNull()?.message?.contains("id must be a non-null integer identity field") == true)
+    // The shopping entity's key is the id Rocky issues.
+    val shoppingExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/2.json").readText()
+    val shopping = schemaFromRoom("shopping", shoppingExport) {
+        table("shopping_items") { logical = "items"; configureColumn("title") { it.copy(logical = "label") } }
+    }
+    val handmade = schema("shopping", version = 2) {
+        table("shopping_items") {
+            text("title"); boolean("completed")
+            column(Column.text("searchTitle").copy(default = JsonPrimitive("")))
+            primaryKey("id"); index("index_shopping_items_completed_title", "completed", "title")
+            logical = "items"; configureColumn("title") { it.copy(logical = "label") }
+        }
+    }
+    check(shopping.definitionJson("09".repeat(32)) == handmade.definitionJson("09".repeat(32)))
+    check(shopping.json() == handmade.json())
+    File(args[0], "shopping-import.json").writeText(shopping.definitionJson("09".repeat(32)))
+    File(args[0], "shopping-hand.json").writeText(handmade.definitionJson("09".repeat(32)))
+    val original = Json.parseToJsonElement(shoppingExport).jsonObject
+    fun changed(export: JsonObject = original, change: (JsonObject) -> JsonObject): String {
+        val database = export.getValue("database").jsonObject
+        val entities = database.getValue("entities").jsonArray
+        return JsonObject(export + ("database" to JsonObject(database + ("entities" to JsonArray(listOf(change(entities.first().jsonObject)) + entities.drop(1)))))).toString()
+    }
+    fun rejected(source: String, reason: String, table: String = "shopping_items") {
+        val message = runCatching { schemaFromRoom("shopping", source) }.exceptionOrNull()?.message ?: error("accepted $reason")
+        check(table in message && reason in message) { message }
+    }
+    fun JsonObject.sql(change: (String) -> String) = JsonObject(this + ("createSql" to JsonPrimitive(change(getValue("createSql").jsonPrimitive.content))))
+    fun JsonObject.withoutField(name: String) = JsonObject(this + ("fields" to JsonArray(getValue("fields").jsonArray.filter { it.jsonObject.getValue("columnName").jsonPrimitive.content != name })))
+    // Room never assigns row ids: autoGenerate is refused, with or without its AUTOINCREMENT SQL.
+    rejected(changed { entity -> JsonObject(entity + ("primaryKey" to JsonObject(entity.getValue("primaryKey").jsonObject + ("autoGenerate" to JsonPrimitive(true))))) }, "autoGenerate = true is refused")
+    rejected(changed { entity -> entity.sql { it.replace("`id` INTEGER NOT NULL", "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL").replace(", PRIMARY KEY(`id`)", "") } }, "unsupported SQL")
+    // Every entity carries both identity fields, as non-null integers.
+    rejected(changed { entity -> entity.withoutField("row_kind").sql { it.replace(", `row_kind` INTEGER NOT NULL", "") } }, "declare Rocky's id and row_kind fields; row_kind is missing")
+    rejected(changed { entity ->
+        val fields = entity.getValue("fields").jsonArray.map { field ->
+            if (field.jsonObject.getValue("columnName").jsonPrimitive.content != "row_kind") field
+            else JsonObject(field.jsonObject - "notNull")
+        }
+        JsonObject(entity + ("fields" to JsonArray(fields))).sql { it.replace("`row_kind` INTEGER NOT NULL", "`row_kind` INTEGER") }
+    }, "row_kind must be a non-null integer identity field")
+    rejected(changed { JsonObject(it + ("ftsVersion" to JsonPrimitive("FTS4"))) }, "unsupported entity")
+    rejected(changed { entity -> entity.sql { it.replace("`title` TEXT NOT NULL", "`title` TEXT NOT NULL CHECK(length(title)>0)") } }, "unsupported SQL")
+    rejected(changed { entity -> entity.sql { "$it WITHOUT ROWID" } }, "trailing SQL")
+    rejected(changed { entity -> JsonObject(entity + ("foreignKeys" to JsonArray(listOf(buildJsonObject { put("table", "other") })))) }, "columns")
+    rejected(changed { entity ->
+        val index = entity.getValue("indices").jsonArray.first().jsonObject
+        JsonObject(entity + ("indices" to JsonArray(listOf(JsonObject(index + ("unique" to JsonPrimitive(true)))))))
+    }, "expected UNIQUE")
+    rejected(changed { entity ->
+        val fields = entity.getValue("fields").jsonArray
+        JsonObject(entity + ("fields" to JsonArray(listOf(JsonObject(fields.first().jsonObject + ("affinity" to JsonPrimitive("BLOB")))) + fields.drop(1))))
+    }, "expected BLOB")
+    rejected(changed { entity ->
+        val index = entity.getValue("indices").jsonArray.first().jsonObject
+        val sql = index.getValue("createSql").jsonPrimitive.content
+        JsonObject(entity + ("indices" to JsonArray(listOf(JsonObject(index + ("createSql" to JsonPrimitive("$sql WHERE completed = 0")))))))
+    }, "unsupported SQL")
+    rejected(changed { entity ->
+        val fields = entity.getValue("fields").jsonArray
+        JsonObject(entity + ("fields" to JsonArray(fields.map { field ->
+            if (field.jsonObject.getValue("columnName").jsonPrimitive.content != "title") field
+            else JsonObject(field.jsonObject + ("defaultValue" to JsonPrimitive("CURRENT_TIMESTAMP")))
+        })))
+    }, "unsupported default")
+    val database = original.getValue("database").jsonObject
+    val withView = JsonObject(original + ("database" to JsonObject(database + ("views" to JsonArray(listOf(buildJsonObject { put("viewName", "partial_items"); put("createSql", "SELECT * FROM shopping_items") })))))).toString()
+    check(runCatching { schemaFromRoom("shopping", withView) }.exceptionOrNull()?.message?.contains("partial_items") == true)
+    val scalarDefaults = changed { entity ->
+        val fields = entity.getValue("fields").jsonArray.map { field ->
+            if (field.jsonObject.getValue("columnName").jsonPrimitive.content == "completed")
+                JsonObject(field.jsonObject + ("defaultValue" to JsonPrimitive("0"))) else field
+        }
+        JsonObject(entity + ("fields" to JsonArray(fields))).sql { it.replace("`completed` INTEGER NOT NULL", "`completed` INTEGER NOT NULL DEFAULT 0") }
+    }
+    val importedDefaults = schemaFromRoom("defaults", scalarDefaults)
+    val manualDefaults = schema("defaults", 2) {
+        table("shopping_items") {
+            text("title")
+            column(Column.boolean("completed").copy(default = JsonPrimitive(false), logical = "completed"))
+            column(Column.text("searchTitle").copy(default = JsonPrimitive("")))
+            primaryKey("id"); index("index_shopping_items_completed_title", "completed", "title")
+            logical = "shopping_items"
+        }
+    }
+    check(importedDefaults.definitionJson("09".repeat(32)) == manualDefaults.definitionJson("09".repeat(32)))
+    val legacyMarketExport = File(root, "sdks/kotlin/schema-qualification/fixtures/legacy/market-text-id.json").readText()
+    check(runCatching { schemaFromRoom("market", legacyMarketExport) }.isFailure)
+    // Natural keys: each entity declares the identity index Rocky creates, by Rocky's name for it.
+    val marketExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.MarketDatabase/2.json").readText()
+    val importedMarket = schemaFromRoom("market", marketExport)
+    val market = schema("market", 2) {
+        table("listings") { text("key"); text("title"); text("note"); integer("price", nullable = true); primaryKey("key") }
+        table("memos") { text("key"); text("memo"); primaryKey("key") }
+        table("stock") { text("key"); integer("remaining"); primaryKey("key") }
+        table("holds") { text("key"); integer("reserved"); primaryKey("key") }
+    }
+    check(importedMarket.definitionJson("09".repeat(32)) == market.definitionJson("09".repeat(32)))
+    val marketJson = Json.parseToJsonElement(marketExport).jsonObject
+    fun JsonObject.identityIndex(change: (JsonObject) -> JsonObject?) = JsonObject(this + ("indices" to JsonArray(getValue("indices").jsonArray.mapNotNull { change(it.jsonObject) })))
+    rejected(changed(marketJson) { entity -> entity.identityIndex { null } }, "declare the identity index @Index(value = [\"id\"], unique = true, name = \"listings_identity\")", "listings")
+    rejected(changed(marketJson) { entity ->
+        entity.identityIndex { index ->
+            JsonObject(index + ("name" to JsonPrimitive("index_listings_id")) + ("createSql" to JsonPrimitive("CREATE UNIQUE INDEX IF NOT EXISTS `index_listings_id` ON `\${TABLE_NAME}` (`id`)")))
+        }
+    }, "name the identity index listings_identity", "listings")
+    // With the id as primary key there is no identity index to declare.
+    rejected(changed { entity ->
+        JsonObject(entity + ("indices" to JsonArray(entity.getValue("indices").jsonArray + buildJsonObject {
+            put("name", "shopping_items_identity"); put("unique", true); put("columnNames", JsonArray(listOf(JsonPrimitive("id")))); put("orders", JsonArray(emptyList()))
+            put("createSql", "CREATE UNIQUE INDEX IF NOT EXISTS `shopping_items_identity` ON `\${TABLE_NAME}` (`id`)")
+        })))
+    }, "the primary key id needs no identity index")
+    val sampleExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.SampleDatabase/1.json").readText()
+    val partitionExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.PartitionDatabase/1.json").readText()
+    val importedPartitions = schemaFromRoom("partitionroom", partitionExport) { table("partition_samples") { partitionBy("sensor") } }
+    val partitions = schema("partitionroom") {
+        table("partition_samples") { text("sensor"); integer("sequence"); integer("reading"); primaryKey("sensor", "sequence"); partitionBy("sensor") }
+        view("partial_partition_samples", "SELECT * FROM partition_samples WHERE row_kind = 0")
+    }
+    check(partitions.definitionJson("09".repeat(32)) == importedPartitions.definitionJson("09".repeat(32)))
+    for ((name, declaration) in listOf("partitions-hand" to partitions, "partitions-import" to importedPartitions)) {
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    }
+    val importedSamples = schemaFromRoom("samples", sampleExport)
+    check(importedSamples.definitionJson("09".repeat(32)) == samples.definitionJson("09".repeat(32)))
+    for ((name, declaration) in listOf("samples-import" to importedSamples, "market-import" to importedMarket, "market-hand" to market))
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+    for ((name, declaration) in listOf("samples" to samples, "samples-import" to importedSamples,
+        "shopping-hand" to handmade, "shopping-import" to shopping, "market-hand" to market, "market-import" to importedMarket))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    val constraintExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.ConstraintDatabase/1.json").readText()
+    val constrainedImport = schemaFromRoom("constraints", constraintExport) {
+        table("children") {
+            onConflict("index_children_code", Conflict.LatestWins)
+            onConflict("index_children_label", Conflict.SetNull)
+        }
+    }
+    val constrainedHand = schema("constraints") {
+        val parent = table("parents") { text("title"); primaryKey("id") }
+        table("children") {
+            text("code"); text("label", nullable = true); integer("parent"); integer("optional", nullable = true)
+            primaryKey("id")
+            unique("code", onConflict = Conflict.LatestWins)
+            unique("label", onConflict = Conflict.SetNull)
+            index("index_children_parent", "parent"); index("index_children_optional", "optional")
+            reference("parent", parent, onDelete = Delete.Cascade)
+            reference("optional", parent, onDelete = Delete.SetNull)
+        }
+    }
+    check(constrainedHand.definitionJson("09".repeat(32)) == constrainedImport.definitionJson("09".repeat(32)))
+    check(constrainedHand.json() == constrainedImport.json())
+    rejected(constraintExport, "needs onConflict", "children")
+    rejected(constraintExport.replace("CASCADE", "RESTRICT"), "onDelete RESTRICT", "children")
+    rejected(constraintExport.replace("SET NULL", "SET DEFAULT"), "onDelete SET DEFAULT", "children")
+    rejected(constraintExport.replace("\"referencedColumns\": [\n              \"id\"", "\"referencedColumns\": [\n            \"title\""), "must reference its id", "children")
+    for ((name, declaration) in listOf("constraints-hand" to constrainedHand, "constraints-import" to constrainedImport)) {
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    }
+    // A cross-scope reference: the parent's existence log is the author's visible choice.
+    val existenceImport = schemaFromRoom("constraints", constraintExport) {
+        table("parents") { existenceLog = true }
+        table("children") {
+            onConflict("index_children_code", Conflict.LatestWins)
+            onConflict("index_children_label", Conflict.SetNull)
+        }
+    }
+    val existenceHand = schema("constraints") {
+        val parent = table("parents") { text("title"); primaryKey("id"); existenceLog = true }
+        table("children") {
+            text("code"); text("label", nullable = true); integer("parent"); integer("optional", nullable = true)
+            primaryKey("id")
+            unique("code", onConflict = Conflict.LatestWins)
+            unique("label", onConflict = Conflict.SetNull)
+            index("index_children_parent", "parent"); index("index_children_optional", "optional")
+            reference("parent", parent, onDelete = Delete.Cascade)
+            reference("optional", parent, onDelete = Delete.SetNull)
+        }
+    }
+    check(existenceHand.definitionJson("09".repeat(32)) == existenceImport.definitionJson("09".repeat(32)))
+    check(existenceHand.json() == existenceImport.json())
+    check("\"existence_log\":true" in existenceHand.definitionJson("09".repeat(32)))
+    check("existence_log" !in constrainedHand.definitionJson("09".repeat(32)))
+    check(runCatching { schema("logs") { table("lists") { text("title"); primaryKey("title"); existenceLog = true } } }
+        .exceptionOrNull()?.message?.contains("keyed by id") == true)
+    for ((name, declaration) in listOf("existence-hand" to existenceHand, "existence-import" to existenceImport)) {
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    }
+    val reversed = schema("market", 2) {
+        table("holds") { text("key"); integer("reserved"); primaryKey("key") }
+        table("stock") { text("key"); integer("remaining"); primaryKey("key") }
+        table("memos") { text("key"); text("memo"); primaryKey("key") }
+        table("listings") { text("key"); text("title"); text("note"); integer("price", nullable = true); primaryKey("key") }
+    }
+    check(reversed.definitionJson("09".repeat(32)) == market.definitionJson("09".repeat(32)))
+    check(reversed.json() == market.json())
+    // Only format-2 tables exist: a register table without a key is refused before the engine sees it.
+    check(runCatching { Schema("legacy", tables = listOf(Table("t", listOf(Column.text("x"))))) }.exceptionOrNull()?.message ==
+        "every table declares a primary key; use the schema builder")
+    println("schema builder, existence log and shopping/market/scalar Room import qualification passed")
+}

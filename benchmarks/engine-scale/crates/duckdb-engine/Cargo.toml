@@ -1,0 +1,9 @@
+[package]
+name = "duckdb-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness.workspace = true
+duckdb = { version = "=1.10506.0", features = ["bundled"] }

@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/*", "examples/*", "benchmarks/runtime-scaling"]
+exclude = ["benchmarks/engine-comparison", "benchmarks/engine-scale", "examples/shoppinglist-app", "sdks/native"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+rocky-core = { path = "crates/rocky-core" }
+rocky-credentials = { path = "crates/rocky-credentials" }
+rocky-runtime = { path = "crates/rocky-runtime" }
+rocky-secure = { path = "crates/rocky-secure" }
+rocky-storage = { path = "crates/rocky-storage" }
+rocky-coordinator = { path = "crates/rocky-coordinator" }
+rocky-iroh = { path = "crates/rocky-iroh" }
+todo-app = { path = "examples/todo-app" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"

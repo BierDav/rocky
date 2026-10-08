@@ -1,0 +1,24 @@
+product:
+  type: kmp/lib
+  platforms: [jvm]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../rocky-room
+test-dependencies:
+  # The reference engine Room runs on in these tests.
+  - androidx.sqlite:sqlite-bundled:2.6.2
+settings:
+  kotlin:
+    freeCompilerArgs: [-Xexpect-actual-classes]
+    ksp:
+      processors:
+        - androidx.room:room-compiler:2.8.4
+      processorOptions:
+        room.schemaLocation: ./schemas
+plugins:
+  # Hand and Room-imported definitions must install equivalently in the native runtime.
+  rocky-qualification:
+    enabled: true
+    mainClass: rocky.SchemaQualificationKt
+    verify: [run, -p, rocky-sdk, --example, qualify_schema_builder, --locked, --]

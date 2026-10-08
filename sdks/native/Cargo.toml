@@ -1,0 +1,35 @@
+[package]
+name = "rocky-uniffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "rocky-bindgen"
+path = "src/bin/bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+default = ["iroh"]
+bindgen = ["uniffi/cli"]
+# The starter's iroh transport and `NativeEndpoint`. Without it the
+# database, sessions and application-supplied transports remain.
+iroh = ["rocky-sdk/iroh", "dep:tokio"]
+
+[dependencies]
+rocky-sdk = { path = "../../crates/rocky-sdk", default-features = false }
+# Only the in-process development coordinator; see `DevelopmentCoordinator`.
+rocky-coordinator = { path = "../../crates/rocky-coordinator", default-features = false }
+uniffi = "=0.32.2"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+# UniFFI-generated scaffolding allows unsafe FFI locally; authored code remains denied.
+unsafe_code = "deny"

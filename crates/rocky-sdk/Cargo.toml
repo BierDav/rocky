@@ -1,0 +1,38 @@
+[package]
+name = "rocky-sdk"
+description = "ORM-neutral native SDK lifecycle, generated typed schemas, enrollment and secure sync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["iroh"]
+# The iroh transport: handlers for an application's endpoint and the starter's
+# own, and the client of a coordination service reached over it.
+iroh = ["dep:rocky-iroh", "dep:rocky-coordinator"]
+
+[dependencies]
+rocky-core.workspace = true
+rocky-storage.workspace = true
+rocky-credentials.workspace = true
+rocky-runtime.workspace = true
+rocky-secure.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "=0.8.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "net", "io-util", "macros", "signal"] }
+data-encoding = "2"
+sha2 = "0.10"
+rocky-iroh = { workspace = true, optional = true }
+rocky-coordinator = { workspace = true, optional = true }
+
+[dev-dependencies]
+sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
+tokio = { version = "1", features = ["test-util"] }
+rocky-coordinator.workspace = true
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+tempfile = "3"
+
+[lints]
+workspace = true

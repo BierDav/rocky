@@ -1,0 +1,13 @@
+product:
+  type: kmp/lib
+  platforms: [jvm, android]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../rocky-core: exported
+  - androidx.sqlite:sqlite:2.6.2: exported
+test-dependencies:
+  - androidx.sqlite:sqlite-bundled:2.6.2
+settings:
+  android:
+    minSdk: 26

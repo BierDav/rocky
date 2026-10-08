@@ -1,0 +1,127 @@
+Pinned source: https://github.com/tursodatabase/turso/blob/v0.8.1/core/translate/emitter/mod.rs
+1332: /// Allocate the rowid for a CDC row into `dest_reg`. The CDC table's `change_id`
+1333: /// column is `INTEGER PRIMARY KEY`, so the rowid IS the change id.
+1334: ///
+1335: /// In MVCC journal mode the id is drawn from the CDC table's implicit
+1336: /// AUTOINCREMENT sequence. This makes change ids monotonic and never reused after
+1337: /// CDC rows are pruned, and registers each in-flight allocation with the MVCC
+1338: /// store so the sync push loop can call `sequence_watermark_experimental` to
+1339: /// avoid advancing the push watermark past a change id that a concurrent
+1340: /// transaction commits out of change-id order under snapshot isolation. In WAL
+1341: /// mode we keep the cheaper `NewRowid` (max rowid + 1) assignment; the WAL push
+1342: /// loop does not depend on the sequence watermark, so its insert path is
+1343: /// unchanged and pays no per-row sequence cost.
+1344: fn emit_cdc_change_id(
+1345:     program: &mut ProgramBuilder,
+1346:     resolver: &Resolver,
+1347:     cdc_cursor_id: usize,
+1348:     dest_reg: usize,
+1349: ) -> Result<()> {
+1350:     if !program.is_mvcc_enabled() {
+1351:         program.emit_insn(Insn::NewRowid {
+1352:             cursor: cdc_cursor_id,
+1353:             rowid_reg: dest_reg,
+1354:             prev_largest_reg: 0,
+1355:         });
+1356:         return Ok(());
+1357:     }
+1358:     let Some(cdc_table) = program
+1359:         .capture_data_changes_info()
+1360:         .as_ref()
+1361:         .map(|info| info.table.clone())
+1362:     else {
+1363:         return Err(crate::LimboError::InternalError(
+1364:             "CDC change-id allocation requested without an active CDC config".to_string(),
+1365:         ));
+1366:     };
+1367:     let seq_name = crate::schema::autoincrement_sequence_name(&cdc_table);
+1368:     let seq = resolver
+1369:         .with_schema(crate::MAIN_DB_ID, |s| s.get_sequence(&seq_name).cloned())
+1370:         .ok_or_else(|| {
+1371:             crate::LimboError::InternalError(format!(
+1372:                 "missing implicit AUTOINCREMENT sequence for CDC table \"{cdc_table}\""
+1373:             ))
+1374:         })?;
+1375:     crate::translate::sequence::emit_disk_read_nextval(
+1376:         program,
+1377:         resolver,
+1378:         crate::MAIN_DB_ID,
+1379:         &seq_name,
+1663: /// Emit a COMMIT record into the CDC table (v2 only).
+1664: /// change_type=2, all other data fields NULL.
+1665: pub fn emit_cdc_commit_insns(
+1666:     program: &mut ProgramBuilder,
+1667:     resolver: &Resolver,
+1668:     cdc_cursor_id: usize,
+1669: ) -> Result<()> {
+1670:     // v2 COMMIT record: (NULL, unixepoch(), conn_txn_id(-1), 2, NULL, NULL, NULL, NULL, NULL)
+1671:     let regs = program.alloc_registers(9);
+1672:     // reg+0: NULL (change_id, autoincrement)
+1673:     program.emit_insn(Insn::Null {
+1674:         dest: regs,
+1675:         dest_end: None,
+1676:     });
+1677:     program.mark_last_insn_constant();
+1678: 
+1679:     // reg+1: change_time = unixepoch()
+1680:     let unixepoch_fn_ctx = crate::function::FuncCtx {
+1681:         func: Func::Scalar(crate::function::ScalarFunc::UnixEpoch),
+1682:         arg_count: 0,
+1683:     };
+1684:     program.emit_insn(Insn::Function {
+1685:         constant_mask: 0,
+1686:         start_reg: 0,
+1687:         dest: regs + 1,
+1688:         func: unixepoch_fn_ctx,
+1689:     });
+1690: 
+1691:     // reg+2: change_txn_id = conn_txn_id(-1)
+1692:     // Pass -1 as candidate: if a txn_id exists, return it; if not, -1 is stored (and will be reset).
+1693:     let minus_one_reg = program.alloc_register();
+1694:     program.emit_int(-1, minus_one_reg);
+1695:     let conn_txn_id_fn_ctx = crate::function::FuncCtx {
+1696:         func: Func::Scalar(crate::function::ScalarFunc::ConnTxnId),
+1697:         arg_count: 1,
+1698:     };
+1699:     program.emit_insn(Insn::Function {
+1700:         constant_mask: 0,
+1701:         start_reg: minus_one_reg,
+1702:         dest: regs + 2,
+1703:         func: conn_txn_id_fn_ctx,
+1704:     });
+1705: 
+1706:     // reg+3: change_type = 2 (COMMIT)
+1707:     program.emit_int(2, regs + 3);
+1708:     program.mark_last_insn_constant();
+1709: 
+1710:     // reg+4..8: NULL (table_name, id, before, after, updates)
+1711:     program.emit_insn(Insn::Null {
+1712:         dest: regs + 4,
+1713:         dest_end: Some(regs + 8),
+1714:     });
+1715:     program.mark_last_insn_constant();
+1716: 
+1717:     // Allocate the COMMIT record's change id from the same source as row records
+1718:     // (the CDC AUTOINCREMENT sequence in MVCC mode) so COMMIT and row change ids
+1719:     // stay in one monotonic, never-reused stream.
+1720:     let rowid_reg = program.alloc_register();
+1721:     emit_cdc_change_id(program, resolver, cdc_cursor_id, rowid_reg)?;
+1722: 
+1723:     let record_reg = program.alloc_register();
+1724:     program.emit_insn(Insn::MakeRecord {
+1725:         start_reg: to_u32(regs),
+1726:         count: to_u32(9),
+1727:         dest_reg: to_u32(record_reg),
+1728:         index_name: None,
+1729:         affinity_str: None,
+1730:     });
+1731: 
+1732:     program.emit_insn(Insn::Insert {
+1733:         cursor: cdc_cursor_id,
+1734:         key_reg: rowid_reg,
+1735:         record_reg,
+1736:         flag: InsertFlags::new()
+1737:             .skip_last_rowid()
+1738:             .skip_statement_change_count(),
+1739:         table_name: "".to_string(),
+1740:     });

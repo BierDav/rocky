@@ -1,0 +1,47 @@
+{
+  "profile": "Local Apple M5 Pro instrumented growth arm rows-10k-observers-100",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "source_archive_sha256": "65dc1070ddaf3995769f1e4d9f9a2c866173725338af3af48419b5fe9205ff8c",
+  "binary_sha256": "0ce354af26c8971e50ab35ca09d99cf1aecb460bbb7f705e02a6c43323ed601c",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  "command": [
+    "target/release/scaling_probe",
+    "soak",
+    "--directory",
+    "benchmarks/runtime-scaling/evidence/writer-attribution-2026-10-06/growth/rows-10k-observers-100/data",
+    "--instrument",
+    "--tables",
+    "2000",
+    "--observers",
+    "100",
+    "--rows",
+    "10000",
+    "--seconds",
+    "300",
+    "--operations",
+    "150000",
+    "--interval",
+    "30",
+    "--durability",
+    "full"
+  ],
+  "raw_output": "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/evidence/writer-attribution-2026-10-06/growth/rows-10k-observers-100/soak.txt",
+  "started_unix": 1791239550.0,
+  "finished_unix": 1791240336.663558,
+  "exit_code": 0,
+  "qualification_gate": "phase 5 recheck; phase 8 pending",
+  "hardware": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac17,8\nhw.memsize: 51539607552\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   743Gi   154Gi    83%    2.8M  1.6G    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  }
+}

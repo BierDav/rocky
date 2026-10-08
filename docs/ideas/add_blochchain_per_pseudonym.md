@@ -1,0 +1,1 @@
+this allows us to verify that other pears only show us data that they want us to see and also the reuse of pseudonyms, which obfuscates pseudonyms (i think)

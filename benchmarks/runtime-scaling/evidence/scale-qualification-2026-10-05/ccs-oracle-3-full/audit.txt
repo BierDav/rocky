@@ -1,0 +1,3 @@
+soak audit domain=1 rows=563061 live=500000 operations=8699317 retained=1024 recomputed=true
+soak audit domain=2 rows=13354 live=5000 operations=1091148 retained=1024 recomputed=true
+soak audit domain=3 rows=13354 live=5000 operations=1091093 retained=1024 recomputed=true

@@ -1,0 +1,60 @@
+erp attrib: rate=100/s duration_s=60 tables=2000 files=1 durability=Full group=128 instrument=true strong=true checkpoint_frames=16384
+erp attrib scheduled local writes: n=6000 throughput=100/s p50_us<=5600 p99_us<=9500 max_us=28892
+erp attrib scheduled local writes: p99_9_us<=14500
+erp attrib strong commands: n=231 throughput=4/s p50_us<=17800 p99_us<=31400 max_us=32595
+erp attrib strong commands: p99_9_us<=32600
+erp attrib: offered=6000 completed=6000 dropped_sends=0 max_send_lag_ms=9.831
+erp attrib writer steps=7617 authoring_steps=6000 incoming_steps=0 step_us=834932 commit_us=23672962 reads_us=153082 flushes=7550
+erp attrib subphases us/write admission=0.06 reduction=13.62 encoding=1.07 sql=59.38 (of step: adm 0% red 10% enc 1% sql 43%)
+erp attrib step attribution us/write authoring=101.26 incoming=0.00 other=29.85
+erp attrib checkpoints=3 truncating=0 mean_ms=12.4 max_ms=18.4 passive: wal_flush_ms=2.06 copy_ms=4.84 file_flush_ms=5.45 intervals=3 dropped_intervals=0
+erp attrib samples total=6000 retained=6000 dropped_samples=0 p50_us=3462 p99_us=7302 p99_9_us=12285 max_us=26072 overlapping=7 (0.1%)
+erp attrib tail overlap: p99 samples=60 overlapping=4 (6.7%); p99_9 samples=6 overlapping=2 (33.3%)
+erp attrib latency no_checkpoint n=5993 p50_us=3462 p99_us=7247 p99_9_us=12015 max_us=26072 | checkpoint n=7 p50_us=10751 p99_us=21680 p99_9_us=21680 max_us=21680
+erp attrib cpu: process_cpu=3.380s writer_thread_cpu=n/a wall=60.000s process_busy=5.6%
+erp attrib storage: db_bytes=76959744 wal_bytes=62014272 page_size=4096 page_count=18789 freelist_count=142 free_pages=0.76%
+erp attrib: rate=250/s duration_s=60 tables=2000 files=1 durability=Full group=128 instrument=true strong=true checkpoint_frames=16384
+erp attrib scheduled local writes: n=15000 throughput=250/s p50_us<=5500 p99_us<=11500 max_us=42664
+erp attrib scheduled local writes: p99_9_us<=22700
+erp attrib strong commands: n=210 throughput=4/s p50_us<=41000 p99_us<=78700 max_us=89339
+erp attrib strong commands: p99_9_us<=89400
+erp attrib: offered=15000 completed=15000 dropped_sends=0 max_send_lag_ms=6.334
+erp attrib writer steps=16470 authoring_steps=15000 incoming_steps=0 step_us=1451410 commit_us=52583170 reads_us=142347 flushes=15457
+erp attrib subphases us/write admission=0.02 reduction=8.40 encoding=0.62 sql=47.26 (of step: adm 0% red 9% enc 1% sql 49%)
+erp attrib step attribution us/write authoring=75.27 incoming=0.00 other=19.57
+erp attrib checkpoints=9 truncating=0 mean_ms=9.0 max_ms=11.9 passive: wal_flush_ms=1.06 copy_ms=3.54 file_flush_ms=4.37 intervals=9 dropped_intervals=0
+erp attrib samples total=15000 retained=15000 dropped_samples=0 p50_us=3895 p99_us=9800 p99_9_us=21542 max_us=40792 overlapping=32 (0.2%)
+erp attrib tail overlap: p99 samples=150 overlapping=24 (16.0%); p99_9 samples=15 overlapping=2 (13.3%)
+erp attrib latency no_checkpoint n=14968 p50_us=3894 p99_us=9401 p99_9_us=18868 max_us=40792 | checkpoint n=32 p50_us=13212 p99_us=26820 p99_9_us=26820 max_us=26820
+erp attrib cpu: process_cpu=6.130s writer_thread_cpu=n/a wall=60.000s process_busy=10.2%
+erp attrib storage: db_bytes=80093184 wal_bytes=25502832 page_size=4096 page_count=19554 freelist_count=4 free_pages=0.02%
+erp attrib: rate=500/s duration_s=60 tables=2000 files=1 durability=Full group=128 instrument=true strong=true checkpoint_frames=16384
+erp attrib scheduled local writes: n=30000 throughput=500/s p50_us<=6900 p99_us<=70900 max_us=176075
+erp attrib scheduled local writes: p99_9_us<=141000
+erp attrib strong commands: n=190 throughput=3/s p50_us<=68700 p99_us<=357000 max_us=432277
+erp attrib strong commands: p99_9_us<=432300
+erp attrib: offered=30000 completed=30000 dropped_sends=0 max_send_lag_ms=8.345
+erp attrib writer steps=31330 authoring_steps=30000 incoming_steps=0 step_us=2944630 commit_us=56499686 reads_us=144925 flushes=14839
+erp attrib subphases us/write admission=0.02 reduction=6.59 encoding=0.40 sql=56.06 (of step: adm 0% red 7% enc 0% sql 57%)
+erp attrib step attribution us/write authoring=82.03 incoming=0.00 other=15.44
+erp attrib checkpoints=11 truncating=0 mean_ms=16.8 max_ms=35.0 passive: wal_flush_ms=1.72 copy_ms=9.14 file_flush_ms=5.87 intervals=11 dropped_intervals=0
+erp attrib samples total=30000 retained=30000 dropped_samples=0 p50_us=5860 p99_us=69645 p99_9_us=139843 max_us=175162 overlapping=152 (0.5%)
+erp attrib tail overlap: p99 samples=300 overlapping=0 (0.0%); p99_9 samples=30 overlapping=0 (0.0%)
+erp attrib latency no_checkpoint n=29848 p50_us=5854 p99_us=69827 p99_9_us=141069 max_us=175162 | checkpoint n=152 p50_us=21746 p99_us=55788 p99_9_us=58066 max_us=58066
+erp attrib cpu: process_cpu=8.550s writer_thread_cpu=n/a wall=60.000s process_busy=14.3%
+erp attrib storage: db_bytes=85934080 wal_bytes=29828832 page_size=4096 page_count=20980 freelist_count=0 free_pages=0.00%
+erp attrib: rate=1000/s duration_s=60 tables=2000 files=1 durability=Full group=128 instrument=true strong=true checkpoint_frames=16384
+erp attrib scheduled local writes: n=60000 throughput=1000/s p50_us<=8000 p99_us<=64500 max_us=149275
+erp attrib scheduled local writes: p99_9_us<=126800
+erp attrib strong commands: n=182 throughput=3/s p50_us<=77200 p99_us<=197500 max_us=342735
+erp attrib strong commands: p99_9_us<=342800
+erp attrib: offered=60000 completed=60000 dropped_sends=0 max_send_lag_ms=34.579
+erp attrib writer steps=61274 authoring_steps=60000 incoming_steps=0 step_us=6539485 commit_us=52398006 reads_us=155218 flushes=12270
+erp attrib subphases us/write admission=0.05 reduction=7.37 encoding=0.34 sql=62.85 (of step: adm 0% red 7% enc 0% sql 58%)
+erp attrib step attribution us/write authoring=90.39 incoming=0.00 other=18.21
+erp attrib checkpoints=14 truncating=0 mean_ms=25.1 max_ms=55.8 passive: wal_flush_ms=2.71 copy_ms=11.15 file_flush_ms=11.21 intervals=14 dropped_intervals=0
+erp attrib samples total=60000 retained=60000 dropped_samples=0 p50_us=6968 p99_us=60892 p99_9_us=125221 max_us=148009 overlapping=485 (0.8%)
+erp attrib tail overlap: p99 samples=600 overlapping=111 (18.5%); p99_9 samples=60 overlapping=0 (0.0%)
+erp attrib latency no_checkpoint n=59515 p50_us=6952 p99_us=55558 p99_9_us=125228 max_us=148009 | checkpoint n=485 p50_us=30285 p99_us=107682 p99_9_us=111221 max_us=111221
+erp attrib cpu: process_cpu=12.330s writer_thread_cpu=n/a wall=60.000s process_busy=20.6%
+erp attrib storage: db_bytes=96636928 wal_bytes=4556752 page_size=4096 page_count=23593 freelist_count=18 free_pages=0.08%

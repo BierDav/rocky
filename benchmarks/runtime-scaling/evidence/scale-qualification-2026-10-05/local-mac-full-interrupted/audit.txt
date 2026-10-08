@@ -1,0 +1,4 @@
+soak recovery reopen_ms=934
+soak recovery audit domain=1 rows=519277 applied=3006546 retained=5767 recomputed=true
+soak recovery audit domain=2 rows=7866 applied=377741 retained=1891 recomputed=true
+soak recovery audit domain=3 rows=7866 applied=377731 retained=1890 recomputed=true

@@ -1,0 +1,657 @@
+use anyhow::{Result, bail};
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::Aead};
+use ed25519_dalek::{Signer, SigningKey};
+use serde_json::json;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+enum Conn {
+    Sql(rusqlite::Connection),
+    Tur(turso::Connection, bool),
+}
+impl Conn {
+    async fn exec(&self, sql: &str) -> Result<()> {
+        match self {
+            Self::Sql(c) => {
+                c.execute_batch(sql)?;
+            }
+            Self::Tur(c, mvcc) => {
+                c.execute(
+                    if *mvcc && sql == "BEGIN" {
+                        "BEGIN CONCURRENT"
+                    } else {
+                        sql
+                    },
+                    (),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+    async fn rows(&self, sql: &str) -> Result<Vec<Vec<String>>> {
+        match self {
+            Self::Sql(c) => {
+                let mut s = c.prepare(sql)?;
+                let n = s.column_count();
+                let r = s.query_map([], |r| {
+                    (0..n)
+                        .map(|i| {
+                            Ok(match r.get_ref(i)? {
+                                rusqlite::types::ValueRef::Null => "NULL".into(),
+                                rusqlite::types::ValueRef::Integer(v) => v.to_string(),
+                                rusqlite::types::ValueRef::Real(v) => v.to_string(),
+                                rusqlite::types::ValueRef::Text(v) => {
+                                    String::from_utf8_lossy(v).into()
+                                }
+                                rusqlite::types::ValueRef::Blob(v) => format!("{v:?}"),
+                            })
+                        })
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })?;
+                Ok(r.collect::<rusqlite::Result<Vec<_>>>()?)
+            }
+            Self::Tur(c, _) => {
+                let mut r = c.query(sql, ()).await?;
+                let mut out = vec![];
+                while let Some(row) = r.next().await? {
+                    let mut v = vec![];
+                    for i in 0..row.column_count() {
+                        v.push(match row.get_value(i)? {
+                            turso::Value::Null => "NULL".into(),
+                            turso::Value::Integer(v) => v.to_string(),
+                            turso::Value::Real(v) => v.to_string(),
+                            turso::Value::Text(v) => v,
+                            turso::Value::Blob(v) => format!(
+                                "{:?}",
+                                turso::core::types::ImmutableRecordRef::from_bin_record(&v)
+                                    .get_values_owned()?
+                            ),
+                        });
+                    }
+                    out.push(v);
+                }
+                Ok(out)
+            }
+        }
+    }
+    async fn num(&self, sql: &str) -> Result<i64> {
+        Ok(self.rows(sql).await?[0][0].parse()?)
+    }
+}
+struct Db {
+    engine: String,
+    path: String,
+    tur: Option<turso::Database>,
+    _anchor: Option<std::sync::Mutex<rusqlite::Connection>>,
+}
+impl Db {
+    async fn open(engine: &str, path: &str) -> Result<Self> {
+        let memory = path == ":memory:";
+        let path = if memory && engine == "sqlite" {
+            format!("file:rocky-{}?mode=memory&cache=shared", std::process::id())
+        } else {
+            path.into()
+        };
+        let anchor = if engine == "sqlite" {
+            Some(std::sync::Mutex::new(rusqlite::Connection::open(&path)?))
+        } else {
+            None
+        };
+        Ok(Self {
+            engine: engine.into(),
+            tur: if engine != "sqlite" {
+                Some(turso::Builder::new_local(&path).build().await?)
+            } else {
+                None
+            },
+            path,
+            _anchor: anchor,
+        })
+    }
+    async fn conn(&self, capture: &str) -> Result<Conn> {
+        let c = if let Some(db) = &self.tur {
+            Conn::Tur(db.connect()?, self.engine == "mvcc")
+        } else {
+            Conn::Sql(rusqlite::Connection::open(&self.path)?)
+        };
+        c.exec("PRAGMA synchronous=FULL").await?;
+        c.exec("PRAGMA fullfsync=ON").await?;
+        if std::env::var("ROCKY_SYNC").as_deref() == Ok("NORMAL") {
+            c.exec("PRAGMA synchronous=NORMAL").await?;
+        }
+        if self.engine == "sqlite" {
+            c.exec("PRAGMA busy_timeout=0").await?;
+        }
+        if capture == "cdc" {
+            c.exec("PRAGMA capture_data_changes_conn('full')").await?;
+        }
+        Ok(c)
+    }
+    async fn setup(&self, capture: &str) -> Result<()> {
+        let c = self.conn("none").await?;
+        c.rows(&format!(
+            "PRAGMA journal_mode={}",
+            if self.engine == "mvcc" { "mvcc" } else { "wal" }
+        ))
+        .await?;
+        for sql in [
+            "CREATE TABLE invoices(id INTEGER PRIMARY KEY, customer INTEGER, status TEXT, amount INTEGER, note TEXT, version INTEGER)",
+            "CREATE INDEX invoice_customer ON invoices(customer,status)",
+            "CREATE TABLE lines(id INTEGER PRIMARY KEY, invoice INTEGER, qty INTEGER, price INTEGER)",
+            "CREATE INDEX line_invoice ON lines(invoice)",
+            "CREATE TABLE tags(id INTEGER PRIMARY KEY, invoice INTEGER, label TEXT)",
+            "CREATE INDEX tag_invoice ON tags(invoice)",
+            "CREATE TABLE inventory(id INTEGER PRIMARY KEY, qty INTEGER)",
+            "CREATE TABLE authors(id INTEGER PRIMARY KEY, seq INTEGER)",
+            "CREATE TABLE jobs(id INTEGER PRIMARY KEY, invoice INTEGER, payload TEXT)",
+            "CREATE TABLE dedup(id INTEGER PRIMARY KEY)",
+            "CREATE TABLE txmeta(id INTEGER PRIMARY KEY, origin TEXT, mutations INTEGER, payload TEXT)",
+            "CREATE TABLE context(id INTEGER PRIMARY KEY, tx INTEGER, origin TEXT)",
+            "INSERT INTO context VALUES(1,0,'local')",
+            "CREATE TABLE staging(id INTEGER PRIMARY KEY, tx INTEGER, tab TEXT, kind TEXT, before_value TEXT, after_value TEXT)",
+            "CREATE INDEX staging_tx ON staging(tx)",
+            "CREATE TABLE consumed(id INTEGER PRIMARY KEY, rows INTEGER)",
+            "CREATE TABLE cursor(id INTEGER PRIMARY KEY, transactions INTEGER)",
+            "INSERT INTO cursor VALUES(1,0)",
+        ] {
+            c.exec(sql).await?;
+        }
+        c.exec("BEGIN").await?;
+        for i in 0..1000 {
+            c.exec(&format!(
+                "INSERT INTO invoices VALUES({i},{},'draft',100,'seed',0)",
+                i % 50
+            ))
+            .await?;
+            c.exec(&format!("INSERT INTO lines VALUES({i},{i},1,100)"))
+                .await?;
+            c.exec(&format!("INSERT INTO tags VALUES({i},{i},'seed')"))
+                .await?;
+        }
+        for i in 0..64 {
+            c.exec(&format!("INSERT INTO authors VALUES({i},0)"))
+                .await?;
+            c.exec(&format!("INSERT INTO inventory VALUES({i},1000000)"))
+                .await?;
+        }
+        c.exec("COMMIT").await?;
+        if capture == "trigger" {
+            for (table, cols) in [
+                (
+                    "invoices",
+                    vec!["id", "customer", "status", "amount", "note", "version"],
+                ),
+                ("lines", vec!["id", "invoice", "qty", "price"]),
+                ("tags", vec!["id", "invoice", "label"]),
+                ("inventory", vec!["id", "qty"]),
+                ("authors", vec!["id", "seq"]),
+                ("jobs", vec!["id", "invoice", "payload"]),
+                ("dedup", vec!["id"]),
+            ] {
+                for (kind, old, new) in [
+                    ("INSERT", false, true),
+                    ("UPDATE", true, true),
+                    ("DELETE", true, false),
+                ] {
+                    let obj = |prefix: &str| {
+                        format!(
+                            "json_object({})",
+                            cols.iter()
+                                .map(|x| format!("'{x}',{prefix}.{x}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        )
+                    };
+                    c.exec(&format!("CREATE TRIGGER cap_{table}_{kind} AFTER {kind} ON {table} WHEN (SELECT origin FROM context WHERE id=1)='local' BEGIN INSERT INTO staging(tx,tab,kind,before_value,after_value) SELECT tx,'{table}','{kind}',{},{} FROM context WHERE id=1; END",if old{obj("OLD")}else{"NULL".into()},if new{obj("NEW")}else{"NULL".into()})).await?;
+                }
+            }
+        }
+        if let Some(anchor) = &self._anchor {
+            // Participate in WAL before the setup connection closes; an unopened
+            // pager alone does not prevent SQLite's last-WAL-connection checkpoint.
+            let conn = anchor.lock().unwrap();
+            conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
+            let _: i64 = conn.query_row("SELECT count(*) FROM invoices", [], |row| row.get(0))?;
+        }
+        Ok(())
+    }
+}
+// Re-scan committed transaction identities, not MAX(change_id): late commits cannot be skipped.
+// No pruning here: retained transaction IDs are part of the durable replay contract.
+async fn drain(c: &Conn, capture: &str) -> Result<(usize, usize)> {
+    let query = match capture {
+        "cdc" => {
+            "SELECT m.id, count(d.change_id) FROM turso_cdc marker JOIN txmeta m ON marker.table_name='txmeta' AND marker.id=m.id JOIN turso_cdc boundary ON boundary.change_txn_id=marker.change_txn_id AND boundary.change_type=2 JOIN turso_cdc d ON d.change_txn_id=marker.change_txn_id WHERE m.origin='local' AND d.table_name IN ('invoices','lines','tags','inventory','authors','jobs','dedup') AND NOT EXISTS(SELECT 1 FROM consumed s WHERE s.id=m.id) GROUP BY m.id"
+        }
+        "trigger" => {
+            "SELECT m.id,count(s.id) FROM txmeta m JOIN staging s ON s.tx=m.id WHERE m.origin='local' AND NOT EXISTS(SELECT 1 FROM consumed d WHERE d.id=m.id) GROUP BY m.id"
+        }
+        _ => {
+            "SELECT m.id,m.mutations FROM txmeta m WHERE m.origin='local' AND NOT EXISTS(SELECT 1 FROM consumed d WHERE d.id=m.id)"
+        }
+    };
+    c.exec(if matches!(c, Conn::Tur(_, true)) {
+        "BEGIN"
+    } else {
+        "BEGIN IMMEDIATE"
+    })
+    .await?;
+    let result=async {let rows=c.rows(query).await?; let mut count=0; for r in &rows {let id=&r[0]; let n:usize=r[1].parse()?;
+ // Read actual payloads as well as counting them.
+ if capture=="cdc" {c.rows(&format!("SELECT d.before,d.after,d.updates FROM turso_cdc d JOIN turso_cdc marker ON marker.change_txn_id=d.change_txn_id WHERE marker.table_name='txmeta' AND marker.id={id}")).await?;}
+ else if capture=="trigger" {c.rows(&format!("SELECT before_value,after_value FROM staging WHERE tx={id}")).await?;}
+ else {c.rows(&format!("SELECT payload FROM txmeta WHERE id={id}")).await?;}
+ c.exec(&format!("INSERT INTO consumed VALUES({id},{n})")).await?; count+=n;}
+ c.exec(&format!("UPDATE cursor SET transactions=transactions+{} WHERE id=1",rows.len())).await?;
+ c.exec("COMMIT").await?; Ok((rows.len(),count))}.await;
+    if result.is_err() {
+        let _ = c.exec("ROLLBACK").await;
+    }
+    result
+}
+async fn mutation(
+    c: &Conn,
+    capture: &str,
+    work: &str,
+    id: i64,
+    writer: usize,
+    batch: usize,
+    crypto: bool,
+) -> Result<()> {
+    c.exec("BEGIN").await?;
+    let r=async {
+ let origin=if work=="replication"{"remote"}else{"local"};
+ if capture=="trigger" {c.exec(&format!("UPDATE context SET tx={id},origin='{origin}' WHERE id=1")).await?;}
+ let payload=if crypto {let bytes=serde_json::to_vec(&json!({"tx":id,"writer":writer,"batch":batch,"operation":"set_field","origin":origin}))?; let key=SigningKey::from_bytes(&[7;32]); let sig=key.sign(&bytes); key.verifying_key().verify_strict(&bytes,&sig)?; let cipher=ChaCha20Poly1305::new_from_slice(&[9;32]).unwrap();let mut nonce=[0u8;12];nonce[..8].copy_from_slice(&id.to_le_bytes()); let encrypted=cipher.encrypt(Nonce::from_slice(&nonce),bytes.as_ref()).unwrap(); assert_eq!(cipher.decrypt(Nonce::from_slice(&nonce),encrypted.as_ref()).unwrap(),bytes); format!("{:?}",encrypted)}else{format!("set_field:{id}:{batch}")};
+ if capture!="none" {c.exec(&format!("INSERT INTO txmeta VALUES({id},'{origin}',{batch},'{payload}')")).await?;}
+ for j in 0..batch {let entity=if work=="contended"{j%4}else{writer*100+((id as usize)*batch+j)%100};
+ if work=="authority" {
+ let stock=c.num("SELECT qty FROM inventory WHERE id=0").await?; if stock<=0{bail!("stock exhausted")};
+ c.exec(&format!("INSERT INTO dedup VALUES({})",id*1000+j as i64)).await?;
+ c.exec("UPDATE inventory SET qty=qty-1 WHERE id=0").await?;
+ c.exec(&format!("INSERT INTO jobs VALUES({}, {entity},'post')",id*1000+j as i64)).await?;
+ c.exec(&format!("UPDATE invoices SET status='posted',version=version+1 WHERE id={entity}")).await?;
+ }else{
+ c.rows(&format!("SELECT id,amount FROM invoices WHERE customer={} AND status='draft' ORDER BY id LIMIT 10",entity%50)).await?;
+ c.exec(&format!("UPDATE invoices SET amount=amount+1,note='edit',version=version+1 WHERE id={entity}")).await?;
+ if work=="draft" {c.exec(&format!("UPDATE lines SET qty=qty+1 WHERE id={entity}")).await?; c.exec(&format!("UPDATE tags SET label='edited' WHERE id={entity}")).await?;}
+ }
+ let author=if work=="contended"{0}else{writer};c.exec(&format!("UPDATE authors SET seq=seq+1 WHERE id={author}")).await?;
+ }
+ c.exec("COMMIT").await?; Ok(()) }.await;
+    if r.is_err() {
+        let _ = c.exec("ROLLBACK").await;
+    }
+    r
+}
+fn percentile(v: &mut [f64], q: f64) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[((v.len() - 1) as f64 * q).round() as usize]
+}
+fn retryable(e: &anyhow::Error) -> bool {
+    let s = format!("{e:?}").to_lowercase();
+    s.contains("busy")
+        || s.contains("locked")
+        || s.contains("conflict")
+        || s.contains("snapshot is stale")
+}
+#[tokio::main]
+async fn main() -> Result<()> {
+    let a: Vec<String> = std::env::args().collect();
+    if a.len() < 2 {
+        bail!(
+            "usage: rocky-engine-bench check | run ENGINE CAPTURE WORK WRITERS BATCH TX_PER_WRITER FILES PATH CRYPTO"
+        )
+    }
+    if a[1] == "check" {
+        return checks().await;
+    }
+    if a[1] == "crash-write" {
+        let db = Db::open(&a[2], &a[4]).await?;
+        db.setup(&a[3]).await?;
+        let c = db.conn(&a[3]).await?;
+        mutation(&c, &a[3], "draft", 1, 0, 4, false).await?;
+        println!("ACK");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        std::thread::sleep(Duration::from_secs(60));
+        return Ok(());
+    }
+    if a[1] == "crash-read" {
+        let db = Db::open(&a[2], &a[4]).await?;
+        let c = db.conn("none").await?;
+        assert_eq!(c.num("SELECT sum(seq) FROM authors").await?, 4);
+        assert_eq!(drain(&c, &a[3]).await?.0, 1);
+        assert_eq!(drain(&c, &a[3]).await?.0, 0);
+        println!(
+            "{}",
+            json!({"engine":a[2],"capture":a[3],"acknowledged_process_crash":"pass"})
+        );
+        return Ok(());
+    }
+    let engine = &a[2];
+    let capture = &a[3];
+    let work = &a[4];
+    let writers: usize = a[5].parse()?;
+    let batch: usize = a[6].parse()?;
+    let txs: usize = a[7].parse()?;
+    let files: usize = a[8].parse()?;
+    let root = &a[9];
+    let crypto = a.get(10).is_some_and(|x| x == "crypto");
+    std::fs::create_dir_all(root)?;
+    let mut dbs = vec![];
+    let mut settings = vec![];
+    let mut initial_storage = vec![];
+    for i in 0..files {
+        let db = Arc::new(
+            Db::open(
+                engine,
+                &if root == "memory" {
+                    ":memory:".into()
+                } else {
+                    format!("{root}/part{i}.db")
+                },
+            )
+            .await?,
+        );
+        db.setup(capture).await?;
+        let cfg = db.conn("none").await?;
+        settings.push(json!({"sqlite_version":cfg.rows("SELECT sqlite_version()").await?,"journal_mode":cfg.rows("PRAGMA journal_mode").await?,"synchronous":cfg.rows("PRAGMA synchronous").await?,"fullfsync":cfg.rows("PRAGMA fullfsync").await?}));
+        dbs.push(db);
+    }
+    for entry in std::fs::read_dir(root)? {
+        let e = entry?;
+        initial_storage
+            .push(json!({"file":e.file_name().to_string_lossy(),"bytes":e.metadata()?.len()}));
+    }
+    // Warm-up before timing, same schema and capture path.
+    for db in &dbs {
+        let c = db.conn(capture).await?;
+        for i in 1..=10 {
+            mutation(&c, capture, work, -i, 0, batch, crypto).await?;
+        }
+        let consumer = db.conn("none").await?;
+        drain(&consumer, capture).await?;
+    }
+    let done = Arc::new(AtomicBool::new(false));
+    let mut readers = vec![];
+    if work == "mixed" || work == "catchup" {
+        for db in &dbs {
+            for _ in 0..if work == "mixed" { 3 } else { 1 } {
+                let db = db.clone();
+                let done = done.clone();
+                let cap = capture.clone();
+                let observer = work == "mixed";
+                readers.push(std::thread::spawn(move||{tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {let c=db.conn("none").await?;let mut lat=vec![];let mut drained=0;let mut errs=0;let mut revision=-1;while !done.load(Ordering::Relaxed){let t=Instant::now();let r=if observer {async {let new_revision=c.num("SELECT coalesce(sum(seq),0) FROM authors").await?;if revision!=new_revision{c.rows("SELECT sum(amount),count(*) FROM invoices WHERE customer=7 AND status='draft'").await?;revision=new_revision;}Ok((0,0))}.await}else{drain(&c,&cap).await};match r{Ok((n,_))=>{drained+=n;lat.push(t.elapsed().as_secs_f64()*1000.);},Err(e)=>{if !retryable(&e){return Err(e)}errs+=1;}}tokio::time::sleep(Duration::from_millis(2)).await;}Ok::<_,anyhow::Error>((lat,drained,errs))})}));
+            }
+        }
+    }
+    let start = Instant::now();
+    let barrier = Arc::new(std::sync::Barrier::new(writers));
+    let mut handles = vec![];
+    for w in 0..writers {
+        let db = dbs[w % files].clone();
+        let c = db.conn(capture).await?;
+        let capture = capture.clone();
+        let work = work.clone();
+        let barrier = barrier.clone();
+        handles.push(std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    barrier.wait();
+                    let mut lat = vec![];
+                    let mut retries = 0;
+                    let mut categories = std::collections::BTreeMap::<String, usize>::new();
+                    for n in 0..txs {
+                        let id = (w * txs + n + 1) as i64;
+                        let t = Instant::now();
+                        let mut attempts = 0;
+                        loop {
+                            match mutation(&c, &capture, &work, id, w, batch, crypto).await {
+                                Ok(()) => break,
+                                Err(e) => {
+                                    if !retryable(&e) || attempts >= 10000 {
+                                        return Err(e);
+                                    }
+                                    retries += 1;
+                                    let message = e.to_string().to_lowercase();
+                                    let kind = if message.contains("snapshot") {
+                                        "snapshot"
+                                    } else if message.contains("conflict") {
+                                        "conflict"
+                                    } else if message.contains("locked") {
+                                        "locked"
+                                    } else {
+                                        "busy"
+                                    };
+                                    *categories.entry(kind.into()).or_default() += 1;
+                                    attempts += 1;
+                                    tokio::time::sleep(Duration::from_micros(
+                                        100 + (w as u64 * 37) % 300,
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
+                        lat.push(t.elapsed().as_secs_f64() * 1000.);
+                    }
+                    Ok::<_, anyhow::Error>((lat, retries, categories))
+                })
+        }));
+    }
+    let mut lat = vec![];
+    let mut retries = 0;
+    let mut retry_categories = std::collections::BTreeMap::<String, usize>::new();
+    for h in handles {
+        let (l, r, categories) = h.join().unwrap()?;
+        lat.extend(l);
+        retries += r;
+        for (k, v) in categories {
+            *retry_categories.entry(k).or_default() += v;
+        }
+    }
+    let seconds = start.elapsed().as_secs_f64();
+    done.store(true, Ordering::Relaxed);
+    let mut readerlat = vec![];
+    let mut reader_errors = 0;
+    let mut drained = 0;
+    for h in readers {
+        let (l, d, e) = h.join().unwrap()?;
+        readerlat.extend(l);
+        drained += d;
+        reader_errors += e;
+    }
+    let drain_start = Instant::now();
+    let mut remaining = 0;
+    let mut capture_rows = 0;
+    let mut capture_storage = vec![];
+    for db in &dbs {
+        let c = db.conn("none").await?;
+        let (n, r) = drain(&c, capture).await?;
+        remaining += n;
+        capture_rows += r;
+        capture_storage.push(json!({"txmeta_rows":c.num("SELECT count(*) FROM txmeta").await?,"payload_bytes":c.num("SELECT coalesce(sum(length(payload)),0) FROM txmeta").await?,"consumed_rows":c.num("SELECT count(*) FROM consumed").await?,"capture_rows":c.num(if capture=="cdc"{"SELECT count(*) FROM turso_cdc"}else{"SELECT count(*) FROM staging"}).await?,"capture_image_bytes":c.num(if capture=="cdc"{"SELECT coalesce(sum(coalesce(length(before),0)+coalesce(length(after),0)+coalesce(length(updates),0)),0) FROM turso_cdc"}else{"SELECT coalesce(sum(coalesce(length(before_value),0)+coalesce(length(after_value),0)),0) FROM staging"}).await?}));
+        let expected = (writers / files
+            + usize::from(dbs.iter().position(|x| Arc::ptr_eq(x, db)).unwrap() < writers % files))
+            * txs
+            * batch
+            + 10 * batch;
+        let actual = c.num("SELECT sum(seq) FROM authors").await?;
+        if actual != expected as i64 {
+            bail!("lost mutations expected {expected} actual {actual}")
+        }
+    }
+    let drain_s = drain_start.elapsed().as_secs_f64();
+    let mut storage = json!({});
+    for entry in std::fs::read_dir(root)? {
+        let e = entry?;
+        storage[e.file_name().to_string_lossy().to_string()] = json!(e.metadata()?.len());
+    }
+    if engine == "sqlite" && root != "memory" && storage.get("part0.db-wal").is_none() {
+        bail!("SQLite WAL lifecycle was not retained for storage accounting")
+    }
+    let reader_p95 = if readerlat.is_empty() {
+        0.
+    } else {
+        percentile(&mut readerlat, 0.95)
+    };
+    println!(
+        "{}",
+        json!({"engine":engine,"capture":capture,"work":work,"writers":writers,"batch":batch,"txs_per_writer":txs,"files":files,"crypto":crypto,"seconds":seconds,"committed_tx_s":(writers*txs) as f64/seconds,"logical_mutations_s":(writers*txs*batch) as f64/seconds,"p50_ms":percentile(&mut lat,0.5),"p95_ms":percentile(&mut lat,0.95),"p99_ms":percentile(&mut lat,0.99),"retries":retries,"reader_p95_ms":reader_p95,"reader_samples":readerlat.len(),"reader_errors":reader_errors,"foreground_drained":drained,"remaining_drain_tx":remaining,"remaining_drain_s":drain_s,"remaining_drain_tx_s":remaining as f64/drain_s,"capture_rows_drained":capture_rows,"storage":storage,"synchronous":std::env::var("ROCKY_SYNC").unwrap_or("FULL".into()),"settings":settings,"retry_categories":retry_categories,"capture_storage":capture_storage,"initial_storage":initial_storage,"memory":root=="memory","dataset_invoices":1000})
+    );
+    Ok(())
+}
+async fn checks() -> Result<()> {
+    for (engine, cap) in [
+        ("sqlite", "trigger"),
+        ("sqlite", "explicit"),
+        ("wal", "cdc"),
+        ("mvcc", "cdc"),
+        ("wal", "explicit"),
+        ("mvcc", "explicit"),
+    ] {
+        let path = format!("/tmp/rocky-check-{engine}-{cap}-{}.db", std::process::id());
+        let db = Db::open(engine, &path).await?;
+        db.setup(cap).await?;
+        let c = db.conn(cap).await?;
+        let mut results = json!({"engine":engine,"capture":cap});
+        if cap == "cdc" {
+            results["cdc_schema"] = json!(c.rows("PRAGMA table_info(turso_cdc)").await?);
+            results["mode_switch_rejected"] = json!(
+                c.rows(&format!(
+                    "PRAGMA journal_mode={}",
+                    if engine == "wal" { "mvcc" } else { "wal" }
+                ))
+                .await
+                .is_err()
+            );
+        }
+        let count_sql = if cap == "cdc" {
+            "SELECT count(*) FROM turso_cdc WHERE change_type<>2"
+        } else {
+            "SELECT count(*) FROM staging"
+        };
+        let before = c.num(count_sql).await?;
+        c.exec("BEGIN").await?;
+        c.exec("UPDATE invoices SET amount=999 WHERE id=1").await?;
+        c.exec("INSERT INTO txmeta VALUES(9999,'local',1,'rollback')")
+            .await?;
+        c.exec("ROLLBACK").await?;
+        assert_eq!(c.num("SELECT amount FROM invoices WHERE id=1").await?, 100);
+        assert_eq!(c.num(count_sql).await?, before);
+        c.exec("BEGIN").await?;
+        let savepoint = async {
+            c.exec("SAVEPOINT s").await?;
+            c.exec("UPDATE invoices SET amount=999 WHERE id=1").await?;
+            c.exec("INSERT INTO txmeta VALUES(9999,'local',1,'rollback')")
+                .await?;
+            c.exec("ROLLBACK TO s").await?;
+            c.exec("RELEASE s").await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        c.exec("COMMIT").await?;
+        assert_eq!(c.num("SELECT amount FROM invoices WHERE id=1").await?, 100);
+        assert_eq!(c.num(count_sql).await?, before);
+        results["savepoint"] = json!(match savepoint {
+            Ok(()) => "pass".into(),
+            Err(e) => format!("unsupported/failure: {e}"),
+        });
+        mutation(&c, cap, "draft", 1, 0, 2, false).await?;
+        mutation(&c, cap, "replication", 2, 0, 2, false).await?;
+        if cap == "trigger" {
+            let image=c.rows("SELECT before_value,after_value FROM staging WHERE tab='invoices' ORDER BY id LIMIT 1").await?;
+            let before: serde_json::Value = serde_json::from_str(&image[0][0])?;
+            let after: serde_json::Value = serde_json::from_str(&image[0][1])?;
+            assert_eq!(before["amount"], 100);
+            assert_eq!(after["amount"], 101);
+            results["before_after_images"] = json!("pass");
+        }
+        if cap == "cdc" {
+            if let Conn::Tur(t, _) = &c {
+                let mut query=t.query("SELECT before,after FROM turso_cdc WHERE table_name='invoices' ORDER BY change_id LIMIT 1",()).await?;
+                let row = query.next().await?.unwrap();
+                for (column, expected) in [(0, 100), (1, 101)] {
+                    if let turso::Value::Blob(blob) = row.get_value(column)? {
+                        let fields = turso::core::types::ImmutableRecordRef::from_bin_record(&blob)
+                            .get_values_owned()?;
+                        assert_eq!(fields[3], turso::core::Value::from_i64(expected));
+                    } else {
+                        bail!("missing CDC image")
+                    }
+                }
+            }
+            assert_eq!(results["mode_switch_rejected"], true);
+            results["before_after_images"] = json!("pass");
+        }
+
+        drop(c);
+        drop(db);
+        let db = Db::open(engine, &path).await?;
+        let consumer = db.conn("none").await?;
+        let (n, rows) = drain(&consumer, cap).await?;
+        assert_eq!(n, 1);
+        assert_eq!(drain(&consumer, cap).await?.0, 0);
+        assert_eq!(consumer.num("SELECT transactions FROM cursor").await?, 1);
+        if cap == "trigger" || cap == "cdc" {
+            assert_eq!(rows, 8);
+        }
+        if engine == "mvcc" {
+            let early = db.conn(cap).await?;
+            let late = db.conn(cap).await?;
+            early.exec("BEGIN").await?;
+            early
+                .exec("INSERT INTO txmeta VALUES(3,'local',1,'early')")
+                .await?;
+            early
+                .exec("UPDATE invoices SET amount=amount+1 WHERE id=10")
+                .await?;
+            mutation(&late, cap, "independent", 4, 1, 1, false).await?;
+            let visible_max = if cap == "cdc" {
+                consumer.num("SELECT max(change_id) FROM turso_cdc").await?
+            } else {
+                0
+            };
+            assert_eq!(drain(&consumer, cap).await?.0, 1);
+            early.exec("COMMIT").await?;
+            if cap == "cdc" {
+                results["unsafe_max_would_skip_rows"]=json!(consumer.num(&format!("SELECT count(*) FROM turso_cdc d JOIN turso_cdc m ON m.change_txn_id=d.change_txn_id WHERE m.table_name='txmeta' AND m.id=3 AND d.change_id<={visible_max}")).await?);
+            }
+            assert_eq!(drain(&consumer, cap).await?.0, 1);
+            results["out_of_order_commit_cursor"] = json!("pass");
+        }
+        let progress = consumer.num("SELECT transactions FROM cursor").await?;
+        drop(consumer);
+        drop(db);
+        let reopened = Db::open(engine, &path).await?;
+        let restarted = reopened.conn("none").await?;
+        assert_eq!(
+            restarted.num("SELECT transactions FROM cursor").await?,
+            progress
+        );
+        assert_eq!(drain(&restarted, cap).await?.0, 0);
+        assert_eq!(
+            restarted
+                .num("SELECT count(*) FROM txmeta WHERE id=9999")
+                .await?,
+            0
+        );
+        results["durable_cursor_restart"] = json!("pass");
+        results["rollback"] = json!("pass");
+        results["committed_group_rows"] = json!(rows);
+        results["restart_before_consume"] = json!("pass");
+        results["replay_dedup"] = json!("pass");
+        results["remote_not_published"] = json!("pass");
+        println!("{results}");
+    }
+    Ok(())
+}

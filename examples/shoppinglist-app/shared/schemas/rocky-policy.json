@@ -1,0 +1,13 @@
+{
+  "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "application": "shopping",
+  "update_policy": "changed",
+  "tables": {
+    "shopping_items": {
+      "class": "mergeable",
+      "columns": {
+        "searchTitle": { "derived": "lower(title)" }
+      }
+    }
+  }
+}

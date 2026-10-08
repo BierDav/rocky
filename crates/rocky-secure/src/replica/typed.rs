@@ -1,0 +1,758 @@
+//! Typed tables of a secure replica: the generated SQL storage that
+//! authorized secure rows project into, in the same transaction as every
+//! row change. See `docs/runtime/secure-sql.md`.
+use super::*;
+use crate::{capture::Plan, scoped_connection::Names, storage};
+use rocky_core::{LogicalSchema, Scope, TableClass, TypedRows, TypedTable};
+
+pub(super) const SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS secure_typed(id INTEGER PRIMARY KEY CHECK(id=1),descriptor BLOB NOT NULL,domain BLOB NOT NULL,readers BLOB NOT NULL)",
+];
+
+/// One typed table and the resource scope its rows belong to.
+pub(super) struct Projected {
+    pub(super) table: TypedTable,
+    pub(super) scope: ResourceScope,
+    pub(super) select: String,
+    pub(super) upsert: String,
+    pub(super) delete: String,
+}
+impl Projected {
+    /// Command-controlled: its rows are the confirmed command rows of its
+    /// scope, never stored mergeable rows.
+    pub(super) fn confirmed(&self) -> bool {
+        self.table.class == TableClass::CommandControlled
+    }
+}
+/// The installed typed tables of a replica.
+pub(super) struct Typed {
+    pub(super) rows: TypedRows,
+    pub(super) domain: Scope,
+    pub(super) tables: Vec<Projected>,
+    pub(super) names: Names,
+    /// Whether these are the shadow tables of a projection plan.
+    pub(super) shadowed: bool,
+    /// Tables with unique indexes or foreign keys; never on shadows.
+    pub(super) constraints: Option<super::constraints::Constraints>,
+}
+pub(super) fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+/// The stored name of a typed table, or of its shadow during a plan.
+pub(super) fn physical(sql_name: &str, shadow: bool) -> String {
+    if shadow {
+        format!("{SHADOW}_{sql_name}")
+    } else {
+        sql_name.to_string()
+    }
+}
+/// The namespace of shadow tables and their indexes.
+pub(super) const SHADOW: &str = "secure_shadow";
+impl Typed {
+    pub(super) fn new(
+        schema: LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+    ) -> Result<Self, Error> {
+        Self::build(schema, domain, readers, false)
+    }
+    /// The shadow tables a projection plan fills: the same columns under
+    /// `secure_shadow_` names, which applications cannot use.
+    pub(super) fn shadow(
+        schema: LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+    ) -> Result<Self, Error> {
+        Self::build(schema, domain, readers, true)
+    }
+    fn build(
+        schema: LogicalSchema,
+        domain: Scope,
+        readers: &BTreeMap<String, Commitment>,
+        shadow: bool,
+    ) -> Result<Self, Error> {
+        let incompatible = |reason: String| Error::Incompatible(reason);
+        // Rows written before a transition added a nullable field lack it;
+        // the application admitted them, so they project with NULL.
+        let nullable = schema
+            .mergeable()
+            .flat_map(|table| {
+                table
+                    .registers()
+                    .filter(|column| !column.not_null)
+                    .map(|column| schema.field_id(table, column))
+            })
+            .collect();
+        let rows = TypedRows::new(schema.clone(), vec![domain.domain])
+            .and_then(|rows| rows.at_generation(1, nullable))
+            .map_err(|error| incompatible(error.to_string()))?;
+        let mut tables = Vec::new();
+        // Confirmed tables are never rebuilt from stored rows, so a
+        // projection plan keeps them in place.
+        let typed: Vec<_> = rows.tables().collect();
+        for table in typed
+            .iter()
+            .filter(|table| !shadow || table.class != TableClass::CommandControlled)
+        {
+            let logical = schema
+                .table(&table.sql_name)
+                .ok_or_else(|| incompatible(format!("{} is not in the schema", table.sql_name)))?;
+            let encryption = readers
+                .get(&table.sql_name)
+                .ok_or_else(|| incompatible(format!("{} has no reader scope", table.sql_name)))?;
+            let columns: Vec<String> = logical
+                .columns
+                .iter()
+                .map(|column| quoted(&column.sql_name))
+                .collect();
+            let key: Vec<String> = table
+                .key
+                .iter()
+                .map(|index| columns[*index].clone())
+                .collect();
+            let by_key = key
+                .iter()
+                .map(|column| format!("{column}=?"))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let registers: Vec<String> = columns
+                .iter()
+                .filter(|column| !key.contains(column))
+                .map(|column| format!("{column}=excluded.{column}"))
+                .collect();
+            let name = quoted(&physical(&table.sql_name, shadow));
+            let conflict = if registers.is_empty() {
+                "DO NOTHING".to_string()
+            } else {
+                format!("DO UPDATE SET {}", registers.join(","))
+            };
+            tables.push(Projected {
+                scope: ResourceScope {
+                    domain,
+                    encryption: *encryption,
+                    table: table.id,
+                },
+                select: format!("SELECT {} FROM {name} WHERE {by_key}", columns.join(",")),
+                upsert: format!(
+                    "INSERT INTO {name}({}) VALUES({}) ON CONFLICT({}) {conflict}",
+                    columns.join(","),
+                    vec!["?"; columns.len()].join(","),
+                    key.join(","),
+                ),
+                delete: format!("DELETE FROM {name} WHERE {by_key}"),
+                table: (*table).clone(),
+            });
+        }
+        if readers.len() != typed.len() {
+            return Err(incompatible("a reader scope names no typed table".into()));
+        }
+        let statements = statements(&schema);
+        let constraints = super::constraints::Constraints::new(&schema, &tables)?;
+        if shadow && constraints.is_some() {
+            return Err(incompatible(
+                "tables with unique indexes or foreign keys change by export and reinstall".into(),
+            ));
+        }
+        Ok(Self {
+            names: Names::new(None, &statements),
+            rows,
+            domain,
+            tables,
+            shadowed: shadow,
+            constraints,
+        })
+    }
+    pub(super) fn partitioned(&self, table: &Projected) -> bool {
+        self.rows
+            .schema()
+            .table(&table.table.sql_name)
+            .is_some_and(|logical| !logical.partition_by.is_empty())
+    }
+    pub(super) fn row_scope(
+        &self,
+        table: &Projected,
+        values: &[SqlValue],
+    ) -> Result<ResourceScope, Error> {
+        match self
+            .rows
+            .partition(&table.table, values)
+            .map_err(|error| denied(&error))?
+        {
+            Some(tuple) => tuple
+                .scope(self.domain, table.table.id)
+                .map_err(|error| denied(&error.to_string())),
+            None => Ok(table.scope),
+        }
+    }
+    pub(super) fn by_scope(&self, scope: ResourceScope) -> Option<&Projected> {
+        self.tables.iter().find(|table| {
+            table.scope == scope
+                || (self.partitioned(table)
+                    && table.scope.domain == scope.domain
+                    && table.scope.table == scope.table)
+        })
+    }
+    pub(super) fn by_name(&self, sql_name: &str) -> Option<&Projected> {
+        self.tables
+            .iter()
+            .find(|table| table.table.sql_name == sql_name)
+    }
+    /// The tables a session may name: every local table and the mergeable
+    /// tables of `scopes`.
+    pub(super) fn plan(&self, scopes: &BTreeSet<ResourceScope>) -> Result<Plan, Error> {
+        let schema = self.rows.schema();
+        let named = |table: &rocky_core::LogicalTable| match self.by_name(&table.sql_name) {
+            Some(projected) => {
+                scopes.contains(&projected.scope)
+                    || (self.partitioned(projected)
+                        && scopes.iter().any(|scope| {
+                            scope.domain == projected.scope.domain
+                                && scope.table == projected.scope.table
+                        }))
+            }
+            None => table.class == TableClass::LocalOnly,
+        };
+        // A table with an existence log that a named table references is
+        // nameable too; the statement check shows none of its support rows.
+        let tables: Vec<&str> = schema
+            .tables
+            .iter()
+            .filter(|table| {
+                named(table)
+                    || (table.existence_log
+                        && schema.tables.iter().any(|child| {
+                            named(child)
+                                && child
+                                    .foreign_keys
+                                    .iter()
+                                    .any(|key| key.table == table.sql_name)
+                        }))
+            })
+            .map(|table| table.sql_name.as_str())
+            .collect();
+        Plan::bound(&[crate::capture::Part {
+            schema,
+            names: &self.names,
+            tables: Some(tables),
+        }])
+    }
+}
+pub(super) fn statements(schema: &LogicalSchema) -> Vec<String> {
+    schema
+        .tables
+        .iter()
+        .flat_map(|table| {
+            std::iter::once(table.create_sql.clone())
+                .chain(table.indexes.iter().map(|index| index.create_sql.clone()))
+        })
+        .collect()
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Installs typed tables for `schema` in `domain`; `readers` names the
+    /// encryption scope of every mergeable table. The schema's manifest must
+    /// be the replica's signed manifest. Existing rows project at once;
+    /// reopening keeps the installation. Another schema of the same signed
+    /// definition, such as new indexes, replaces it through a projection
+    /// plan: shadow tables fill in bounded steps and switch in one verified
+    /// transaction. Changes the definition does not allow are refused.
+    pub async fn install_tables(
+        &self,
+        schema: LogicalSchema,
+        domain: Scope,
+        readers: BTreeMap<String, Commitment>,
+    ) -> Result<(), Error> {
+        schema
+            .require_row_identity()
+            .map_err(|error| Error::Incompatible(error.to_string()))?;
+        let mut inner = self.inner.lock().await;
+        let domains: Vec<_> = inner
+            .definition
+            .domains
+            .iter()
+            .map(|rule| rule.domain)
+            .collect();
+        if domain.app != inner.definition.app || !domains.contains(&domain.domain) {
+            return Err(denied("typed tables need a domain of the signed manifest"));
+        }
+        // Command methods and the generations are the installed
+        // application's; the tables must be exactly the signed ones.
+        let mut expected = schema.manifest_at(&domains, inner.definition.schema);
+        expected.methods = inner.definition.methods.clone();
+        expected.handler = inner.definition.handler;
+        if expected.hash() != inner.manifest {
+            return Err(Error::Incompatible(
+                "the schema's definition differs from the signed manifest".into(),
+            ));
+        }
+        if schema
+            .tables
+            .iter()
+            .any(|table| table.sql_name.to_ascii_lowercase().starts_with("secure_"))
+        {
+            return Err(Error::Incompatible("secure_ names are reserved".into()));
+        }
+        let typed = Typed::new(schema.clone(), domain, &readers)?;
+        let record = [
+            schema
+                .canonical()
+                .map_err(|error| Error::Incompatible(error.to_string()))?,
+            encode(&domain)?,
+            encode(&readers)?,
+        ];
+        let planned = transaction!(inner, |inner| {
+            let stored = rows(
+                &inner.conn,
+                "SELECT descriptor,domain,readers FROM secure_typed WHERE id=1",
+            )
+            .await?;
+            let expected: Vec<SqlValue> = record.iter().cloned().map(SqlValue::Blob).collect();
+            match stored.first() {
+                Some(row) if *row == expected => return Ok(false),
+                // Another schema of the same definition: rebuild the tables
+                // through a projection plan.
+                Some(_) => {
+                    inner.record_plan(&schema, domain, &readers).await?;
+                    return Ok(true);
+                }
+                None => {}
+            }
+            for sql in statements(&schema).iter().chain(
+                typed
+                    .constraints
+                    .iter()
+                    .flat_map(super::constraints::Constraints::statements),
+            ) {
+                inner.conn.execute(sql.clone(), ()).await?;
+            }
+            inner
+                .conn
+                .execute(
+                    "INSERT INTO secure_typed VALUES(1,?,?,?)",
+                    bindings(expected),
+                )
+                .await?;
+            for table in &typed.tables {
+                if table.confirmed() {
+                    fill_confirmed(&inner.conn, &typed, table).await?;
+                } else if typed
+                    .constraints
+                    .as_ref()
+                    .and_then(|c| c.node(table.scope))
+                    .is_none()
+                {
+                    reproject(&inner.conn, &typed, table).await?;
+                }
+            }
+            Ok(false)
+        })?;
+        if planned {
+            drop(inner);
+            return self.run_plan().await;
+        }
+        let constrained = typed.constraints.is_some();
+        inner.typed = Some(Arc::new(typed));
+        if constrained {
+            transaction!(inner, |inner| inner.rebuild_constraints(None).await)?;
+        }
+        inner.start_events();
+        Ok(())
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// Loads the installed typed tables at open.
+    pub(super) async fn load_typed(&mut self) -> Result<(), Error> {
+        let stored = rows(
+            &self.conn,
+            "SELECT descriptor,domain,readers FROM secure_typed WHERE id=1",
+        )
+        .await?;
+        let Some(row) = stored.first() else {
+            return Ok(());
+        };
+        let [
+            SqlValue::Blob(descriptor),
+            SqlValue::Blob(domain),
+            SqlValue::Blob(readers),
+        ] = row.as_slice()
+        else {
+            return Err(Error::Corrupt("typed table record".into()));
+        };
+        let schema = LogicalSchema::parse(descriptor)
+            .map_err(|_| Error::Corrupt("typed table descriptor".into()))?;
+        self.typed = Some(Arc::new(Typed::new(
+            schema,
+            decode(domain)?,
+            &decode(readers)?,
+        )?));
+        self.start_events();
+        Ok(())
+    }
+    /// Follows one stored row into its typed table, inside the caller's
+    /// transaction. An unchanged typed row is not written again, so rows a
+    /// SQL session wrote fire no second trigger. In `strict` mode, during
+    /// a SQL session's commit, a difference fails the commit instead.
+    pub(super) async fn project(
+        &self,
+        scope: ResourceScope,
+        old: Option<&Materialized>,
+        new: &Materialized,
+    ) -> Result<(), Error> {
+        if let Some(shadow) = self.shadow.clone()
+            && let Some(table) = shadow.by_scope(scope)
+        {
+            self.project_into(&shadow, table, scope, old, new, false)
+                .await?;
+        }
+        let Some(typed) = self.typed.clone() else {
+            return Ok(());
+        };
+        // Candidates follow every write; `resolve` settles them once the
+        // frame or the SQL commit stored all of its rows.
+        if let Some(node) = typed.constraints.as_ref().and_then(|c| c.node(scope)) {
+            return self.follow(&typed, node, new).await;
+        }
+        if self.strict_projection {
+            return Ok(());
+        }
+        let Some(table) = typed.by_scope(scope) else {
+            return Ok(());
+        };
+        self.project_into(&typed, table, scope, old, new, self.strict_projection)
+            .await
+    }
+    pub(super) async fn verify_sql_projection(&self, writes: &[RowWrite]) -> Result<(), Error> {
+        if !self.strict_projection {
+            return Ok(());
+        }
+        let typed = self
+            .typed
+            .clone()
+            .ok_or_else(|| Error::Corrupt("missing SQL projection".into()))?;
+        let written = writes
+            .iter()
+            .map(|write| (write.change.scope, write.change.row))
+            .collect();
+        self.resolve(Some(&written)).await?;
+        let constraints = typed.constraints.as_ref();
+        for write in writes {
+            let change = &write.change;
+            if constraints.and_then(|c| c.node(change.scope)).is_some() {
+                continue;
+            }
+            let table = typed
+                .by_scope(change.scope)
+                .ok_or_else(|| Error::Corrupt("missing SQL table".into()))?;
+            let record = self
+                .row(change.scope, self.storage_row(change)?)
+                .await?
+                .ok_or_else(|| Error::Corrupt("missing SQL incarnation".into()))?;
+            let old = change.before.as_ref().map(|fields| {
+                let mut old = record.clone();
+                old.fields = fields.clone();
+                old.deleted = false;
+                old
+            });
+            self.project_into(&typed, table, change.scope, old.as_ref(), &record, true)
+                .await?;
+        }
+        Ok(())
+    }
+    /// Follows one stored row into one table, typed or shadow.
+    async fn project_into(
+        &self,
+        typed: &Typed,
+        table: &Projected,
+        scope: ResourceScope,
+        old: Option<&Materialized>,
+        new: &Materialized,
+        strict: bool,
+    ) -> Result<(), Error> {
+        let winner = if new.identity.is_some() {
+            self.winner(
+                scope,
+                new.key
+                    .ok_or_else(|| Error::Corrupt("missing incarnation key".into()))?,
+            )
+            .await?
+        } else {
+            Some(new.clone())
+        };
+        let live = |record: &Materialized| (!record.deleted).then(|| record.fields.clone());
+        let corrupt = |reason: String| Error::Corrupt(reason);
+        let current = match winner
+            .as_ref()
+            .and_then(live)
+            .or_else(|| old.and_then(live))
+            .or_else(|| live(new))
+        {
+            Some(fields) => typed.rows.values(&table.table, &fields).map_err(corrupt)?,
+            None => return Ok(()),
+        };
+        let key = |values: &[SqlValue]| -> Vec<SqlValue> {
+            table
+                .table
+                .key
+                .iter()
+                .filter_map(|index| values.get(*index).cloned())
+                .collect()
+        };
+        let stored: Vec<Vec<SqlValue>> =
+            rows_with(&self.conn, &table.select, key(&current)).await?;
+        let wanted = winner.as_ref().and_then(live).map(|_| current.clone());
+        if stored.first() == wanted.as_ref() || (stored.is_empty() && wanted.is_none()) {
+            return Ok(());
+        }
+        if strict {
+            return Err(Error::Sql(crate::sql::SqlError::Capture(format!(
+                "the projection of {} differs from the transaction's rows",
+                table.table.sql_name
+            ))));
+        }
+        if !typed.shadowed {
+            self.touch(&table.table.sql_name);
+        }
+        match wanted {
+            Some(values) => {
+                self.conn
+                    .execute(table.upsert.clone(), bindings(values))
+                    .await?
+            }
+            None => {
+                self.conn
+                    .execute(table.delete.clone(), bindings(key(&current)))
+                    .await?
+            }
+        };
+        Ok(())
+    }
+    /// Follows a scope's confirmed command rows into its command-controlled
+    /// table, inside the caller's transaction.
+    pub(crate) async fn project_confirmed(&self, scope: ResourceScope) -> Result<(), Error> {
+        let Some(typed) = self.typed.clone() else {
+            return Ok(());
+        };
+        if let Some(table) = typed.by_scope(scope).filter(|table| table.confirmed())
+            && fill_confirmed(&self.conn, &typed, table).await?
+        {
+            self.touch(&table.table.sql_name);
+        }
+        Ok(())
+    }
+    /// Empties a scope's typed table, as its rows are evicted. Confirmed
+    /// rows are not evicted with stored rows.
+    pub(crate) async fn clear_typed(&self, scope: ResourceScope) -> Result<(), Error> {
+        self.restart_plan(scope).await?;
+        if let Some(typed) = &self.typed
+            && typed
+                .constraints
+                .as_ref()
+                .and_then(|c| c.node(scope))
+                .is_some()
+        {
+            // Children elsewhere lose their parents with it.
+            return self.rebuild_constraints(Some(scope)).await;
+        }
+        if let Some(table) = self
+            .typed
+            .as_ref()
+            .and_then(|typed| typed.by_scope(scope))
+            .filter(|table| !table.confirmed())
+        {
+            self.touch(&table.table.sql_name);
+            reproject(
+                &self.conn,
+                self.typed
+                    .as_ref()
+                    .ok_or_else(|| denied("missing typed schema"))?,
+                table,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    /// Rebuilds a scope's typed table from its stored rows, after a bulk
+    /// change of `secure_rows`.
+    pub(super) async fn reproject(&self, scope: ResourceScope) -> Result<(), Error> {
+        self.index_row_keys().await?;
+        self.restart_plan(scope).await?;
+        let Some(typed) = self.typed.clone() else {
+            return Ok(());
+        };
+        if typed
+            .constraints
+            .as_ref()
+            .and_then(|c| c.node(scope))
+            .is_some()
+        {
+            return self.rebuild_constraints(None).await;
+        }
+        match typed.by_scope(scope) {
+            Some(table) if table.confirmed() => self.project_confirmed(scope).await,
+            Some(table) => {
+                self.touch(&table.table.sql_name);
+                reproject(&self.conn, &typed, table).await
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+async fn rows_with(
+    conn: &crate::scoped_connection::ScopedConnection,
+    sql: &str,
+    params: Vec<SqlValue>,
+) -> Result<Vec<Vec<SqlValue>>, Error> {
+    collect_rows(conn.query(sql.to_string(), bindings(params)).await?).await
+}
+
+/// Makes a command-controlled table hold exactly its scope's confirmed
+/// command rows. Returns whether it changed. Command tables are small, so
+/// a difference replaces the whole table.
+async fn fill_confirmed(
+    conn: &crate::scoped_connection::ScopedConnection,
+    typed: &Typed,
+    table: &Projected,
+) -> Result<bool, Error> {
+    let stored = collect_rows(
+        conn.query(
+            "SELECT rows FROM secure_command_rows WHERE scope=?",
+            [encode(&table.scope)?],
+        )
+        .await?,
+    )
+    .await?;
+    let rows: BTreeMap<Commitment, rocky_core::RowFields> = match stored.first().map(Vec::as_slice)
+    {
+        Some([SqlValue::Blob(bytes)]) => decode(bytes)?,
+        Some(_) => return Err(Error::Corrupt("command rows".into())),
+        None => BTreeMap::new(),
+    };
+    let wanted = rows
+        .values()
+        .map(|fields| typed.rows.values(&table.table, fields))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::Corrupt)?;
+    let name = quoted(&table.table.sql_name);
+    let counted = rows_with(conn, &format!("SELECT count(*) FROM {name}"), Vec::new()).await?;
+    let mut same = counted == vec![vec![SqlValue::Integer(wanted.len() as i64)]];
+    for values in &wanted {
+        if !same {
+            break;
+        }
+        let key = table
+            .table
+            .key
+            .iter()
+            .filter_map(|index| values.get(*index).cloned())
+            .collect();
+        same = rows_with(conn, &table.select, key).await?.first() == Some(values);
+    }
+    if same {
+        return Ok(false);
+    }
+    conn.execute(format!("DELETE FROM {name}"), ()).await?;
+    for values in wanted {
+        conn.execute(table.upsert.clone(), bindings(values)).await?;
+    }
+    Ok(true)
+}
+
+/// Replaces a typed table's rows by the live stored rows of its scope, or
+/// of every partition scope of a partitioned table.
+pub(super) async fn reproject(
+    conn: &crate::scoped_connection::ScopedConnection,
+    typed: &Typed,
+    table: &Projected,
+) -> Result<(), Error> {
+    conn.execute(format!("DELETE FROM {}", quoted(&table.table.sql_name)), ())
+        .await?;
+    let records = if typed.partitioned(table) {
+        stored_winners(conn, None, |scope| {
+            typed
+                .by_scope(scope)
+                .is_some_and(|projected| projected.table.id == table.table.id)
+        })
+        .await?
+    } else {
+        winners(conn, table.scope).await?
+    };
+    for record in records {
+        let values = typed
+            .rows
+            .values(&table.table, &record.fields)
+            .map_err(Error::Corrupt)?;
+        conn.execute(table.upsert.clone(), storage::bindings(values))
+            .await?;
+    }
+    Ok(())
+}
+/// The live incarnation with the latest creation at each key of a scope.
+pub(super) async fn winners(
+    conn: &crate::scoped_connection::ScopedConnection,
+    scope: ResourceScope,
+) -> Result<Vec<Materialized>, Error> {
+    stored_winners(conn, Some(scope), |_| true).await
+}
+/// The live winners of `scope`, or of every stored scope `keep` accepts.
+async fn stored_winners(
+    conn: &crate::scoped_connection::ScopedConnection,
+    scope: Option<ResourceScope>,
+    keep: impl Fn(ResourceScope) -> bool,
+) -> Result<Vec<Materialized>, Error> {
+    let mut after = (Vec::new(), Vec::new());
+    let mut winners: BTreeMap<(ResourceScope, Commitment), Materialized> = BTreeMap::new();
+    loop {
+        let (sql, params) = match scope {
+            Some(scope) => (
+                "SELECT scope,row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT 256",
+                vec![
+                    SqlValue::Blob(encode(&scope)?),
+                    SqlValue::Blob(after.1.clone()),
+                ],
+            ),
+            None => (
+                "SELECT scope,row,fields FROM secure_rows WHERE (scope,row)>(?,?) ORDER BY scope,row LIMIT 256",
+                vec![
+                    SqlValue::Blob(after.0.clone()),
+                    SqlValue::Blob(after.1.clone()),
+                ],
+            ),
+        };
+        let chunk = collect_rows(conn.query(sql, bindings(params)).await?).await?;
+        for record in &chunk {
+            let [
+                SqlValue::Blob(scope),
+                SqlValue::Blob(row),
+                SqlValue::Blob(bytes),
+            ] = record.as_slice()
+            else {
+                return Err(Error::Corrupt("stored row".into()));
+            };
+            after = (scope.clone(), row.clone());
+            let scope: ResourceScope = decode(scope)?;
+            if !keep(scope) {
+                continue;
+            }
+            let record: Materialized = decode(bytes)?;
+            if record.deleted {
+                continue;
+            }
+            let key = record.key.map(Ok).unwrap_or_else(|| {
+                row.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("row key".into()))
+            })?;
+            let key = (scope, key);
+            if winners.get(&key).is_none_or(|held| {
+                (record.created.as_ref(), record.identity) > (held.created.as_ref(), held.identity)
+            }) {
+                winners.insert(key, record);
+            }
+        }
+        if chunk.len() < 256 {
+            return Ok(winners.into_values().collect());
+        }
+    }
+}

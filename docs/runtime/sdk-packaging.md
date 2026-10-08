@@ -1,0 +1,130 @@
+# Kotlin SDK and packages
+
+The Kotlin APIs call the runtime in-process through UniFFI. Schemas, typed
+command handlers and transports live in application Kotlin; consumers link
+packaged artifacts and need no Rust project, Cargo, Python or native
+executable. Contributor generation still uses those tools. The handles are
+described in [composition](sdk-composition.md); [Android](android.md) adds
+lifecycle and a Keystore store.
+
+## Compose services
+
+```kotlin
+val db = RockyDatabase.local(directory, schema, secrets = mySecretStore)
+val session = db.openSession()
+val authority = session.credentials.status()
+val reads = session.observe(schema.table("items").query())
+val progress = session.readiness()
+val network = db.attach(PeerTransport.Endpoint(myEndpoint))
+network.close() // database and application endpoint continue
+session.close() // other sessions continue
+// db.close() ends its sessions and network, then flushes/closes its file
+```
+
+`local`/`open` default to no network; `create`/`join`/`resume` are starter
+helpers over the same handles, attaching iroh and automatic sync by default.
+`RockyDatabase` is itself its default session.
+
+`RockySession` implements `RuntimePort`: `Row` reads and `write { }` SQL
+transactions without an ORM. Schemas come from `schema { }` or `schemaFromRoom`;
+an insert takes its `id` from `nextId(table)` and needs the device's author
+for that table. `session.commands` is the `CommandPort`; only execution and
+delivery need the coordinator and optional handlers passed as `CommandRuntime`.
+`DevelopmentCoordinator` is an in-memory process fixture;
+`ServiceCoordinator(trustBundle)` pins a provider or self-hosted service
+reached over the database's iroh transport. `session.service(tenantKey)`
+returns the owner's `ServiceOwner` (`register`, `control`, `activate`,
+`usage`); `CommandIdentity.encoded`/`decode` carry device identities to it
+([starter guide](getting-started.md)).
+
+`Credentials.prepare` returns public keys for an external issuer;
+`RockyDatabase.install` accepts the supplied credential/reader-key bundle,
+verified natively before installation. Enrollment, renewal, revocation and
+logout use `session.credentials` ([enrollment](sdk-enrollment.md)).
+
+## Batches, cancellation and reconciliation
+
+Queries return bounded tagged rows in one native call. `query(..., cursor = next)`
+continues a page; `maxRows` is 1–1,024 and pages also cap encoded bytes.
+Continuations are `page.v1:<offset>:<commitment>`, a session-private random
+commitment over manifest, authority epoch/expiry, query and offset. They
+retain no cursor; malformed, cross-session, cross-query and stale tokens
+refuse. Concurrent edits may shift pages: restart a scan when revisions
+change. After renewal, fresh calls use current authority and old
+continuations refuse. Errors carry stable `code`, `retryable` and a
+diagnostic `message`.
+
+`readiness()` is a cold conflated Flow of committed revision, generation and
+backfill progress, credential epoch/expiry/logout, open-ticket counts, network
+attachment and [bootstrap/sync state](sdk-bootstrapping.md#readiness), built on
+`status` and `status_next(after = token)` so registration cannot miss a racing
+revision. Authority changes without a revision are seen within one second.
+`ready` describes local installation and credentials, not remote completeness.
+
+Foreign cancellation abandons the wait; admitted writes keep running. Persist
+the `handle` passed to `write` before writing, then `session.reconcile(handle)`
+after interruption: false means no known local commit. A different transaction
+under a committed handle is refused, so write again only when it did not
+commit. For commands, persist and rerun the same `ticket(command, handle)`.
+Confirmed or unknown outcomes are never converted into fresh-ID retries.
+
+## Build and consume a package
+
+`./kotlin do packageSdk -m packaged-consumer` generates UniFFI Kotlin from the
+ABI, compiles the ORM-neutral SDK and a Kotlin-only consumer, and writes
+`local/packaged-sdk`: `lib/rocky-core-jvm.jar` (bindings plus JNA OS/CPU
+resources), the JNA, coroutines, serialization and Kotlin standard-library
+jars, `Consumer.kt`, `consumer.jar`, a launcher and a SHA-256 inventory.
+Nothing is published. `./kotlin check packaged -m packaged-consumer` copies
+only artifacts outside the repository and runs with an empty environment and
+only Java on `PATH`. It covers local sessions, readiness Flow and cancellation,
+handle reconciliation, Kotlin handlers, durable tickets, network ownership,
+fresh restore and additive upgrade with reopen, on a development coordinator.
+`./kotlin do qualifyPackageOnLinux -m packaged-consumer` repeats it in a
+`linux/amd64` container.
+
+| Artifact | Default iroh | Without iroh |
+| --- | --- | --- |
+| Rust SDK | Local database, owned or borrowed networks, composed/service coordinator | Local database, TCP/custom networks, composed coordinator |
+| Native ABI | Databases, sessions, callbacks, endpoint handles, service bundles | Databases, sessions, foreign transports; endpoint/service configuration refuses |
+| Kotlin JVM package | Qualified | ABI compile gate only |
+| Android AAR (`arm64-v8a`, `x86_64`, API 26+) | See [Android](android.md#qualification) | No claim |
+
+| Target | Evidence |
+| --- | --- |
+| macOS arm64 (`darwin-aarch64`) | Clean packaged consumer, JDK 25 |
+| Linux x86_64 (`linux-x86-64`) | Clean packaged consumer, Debian 12, OpenJDK 17, under emulation |
+| Windows x86_64 | Best-effort build, no claim |
+| iOS, web | Unqualified |
+
+JVM bytecode targets 17. The JVM package carries the locked development
+native profile; publication, optimized artifacts and signing/notarization are
+not done. The partitioned shopping schema is refused by the current constraint
+boundary ([audit](shopping-qualification.md)).
+
+## Another language
+
+Another binding implements the same version-1 scoped JSON call/error/batch
+contract ([SDK contract](sdk-contract.md)), opaque session ownership, stable
+intent persistence and committed observation semantics. Generate bindings with
+the pinned UniFFI 0.32.2 from the packaged ABI (`uniffi.toml` is the Kotlin
+example). Supply secret-store and stream callbacks and deterministic handlers
+through foreign interfaces. Callbacks receive immutable input and return
+bounded decisions; they never own a storage transaction or perform external
+effects. Foreign exceptions, overruns and crashes map to named failure classes
+and timeouts, never a panic or stuck domain worker. Qualify cancellation,
+scalar precision, exception mapping, callback deadlines and borrowed-resource
+lifetime before release.
+
+## Design rationale
+
+- In-process UniFFI bindings are the one consumer adapter. A sidecar process
+  over a local runtime protocol was rejected: it doubles the protocol surface,
+  cannot run on iOS and makes sharing one iroh endpoint with application
+  protocols awkward. A hand-written C ABI was rejected because UniFFI generates
+  it together with typed bindings. A future sidecar would be an additional
+  adapter carrying the same bytes and host contract.
+- One UniFFI version is pinned across runtime and bindings; a mismatch is a
+  load error. Binding object graphs are never stored or sent.
+- The runtime cannot prevent foreign handler I/O: handler determinism is
+  trusted, and handler identity is declared and installed, not proven.

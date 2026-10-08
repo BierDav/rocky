@@ -1,0 +1,29 @@
+roles rows=500000 scopes=20 rows_per_scope=25000 behind=10000
+roles load (author and push): rows=500000 ms=253505 rows_per_s=1972 resident_mib=85
+roles subset-sync: rows=25000 frames=782 pages=196 frame_bytes_mean=29764 ms=8378
+roles check: subset converges: ok
+roles check: no stored rows outside the subscription: ok
+roles check: an unsubscribed scope is not complete: ok
+roles catch-up: operations=10000 frames=10000 pages=455 ms=48676 ops_per_s=205 resident_mib=131
+roles catch-up partial local writes: n=1930 throughput=40/s p50_us=5714 p99_us=88948 max_us=142808
+roles catch-up full-node local writes: n=1683 throughput=35/s p50_us=4395 p99_us=120029 max_us=162154
+roles check: caught-up scope converges: ok
+roles prune: pruned=10980 blocked=None
+roles rebootstrap: ms=5811 superseded=10782 reapplied=10 rejected=0 pending=0
+roles check: every offline edit is reapplied or rejected: ok
+roles check: rebootstrapped scope converges: ok
+roles check: eviction without custody is refused: ok
+roles evict: rows=25000 operations=787 ms=521
+roles resubscribe: ms=8275
+roles check: resubscribed rows equal the evicted ones: ok
+roles check: resubscribed scope converges: ok
+roles kill mid-transfer: catch-up result ok=false
+roles check: a replica interrupted by the full node's exit converges: ok
+roles check: a replica interrupted by the full node's exit converges: ok
+roles resume after restart: ms=13775
+roles replacement: scopes=20 ms=192719 resident_mib=98
+roles check: the replacement full node reaches the same state: ok
+roles check: partials converge with the replacement: ok
+roles check: partials converge with the replacement: ok
+roles strong: covered by secure::tests::roles::a_full_node_alone_confirms_nothing
+exit=0

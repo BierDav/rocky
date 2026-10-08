@@ -1,0 +1,69 @@
+gate wide_tables=2000: domain 1 owns the wide physical schema; other domains use sparse schemas
+gate: 600 s, 16 domains x 8 clients, files=1, group=128, checkpoint_frames=16384, full durability, incoming on [3, 4, 5, 6], strong on two more domains [17, 18]
+gate t=  10s writes=7276/s steps/group=70.4 flushes=104/s busy: steps 42% commit 55% reads 0% checkpoints 13 (3% of time) wal=47 MiB queue=0 resident=76 MiB
+gate t=  20s writes=6612/s steps/group=71.9 flushes=93/s busy: steps 45% commit 50% reads 0% checkpoints 13 (4% of time) wal=54 MiB queue=1 resident=77 MiB
+gate t=  30s writes=6481/s steps/group=72.3 flushes=91/s busy: steps 45% commit 49% reads 0% checkpoints 14 (5% of time) wal=6 MiB queue=0 resident=77 MiB
+gate t=  40s writes=6664/s steps/group=73.4 flushes=92/s busy: steps 45% commit 49% reads 0% checkpoints 13 (6% of time) wal=15 MiB queue=6 resident=77 MiB
+gate t=  50s writes=6427/s steps/group=72.9 flushes=89/s busy: steps 46% commit 48% reads 0% checkpoints 12 (6% of time) wal=48 MiB queue=1 resident=74 MiB
+gate t=  60s writes=6182/s steps/group=74.9 flushes=83/s busy: steps 47% commit 45% reads 0% checkpoints 12 (7% of time) wal=64 MiB queue=8 resident=75 MiB
+gate t=  70s writes=6162/s steps/group=73.3 flushes=85/s busy: steps 46% commit 46% reads 0% checkpoints 13 (8% of time) wal=27 MiB queue=1 resident=75 MiB
+gate t=  80s writes=6176/s steps/group=74.6 flushes=84/s busy: steps 45% commit 46% reads 0% checkpoints 12 (8% of time) wal=64 MiB queue=8 resident=75 MiB
+gate t=  90s writes=6004/s steps/group=74.8 flushes=81/s busy: steps 45% commit 45% reads 0% checkpoints 13 (9% of time) wal=16 MiB queue=4 resident=76 MiB
+gate t= 100s writes=5815/s steps/group=76.3 flushes=77/s busy: steps 47% commit 43% reads 1% checkpoints 12 (9% of time) wal=18 MiB queue=0 resident=76 MiB
+gate t= 110s writes=5853/s steps/group=74.5 flushes=80/s busy: steps 46% commit 44% reads 1% checkpoints 12 (10% of time) wal=36 MiB queue=4 resident=76 MiB
+gate t= 120s writes=5295/s steps/group=80.7 flushes=66/s busy: steps 50% commit 40% reads 1% checkpoints 11 (9% of time) wal=59 MiB queue=0 resident=76 MiB
+gate t= 130s writes=5622/s steps/group=81.7 flushes=70/s busy: steps 49% commit 40% reads 1% checkpoints 12 (10% of time) wal=57 MiB queue=0 resident=76 MiB
+gate t= 140s writes=5656/s steps/group=75.7 flushes=76/s busy: steps 44% commit 42% reads 1% checkpoints 13 (12% of time) wal=7 MiB queue=0 resident=76 MiB
+gate t= 150s writes=5420/s steps/group=74.0 flushes=74/s busy: steps 45% commit 42% reads 1% checkpoints 12 (11% of time) wal=65 MiB queue=0 resident=76 MiB
+gate t= 160s writes=5220/s steps/group=84.1 flushes=63/s busy: steps 51% commit 38% reads 1% checkpoints 11 (10% of time) wal=18 MiB queue=5 resident=76 MiB
+gate t= 170s writes=5501/s steps/group=81.5 flushes=68/s busy: steps 48% commit 39% reads 1% checkpoints 11 (11% of time) wal=64 MiB queue=8 resident=76 MiB
+gate t= 180s writes=5188/s steps/group=80.2 flushes=66/s busy: steps 47% commit 39% reads 1% checkpoints 13 (13% of time) wal=4 MiB queue=4 resident=76 MiB
+gate t= 190s writes=5075/s steps/group=78.6 flushes=65/s busy: steps 45% commit 42% reads 1% checkpoints 12 (12% of time) wal=19 MiB queue=3 resident=76 MiB
+gate t= 200s writes=4879/s steps/group=78.9 flushes=63/s busy: steps 48% commit 39% reads 1% checkpoints 12 (12% of time) wal=48 MiB queue=0 resident=76 MiB
+gate t= 210s writes=4829/s steps/group=78.9 flushes=62/s busy: steps 47% commit 38% reads 1% checkpoints 13 (13% of time) wal=11 MiB queue=2 resident=77 MiB
+gate t= 220s writes=4665/s steps/group=79.7 flushes=59/s busy: steps 49% commit 38% reads 1% checkpoints 12 (12% of time) wal=13 MiB queue=4 resident=78 MiB
+gate t= 230s writes=4975/s steps/group=80.4 flushes=63/s busy: steps 48% commit 39% reads 1% checkpoints 11 (11% of time) wal=66 MiB queue=8 resident=78 MiB
+gate t= 240s writes=4629/s steps/group=79.5 flushes=59/s busy: steps 48% commit 37% reads 1% checkpoints 13 (13% of time) wal=6 MiB queue=3 resident=78 MiB
+gate t= 250s writes=4822/s steps/group=82.9 flushes=59/s busy: steps 50% commit 37% reads 1% checkpoints 12 (12% of time) wal=11 MiB queue=4 resident=78 MiB
+gate t= 260s writes=4753/s steps/group=77.4 flushes=62/s busy: steps 48% commit 39% reads 1% checkpoints 12 (12% of time) wal=25 MiB queue=4 resident=78 MiB
+gate t= 270s writes=5003/s steps/group=77.6 flushes=65/s busy: steps 47% commit 40% reads 1% checkpoints 12 (12% of time) wal=41 MiB queue=3 resident=78 MiB
+gate t= 280s writes=4576/s steps/group=83.9 flushes=55/s busy: steps 51% commit 36% reads 1% checkpoints 12 (12% of time) wal=61 MiB queue=4 resident=78 MiB
+gate t= 290s writes=4810/s steps/group=79.6 flushes=61/s busy: steps 48% commit 38% reads 1% checkpoints 12 (12% of time) wal=55 MiB queue=2 resident=78 MiB
+gate t= 300s writes=4866/s steps/group=82.1 flushes=60/s busy: steps 49% commit 38% reads 1% checkpoints 12 (12% of time) wal=66 MiB queue=8 resident=79 MiB
+gate t= 310s writes=4828/s steps/group=82.2 flushes=60/s busy: steps 50% commit 37% reads 2% checkpoints 12 (12% of time) wal=59 MiB queue=6 resident=79 MiB
+gate t= 320s writes=4624/s steps/group=82.1 flushes=57/s busy: steps 49% commit 37% reads 1% checkpoints 13 (13% of time) wal=17 MiB queue=7 resident=79 MiB
+gate t= 330s writes=4809/s steps/group=79.5 flushes=61/s busy: steps 48% commit 38% reads 2% checkpoints 12 (12% of time) wal=24 MiB queue=0 resident=79 MiB
+gate t= 340s writes=4715/s steps/group=79.4 flushes=60/s busy: steps 48% commit 38% reads 2% checkpoints 12 (12% of time) wal=40 MiB queue=3 resident=79 MiB
+gate t= 350s writes=4688/s steps/group=79.2 flushes=60/s busy: steps 48% commit 38% reads 2% checkpoints 12 (12% of time) wal=50 MiB queue=3 resident=79 MiB
+gate t= 360s writes=4736/s steps/group=81.7 flushes=59/s busy: steps 50% commit 37% reads 2% checkpoints 12 (12% of time) wal=63 MiB queue=0 resident=79 MiB
+gate t= 370s writes=4893/s steps/group=78.8 flushes=63/s busy: steps 47% commit 38% reads 2% checkpoints 13 (12% of time) wal=39 MiB queue=0 resident=79 MiB
+gate t= 380s writes=4830/s steps/group=79.1 flushes=62/s busy: steps 47% commit 38% reads 2% checkpoints 12 (12% of time) wal=65 MiB queue=8 resident=79 MiB
+gate t= 390s writes=4484/s steps/group=81.9 flushes=56/s busy: steps 50% commit 36% reads 2% checkpoints 13 (13% of time) wal=11 MiB queue=0 resident=79 MiB
+gate t= 400s writes=4700/s steps/group=78.9 flushes=60/s busy: steps 48% commit 38% reads 2% checkpoints 12 (12% of time) wal=12 MiB queue=6 resident=79 MiB
+gate t= 410s writes=4680/s steps/group=78.9 flushes=60/s busy: steps 49% commit 38% reads 2% checkpoints 12 (11% of time) wal=15 MiB queue=0 resident=79 MiB
+gate t= 420s writes=4590/s steps/group=83.4 flushes=56/s busy: steps 50% commit 36% reads 2% checkpoints 12 (12% of time) wal=20 MiB queue=2 resident=79 MiB
+gate t= 430s writes=4659/s steps/group=84.7 flushes=56/s busy: steps 50% commit 35% reads 2% checkpoints 11 (11% of time) wal=64 MiB queue=8 resident=79 MiB
+gate t= 440s writes=4696/s steps/group=82.2 flushes=58/s busy: steps 49% commit 37% reads 2% checkpoints 13 (13% of time) wal=64 MiB queue=0 resident=80 MiB
+gate t= 450s writes=4756/s steps/group=83.2 flushes=58/s busy: steps 50% commit 37% reads 2% checkpoints 11 (11% of time) wal=51 MiB queue=2 resident=80 MiB
+gate t= 460s writes=4474/s steps/group=83.5 flushes=54/s busy: steps 50% commit 35% reads 2% checkpoints 13 (13% of time) wal=6 MiB queue=0 resident=80 MiB
+gate t= 470s writes=4800/s steps/group=80.5 flushes=60/s busy: steps 48% commit 38% reads 2% checkpoints 11 (11% of time) wal=64 MiB queue=5 resident=80 MiB
+gate t= 480s writes=4393/s steps/group=79.4 flushes=56/s busy: steps 48% commit 38% reads 2% checkpoints 12 (12% of time) wal=57 MiB queue=7 resident=80 MiB
+gate t= 490s writes=4612/s steps/group=81.5 flushes=57/s busy: steps 48% commit 36% reads 2% checkpoints 12 (12% of time) wal=64 MiB queue=8 resident=80 MiB
+gate t= 500s writes=4614/s steps/group=79.5 flushes=59/s busy: steps 48% commit 37% reads 3% checkpoints 13 (13% of time) wal=5 MiB queue=0 resident=80 MiB
+gate t= 510s writes=4660/s steps/group=82.5 flushes=57/s busy: steps 48% commit 38% reads 3% checkpoints 11 (11% of time) wal=64 MiB queue=8 resident=80 MiB
+gate t= 520s writes=4430/s steps/group=83.5 flushes=54/s busy: steps 50% commit 36% reads 3% checkpoints 12 (12% of time) wal=47 MiB queue=0 resident=81 MiB
+gate t= 530s writes=4463/s steps/group=82.5 flushes=55/s busy: steps 49% commit 36% reads 3% checkpoints 12 (11% of time) wal=20 MiB queue=2 resident=81 MiB
+gate t= 540s writes=4760/s steps/group=79.3 flushes=61/s busy: steps 48% commit 38% reads 3% checkpoints 12 (12% of time) wal=40 MiB queue=0 resident=81 MiB
+gate t= 550s writes=4664/s steps/group=84.7 flushes=56/s busy: steps 48% commit 37% reads 2% checkpoints 12 (12% of time) wal=26 MiB queue=5 resident=81 MiB
+gate t= 560s writes=4368/s steps/group=86.3 flushes=51/s busy: steps 51% commit 34% reads 3% checkpoints 12 (12% of time) wal=6 MiB queue=5 resident=81 MiB
+gate t= 570s writes=4759/s steps/group=83.4 flushes=58/s busy: steps 49% commit 36% reads 3% checkpoints 11 (11% of time) wal=65 MiB queue=8 resident=81 MiB
+gate t= 580s writes=4478/s steps/group=84.5 flushes=54/s busy: steps 51% commit 35% reads 3% checkpoints 12 (12% of time) wal=49 MiB queue=0 resident=81 MiB
+gate t= 590s writes=4526/s steps/group=85.5 flushes=54/s busy: steps 50% commit 35% reads 3% checkpoints 12 (12% of time) wal=37 MiB queue=2 resident=81 MiB
+gate t= 600s writes=4745/s steps/group=79.6 flushes=60/s busy: steps 47% commit 38% reads 3% checkpoints 12 (12% of time) wal=31 MiB queue=0 resident=81 MiB
+gate local writes: n=3048848 throughput=5076/s p50_us<=20200 p99_us<=128900 max_us=223114
+gate strong commands: n=2290 throughput=4/s p50_us<=258300 p99_us<=497800 max_us=537459
+gate incoming pages: n=24000 throughput=40/s p50_us<=23700 p99_us<=142400 max_us=190964
+gate checkpoints: passive=728 wal_flush_ms=2.6 copy_ms=20.1 file_flush_ms=66.4 per checkpoint; truncating=0 mean_ms=0.0
+gate incoming operations: 768000 (1279/s); slowest 10 s interval 4368 writes/s
+gate writer: groups=39101 steps=3090042 flushes=39101 steps 48% commit 39% reads 1% of 1 thread(s); checkpoints=728 mean_ms=89.2 max_ms=153.8; wal max 67 MiB by frames, 66 MiB on disk
+gate reopen: 448 ms, 3818012 applied operations, files 317 MB

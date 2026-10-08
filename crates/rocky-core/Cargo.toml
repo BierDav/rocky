@@ -1,0 +1,17 @@
+[package]
+name = "rocky-core"
+description = "Shared Rocky identities, operation envelopes, versions and protocol errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The `AsyncRead`/`AsyncWrite` traits and connectivity `watch` of the network port.
+tokio = { version = "1", default-features = false, features = ["sync"] }

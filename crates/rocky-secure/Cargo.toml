@@ -1,0 +1,32 @@
+[package]
+name = "rocky-secure"
+description = "Signed capabilities, encrypted replicas and authenticated native sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rocky-core.workspace = true
+rocky-credentials.workspace = true
+rocky-storage.workspace = true
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "net", "io-util"] }
+
+p2panda-core = "=0.5.2"
+p2panda-store = { version = "=0.5.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+chacha20poly1305 = "=0.10.1"
+rand = "=0.8.8"
+
+[dev-dependencies]
+serde_json = "1"
+accounting-app = { path = "../../examples/accounting-app" }
+employees-app = { path = "../../examples/employees-app" }
+rocky-coordinator.workspace = true
+rocky-storage = { workspace = true, features = ["test-support"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

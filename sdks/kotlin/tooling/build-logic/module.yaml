@@ -1,0 +1,6 @@
+product: jvm/lib
+apply:
+  - //project.module-template.yaml
+dependencies:
+  # The embedded compiler; matches the toolchain's Kotlin compiler.
+  - org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.20: exported

@@ -1,0 +1,9 @@
+roles rows=500000 scopes=20 rows_per_scope=25000 behind=10000
+roles load: rows=500000 ms=263675 rows_per_s=1896 resident_mib=23
+roles subset-sync: rows=25000 frames=782 pages=781 frame_bytes_mean=67096 ms=26292
+roles check: subset converges: ok
+roles check: no stored rows outside the subscription: ok
+roles check: an unsubscribed scope is not complete: ok
+roles catch-up: operations=10000 frames=10000 pages=3334 ms=309830 ops_per_s=32 resident_mib=74
+Error: Backpressure
+exit=1

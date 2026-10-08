@@ -1,0 +1,34 @@
+tables=10 domains=1 manifest_bytes=2208 validate_us=208 hash_us=13 fingerprint_us=106
+tables=10 domains=1 files=1 installed_ms=47
+tables=10 domains=1 files=1 install_ms=47 open_ms=2 write_us=114 read_us=29 resident_mib=13
+tables=10 domains=8 manifest_bytes=2390 validate_us=34 hash_us=5 fingerprint_us=28
+tables=10 domains=8 files=1 installed_ms=97
+tables=10 domains=8 files=1 install_ms=97 open_ms=7 write_us=101 read_us=29 resident_mib=17
+tables=10 domains=64 manifest_bytes=3846 validate_us=38 hash_us=8 fingerprint_us=32
+tables=10 domains=64 files=16 installed_ms=859
+tables=10 domains=64 files=16 install_ms=859 open_ms=54 write_us=99 read_us=29 resident_mib=75
+tables=100 domains=1 manifest_bytes=19848 validate_us=542 hash_us=89 fingerprint_us=410
+tables=100 domains=1 files=1 installed_ms=111
+tables=100 domains=1 files=1 install_ms=111 open_ms=6 write_us=107 read_us=30 resident_mib=74
+tables=100 domains=8 manifest_bytes=20030 validate_us=278 hash_us=39 fingerprint_us=238
+tables=100 domains=8 files=1 installed_ms=1248
+tables=100 domains=8 files=1 install_ms=1248 open_ms=51 write_us=82 read_us=33 resident_mib=78
+tables=100 domains=64 manifest_bytes=21486 validate_us=289 hash_us=43 fingerprint_us=249
+tables=100 domains=64 files=16 installed_ms=6135
+tables=100 domains=64 files=16 install_ms=6135 open_ms=207 write_us=75 read_us=35 resident_mib=144
+tables=500 domains=1 manifest_bytes=99848 validate_us=1601 hash_us=234 fingerprint_us=1327
+tables=500 domains=1 files=1 installed_ms=558
+tables=500 domains=1 files=1 install_ms=558 open_ms=28 write_us=121 read_us=34 resident_mib=147
+tables=500 domains=8 manifest_bytes=100030 validate_us=1380 hash_us=208 fingerprint_us=1190
+tables=500 domains=8 files=1 installed_ms=28752
+tables=500 domains=8 files=1 install_ms=28752 open_ms=266 write_us=74 read_us=91 resident_mib=158
+tables=500 domains=64 manifest_bytes=101486 validate_us=1369 hash_us=195 fingerprint_us=1194
+tables=500 domains=64 files=16 installed_ms=80206
+tables=500 domains=64 files=16 install_ms=80206 open_ms=1112 write_us=77 read_us=54 resident_mib=358
+tables=2000 domains=1 manifest_bytes=403848 validate_us=6446 hash_us=947 fingerprint_us=5212
+tables=2000 domains=1 files=1 installed_ms=8311
+tables=2000 domains=1 files=1 install_ms=8311 open_ms=114 write_us=77 read_us=53 resident_mib=382
+tables=2000 domains=8 manifest_bytes=404030 validate_us=5957 hash_us=834 fingerprint_us=5131
+tables=2000 domains=8 files=4 installed_ms=127585
+tables=2000 domains=8 files=4 install_ms=127585 open_ms=681 write_us=76 read_us=95 resident_mib=393
+tables=2000 domains=64 manifest_bytes=405486 validate_us=6101 hash_us=878 fingerprint_us=5018

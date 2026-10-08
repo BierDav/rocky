@@ -1,0 +1,80 @@
+erp open_loop rate=100/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp stream offered=3000 completed=3000 achieved_per_s=100.0
+erp schedule dropped_sends=0 max_send_lag_ms=2.321
+erp interval=0s offered=1000 completed=1000 late_sends=0 behind=false
+erp interval=10s offered=1000 completed=1000 late_sends=0 behind=false
+erp interval=20s offered=1000 completed=1000 late_sends=0 behind=false
+erp strong commands: n=113 throughput=4/s p50_us<=17100 p99_us<=284900 max_us=348944
+erp strong commands: p99_9_us<=349000
+erp writer groups=3640 steps=3791 step_us=362679 commit_us=14887339 checkpoints=1 checkpoint_us=7838 checkpoint_copy_us=4188 checkpoint_file_flush_us=3550
+erp open_loop rate=100/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp scheduled local writes: n=3000 throughput=100/s p50_us<=31700 p99_us<=141500 max_us=295318
+erp scheduled local writes: p99_9_us<=265400
+erp stream offered=3000 completed=3000 achieved_per_s=100.0
+erp schedule dropped_sends=0 max_send_lag_ms=19.644
+erp interval=0s offered=1000 completed=1000 late_sends=16 behind=true
+erp interval=10s offered=1000 completed=1000 late_sends=9 behind=true
+erp interval=20s offered=1000 completed=1000 late_sends=6 behind=true
+erp strong commands: n=61 throughput=2/s p50_us<=281300 p99_us<=676000 max_us=675992
+erp strong commands: p99_9_us<=676000
+erp writer groups=1705 steps=3427 step_us=1336011 commit_us=27921493 checkpoints=1 checkpoint_us=209276 checkpoint_copy_us=196287 checkpoint_file_flush_us=7385
+erp open_loop rate=250/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp stream offered=7500 completed=7500 achieved_per_s=250.0
+erp schedule dropped_sends=0 max_send_lag_ms=2.359
+erp interval=0s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=10s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=20s offered=2500 completed=2500 late_sends=0 behind=false
+erp strong commands: n=111 throughput=4/s p50_us<=33000 p99_us<=86800 max_us=105008
+erp strong commands: p99_9_us<=105100
+erp writer groups=7827 steps=8277 step_us=463801 commit_us=25757804 checkpoints=4 checkpoint_us=32297 checkpoint_copy_us=10483 checkpoint_file_flush_us=15058
+erp open_loop rate=250/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp scheduled local writes: n=7500 throughput=250/s p50_us<=5400 p99_us<=32700 max_us=81460
+erp scheduled local writes: p99_9_us<=65600
+erp stream offered=7500 completed=7500 achieved_per_s=250.0
+erp schedule dropped_sends=0 max_send_lag_ms=2.884
+erp interval=0s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=10s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=20s offered=2500 completed=2500 late_sends=0 behind=false
+erp strong commands: n=108 throughput=4/s p50_us<=41700 p99_us<=182600 max_us=316735
+erp strong commands: p99_9_us<=316800
+erp writer groups=7455 steps=8256 step_us=731355 commit_us=26431560 checkpoints=4 checkpoint_us=34425 checkpoint_copy_us=14024 checkpoint_file_flush_us=14575
+erp open_loop rate=500/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp stream offered=15000 completed=15000 achieved_per_s=500.0
+erp schedule dropped_sends=0 max_send_lag_ms=6.994
+erp interval=0s offered=5000 completed=5000 late_sends=1 behind=true
+erp interval=10s offered=5000 completed=5000 late_sends=1 behind=true
+erp interval=20s offered=5000 completed=5000 late_sends=4 behind=true
+erp strong commands: n=103 throughput=3/s p50_us<=66600 p99_us<=80600 max_us=84902
+erp strong commands: p99_9_us<=85000
+erp writer groups=8057 steps=15721 step_us=1357053 commit_us=28462007 checkpoints=6 checkpoint_us=66809 checkpoint_copy_us=34359 checkpoint_file_flush_us=28247
+erp open_loop rate=500/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp scheduled local writes: n=15000 throughput=500/s p50_us<=6400 p99_us<=11400 max_us=32676
+erp scheduled local writes: p99_9_us<=25200
+erp stream offered=15000 completed=15000 achieved_per_s=500.0
+erp schedule dropped_sends=0 max_send_lag_ms=4.066
+erp interval=0s offered=5000 completed=5000 late_sends=1 behind=true
+erp interval=10s offered=5000 completed=5000 late_sends=0 behind=false
+erp interval=20s offered=5000 completed=5000 late_sends=2 behind=true
+erp strong commands: n=103 throughput=3/s p50_us<=66200 p99_us<=93700 max_us=122147
+erp strong commands: p99_9_us<=122200
+erp writer groups=8198 steps=15721 step_us=1376971 commit_us=28413613 checkpoints=6 checkpoint_us=73163 checkpoint_copy_us=30650 checkpoint_file_flush_us=30152
+erp open_loop rate=1000/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp stream offered=30000 completed=30000 achieved_per_s=1000.0
+erp schedule dropped_sends=0 max_send_lag_ms=1.270
+erp interval=0s offered=10000 completed=10000 late_sends=1243 behind=true
+erp interval=10s offered=10000 completed=10000 late_sends=1338 behind=true
+erp interval=20s offered=10000 completed=10000 late_sends=1381 behind=true
+erp strong commands: n=101 throughput=3/s p50_us<=70300 p99_us<=94500 max_us=97025
+erp strong commands: p99_9_us<=97100
+erp writer groups=7605 steps=30707 step_us=2265866 commit_us=27520912 checkpoints=7 checkpoint_us=99999 checkpoint_copy_us=47825 checkpoint_file_flush_us=43710
+erp open_loop rate=1000/s duration_s=30 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp scheduled local writes: n=30000 throughput=1000/s p50_us<=7000 p99_us<=12800 max_us=35852
+erp scheduled local writes: p99_9_us<=28800
+erp stream offered=30000 completed=30000 achieved_per_s=1000.0
+erp schedule dropped_sends=0 max_send_lag_ms=6.250
+erp interval=0s offered=10000 completed=10000 late_sends=5614 behind=true
+erp interval=10s offered=10000 completed=10000 late_sends=5506 behind=true
+erp interval=20s offered=10000 completed=10000 late_sends=5439 behind=true
+erp strong commands: n=101 throughput=3/s p50_us<=70700 p99_us<=97000 max_us=100117
+erp strong commands: p99_9_us<=100200
+erp writer groups=7581 steps=30707 step_us=2309512 commit_us=27453560 checkpoints=7 checkpoint_us=107849 checkpoint_copy_us=48627 checkpoint_file_flush_us=46779

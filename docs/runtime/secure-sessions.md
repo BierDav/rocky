@@ -1,0 +1,120 @@
+# Secure sessions and transaction bundles
+
+`EncryptedReplica` sessions and atomic multi-scope bundles (Rust API). SQL
+over typed tables is in [secure SQL](secure-sql.md); grants and delivery are in
+[permissions and sync](permissions-and-sync.md); the design is
+[decision 0018](../decisions/0018-secure-transaction-bundles.md).
+
+## Bundles
+
+`author_bundle` commits writes of several scopes and more than 32 rows as one
+local transaction. The frames are returned after a flush.
+
+```rust
+let frames = replica
+    .author_bundle(handle, vec![
+        RowWrite::changed(public_row),
+        RowWrite::changed(private_row),
+    ], vec![])
+    .await?;
+```
+
+| Bound | Value |
+| --- | --- |
+| Rows per frame (`ROWS_PER_FRAME`) | 32, one scope per frame |
+| Frames per bundle (`MAX_BUNDLE_FRAMES`) | 64 |
+| Rows per bundle (`MAX_BUNDLE_ROWS`) | 2,048; each row once |
+| Encoded writes (`MAX_BUNDLE_BYTES`) | 4 MiB |
+
+Every write is admitted against the node's grants and the application checks
+the exact transaction across scopes. One refused write, an exceeded bound or
+a failure before the commit commits nothing, frames already signed for other
+scopes included, and leaves the sequences unused. A dependency must belong to
+one of the bundle's scopes. The same handle and writes return the same
+frames, also after a restart or recovery import; other writes conflict.
+
+`RowWrite::assigned` lists fields an update republishes although unchanged.
+Each needs a row/field grant like a changed one.
+
+## What a receiver applies
+
+Each frame carries the bundle's member list, every entry sealed under its own
+member's scope key. A receiver applies together all members it can open, may
+read and holds; it waits while one of them is missing. Members of other
+partitions do not block it.
+
+| Receiver | Result |
+| --- | --- |
+| Holds and reads every scope | Applies every member in one commit, after the last arrives |
+| Reads the public scope only | Applies the public members; cannot open the others |
+| May read a scope but lacks its key | Applies the rest; that partition applies once the key is installed |
+| Finds members that disagree, or one rejected | Rejects every pending member it requires |
+
+While a required member is missing, the received ones report
+`PendingDependencies` and the scope's pages report `complete == false`.
+Receipt and applied acknowledgments stay per frame, so each describes exactly
+one partition. Members applied before a checkpoint count through the log;
+the signed checkpoint vouches for them.
+
+A reader of a member learns how many members the bundle has, not their
+scopes. Relays see ordinary frames; timing and sizes stay visible.
+
+## Sessions
+
+`EncryptedReplica::session(scopes)` binds what authentication and enrollment
+supplied at open. No call argument names a principal or a grant.
+
+| `SessionStatus` field | Meaning |
+| --- | --- |
+| `principal` | The user the credential chain delegates from: the login identity |
+| `node` | The device key that signs every operation |
+| `manifest`, `epoch` | The definition and the policy epoch of the credentials |
+| `expires` | Earliest expiry in the chain |
+| `scopes` | The resource set asked for; each must be granted |
+| `readable`, `writable` | Scopes read with an installed key, scopes with a write right |
+
+Every session call checks that the replica's authority has not changed since
+the session opened and verifies the credentials at the current time. These
+end every session: `learn_policy`, `renew_credentials`, `evict_key`,
+`install_key_epoch`, `retire_key_epoch` and `logout`. `renew_credentials` evicts keys the new grants cannot read whole.
+`logout` drops every key from memory; stored plaintext projections remain at
+rest. An offline node enforces only the newest policy it has learned;
+`SessionStatus::epoch` shows which.
+
+`SecureSession::transaction()` stages inserts, updates and deletes in memory
+and reads its own writes. Each staged write is admitted at once and again at
+commit; a refused edit leaves the staged row as it was.
+
+```rust
+let mut transaction = session.transaction();
+transaction.update(scope, row, values, UpdateMode::Changed).await?;
+let frames = transaction.commit(handle).await?;
+```
+
+`UpdateMode::Changed` publishes values that differ and needs rights to
+those fields only. `Assigned` republishes every assigned value and needs a
+right for each. Unchanged permission-controlling fields are never
+republished; changing one needs a strong command. A row another writer
+changed since the transaction read it fails the commit with `Conflict`.
+
+The commit is admitted under the replica lock inside the write transaction.
+A policy learned before that point refuses it; one learned after it applies
+to later calls. Bytes already returned cannot be taken back.
+
+## Qualification
+
+`cargo test -p rocky-secure --lib tests::bundles`:
+
+- A 41-row bundle over a public and a private scope: full readers apply it
+  in one commit in any arrival order and across a restart; public readers
+  apply their partition alone; a late key applies the private partition.
+- An injected failure, a busy file, one denied write, an invalid row, a
+  duplicated row and the bounds commit nothing. Handles return the same
+  frames after a restart and without their member records.
+- A forked log that makes members disagree is rejected in both arrival orders.
+- Checkpoint, audit and pruning of bundle members; a later partition applies
+  against pruned partners.
+- Sessions end on renewal, attenuation, policy and logout. Read-only,
+  custody-only and field-limited principals cannot widen their writes.
+
+This is application-level evidence, not a cryptographic audit.

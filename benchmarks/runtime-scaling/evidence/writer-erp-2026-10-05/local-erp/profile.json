@@ -1,0 +1,33 @@
+{
+  "profile": "Local Apple M5 Pro open-loop ERP rates with 4/s strong commands",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "source_archive_sha256": "387036738a62c8d4d94189c148d435f48a3f20b90cf13ff27c2bffcbbc27740a",
+  "binary_sha256": "c6c4d71ce40e2bcb7ccaa5467d8e8d186f8f4e208d3472874ea1962a792ec1ac",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  "command": [
+    "target/release/scaling_probe",
+    "erp-open-loop",
+    "60",
+    "2000",
+    "benchmarks/runtime-scaling/evidence/writer-erp-2026-10-05/local-erp/data"
+  ],
+  "raw_output": "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/evidence/writer-erp-2026-10-05/local-erp/open-loop.txt",
+  "started_unix": 1791232180.0,
+  "finished_unix": 1791232542.057439,
+  "exit_code": 0,
+  "qualification_gate": "phase 5 recheck; phase 8 pending",
+  "hardware": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac17,8\nhw.memsize: 51539607552\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   723Gi   173Gi    81%    2.8M  1.8G    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  }
+}

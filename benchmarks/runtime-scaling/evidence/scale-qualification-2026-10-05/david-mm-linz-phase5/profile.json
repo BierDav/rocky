@@ -1,0 +1,11 @@
+{
+  "profile": "Apple M4 Mac mini / phase-5 gate at 2,000 tables",
+  "hostname": "david-mm-linz.local",
+  "platform": "Darwin david-mm-linz.local 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:08:48 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T8132 arm64",
+  "hardware_and_rustc_manifest": "../evidence-full/profile.json",
+  "source_archive_sha256": "0f82b39d9c0e6c42890017fd81bac8d556180ea39bdb077af0e4879e4330d393",
+  "binary_sha256": "fb29534c54f6cefd94562a98b87b48cfeb95b3381964692d17b5110246dab52c",
+  "command": ["/Users/david-bieregger/rocky-scale-08-imts4Eqh/target/release/scaling_probe", "gate", "600", "1", "16384", "128", "/Users/david-bieregger/rocky-scale-08-imts4Eqh/evidence-phase5-scale08-20261005-194338", "2000"],
+  "started_unix": 1791222218,
+  "qualification_gate": "phase 5 recheck; phase 8 pending"
+}

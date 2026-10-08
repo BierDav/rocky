@@ -1,0 +1,16 @@
+# Rocky's runtime for Android apps: the AAR the android-runtime Gradle build publishes to Maven local.
+# An Android app depends on this module next to rocky-core; see ../android-runtime/README.md.
+product:
+  type: kmp/lib
+  platforms: [android]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - rocky:rocky-runtime-android:0.1.0
+repositories:
+  - mavenLocal
+settings:
+  android:
+    minSdk: 26
+plugins:
+  rocky-android: enabled

@@ -1,0 +1,24 @@
+encrypted entities=10 signed_manifest_bytes=4503 verify_us=156
+encrypted entities=10 install_ms=12 resident_mib=11
+encrypted entities=10 grant_us=70 grant_plus_manifest_us=75
+encrypted entities=10 author: n=1000 throughput=165/s p50_us=5714 p99_us=15704 max_us=18203
+encrypted entities=10 incoming: n=1000 throughput=160/s p50_us=5994 p99_us=15138 max_us=18825
+encrypted entities=10 scope-read: n=1000 throughput=3388/s p50_us=289 p99_us=530 max_us=775
+encrypted entities=100 signed_manifest_bytes=42841 verify_us=821
+encrypted entities=100 install_ms=12 resident_mib=18
+encrypted entities=100 grant_us=71 grant_plus_manifest_us=128
+encrypted entities=100 author: n=1000 throughput=167/s p50_us=5725 p99_us=15521 max_us=18639
+encrypted entities=100 incoming: n=1000 throughput=159/s p50_us=5997 p99_us=15817 max_us=17833
+encrypted entities=100 scope-read: n=1000 throughput=3542/s p50_us=269 p99_us=515 max_us=592
+encrypted entities=500 signed_manifest_bytes=216494 verify_us=4854
+encrypted entities=500 install_ms=20 resident_mib=20
+encrypted entities=500 grant_us=72 grant_plus_manifest_us=312
+encrypted entities=500 author: n=1000 throughput=157/s p50_us=5806 p99_us=16535 max_us=17704
+encrypted entities=500 incoming: n=1000 throughput=155/s p50_us=6029 p99_us=16001 max_us=17907
+encrypted entities=500 scope-read: n=1000 throughput=3683/s p50_us=265 p99_us=488 max_us=699
+encrypted entities=2000 signed_manifest_bytes=875441 verify_us=19034
+encrypted entities=2000 install_ms=38 resident_mib=26
+encrypted entities=2000 grant_us=67 grant_plus_manifest_us=1010
+encrypted entities=2000 author: n=1000 throughput=165/s p50_us=5734 p99_us=16315 max_us=18673
+encrypted entities=2000 incoming: n=1000 throughput=159/s p50_us=6003 p99_us=15801 max_us=20038
+encrypted entities=2000 scope-read: n=1000 throughput=3615/s p50_us=275 p99_us=448 max_us=592

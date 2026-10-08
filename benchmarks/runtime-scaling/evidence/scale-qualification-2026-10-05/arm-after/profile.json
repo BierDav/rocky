@@ -1,0 +1,50 @@
+{
+  "profile": "arm64-Neoverse-N1-cloud-block-ext4",
+  "platform": "Linux-7.2.7-aarch64-with-glibc2.42",
+  "source_archive_sha256": "4c10f811a487b0f358f48a92a2ef84ffc8cda7c0abaa9e9c683cedc2f9189ff9",
+  "binary_sha256": "375b547d7e6fe01189f9195baa4f75ebbc702c9f504b58e35b8b153d6ecfffe6",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.95.0 (59807616e 2026-04-14)\n",
+    "stderr": ""
+  },
+  "command": [
+    "/home/david-bieregger/rocky-scale-08-5yYEcpri/target/release/scaling_probe",
+    "soak",
+    "--directory",
+    "/home/david-bieregger/rocky-scale-08-5yYEcpri/evidence-after/data",
+    "--seconds",
+    "30",
+    "--operations",
+    "50000",
+    "--rows",
+    "5000",
+    "--tables",
+    "2000",
+    "--observers",
+    "100",
+    "--interval",
+    "10",
+    "--durability",
+    "full"
+  ],
+  "started_unix": 1791204922.013228,
+  "qualification_gate": "pending",
+  "cpu": {
+    "exit_code": 0,
+    "stdout": "Architecture:                            aarch64\nCPU op-mode(s):                          32-bit, 64-bit\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               ARM\nModel name:                              Neoverse-N1\nModel:                                   1\nThread(s) per core:                      1\nCore(s) per socket:                      4\nSocket(s):                               1\nStepping:                                r3p1\nBogoMIPS:                                50,00\nFlags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; CSV2, BHB\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+    "stderr": ""
+  },
+  "storage": {
+    "exit_code": 0,
+    "stdout": "NAME   TYPE   SIZE MODEL        FSTYPE\nsda    disk   200G BlockVolume  \n\u251c\u2500sda1 part   512M              vfat\n\u2514\u2500sda2 part 199,5G              ext4\nsdb    disk    10G VIRTUAL-DISK ext4\nsdc    disk     1G VIRTUAL-DISK ext4\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda2       196G   71G  116G  38% /\n",
+    "stderr": ""
+  },
+  "exit_code": 0,
+  "finished_unix": 1791205200.6407712
+}

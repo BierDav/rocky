@@ -1,0 +1,24 @@
+tasks:
+  bindings:
+    action: !rocky.build.generateBindings
+      repositoryRoot: ${project.rootDir}
+      rustSources:
+        - ${project.rootDir}/Cargo.toml
+        - ${project.rootDir}/Cargo.lock
+        - ${project.rootDir}/rust-toolchain.toml
+        - ${project.rootDir}/crates
+        - ${project.rootDir}/sdks/native/Cargo.toml
+        - ${project.rootDir}/sdks/native/Cargo.lock
+        - ${project.rootDir}/sdks/native/uniffi.toml
+        - ${project.rootDir}/sdks/native/src
+      kotlin: ${taskOutputDir}/kotlin
+      resources: ${taskOutputDir}/resources
+
+generated:
+  sources:
+    - directory: ${tasks.bindings.action.kotlin}
+  resources:
+    # JNA loads the library by OS/CPU resource prefix; Android packages per-ABI libraries instead.
+    - directory: ${tasks.bindings.action.resources}
+      fragment:
+        modifier: "@jvm"

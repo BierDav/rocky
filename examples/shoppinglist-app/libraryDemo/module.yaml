@@ -1,0 +1,8 @@
+product: jvm/app
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../shared
+settings:
+  jvm:
+    mainClass: org.example.examples.shopping.LibraryDemoKt

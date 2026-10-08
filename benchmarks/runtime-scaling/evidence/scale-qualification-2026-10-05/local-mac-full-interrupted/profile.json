@@ -1,0 +1,46 @@
+{
+  "profile": "Apple M5 Pro / APFS / Rust 1.95.0 / full durability",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "source_archive_sha256": "0f82b39d9c0e6c42890017fd81bac8d556180ea39bdb077af0e4879e4330d393",
+  "binary_sha256": "d86f68481d49dc6213d79dae7ce92834acf06b2e847f831ab7fde8756394a761",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  "command": [
+    "/Users/david-bieregger/RustroverProjects/rocky-db/target/release/scaling_probe",
+    "soak",
+    "--directory",
+    "/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac/data",
+    "--seconds",
+    "10800",
+    "--operations",
+    "5000000",
+    "--rows",
+    "500000",
+    "--tables",
+    "2000",
+    "--observers",
+    "100",
+    "--interval",
+    "60",
+    "--durability",
+    "full"
+  ],
+  "started_unix": 1791205580.954915,
+  "qualification_gate": "pending",
+  "cpu": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac17,8\nhw.memsize: 51539607552\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   686Gi   211Gi    77%    2.7M  2.2G    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  },
+  "run_status": "interrupted",
+  "interruption_reason": "Benchmark and parent process absent; tool session no longer exists. No exit code or benchmark error recorded.",
+  "audit_exit_code": 0
+}

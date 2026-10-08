@@ -1,0 +1,11 @@
+[package]
+name = "accounting-app"
+description = "Resource-owned accounting event review with explicit version checks, and Alice's observed checkboxes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+[dependencies]
+rocky-core.workspace = true
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+{
+  "profile": "Local Apple Silicon phase 5 gate, current working source",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "source_archive_sha256": "677953ef7755afa4596c31014906120c0a1c53e4534ed6ab311bab1ec273a6f9",
+  "binary_sha256": "b314b2d25365f25857277769488fc68a715d739c67b9c1b3b8efd80d9048fa43",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  "command": [
+    "target/release/scaling_probe",
+    "gate",
+    "600",
+    "1",
+    "16384",
+    "128",
+    "benchmarks/runtime-scaling/evidence/writer-erp-2026-10-05/local-phase5/data",
+    "2000"
+  ],
+  "raw_output": "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/evidence/writer-erp-2026-10-05/local-phase5/gate.txt",
+  "started_unix": 1791231428.0,
+  "finished_unix": 1791232033.137221,
+  "exit_code": 0,
+  "qualification_gate": "phase 5 recheck; phase 8 pending",
+  "hardware": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac17,8\nhw.memsize: 51539607552\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   721Gi   176Gi    81%    2.8M  1.8G    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  }
+}

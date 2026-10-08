@@ -1,0 +1,33 @@
+[package]
+name = "rocky-coordinator"
+description = "Generic execution fencing, head confirmation and request deduplication"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["iroh"]
+# The voter's iroh client lane and the setup commands that certify it.
+iroh = ["dep:rocky-iroh"]
+
+[dependencies]
+rocky-core.workspace = true
+rocky-iroh = { workspace = true, optional = true }
+rocky-credentials.workspace = true
+openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
+p2panda-core = "=0.5.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+rocky-runtime.workspace = true
+rocky-secure.workspace = true
+directory-app = { path = "../../examples/directory-app" }
+inventory-app = { path = "../../examples/inventory-app" }
+
+[lints]
+workspace = true

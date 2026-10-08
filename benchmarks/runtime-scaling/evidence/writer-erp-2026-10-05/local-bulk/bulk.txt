@@ -1,0 +1,29 @@
+erp open_loop rate=250/s duration_s=180 tables=2000 files=1 durability=Full group=128 checkpoint_frames=16384
+erp scheduled local writes: n=45000 throughput=250/s p50_us<=7200 p99_us<=11600 max_us=44840
+erp scheduled local writes: p99_9_us<=28600
+erp background writes during bulk: n=43749 throughput=243/s p50_us<=7200 p99_us<=11600 max_us=44840
+erp background writes during bulk: p99_9_us<=28800
+erp bulk writes=50000 duration_ms=267945
+erp stream offered=45000 completed=45000 achieved_per_s=250.0
+erp schedule dropped_sends=0 max_send_lag_ms=11.719
+erp interval=0s offered=2500 completed=2500 late_sends=1 behind=true
+erp interval=10s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=20s offered=2500 completed=2500 late_sends=1 behind=true
+erp interval=30s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=40s offered=2500 completed=2500 late_sends=2 behind=true
+erp interval=50s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=60s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=70s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=80s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=90s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=100s offered=2500 completed=2500 late_sends=2 behind=true
+erp interval=110s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=120s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=130s offered=2500 completed=2500 late_sends=2 behind=true
+erp interval=140s offered=2500 completed=2500 late_sends=1 behind=true
+erp interval=150s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=160s offered=2500 completed=2500 late_sends=0 behind=false
+erp interval=170s offered=2500 completed=2500 late_sends=0 behind=false
+erp strong commands: n=571 throughput=3/s p50_us<=69700 p99_us<=94800 max_us=104817
+erp strong commands: p99_9_us<=104900
+erp writer groups=72462 steps=98997 step_us=11389604 commit_us=256812772 checkpoints=58 checkpoint_us=979509 checkpoint_copy_us=346984 checkpoint_file_flush_us=600331

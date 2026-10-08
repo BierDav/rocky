@@ -1,0 +1,32 @@
+soak os=macos arch=aarch64 durability=Full tables=2000 rows=5000 domains=3 observers=100 minimum_seconds=30 minimum_operations=50000
+soak gaps: strong/effects, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner
+soak install_ms=64256 resident_mib=79
+soak t_s=10 main_operations=13705 writes_per_s=1370 live_rows=5000 observations=15414 resident_mib=188 file_bytes=218619904 wal_bytes=65079576 retained=2436 checkpoint=3 step_us_per_write=157.31 commit_us=7002963 checkpoint_copy_us=114229 checkpoint_flush_us=129278 queue=0
+soak domain=1 writes: n=13724 p50_us<=16383 p99_us<=32767 max_us=76656
+soak domain=2 writes: n=1722 p50_us<=16383 p99_us<=32767 max_us=70375
+soak domain=3 writes: n=1721 p50_us<=16383 p99_us<=32767 max_us=70380
+soak point reads: n=854 p50_us<=127 p99_us<=4095 max_us=323680
+soak range two pages: n=854 p50_us<=255 p99_us<=2851 max_us=2851
+soak t_s=20 main_operations=27244 writes_per_s=1334 live_rows=5000 observations=30358 resident_mib=188 file_bytes=222511104 wal_bytes=9410112 retained=3666 checkpoint=6 step_us_per_write=167.44 commit_us=6855331 checkpoint_copy_us=122404 checkpoint_flush_us=150892 queue=0
+soak domain=1 writes: n=13536 p50_us<=16383 p99_us<=65535 max_us=146870
+soak domain=2 writes: n=1702 p50_us<=16383 p99_us<=65535 max_us=140222
+soak domain=3 writes: n=1702 p50_us<=16383 p99_us<=65535 max_us=146865
+soak point reads: n=846 p50_us<=127 p99_us<=2047 max_us=2415
+soak range two pages: n=846 p50_us<=255 p99_us<=2047 max_us=2598
+soak t_s=30 main_operations=40867 writes_per_s=1361 live_rows=5000 observations=47346 resident_mib=188 file_bytes=224870400 wal_bytes=53090352 retained=4993 checkpoint=9 step_us_per_write=164.94 commit_us=6894599 checkpoint_copy_us=109371 checkpoint_flush_us=141233 queue=0
+soak domain=1 writes: n=13623 p50_us<=16383 p99_us<=60181 max_us=60181
+soak domain=2 writes: n=1708 p50_us<=16383 p99_us<=32767 max_us=60181
+soak domain=3 writes: n=1705 p50_us<=16383 p99_us<=32767 max_us=60179
+soak point reads: n=834 p50_us<=127 p99_us<=2839 max_us=2839
+soak range two pages: n=834 p50_us<=255 p99_us<=2047 max_us=2704
+soak t_s=40 main_operations=53316 writes_per_s=1243 live_rows=5000 observations=58160 resident_mib=189 file_bytes=228311040 wal_bytes=13937992 retained=5151 checkpoint=12 step_us_per_write=156.88 commit_us=7242093 checkpoint_copy_us=126679 checkpoint_flush_us=156682 queue=4
+soak domain=1 writes: n=12449 p50_us<=16383 p99_us<=65535 max_us=174477
+soak domain=2 writes: n=1560 p50_us<=16383 p99_us<=65535 max_us=137980
+soak domain=3 writes: n=1560 p50_us<=16383 p99_us<=65535 max_us=137974
+soak point reads: n=836 p50_us<=127 p99_us<=4095 max_us=9503
+soak range two pages: n=836 p50_us<=255 p99_us<=4095 max_us=5464
+soak reopen_ms=323 resident_mib=182
+soak audit domain=1 rows=5368 live=5000 operations=53348 retained=1060 recomputed=true
+soak audit domain=2 rows=100 live=50 operations=6694 retained=1024 recomputed=true
+soak audit domain=3 rows=100 live=50 operations=6690 retained=1024 recomputed=true
+soak storage_slice=passed elapsed_s=43 qualification_gate=pending

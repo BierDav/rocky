@@ -1,0 +1,10 @@
+product: ios/app
+apply:
+  - //project.module-template.yaml
+
+dependencies:
+  - //shared
+  - $compose.ui
+
+settings:
+  compose: enabled

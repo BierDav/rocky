@@ -1,0 +1,134 @@
+# Development workflow
+
+## Tooling
+
+Use rustup, Jujutsu (`jj`) and ripgrep (`rg`). `rust-toolchain.toml` pins Rust
+1.99.0 with rustfmt and Clippy. Invoking Cargo in the repository selects it.
+Workspace crates inherit shared dependency and lint configuration.
+
+Keep the root `Cargo.lock` committed. Update it intentionally when changing
+dependencies. The engine benchmark retains its own manifest and lockfile.
+
+## Version control: Jujutsu only
+
+Use `jj` for all version-control operations. Never invoke the Git CLI, including
+read-only commands. `jj git` is Jujutsu's supported Git-backed remote transport.
+
+```sh
+jj status
+jj diff
+jj log -r 'ancestors(@, 5)'
+jj file list
+```
+
+Jujutsu snapshots working-copy changes automatically; there is no staging step.
+Keep related edits in one change. Review the diff and check results before
+describing or separating changes. Preserve work outside your task.
+
+```sh
+jj describe -m "Describe the concrete change"
+jj new
+```
+
+Use these commands when intentionally finishing a change and starting another.
+Agents normally leave their edits in the current change for review.
+
+Fetch through `jj git fetch`; publish an explicitly selected bookmark through
+`jj git push --bookmark <name>` only when publication is requested. Do not create
+bookmarks or rewrite shared history as an incidental part of local editing.
+
+## Shared checks
+
+```sh
+./scripts/check
+```
+
+The script resolves the repository from its own location. It runs formatting,
+Clippy for workspace targets with warnings treated as errors, and workspace
+tests, including doc tests. Dependency resolution uses the committed lockfile.
+
+During development, narrow verification to the package you changed:
+
+```sh
+cargo test -p rocky-runtime --locked
+cargo clippy -p rocky-runtime --all-targets --locked -- -D warnings
+cargo fmt --all
+```
+
+Run the shared checks before completing workspace changes. Introduce explicit
+checks for supported feature combinations when platform features are added.
+Do not assume `--all-features` represents a valid platform configuration.
+`./scripts/check` also tests `rocky-sdk` without its default `iroh` feature,
+and `./sdks/native/check` builds the ABI without it.
+
+## Kotlin desktop integration
+
+The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.
+The Amper modules configure JVM desktop targets. Android is packaged and
+qualified separately; see [below](#android). The SDK's build, packaging and
+qualification steps are [toolchain plugins](../sdks/kotlin/README.md#build-tooling);
+`./kotlin check` runs every check and test.
+Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
+and desktop compilation, and `./kotlin check qualify -m inventory-qualification`
+for the existing SDK contract qualification. Run `./sdks/native/check` for the
+excluded UniFFI ABI crate. Run `./kotlin check packaged -m packaged-consumer` for an
+artifact-only JVM consumer, or `./kotlin do packageSdk -m packaged-consumer` to
+produce the standalone library/resources and example in `local/packaged-sdk`.
+[Packaging](runtime/sdk-packaging.md) documents no-build-tools consumption.
+Run `./kotlin test -m rocky-sqlite` and `./kotlin test -m room-qualification` for the
+[SQL driver](runtime/sql-driver.md) and its pinned Room fixture. The Room gate
+uses the standalone `sqlite3` CLI with JSON output for read-only inspection of
+the live file; install it before running that gate.
+Run `./kotlin check qualify -m schema-qualification` for hand/Room definition
+equivalence and native installation, and `./kotlin test -m schema-qualification` to
+regenerate the pinned Room exports and check compound-key scalar DAOs.
+Every build prepares SDK-owned native bindings/resources with Cargo, so it needs
+the pinned Rust toolchain. These are separate from the Rust `./scripts/check` gate.
+See [Room on Rocky's file](runtime/room-integration.md).
+
+## Android
+
+The [Android runtime](../sdks/kotlin/android-runtime/README.md) is a small Gradle build
+that publishes Rocky's native libraries to Maven local; Android apps depend on the
+`rocky-runtime-android` module, which checks that the published runtime is current.
+It needs the Android SDK and NDK and rustup, which it provisions under `local/` when
+none is on `PATH`. `./kotlin do packageAndroid -m rocky-runtime-android` then writes the
+SDK's AAR and jars as a local Maven repository for Gradle consumers.
+This is not part of `./scripts/check`. See [Android](runtime/android.md).
+
+## CI
+
+The baseline workflow runs on macOS, matching the first desktop target. It
+downloads an archive of the exact event revision and calls `scripts/check`.
+It needs no version-control CLI or repository history, and never invokes Git.
+The repository toolchain file is also the toolchain source of truth in CI.
+
+Required status checks are a hosting setting; the workflow file does not configure
+branch protection. No remotely hosted CI run has been verified by this baseline.
+
+## Code and tests
+
+Use small public APIs and descriptive private modules. Return typed errors for
+expected failures. Keep external I/O outside database transactions and publish
+only committed state. Avoid unnecessary traits, production panics and unwraps.
+
+Inherited lints forbid unsafe code and reject `dbg!` and `todo!` placeholders.
+Add targeted lint policy when a concrete recurring problem justifies it.
+
+Tests should establish observable behavior, invariants or regressions. Prioritize
+convergence, atomic rollback, observation races, deduplication and fencing as
+those behaviors are implemented. Use controllable fault injection rather than
+arbitrary sleeps. Empty-crate checks only establish the development baseline.
+
+## Benchmarks and local data
+
+All benchmark and probe code lives under `benchmarks/`. The two engine
+workspaces, `engine-comparison` and `engine-scale`, are outside application
+workspace checks; follow the
+[instructions](../benchmarks/engine-comparison/AGENTS.md) before changing them.
+`runtime-scaling` holds the runtime's scaling probes and stays a workspace
+member, so `./scripts/check` keeps it compiling against the runtime API.
+
+Keep development databases and credentials under the ignored `local/` directory.
+Do not commit private keys or real `.env` files. Preserve deliberately checked-in
+benchmark evidence and summaries.

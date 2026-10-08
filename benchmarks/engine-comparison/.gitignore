@@ -1,0 +1,13 @@
+/target/
+/memory/
+
+# Generated benchmark output. Curated summaries and the environment record are
+# kept; raw samples, logs and the machine-readable summary are regenerable.
+/results/*
+!/results/MEASUREMENTS.md
+!/results/PROFILES.md
+!/results/environment.txt
+/results/databases/
+
+/.venv/
+/__pycache__/

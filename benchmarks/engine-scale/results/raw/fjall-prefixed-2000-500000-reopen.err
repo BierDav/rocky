@@ -1,0 +1,18 @@
+       13.01 real        11.04 user         5.07 sys
+           742440960  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               46450  page reclaims
+                   3  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                2081  voluntary context switches
+             1043942  involuntary context switches
+        177980434718  instructions retired
+         62744766560  cycles elapsed
+           635438016  peak memory footprint

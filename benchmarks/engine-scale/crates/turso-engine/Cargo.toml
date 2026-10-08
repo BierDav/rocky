@@ -1,0 +1,10 @@
+[package]
+name = "turso-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness.workspace = true
+turso = "=0.8.1"
+tokio = { version = "1", features = ["rt", "time"] }

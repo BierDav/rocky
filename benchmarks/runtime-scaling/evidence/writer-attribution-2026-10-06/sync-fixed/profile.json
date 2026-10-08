@@ -1,0 +1,35 @@
+{
+  "profile": "Local Apple M5 Pro same-file sync interference at 250 writes/s (peer backlog, retention off)",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "source_archive_sha256": "7e632b5163f6738200263328af05b99af4c94c917a781267bdf8fcd4b4be1c30",
+  "binary_sha256": "7ca5eda4fbde53424fa34f88fcf0e3dfcdad876813742f84144dfffb93c5d3e5",
+  "rustc": {
+    "exit_code": 0,
+    "stdout": "rustc 1.99.0 (b940084d7 2026-09-28) (Homebrew)\n",
+    "stderr": ""
+  },
+  "command": [
+    "target/release/scaling_probe",
+    "erp-sync",
+    "250",
+    "120",
+    "2000",
+    "300000",
+    "benchmarks/runtime-scaling/evidence/writer-attribution-2026-10-06/sync-fixed/data"
+  ],
+  "raw_output": "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/evidence/writer-attribution-2026-10-06/sync-fixed/sync.txt",
+  "started_unix": 1791240423.0,
+  "finished_unix": 1791240654.878606,
+  "exit_code": 0,
+  "qualification_gate": "phase 5 recheck; phase 8 pending",
+  "hardware": {
+    "exit_code": 0,
+    "stdout": "hw.model: Mac17,8\nhw.memsize: 51539607552\nmachdep.cpu.brand_string: Apple M5 Pro\n",
+    "stderr": ""
+  },
+  "filesystem": {
+    "exit_code": 0,
+    "stdout": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   743Gi   154Gi    83%    2.8M  1.6G    0%   /System/Volumes/Data\n",
+    "stderr": ""
+  }
+}

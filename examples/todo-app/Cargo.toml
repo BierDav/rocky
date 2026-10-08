@@ -1,0 +1,13 @@
+[package]
+name = "todo-app"
+description = "Todo schema, deterministic merge rules and application command handlers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rocky-core.workspace = true
+
+[lints]
+workspace = true

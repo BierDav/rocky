@@ -1,0 +1,4 @@
+tables=2000 domains=64 manifest_bytes=405486 validate_us=12180 hash_us=1580 fingerprint_us=8164
+tables=2000 domains=64 files=32 installed_ms=1024228
+tables=2000 domains=64 reader_warmup_us=64306
+tables=2000 domains=64 files=32 install_ms=1024228 open_ms=4622 write_us=94 read_us=25 resident_mib=1129

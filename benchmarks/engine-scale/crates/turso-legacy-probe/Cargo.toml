@@ -1,0 +1,9 @@
+[package]
+name = "turso-legacy-probe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+turso = "=0.8.1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }

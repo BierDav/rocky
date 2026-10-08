@@ -1,0 +1,11 @@
+# Phase 16's required definition; ./kotlin run -m requiredSchema is the preflight.
+product: jvm/app
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../../../sdks/kotlin/rocky-core
+settings:
+  jvm:
+    mainClass: shopping.qualification.RequiredSchemaKt
+  kotlin:
+    allWarningsAsErrors: true

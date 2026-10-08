@@ -1,0 +1,9 @@
+[package]
+name = "redb-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness.workspace = true
+redb = "=4.3.0"

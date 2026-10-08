@@ -1,0 +1,16 @@
+body { margin: 0; background: #f5f4f0; color: #252c29; font: 16px system-ui, sans-serif; }
+main { max-width: 1320px; margin: 40px auto; padding: 24px; }
+h1 { margin-bottom: 4px; }
+.status { color: #64716a; font-size: 14px; }
+form { display: flex; gap: 8px; flex: 1; }
+input[type=text] { min-width: 0; flex: 1; padding: 10px; border: 1px solid #bbc7bf; border-radius: 6px; font: inherit; }
+button { padding: 8px 12px; border: 1px solid #bbc7bf; border-radius: 6px; background: #e4ece7; cursor: pointer; font: inherit; }
+button:disabled { opacity: .5; cursor: default; }
+ul { padding: 0; list-style: none; }
+li { display: flex; align-items: center; gap: 10px; margin: 12px 0; }
+input[type=checkbox] { width: 20px; height: 20px; }
+[role=alert] { color: #a52424; }
+
+.replicas { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+section { min-width: 0; }
+@media (max-width: 800px) { .replicas { grid-template-columns: 1fr; } }

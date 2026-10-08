@@ -1,0 +1,239 @@
+Apple M5 Pro / APFS / local Homebrew Rust 1.99.0 / full durability: storage slice exit=0; phase 8 pending; /Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'
+Traceback (most recent call last):
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 123, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 119, in main
+    return args.handler(args)
+           ~~~~~~~~~~~~^^^^^^
+  File "/Users/david-bieregger/RustroverProjects/rocky-db/benchmarks/runtime-scaling/qualification.py", line 23, in run
+    directory.mkdir(parents=True, exist_ok=False)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileExistsError: [Errno 17] File exists: '/Users/david-bieregger/RustroverProjects/rocky-db/local/scale-full-mac-launchd'

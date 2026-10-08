@@ -1,0 +1,89 @@
+turso_core 0.8.1 translate/sequence.rs
+1: // Sequence bytecode translation.
+2: //
+3: // See the persistence design comment on `Sequence` in core/schema.rs.
+4: // Key invariant: every nextval() must INSERT a row into the backing table
+5: // (`__turso_internal_seq_<name>`). This makes MVCC allocations conflict-free.
+6: //
+7: // Compaction and `sqlite_sequence` synchronization are emitted INLINE
+8: // here at translate time — they are NOT performed at commit time by a
+9: // vdbe handler issuing nested `prepare_internal()` calls, which would
+10: // drive `pager.io.step()` synchronously and break the vdbe async
+11: // contract (the outer `Statement::step()` must return
+12: // `StepResult::IO` rather than blocking).
+285:         index_name: None,
+286:         affinity_str: None,
+287:     });
+288:     program.emit_insn(Insn::Insert {
+289:         cursor: cursor_id,
+290:         key_reg: target_register,
+291:         record_reg,
+292:         flag: InsertFlags::new().require_seek().skip_all_change_counts(),
+293:         table_name: seq_name.to_string(),
+294:     });
+295: 
+296:     // Inline backing-table compaction has two distinct cases:
+297:     //
+298:     //   * CYCLE: load-bearing for wrap-correctness. After a wrap the
+299:     //     new value re-enters a range whose rows the backing table
+300:     //     still holds, so Last/Rewind can pick up the *old* row
+301:     //     rather than the wrapped one. Compaction must run on every
+302:     //     nextval regardless of path. The contention this creates
+303:     //     under MVCC concurrent is fundamental to CYCLE semantics
+304:     //     (every wrap is a logical "advance the shared pointer" that
+305:     //     PG also serializes); the inner-tx retry budget absorbs it.
+306:     //
+307:     //   * Non-CYCLE: bookkeeping only. Every nextval produces a *new*
+308:     //     value, and `value INTEGER PRIMARY KEY` guarantees the row
+309:     //     lands on a distinct B-tree key. The watermark is
+310:     //     recoverable from Last/Rewind regardless of how many
+311:     //     historical rows sit in the table. We therefore gate the
+312:     //     compaction loop on `path_kind_reg`:
+313:     //
+314:     //       - SKIPPED path (0) — WAL single-writer OR MVCC exclusive
+315:     //         outer tx. No concurrent allocator can race the prior-
+316:     //         watermark row, so the original WW-on-shared-row
+317:     //         argument doesn't apply. Compact inline so the backing
+318:     //         table stays at one row per sequence instead of
+319:     //         accumulating one row per nextval forever. Especially
+320:     //         important in WAL/rollback mode, where there is no
+321:     //         checkpoint-time `SeqCompactDriver` and a long-running
+322:     //         workload would otherwise bloat the DB without bound.
+323:     //
+324:     //       - WRAPPED path (1) — MVCC autocommit or BEGIN CONCURRENT.
+325:     //         Skip compaction; deleting the shared prior-watermark
+326:     //         row would produce avoidable WW conflicts on the hot
+327:     //         path. The MVCC checkpoint's `SeqCompactDriver`
+328:     //         reclaims the rows asynchronously.
+329:     //
+330:     // The "MVCC concurrent stays conflict-free" half of this contract
+331:     // is enforced by `test_nextval_no_inner_tx_retry_on_concurrent_mvcc`.
+332:     if seq.cycle {
+333:         emit_backing_table_compaction(program, cursor_id, seq_name, target_register);
+334:     } else {
+335:         let skip_compact_label = program.allocate_label();
+336:         // If path_kind_reg is truthy (== SEQ_PATH_WRAPPED), jump past
+337:         // the compaction loop; fall through and compact otherwise.
+338:         program.emit_insn(Insn::If {
+339:             reg: path_kind_reg,
+340:             target_pc: skip_compact_label,
+341:             jump_if_null: false,
+342:         });
+343:         emit_backing_table_compaction(program, cursor_id, seq_name, target_register);
+344:         program.preassign_label_to_next_insn(skip_compact_label);
+345:     }
+346: 
+347:     program.emit_insn(Insn::Close { cursor_id });
+348: 
+349:     // For AUTOINCREMENT-backing sequences, mirror the watermark into
+350:     // `sqlite_sequence` in the same autonomous inner tx so SQLite-
+351:     // compatibility readers see the current high-water mark without
+352:     // needing a checkpoint. Under MVCC this serializes concurrent
+353:     // AUTOINCREMENT inserts to the same table through the
+354:     // `sqlite_sequence` row; the existing inner-tx retry budget in
+355:     // `op_sequence_commit_inner_tx` absorbs the WW-conflicts.
+356:     emit_autoincrement_sqlite_sequence_sync(
+357:         program,
+358:         resolver,
+359:         database_id,
+360:         seq_name,

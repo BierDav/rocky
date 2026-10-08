@@ -1,0 +1,20 @@
+# The Turso adapter built against turso_core with the root-page lookup patch.
+# Run ./prepare.sh first; it creates vendor/turso_core.
+[workspace]
+
+[package]
+name = "turso-patched-engine"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+harness = { path = "../crates/harness", package = "engine-scale-harness" }
+turso = "=0.8.1"
+tokio = { version = "1", features = ["rt", "time"] }
+
+[patch.crates-io]
+turso_core = { path = "vendor/turso_core" }
+
+[profile.release]
+debug = "line-tables-only"

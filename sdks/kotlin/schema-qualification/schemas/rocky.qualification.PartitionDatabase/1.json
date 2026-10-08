@@ -1,0 +1,74 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "f077af91c2d9b86c598abf7cd2965398",
+    "entities": [
+      {
+        "tableName": "partition_samples",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sensor` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `reading` INTEGER NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL, PRIMARY KEY(`sensor`, `sequence`))",
+        "fields": [
+          {
+            "fieldPath": "sensor",
+            "columnName": "sensor",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reading",
+            "columnName": "reading",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rowKind",
+            "columnName": "row_kind",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sensor",
+            "sequence"
+          ]
+        },
+        "indices": [
+          {
+            "name": "partition_samples_identity",
+            "unique": true,
+            "columnNames": [
+              "sensor",
+              "id"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `partition_samples_identity` ON `${TABLE_NAME}` (`sensor`, `id`)"
+          }
+        ]
+      }
+    ],
+    "views": [
+      {
+        "viewName": "partial_partition_samples",
+        "createSql": "CREATE VIEW `${VIEW_NAME}` AS SELECT * FROM partition_samples WHERE row_kind = 0"
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f077af91c2d9b86c598abf7cd2965398')"
+    ]
+  }
+}

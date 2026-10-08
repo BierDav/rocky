@@ -1,0 +1,15 @@
+tasks:
+  qualify:
+    action: !rocky.build.qualify
+      classpath: ${module.runtimeClasspath}
+      jar: ${module.jar}
+      compileClasspath: ${module.compileClasspath}
+      rejected: ${pluginSettings.rejected}
+      work: ${taskOutputDir}
+      repositoryRoot: ${project.rootDir}
+      mainClass: ${pluginSettings.mainClass}
+      prepare: ${pluginSettings.prepare}
+      verify: ${pluginSettings.verify}
+
+checks:
+  - qualify

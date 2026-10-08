@@ -1,0 +1,12 @@
+product:
+  type: kmp/lib
+  platforms: [jvm, android]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../rocky-core: exported
+  - ../rocky-sqlite: exported
+  - androidx.room:room-runtime:2.8.4: exported
+settings:
+  android:
+    minSdk: 26

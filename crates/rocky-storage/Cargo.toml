@@ -1,0 +1,25 @@
+[package]
+name = "rocky-storage"
+description = "SQLite access, row capture and errors shared by the runtimes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Fault-injection hooks for the tests of dependent crates.
+test-support = []
+
+[dependencies]
+rocky-core.workspace = true
+# Application statements are analyzed as a SQLite-dialect syntax tree.
+sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
+rusqlite = { version = "=0.40.2", features = ["bundled", "column_decltype", "functions", "hooks", "preupdate_hook"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

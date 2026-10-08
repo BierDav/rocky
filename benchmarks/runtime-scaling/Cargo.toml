@@ -1,0 +1,20 @@
+[package]
+name = "runtime-scaling"
+description = "Scaling probes and timing qualification for the local runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rocky-core.workspace = true
+rocky-runtime.workspace = true
+rocky-secure.workspace = true
+rocky-coordinator.workspace = true
+inventory-app = { path = "../../examples/inventory-app" }
+employees-app = { path = "../../examples/employees-app" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true

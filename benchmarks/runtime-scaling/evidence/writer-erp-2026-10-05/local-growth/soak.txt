@@ -1,0 +1,68 @@
+soak os=macos arch=aarch64 durability=Full tables=2000 rows=100000 domains=3 observers=100 minimum_seconds=600 minimum_operations=500000
+soak gaps: strong/effects, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner
+soak install_ms=109343 resident_mib=100
+soak t_s=60 main_operations=76399 writes_per_s=1273 live_rows=76415 observations=144196 resident_mib=193 file_bytes=248250368 wal_bytes=36647432 retained=3610 checkpoint=18 step_us_per_write=187.95 commit_us=40191601 checkpoint_copy_us=676860 checkpoint_flush_us=784379 queue=0
+soak domain=1 writes: n=76415 p50_us<=16383 p99_us<=65535 max_us=90211
+soak domain=2 writes: n=9580 p50_us<=16383 p99_us<=65535 max_us=77666
+soak domain=3 writes: n=9573 p50_us<=16383 p99_us<=65535 max_us=77656
+soak point reads: n=4860 p50_us<=127 p99_us<=4095 max_us=409324
+soak range two pages: n=4860 p50_us<=255 p99_us<=4095 max_us=4554
+soak t_s=120 main_operations=150145 writes_per_s=1229 live_rows=100000 observations=275532 resident_mib=114 file_bytes=259330048 wal_bytes=14996832 retained=3516 checkpoint=36 step_us_per_write=213.15 commit_us=38281811 checkpoint_copy_us=719340 checkpoint_flush_us=999571 queue=11
+soak domain=1 writes: n=73746 p50_us<=16383 p99_us<=65535 max_us=142491
+soak domain=2 writes: n=9242 p50_us<=16383 p99_us<=65535 max_us=142493
+soak domain=3 writes: n=9248 p50_us<=16383 p99_us<=65535 max_us=142493
+soak point reads: n=4893 p50_us<=127 p99_us<=4095 max_us=4939
+soak range two pages: n=4893 p50_us<=255 p99_us<=4095 max_us=4273
+soak t_s=180 main_operations=221861 writes_per_s=1195 live_rows=100000 observations=402914 resident_mib=114 file_bytes=262328320 wal_bytes=4194304 retained=5549 checkpoint=53 step_us_per_write=233.33 commit_us=37111027 checkpoint_copy_us=641973 checkpoint_flush_us=985534 queue=0
+soak domain=1 writes: n=71716 p50_us<=16383 p99_us<=65535 max_us=90411
+soak domain=2 writes: n=8983 p50_us<=16383 p99_us<=65535 max_us=90405
+soak domain=3 writes: n=8989 p50_us<=16383 p99_us<=65535 max_us=78397
+soak point reads: n=4917 p50_us<=127 p99_us<=3369 max_us=3369
+soak range two pages: n=4917 p50_us<=255 p99_us<=4095 max_us=5924
+soak t_s=240 main_operations=292063 writes_per_s=1170 live_rows=100000 observations=533386 resident_mib=114 file_bytes=266158080 wal_bytes=7004056 retained=6033 checkpoint=70 step_us_per_write=238.01 commit_us=37022187 checkpoint_copy_us=658575 checkpoint_flush_us=1080241 queue=2
+soak domain=1 writes: n=70202 p50_us<=16383 p99_us<=65535 max_us=102892
+soak domain=2 writes: n=8801 p50_us<=16383 p99_us<=65535 max_us=89678
+soak domain=3 writes: n=8800 p50_us<=16383 p99_us<=65535 max_us=89679
+soak point reads: n=4895 p50_us<=127 p99_us<=3743 max_us=3743
+soak range two pages: n=4895 p50_us<=255 p99_us<=4095 max_us=4342
+soak t_s=300 main_operations=362005 writes_per_s=1165 live_rows=99998 observations=658942 resident_mib=113 file_bytes=269783040 wal_bytes=18688352 retained=3162 checkpoint=88 step_us_per_write=237.49 commit_us=36937565 checkpoint_copy_us=746400 checkpoint_flush_us=1208915 queue=5
+soak domain=1 writes: n=69942 p50_us<=16383 p99_us<=65535 max_us=92046
+soak domain=2 writes: n=8761 p50_us<=16383 p99_us<=65535 max_us=94440
+soak domain=3 writes: n=8757 p50_us<=16383 p99_us<=65535 max_us=89982
+soak point reads: n=4878 p50_us<=127 p99_us<=3815 max_us=3815
+soak range two pages: n=4878 p50_us<=255 p99_us<=4022 max_us=4022
+soak t_s=360 main_operations=431689 writes_per_s=1161 live_rows=100000 observations=784312 resident_mib=113 file_bytes=272723968 wal_bytes=16817872 retained=5187 checkpoint=105 step_us_per_write=238.72 commit_us=36935857 checkpoint_copy_us=719109 checkpoint_flush_us=1227252 queue=0
+soak domain=1 writes: n=69684 p50_us<=16383 p99_us<=65535 max_us=108347
+soak domain=2 writes: n=8734 p50_us<=16383 p99_us<=65535 max_us=96105
+soak domain=3 writes: n=8737 p50_us<=16383 p99_us<=65535 max_us=96111
+soak point reads: n=4895 p50_us<=127 p99_us<=3278 max_us=3278
+soak range two pages: n=4895 p50_us<=255 p99_us<=3788 max_us=3788
+soak t_s=420 main_operations=499879 writes_per_s=1136 live_rows=100000 observations=914360 resident_mib=113 file_bytes=275632128 wal_bytes=59443392 retained=4664 checkpoint=121 step_us_per_write=253.46 commit_us=36218983 checkpoint_copy_us=648345 checkpoint_flush_us=1194228 queue=0
+soak domain=1 writes: n=68190 p50_us<=16383 p99_us<=65535 max_us=92412
+soak domain=2 writes: n=8551 p50_us<=16383 p99_us<=65535 max_us=91806
+soak domain=3 writes: n=8548 p50_us<=16383 p99_us<=65535 max_us=91809
+soak point reads: n=4881 p50_us<=127 p99_us<=3794 max_us=3794
+soak range two pages: n=4881 p50_us<=255 p99_us<=4015 max_us=4015
+soak t_s=480 main_operations=568763 writes_per_s=1148 live_rows=100000 observations=1035421 resident_mib=113 file_bytes=278913024 wal_bytes=6966952 retained=3820 checkpoint=138 step_us_per_write=244.32 commit_us=36641136 checkpoint_copy_us=709444 checkpoint_flush_us=1258850 queue=0
+soak domain=1 writes: n=68884 p50_us<=16383 p99_us<=65535 max_us=99107
+soak domain=2 writes: n=8641 p50_us<=16383 p99_us<=65535 max_us=99090
+soak domain=3 writes: n=8645 p50_us<=16383 p99_us<=65535 max_us=99114
+soak point reads: n=4885 p50_us<=127 p99_us<=4095 max_us=5797
+soak range two pages: n=4885 p50_us<=255 p99_us<=4095 max_us=13072
+soak t_s=540 main_operations=636468 writes_per_s=1128 live_rows=100000 observations=1157109 resident_mib=113 file_bytes=279261184 wal_bytes=22594112 retained=5907 checkpoint=154 step_us_per_write=257.89 commit_us=35885243 checkpoint_copy_us=699139 checkpoint_flush_us=1227191 queue=6
+soak domain=1 writes: n=67705 p50_us<=16383 p99_us<=65535 max_us=96304
+soak domain=2 writes: n=8491 p50_us<=16383 p99_us<=65535 max_us=90000
+soak domain=3 writes: n=8489 p50_us<=16383 p99_us<=65535 max_us=90000
+soak point reads: n=4880 p50_us<=127 p99_us<=4016 max_us=4016
+soak range two pages: n=4880 p50_us<=255 p99_us<=3617 max_us=3617
+soak t_s=600 main_operations=705685 writes_per_s=1153 live_rows=100000 observations=1287231 resident_mib=113 file_bytes=279818240 wal_bytes=53168632 retained=5407 checkpoint=171 step_us_per_write=244.97 commit_us=36539993 checkpoint_copy_us=670306 checkpoint_flush_us=1240782 queue=10
+soak domain=1 writes: n=69217 p50_us<=16383 p99_us<=65535 max_us=102011
+soak domain=2 writes: n=8673 p50_us<=16383 p99_us<=65535 max_us=84686
+soak domain=3 writes: n=8675 p50_us<=16383 p99_us<=65535 max_us=83811
+soak point reads: n=4869 p50_us<=127 p99_us<=4095 max_us=5505
+soak range two pages: n=4869 p50_us<=255 p99_us<=4095 max_us=6407
+soak reopen_ms=683 resident_mib=183
+soak audit domain=1 rows=104656 live=100000 operations=705717 retained=1322 recomputed=true
+soak audit domain=2 rows=1672 live=1000 operations=88459 retained=1024 recomputed=true
+soak audit domain=3 rows=1672 live=1000 operations=88463 retained=1024 recomputed=true
+soak storage_slice=passed elapsed_s=603 qualification_gate=pending

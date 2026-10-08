@@ -1,0 +1,4 @@
+soak os=linux arch=x86_64 durability=Full tables=2000 rows=5000 domains=3 observers=100 minimum_seconds=30 minimum_operations=50000
+soak gaps: strong/effects, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner
+soak install_ms=128397 resident_mib=62
+Error: Storage(StorageFailure { source: Deadline })

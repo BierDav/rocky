@@ -10,6 +10,11 @@ import rocky.schemaFromRoom
 import kotlinx.coroutines.runBlocking
 import kotlin.test.*
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import rocky.RockyException
 import rocky.sqlite.RockySQLiteDriver
 
 class RoomScalarsTest {
@@ -33,6 +38,32 @@ class RoomScalarsTest {
             val reopened = RockyDatabase.open(directory, imported)
             try { assertEquals("[]", reopened.read(imported.table("samples").query()).getValue("rows").toString()) }
             finally { reopened.close() }
+        } finally { directory.deleteRecursively() }
+    }
+
+    @Test fun groupPartitionSharesOneSecretForEveryTable() = runBlocking<Unit> {
+        val grouped = schema("groupsecret") {
+            table("lists") { text("name"); primaryKey("name"); partitionBy("name", group = "list") }
+            table("items") { text("list"); text("key"); primaryKey("list", "key"); partitionBy("list", group = "list") }
+            table("attachments") { text("list"); text("key"); primaryKey("list", "key"); partitionBy("list", group = "list") }
+        }
+        val directory = Files.createTempDirectory("rocky-group-secret").toFile()
+        try {
+            val database = RockyDatabase.local(File(directory, "issuer"), grouped)
+            try {
+                val list = JsonArray(listOf(rocky.text("A")))
+                assertEquals(1, database.partitions.create("list", list).getValue("epoch").jsonPrimitive.int)
+                val status = database.partitions.status("list", list)
+                assertEquals("[1]", status.getValue("epochs").toString())
+                val tables = status.getValue("tables").jsonArray.map { it.jsonObject }
+                assertEquals(listOf("attachments", "items", "lists"), tables.map { it.getValue("table").jsonPrimitive.content }.sorted())
+                assertTrue(tables.all { it.getValue("epochs").toString() == "[1]" })
+                val device = rocky.Credentials.prepare(File(directory, "reader"))
+                val shared = database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))))
+                assertEquals(1, shared.getValue("envelopes").jsonArray.size)
+                assertFailsWith<RockyException> { database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))), epoch = 2) }
+                assertFailsWith<RockyException> { database.partitions.subscribe("list", list, omit = listOf("photos")) }
+            } finally { database.close() }
         } finally { directory.deleteRecursively() }
     }
 

@@ -306,7 +306,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

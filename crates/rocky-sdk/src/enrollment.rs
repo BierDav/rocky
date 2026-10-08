@@ -6,6 +6,7 @@
 use crate::{
     Failure,
     domain::Domain,
+    groups::{GroupPartition, GroupRecord, Holder, Member, secret_role},
     schema::Schema,
     secrets::{Vault, write_private},
     service::ServiceError,
@@ -31,8 +32,8 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Current `identity.json` format.
-pub const VERSION: u32 = 8;
+/// Current `identity.json` format, including group secrets.
+pub const VERSION: u32 = 9;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -72,7 +73,8 @@ pub struct Settings {
     pub profile: Profile,
     /// The key epochs held of each collection this device reads, ascending.
     pub keys: BTreeMap<String, Vec<u64>>,
-    pub partitions: BTreeMap<String, PartitionRecord>,
+    /// Group partitions known here, by group address.
+    pub groups: BTreeMap<String, GroupRecord>,
     /// Present on a device that holds the publisher key.
     pub authority: Option<Issuing>,
     /// The issuers that renew this device, by node key. Their routes are
@@ -98,15 +100,6 @@ pub struct Settings {
     pub author_high_water: u32,
     /// An issuer's assignment key, separate from every node/user identity.
     pub author_issuer: Option<PublicKey>,
-}
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PartitionRecord {
-    pub scope: rocky_core::ResourceScope,
-    pub tuple: rocky_core::PartitionTuple,
-    pub epochs: Vec<u64>,
-}
-pub(crate) fn partition_key_role(scope: rocky_core::ResourceScope, epoch: u64) -> String {
-    format!("partition.{}.{}", HEXLOWER.encode(&scope.encryption), epoch)
 }
 /// An assigned signing key's stable author and authenticated device/table.
 #[derive(Clone, Serialize, Deserialize)]
@@ -168,6 +161,9 @@ pub struct Issuing {
     /// Saved before the rotation's keys are made, so an interrupted
     /// revocation completes at the next open.
     pub rotation: Option<Rotation>,
+    /// Devices granted partitions here, by node key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub holders: BTreeMap<PublicKey, Holder>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Rotation {
@@ -546,71 +542,82 @@ impl Settings {
     fn grants(&self) -> &[ResourceGrant] {
         self.credentials.grants()
     }
+    /// The paired grants this device's selectors resolve on one partition.
+    fn selected(
+        &self,
+        scope: &rocky_core::ResourceScope,
+        tuple: &rocky_core::PartitionTuple,
+    ) -> Vec<ResourceGrant> {
+        self.credentials
+            .0
+            .last()
+            .and_then(|leaf| leaf.capability.extended().ok())
+            .map(|extended| {
+                extended
+                    .partitions
+                    .iter()
+                    .filter_map(|grant| {
+                        grant
+                            .resolve(scope.domain, scope.table, tuple)
+                            .ok()
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// Whether this device may read a partition in whole, as its key needs.
+    pub(crate) fn reads_partition(&self, member: &Member) -> bool {
+        self.grants()
+            .iter()
+            .chain(&self.selected(&member.scope, &member.tuple))
+            .any(|grant| {
+                grant.scope == member.scope
+                    && grant.rows == RowSelection::All
+                    && grant.rights.contains(&Right::Read)
+            })
+    }
+    /// The members of every known group partition under `domain`'s schema.
+    pub(crate) fn partitions(&self, domain: &Domain) -> Result<Vec<GroupPartition>, Failure> {
+        self.groups
+            .values()
+            .map(|record| GroupPartition::of(domain, record))
+            .collect()
+    }
     /// Whether this device may read `scope` in whole, as a checkpoint needs.
-    pub fn reads_whole(&self, scope: &rocky_core::ResourceScope) -> bool {
+    pub fn reads_whole(&self, domain: &Domain, scope: &rocky_core::ResourceScope) -> bool {
         let concrete = self.grants().iter().any(|grant| {
             grant.scope == *scope
                 && grant.rows == RowSelection::All
                 && grant.rights.contains(&Right::Read)
         });
         concrete
-            || self
-                .partitions
-                .values()
-                .find(|record| &record.scope == scope)
-                .is_some_and(|record| {
-                    self.credentials
-                        .0
-                        .last()
-                        .and_then(|leaf| leaf.capability.extended().ok())
-                        .is_some_and(|extended| {
-                            extended.partitions.iter().any(|grant| {
-                                grant
-                                    .resolve(scope.domain, scope.table, &record.tuple)
-                                    .ok()
-                                    .flatten()
-                                    .is_some_and(|grant| {
-                                        grant.rows == RowSelection::All
-                                            && grant.rights.contains(&Right::Read)
-                                    })
-                            })
-                        })
-                })
+            || self.partitions(domain).is_ok_and(|partitions| {
+                partitions
+                    .iter()
+                    .flat_map(|partition| &partition.members)
+                    .any(|member| member.scope == *scope && self.reads_partition(member))
+            })
     }
     /// The scopes this device's credentials name: what its sessions and
     /// its sync cover.
     pub fn granted(&self, domain: &Domain) -> Vec<rocky_core::ResourceScope> {
+        let partitions = self.partitions(domain).unwrap_or_default();
         domain
             .scopes()
             .map(|(_, scope)| scope)
             .filter(|scope| self.grants().iter().any(|grant| grant.scope == *scope))
             .chain(
-                self.partitions
-                    .values()
-                    .filter(|record| {
+                partitions
+                    .iter()
+                    .flat_map(|partition| &partition.members)
+                    .filter(|member| {
                         self.grants()
                             .iter()
-                            .any(|grant| grant.scope == record.scope)
-                            || self
-                                .credentials
-                                .0
-                                .last()
-                                .and_then(|leaf| leaf.capability.extended().ok())
-                                .is_some_and(|extended| {
-                                    extended.partitions.iter().any(|grant| {
-                                        grant
-                                            .resolve(
-                                                record.scope.domain,
-                                                record.scope.table,
-                                                &record.tuple,
-                                            )
-                                            .ok()
-                                            .flatten()
-                                            .is_some()
-                                    })
-                                })
+                            .any(|grant| grant.scope == member.scope)
+                            || !self.selected(&member.scope, &member.tuple).is_empty()
                     })
-                    .map(|record| record.scope),
+                    .map(|member| member.scope),
             )
             .collect()
     }
@@ -728,7 +735,8 @@ impl Settings {
         self.credentials.expires()
     }
     /// The open configuration of the secure replica: the chain and every
-    /// held key epoch. A missing key is an error, never a new key.
+    /// held collection key epoch. A missing key is an error, never a new
+    /// key. Partition keys follow once their addresses are registered.
     pub fn config(&self, vault: &Vault, domain: &Domain) -> Result<SecureConfig, Failure> {
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
@@ -737,19 +745,6 @@ impl Settings {
                     scope,
                     generation: *epoch,
                     key: vault.get(&key_role(name, *epoch))?,
-                });
-            }
-        }
-        for record in self
-            .partitions
-            .values()
-            .filter(|record| self.reads_whole(&record.scope))
-        {
-            for epoch in &record.epochs {
-                keys.push(KeyMaterial {
-                    scope: record.scope,
-                    generation: *epoch,
-                    key: vault.get(&partition_key_role(record.scope, *epoch))?,
                 });
             }
         }
@@ -781,12 +776,12 @@ impl Settings {
         if let Ok(domain) = self.domain() {
             roles.extend(domain.scopes().map(|(name, _)| pseudonym_role(name)));
         }
-        for record in self.partitions.values() {
+        for record in self.groups.values() {
             roles.extend(
                 record
                     .epochs
                     .iter()
-                    .map(|epoch| partition_key_role(record.scope, *epoch)),
+                    .map(|epoch| secret_role(&record.address, *epoch)),
             );
         }
         // A rotation may have made keys the identity does not list yet.
@@ -794,6 +789,11 @@ impl Settings {
             self.authority.as_ref().and_then(|a| a.rotation.as_ref())
         {
             roles.extend(self.keys.keys().map(|name| key_role(name, *epoch)));
+            roles.extend(
+                self.groups
+                    .values()
+                    .map(|record| secret_role(&record.address, *epoch)),
+            );
         }
         roles
     }
@@ -865,7 +865,7 @@ impl Settings {
             author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
-            partitions: BTreeMap::new(),
+            groups: BTreeMap::new(),
         };
         let grants = Profile::Issuer.grants(&bound.resources())?;
         let capability = settings.issue(
@@ -1774,7 +1774,7 @@ impl Settings {
             author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
-            partitions: BTreeMap::new(),
+            groups: BTreeMap::new(),
         };
         let domain = settings.domain()?;
         if credentials.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
@@ -1948,7 +1948,7 @@ impl Joining {
             author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
-            partitions: BTreeMap::new(),
+            groups: BTreeMap::new(),
         };
         let domain = settings.domain()?;
         if settings.manifest()?.verify(settings.publisher)?.hash() != domain.manifest().hash() {
@@ -2315,6 +2315,58 @@ impl Settings {
         self.save(path)?;
         Ok(renewal.to_bytes()?)
     }
+    /// Whether the policy or this issuer revoked a device or its user.
+    pub(crate) fn revoked_device(&self, node: &PublicKey) -> bool {
+        let revoked = &self.policy.statement.revoked;
+        revoked.contains(&revoked_subject(node))
+            || self.authority.as_ref().is_some_and(|authority| {
+                authority
+                    .devices
+                    .get(node)
+                    .is_some_and(|device| device.revoked)
+                    || authority
+                        .holders
+                        .get(node)
+                        .is_some_and(|holder| revoked.contains(&revoked_subject(&holder.user)))
+            })
+    }
+    /// Records partitions granted or delegated to a device against its node
+    /// and user, before the chain leaves this issuer, so that revoking it
+    /// rotates them. Refuses a revoked device or user.
+    pub(crate) fn record_holder(
+        &mut self,
+        device: &DeviceKeys,
+        grants: &[rocky_credentials::PartitionGrant],
+    ) -> Result<(), Failure> {
+        if self.revoked_device(&device.node)
+            || self
+                .policy
+                .statement
+                .revoked
+                .contains(&revoked_subject(&device.user))
+        {
+            return Err("the device or its user was revoked".into());
+        }
+        let issuing = self.issuing("grants partitions")?;
+        if issuing
+            .devices
+            .get(&device.node)
+            .is_some_and(|known| known.user != device.user)
+        {
+            return Err("this node is known with another user key".into());
+        }
+        let holders = &mut issuing.holders;
+        if !holders.contains_key(&device.node) && holders.len() >= MAX_DEVICES {
+            return Err("partition holder capacity reached".into());
+        }
+        holders
+            .entry(device.node)
+            .or_insert_with(|| Holder {
+                user: device.user,
+                partitions: Vec::new(),
+            })
+            .record(device.user, grants)
+    }
     /// Begins revoking a device: the intent is all that changes. `rotate`
     /// completes it, now or at the next open.
     pub fn begin_revocation(&mut self, node: PublicKey) -> Result<(), Failure> {
@@ -2329,16 +2381,12 @@ impl Settings {
         if own == Some(node) {
             return Err("an issuer cannot revoke itself".into());
         }
+        if self.revoked_device(&node) {
+            return Err("device is already revoked".into());
+        }
         let authority = self.issuing("revokes devices")?;
         if authority.rotation.is_some() {
             return Err("another revocation is unfinished".into());
-        }
-        if authority
-            .devices
-            .get(&node)
-            .is_some_and(|device| device.revoked)
-        {
-            return Err("device is already revoked".into());
         }
         authority.rotation = Some(Rotation { epoch, node });
         Ok(())
@@ -2359,10 +2407,17 @@ impl Settings {
         let domain = self.domain()?;
         let mut revoked = vec![revoked_subject(&node)];
         let mut readable: Option<Profile> = None;
-        if let Some(device) = self.issuing("revokes devices")?.devices.get_mut(&node) {
+        let issuing = self.issuing("revokes devices")?;
+        if let Some(device) = issuing.devices.get_mut(&node) {
             device.revoked = true;
             revoked.extend([revoked_subject(&device.user), device.capability]);
             readable = Some(device.profile.clone());
+        }
+        // A device known through a partition grant loses its user subject
+        // too, so a fresh node key under it cannot renew.
+        let holder = issuing.holders.get(&node).cloned();
+        if let Some(holder) = &holder {
+            revoked.push(revoked_subject(&holder.user));
         }
         revoked.extend(
             self.author_assignments
@@ -2397,32 +2452,41 @@ impl Settings {
             }
             keys.push((name, epoch, key));
         }
-        // A selector may cover any tuple: conservatively rotate every known
-        // partition of a collection this device could read.
-        for record in self.partitions.values_mut() {
-            let name = domain
-                .scopes()
-                .find(|(_, scope)| scope.table == record.scope.table)
-                .map(|(name, _)| name)
-                .ok_or("unknown partition table")?;
-            if record.epochs.is_empty()
-                || readable
-                    .as_ref()
-                    .is_some_and(|profile| !profile.reads(name))
-            {
-                continue;
+        // The group secret is the unit: one new secret per group partition
+        // the device could read, so every member table advances together.
+        // Its profile's tables and its recorded partition grants count; a
+        // device enrolled elsewhere may have read any known partition.
+        // Even an address held here without a key rotates: the new secret
+        // does not depend on the old one.
+        let mut rotated = Vec::new();
+        for partition in self.partitions(&domain)? {
+            let read = match &readable {
+                None => true,
+                Some(profile) => {
+                    partition
+                        .members
+                        .iter()
+                        .any(|member| profile.reads(&member.table))
+                        || holder
+                            .as_ref()
+                            .is_some_and(|holder| holder.selects(&partition))
+                }
+            };
+            if read {
+                partition.record.admit(epoch)?;
+                rotated.push(partition.record);
             }
-            let role = partition_key_role(record.scope, epoch);
+        }
+        // Capacity was checked for all before any secret is made; a secret
+        // found here was made by an interrupted attempt of this intent.
+        for mut record in rotated {
+            let role = secret_role(&record.address, epoch);
             if vault.find(&role)?.is_none() {
                 vault.create(&role)?;
             }
-            if !record.epochs.contains(&epoch) {
-                if record.epochs.len() >= MAX_EPOCHS {
-                    return Err("partition key epoch capacity reached".into());
-                }
-                record.epochs.push(epoch);
-                record.epochs.sort_unstable();
-            }
+            record.hold(epoch)?;
+            self.groups
+                .insert(crate::groups::record_key(&record.address), record);
         }
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
         let authority = Authority {
@@ -2571,42 +2635,4 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn contact_versions_are_independent_of_routing_flags() {
-        let key = PrivateKey::new().public_key();
-        let mut record = ContactRecord {
-            v: CONTACT_VERSION,
-            publisher: key,
-            node: key,
-            routes: Vec::new(),
-            issuer: true,
-            enrollment_only: false,
-        };
-        let uri = |record: &ContactRecord| {
-            format!(
-                "rocky://peer/{}",
-                BASE64URL_NOPAD.encode(&serde_json::to_vec(record).unwrap())
-            )
-        };
-        for enrollment_only in [false, true] {
-            record.enrollment_only = enrollment_only;
-            assert_eq!(
-                ContactRecord::parse(&uri(&record)).unwrap().enrollment_only,
-                enrollment_only
-            );
-        }
-        for version in [0, 1, 3, u32::MAX] {
-            record.v = version;
-            assert_eq!(
-                ContactRecord::parse(&uri(&record))
-                    .err()
-                    .unwrap()
-                    .to_string(),
-                "unsupported contact version"
-            );
-        }
-    }
-}
+mod tests;

@@ -859,6 +859,10 @@ impl Node {
         }
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
         self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        // New grants may make more members of a held group readable.
+        for partition in settings.partitions(&self.domain)? {
+            self.hold_keys(&settings, &partition).await?;
+        }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
         drop(settings);
@@ -1276,20 +1280,10 @@ impl Node {
         for (key, credentials) in settings.row_authors(&self.vault)? {
             self.replica.register_row_author(key, credentials).await?;
         }
-        for record in settings
-            .partitions
-            .values()
-            .filter(|record| record.epochs.contains(&epoch))
-        {
-            self.replica
-                .install_key_epoch(KeyMaterial {
-                    scope: record.scope,
-                    generation: epoch,
-                    key: self
-                        .vault
-                        .get(&crate::enrollment::partition_key_role(record.scope, epoch))?,
-                })
-                .await?;
+        for partition in settings.partitions(&self.domain)? {
+            if partition.record.epochs.contains(&epoch) {
+                self.hold_keys(&settings, &partition).await?;
+            }
         }
         drop(settings);
         self.forget_readers().await;
@@ -1348,6 +1342,10 @@ impl Node {
         }
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
         self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        // New grants may make more members of a held group readable.
+        for partition in settings.partitions(&self.domain)? {
+            self.hold_keys(&settings, &partition).await?;
+        }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
         drop(settings);
@@ -1580,7 +1578,7 @@ impl Node {
                 let settings = self.settings.lock().await;
                 pending
                     .into_iter()
-                    .filter(|scope| settings.reads_whole(scope))
+                    .filter(|scope| settings.reads_whole(&self.domain, scope))
                     .collect()
             };
             // `None`: this peer offers no checkpoint; intent stays for another.

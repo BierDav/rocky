@@ -130,8 +130,8 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .unwrap()
     .database;
     let reader_session = reader.session();
-    let envelopes=call(&session,&scope,json!({"type":"partition_envelopes","table":"items","values":values("A"),"recipients":[device.node]})).await;
-    call(&reader_session,&scope,json!({"type":"partition_install","table":"items","values":values("A"),"envelope":envelopes["envelopes"][0]})).await;
+    let shared=call(&session,&scope,json!({"type":"partition_share","table":"items","values":values("A"),"recipients":[device.node]})).await;
+    call(&reader_session,&scope,json!({"type":"partition_install","table":"items","values":values("A"),"envelope":shared["envelopes"][0]["envelope"]})).await;
     assert_ne!(
         reply(
             &reader_session,

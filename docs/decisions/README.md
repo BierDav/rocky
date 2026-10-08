@@ -14,6 +14,7 @@ naturally holds.
 | [0028](0028-generation-lineage-and-signed-backups.md) | Generation lineage, projection plans, signed backups |
 | [0037](0037-partition-groups.md) | Explicit partition groups, positional addresses and secret boundary |
 | [0039](0039-single-current-formats.md) | One current persisted and wire format |
+| [0040](0040-group-secrets.md) | Group secrets, derived table keys, group envelopes and rotation |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved by the current roadmap. The next record is 0040.

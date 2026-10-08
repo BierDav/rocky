@@ -248,29 +248,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         Ok(())
     }
-    /// Accepts recipient-bound key delivery; the independently verified grant is still required.
-    pub async fn install_partition_envelope(
-        &self,
-        envelope: &rocky_credentials::PartitionKeyEnvelope,
-        issuer: PublicKey,
-        scope: ResourceScope,
-        tuple: PartitionTuple,
-        epoch: u64,
-    ) -> Result<(), Error> {
-        let key = {
-            let inner = self.inner.lock().await;
-            envelope
-                .open(&inner.config.node, issuer, inner.manifest, scope, epoch)
-                .map_err(credential)?
-        };
-        self.register_partition(scope, tuple).await?;
-        self.install_key_epoch(KeyMaterial {
-            scope,
-            generation: epoch,
-            key,
-        })
-        .await
-    }
     pub async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
         self.inner.lock().await.table_complete(table).await
     }

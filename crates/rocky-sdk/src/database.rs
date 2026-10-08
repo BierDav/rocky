@@ -791,14 +791,25 @@ async fn run(
             drop(replica);
             return Err(error.into());
         }
-        for record in settings
-            .partitions
-            .values()
-            .filter(|record| settings.granted(&domain).contains(&record.scope))
-        {
-            replica
-                .register_partition(record.scope, record.tuple.clone())
-                .await?;
+        // Every readable member's key derives from its group secret,
+        // including a table that joined the group in a later generation.
+        let granted = settings.granted(&domain);
+        for partition in settings.partitions(&domain)? {
+            for member in &partition.members {
+                if granted.contains(&member.scope) {
+                    replica
+                        .register_partition(member.scope, member.tuple.clone())
+                        .await?;
+                }
+                // Newest first: earlier epochs then join its history.
+                if settings.reads_partition(member) {
+                    for epoch in partition.record.epochs.iter().rev() {
+                        replica
+                            .install_key_epoch(partition.key(&vault, member, *epoch)?)
+                            .await?;
+                    }
+                }
+            }
         }
         for (key, chain) in settings.row_authors(&vault)? {
             replica.register_row_author(key, chain).await?;

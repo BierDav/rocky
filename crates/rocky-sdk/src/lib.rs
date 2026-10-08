@@ -8,6 +8,7 @@ mod domain;
 mod engine;
 mod enrollment;
 mod generation;
+mod groups;
 mod node;
 mod owner;
 mod scheduling;

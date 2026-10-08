@@ -2,7 +2,7 @@
 
 The `rocky-core` and `rocky-credentials` primitives behind
 [partitioned scopes](partitioned-scopes.md): addresses, selector grants and
-key envelopes. That guide covers the Kotlin/native lifecycle and formats.
+group secret envelopes. That guide covers the Kotlin/native lifecycle and formats.
 
 ## Addresses and selectors
 
@@ -67,37 +67,40 @@ capability. Concrete grants and selector grants attenuate independently;
 converting a selector into a concrete grant inside a delegated chain is not
 supported by these APIs.
 
-## Delivering keys
+## Group secrets
 
-`PartitionKeyEnvelope::seal` (version 1) wraps one scope and epoch's 32-byte
-key to one recipient's Ed25519 public key, converted to X25519, with
-ChaCha20-Poly1305. The issuer signs the whole envelope under
-`rocky.partition-key-envelope.v1`. `seal_many` wraps the same key independently to 1–256 distinct
-recipients. The epoch must be positive, and the tuple must derive the supplied
-scope. Each envelope uses fresh ephemeral material and a fresh AEAD nonce.
+`rocky-credentials::derive_table_key(secret, domain, group, table, epoch)` is
+HKDF-SHA256 binding the domain, group address, table identity and positive
+epoch; a derived key reveals neither the secret nor a sibling table's key.
 
-`verify` pins the expected delivering issuer, manifest, scope and epoch and
-checks its signature, without any reader secret. `open` additionally requires
-the intended recipient's secret key, derives the wrapping key and authenticates
-the ciphertext. The wrapping key and associated data bind the version,
-manifest, scope, tuple, epoch, recipient, issuer and ephemeral public key. Wrong recipients, keys, contexts, zero DH shared secrets
-and modified ciphertext are refused. `from_bytes` enforces a 4 KiB canonical
-CBOR bound; decoding alone does not verify the issuer signature.
+`GroupSecretEnvelope::seal` (version 1) wraps one group partition's 32-byte
+secret for one epoch to one recipient's Ed25519 public key, converted to
+X25519, with ChaCha20-Poly1305. The issuer signs the whole envelope under
+`rocky.group-secret-envelope.v1`. `seal_many` wraps the same secret
+independently to 1–256 distinct recipients, each with fresh ephemeral material
+and a fresh AEAD nonce. The sealed length follows from the secret length.
 
-An envelope grants no rights. The receiving application must verify credentials
-and decide whether the delivering issuer is trusted for that partition.
-The envelope epoch is installed durably in the runtime; the SDK stores its key
-in the installation's external Vault. SDK revocation rotates known partition
-keys conservatively, preserves historical epochs and revokes assigned pseudonyms.
-Fresh envelopes deliver the new epoch to remaining recipients. Retirement uses
-the existing per-scope refusal checks while retained history needs an old epoch.
+`verify` pins the expected delivering issuer, manifest, group address and
+epoch and checks its signature, without any reader secret. `open` additionally
+requires the intended recipient's secret key. The wrapping key and associated
+data bind the version, manifest, group address, epoch, recipient, issuer and
+ephemeral public key. Wrong recipients, keys, contexts, zero DH shared secrets,
+other versions or sealed lengths and modified ciphertext are refused.
+`from_bytes` enforces a 4 KiB canonical CBOR bound; decoding alone does not
+verify the issuer signature. [Decision 0039](../decisions/0040-group-secrets.md)
+pins both formats.
+
+An envelope grants no rights. The receiving application verifies credentials
+and decides whether the delivering issuer is trusted for that partition. The
+SDK lifecycle, holding rule and revocation are in
+[partitioned scopes](partitioned-scopes.md#group-secrets).
 
 ## Qualification
 
 `cargo test -p rocky-core` and `cargo test -p rocky-credentials` cover canonical
 SQL equality, tuple separation, selector attenuation, paired rights/fields,
-custody, policy/expiry/revocation, renewal, author admission and
-recipient/context/ciphertext substitution.
+custody, policy/expiry/revocation, renewal, author admission, the HKDF vectors,
+derived-key separation and recipient/context/ciphertext substitution.
 
 ## Design rationale
 
@@ -107,5 +110,7 @@ recipient/context/ciphertext substitution.
   combine with fields or partitions of another.
 - A grant delivers no key and an envelope grants nothing: admission verifies
   credentials regardless of who delivered a key.
-- Recipients get separate envelopes of one key and never share a wrapping
+- Recipients get separate envelopes of one secret and never share a wrapping
   secret.
+- One secret per group partition costs one envelope and one rotation however
+  many tables the group has.

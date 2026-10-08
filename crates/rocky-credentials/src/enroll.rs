@@ -21,6 +21,8 @@ const MAX_ATTEMPTS: u8 = 10;
 fn equal(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.iter().zip(right).fold(0, |all, (a, b)| all | (a ^ b)) == 0
 }
+/// Bytes `seal` adds to its plaintext: the nonce and the AEAD tag.
+pub(crate) const SEAL_OVERHEAD: usize = 12 + 16;
 pub(crate) fn seal(key: Commitment, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
     let mut nonce = [0; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);

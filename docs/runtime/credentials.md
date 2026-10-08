@@ -187,7 +187,7 @@ written after the rotation stays sealed from it even when obtained elsewhere.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` (`rocky_sdk` `VERSION`) | 8 | Profile, held key epochs per collection, issuer `authority` (invitation, devices with profiles, pending `rotation`), `issuers` by node key, author ranges and pseudonyms |
+| `identity.json` (`rocky_sdk` `VERSION`) | 9 | Profile, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation, devices with profiles, partition holders, pending `rotation`), `issuers` by node key, author ranges and pseudonyms; 8 is refused |
 | Invitation URI `rocky://join/` | 3 | Carries the grant profile |
 | Pair request | 2 | Labels `rocky.credentials.pair-*.v2`; the enrollment carries profile, key epochs and, for an issuer, the publisher key and an author range; optional `routes` are bound by the proof when present |
 | Renewal | 2 | Request signed by the node, bound to an issuer audience and a one-time X25519 key; publisher-signed answer sealing `{keys, issuers}` to that key |

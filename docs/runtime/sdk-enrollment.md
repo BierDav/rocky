@@ -109,7 +109,9 @@ for a newer policy. Expired credentials cannot open a member until an issuer
 is reachable. Clock skew up to five minutes is accepted.
 
 `revoke(node)` on an issuer starts a new key epoch for every collection the
-device could read and signs the next policy epoch ending its chains. The
+device could read, and a new secret for every group partition it could read or
+was granted, and signs the next policy epoch ending its chains and its user's
+([group secrets](partitioned-scopes.md#group-secrets)). The
 intent is saved first; an interruption completes at the next open. Others
 renew on their next sync; the revoked device is refused sync and renewal and
 keeps only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk)

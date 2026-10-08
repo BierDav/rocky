@@ -74,7 +74,7 @@ class CredentialPrimitivesTest {
             val current = Json.parseToJsonElement(identity.readText()).jsonObject
             val database = File(directory, "rocky.sqlite")
             val kept = database.readBytes()
-            for (version in listOf(0, 1, 2, 3, 4, 5, 6, 7, 9, Int.MAX_VALUE)) {
+            for (version in listOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 10, Int.MAX_VALUE)) {
                 val bytes = JsonObject(current + ("version" to JsonPrimitive(version))).toString().toByteArray()
                 identity.writeBytes(bytes)
                 val error = assertFailsWith<RockyException> { RockyDatabase.open(directory, ItemsSchema) }

@@ -1,6 +1,6 @@
 # 0037: Explicit partition groups
 
-Status: accepted; schema and address implemented, group secrets follow in phase 3.
+Status: accepted; schema, address and [group secrets](0040-group-secrets.md) implemented.
 Date: 2026-10-08
 
 ## Context
@@ -38,7 +38,7 @@ are refused for both partitioned and unpartitioned schemas.
 Phase 3 supplies one random secret per group address and key epoch. Table keys
 are derived by a domain-separated cryptographic KDF binding the group address,
 epoch and stable table identity, never by treating one table key as the secret.
-The KDF and envelope format must be pinned by phase 3's implementation and tests.
+[Decision 0039](0040-group-secrets.md) pins the KDF and envelope format.
 Adding a table lets existing secret holders derive its key without another
 envelope. Generation admission refuses changing an existing table's group,
 removing membership or renaming a group; new tables may join an existing group.

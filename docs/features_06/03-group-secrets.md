@@ -1,6 +1,6 @@
 # 3. Group secrets
 
-Status: not started.
+Status: complete on the assigned base; all completion gates passed on 2026-10-09.
 Owner: `rocky-credentials` envelopes; `rocky-sdk` key store, sharing,
 revocation and subscriptions; Kotlin `partitions` API. Depends on
 [phase 2](02-partition-groups.md). Wave 1.
@@ -84,3 +84,54 @@ search is not complete:
 - A phone holds a list and its items while leaving out a third table.
 - [Partitioned scopes](../runtime/partitioned-scopes.md) and
   [partition credentials](../runtime/partition-credentials.md) describe it.
+
+## Implementation and evidence
+
+`rocky-credentials::group` derives table keys by HKDF-SHA256 and replaces the
+per-table envelope with `GroupSecretEnvelope`; the sealed length follows from the
+secret length. `rocky-sdk::groups` resolves group partitions against the current
+generation, stores one secret per epoch in the installation vault and derives
+member keys on open, install, renewal and rotation. SDK identity version 9 holds
+group records and issuer partition holders; version 8 is refused.
+[Decision 0039](../decisions/0040-group-secrets.md) pins both formats. Kotlin
+`partitions` takes group partitions: create, share, install, register, subscribe,
+bootstrap, unsubscribe, evict and status.
+
+The listed gaps are closed: install opens the envelope and verifies read on
+every member before registering or storing; capacity is checked before a secret
+is written; create uses the partition's current epoch, else the policy epoch;
+rotation makes one new secret per group partition, keyed or not.
+
+Gate evidence (`crates/rocky-sdk/tests/group_secrets.rs` unless noted):
+
+- One envelope per recipient; recipients sync and read all three tables over the
+  in-process transport (`readers_open_every_table_from_one_envelope...`).
+- Missing read on one member refuses install with no secret, epoch or
+  registration left (`one_envelope_shares_a_group...`).
+- After revocation the remaining reader opens post-revocation rows in every
+  table from one new envelope; the removed one holds no new-epoch key or secret.
+- A device enrolled to read only `notes`, then granted list A, rotates A (not B);
+  a grant-only device rotates every known partition; its user cannot be granted
+  under a new node key, and renewal under a new node key is refused
+  (`enrollment::tests`).
+- Sharing to a revoked recipient or a non-current epoch is refused.
+- Key-provider failure injected at every operation of a revocation, then reopen:
+  every member is at epochs [1, 2] with exactly two secrets.
+- A table joining the group in generation 2 derives its key; one row is sealed
+  and read without a new secret.
+- A partial-role phone holds lists and items with attachments left out; unknown
+  or all-table omissions are refused; the closure rule is unit-tested
+  (`groups::tests`) because partitioned references stay refused until phase 5.
+
+Verification on parent `1a918842`: `./scripts/check` passed (752 passing test
+executions, 15 ignored); `./sdks/native/check` passed; `./kotlin check` passed
+(51 tests, including a new group test); `./kotlin test -m schema-qualification`
+5 passed; `./kotlin check qualify -m schema-qualification` seven pairs passed;
+`./kotlin test -m room-qualification` 12 passed;
+`./kotlin check packaged -m packaged-consumer` passed.
+
+Not verified: a revoked device receiving post-revocation frames through a custody
+relay (it is refused sync by the issuer; the evidence is key-level), a second
+issuer's rotation of a partition it holds only by address, device and real
+network runs, and the four-table measurement of phase 9.
+

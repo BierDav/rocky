@@ -52,58 +52,61 @@ including NOCASE and RTRIM spellings, independent of their column identities.
 The address binds the domain and group name in slot declaration order.
 [Decision 0037](../decisions/0037-partition-groups.md) pins its encoding.
 
-This phase implements schema membership and addresses. Keys and lifecycle still
-use per-table scopes: [phase 3](../features_06/03-group-secrets.md) implements the
-shared secret, derived table keys and group holding rule. Partitioned conflict
-policies, references, existence logs and command control remain refused.
+Table scopes, logs, checkpoints, grants and pseudonyms stay per table; the key
+comes from the [group secret](#group-secrets). Partitioned conflict policies,
+references, existence logs and command control remain refused.
 
 Changing an existing table's group or renaming a group is refused by generation
 admission; a new table may join an existing group. Removing a table remains
 refused. Changing partition columns requires a new installation; generation admission
 refuses to reinterpret existing rows under another scope.
 
-## Keys, credentials and subscriptions
+## Group secrets
 
-`RockyClient.partitions` exposes address, grant, delegate, create, register,
-install, envelopes, role, subscribe, unsubscribe, evict and complete operations.
-All values use the existing tagged SDK cells, in `partitionBy` declaration order.
-JSON requests use the same operation names prefixed with `partition_` and go
-through the native bindings; no Rust source is required.
+One random secret per group partition and key epoch derives every member
+table's key ([decision 0039](../decisions/0040-group-secrets.md)). Reading is
+all-or-nothing per group partition; write rights stay per table. A table that
+joins the group in a later generation derives its key from the held secret.
 
-The issuer calls `create(table, values, epoch)` to persist a concrete address and
-its random key. `address` returns the canonical tuple and scope, from which an
-application builds a selector grant. `grant` issues it to a prepared device;
-`delegate` narrows an existing delegable chain. Selector grants carry domain,
-table, selector, row selection, rights and fields together. A reader may receive
-only A while an ERP grant selects one customer and any warehouse.
+`RockyClient.partitions` names a group partition by group and slot values, in
+`partitionBy` order; `address` and `complete` name one table. JSON requests use
+the same names prefixed with `partition_`; values use the tagged SDK cells. The
+native request may name `table` instead of `group` to mean that table's group.
 
-The issuer calls `envelopes(table, values, recipients, epoch)` for independent
-recipient-bound envelopes. The reader calls `install` with its envelope and the
-same address/epoch. The SDK pins its publisher as delivering issuer, verifies
-whole-partition read authority, saves the key in the external installation Vault
-and records metadata before runtime installation. A custody node uses `register`
-without a key. Valid incoming frames can register an authorized address too.
-The frame signature, tuple/schema match and custody grant are checked first.
+| Operation | Effect |
+| --- | --- |
+| `create(group, values)` | Issuer: prepares the secret at the partition's current epoch, else the policy epoch |
+| `share(group, values, recipients)` | Issuer: one envelope of the current epoch per recipient node key |
+| `install(group, values, envelope)` | Opens the envelope, then requires whole-partition read on every member before anything is stored |
+| `grant` / `delegate` | Selector grants; an issuer records the device and user first |
+| `register(group, values)` | Registers the addresses without a key, as custody |
+| `subscribe` / `bootstrap(group, values, omit)` | Holds every member except those left out; `bootstrap` saves checkpoint-first intent |
+| `unsubscribe` / `evict(group, values, keep)` | Releases every member except those kept |
+| `status(group, values)` | Held secret epochs, and each member's key epochs and holding |
 
-A grant never delivers a key; an envelope never grants authority. A recipient
-without B's grant cannot request B's range or checkpoint, register its key, or
-admit its frames. Keys reveal a whole partition, including earlier ciphertext
-under that epoch. Revocation cannot make a previously delivered secret unknown.
+The SDK pins its publisher as delivering issuer and stores only the secret in
+the installation's external key provider. `share` refuses a revoked recipient,
+a non-current epoch and an unfinished revocation. A grant never delivers a key;
+an envelope never grants authority. A recipient without B's grant cannot
+request B's range or checkpoint, register its key or admit its frames. A key
+reveals a whole partition, including earlier ciphertext under that epoch.
 
-Revocation saves intent before rotating known partition keys conservatively,
-revokes the device and its assigned pseudonyms, renews the issuer's own authors,
-and installs new epochs. Earlier keys remain for retained history. Issue fresh
-credentials and envelopes to remaining readers. Supplied credential renewal
-accepts selectors; narrowing removes runtime readability and unauthorized keys
-are not loaded on reopen. Partition envelope delivery is explicit application
-plumbing, as are grants and choice of recipients.
+**Revocation.** One saved intent rotates: each group partition the device could
+read gets one new secret, so its members advance to one epoch together, also
+after an interruption. Affected are partitions whose members its enrollment
+profile reads or a recorded grant selects; every known partition when the
+issuer never enrolled the device. Its user subject is revoked with it, so a
+fresh node key cannot renew. Earlier epochs remain for retained history; share
+the new epoch to remaining readers. A grant delegated on a non-issuer is not
+recorded and is covered only by that conservative rotation.
 
-`role(partial = true, fullNodes = ..., custody = ...)` selects the partial role.
-Subscribe/register addresses before catching up. Unsubscribe stops following a
-scope; evict requires the existing full-node custody evidence, removes its rows
-and operations, and keeps permanent replay/identity marks. Other partitions'
-projection rows remain. Reopen reloads durable addresses, keys and subscriptions.
-Epoch retirement uses the existing per-scope retained-history checks.
+**Holding rule.** A group partition is held whole unless the application leaves
+a table out by name, for example attachments on a phone. Leaving out a table
+that a held member references is refused, as is keeping a member without one
+it references. `role(partial = true, fullNodes = ..., custody = ...)` selects
+the partial role; eviction requires the existing full-node custody evidence and
+keeps permanent replay/identity marks. Reopen reloads addresses, secrets,
+derived keys and subscriptions.
 
 ## IDs and transactions
 
@@ -116,7 +119,7 @@ creation summary. Equal IDs in different partitions are valid.
 
 A table partitioned by its own `id` counts per author/table. Call
 `partitions.next("lists")` before opening the write transaction. It prepares the
-key for the prospective log-derived ID and returns that ID and scope. Repeating
+group secret for the prospective log-derived ID and returns that ID and scope. Repeating
 preparation before an insert is idempotent; it does not allocate a counter.
 Inside the transaction, `nextId("lists")` reserves and verifies the same ID.
 Use the prepared list ID to prepare its items partition before that transaction
@@ -168,6 +171,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
 | Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
+| Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0039](../decisions/0040-group-secrets.md)) |
 | Frame | Row format 5 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body unchanged; each opening commits to its frame header and tuple |
@@ -187,10 +191,11 @@ the maximum in the table's permanent creation summary.
 | Encoded tuple | 1 KiB |
 | Selector values per column / total bytes | 256 / 16 KiB |
 | Envelope recipients per call / size | 256 / 4 KiB |
+| Secret epochs per group partition / recorded grants per holder | 256 / 256 |
 | Registered partitions per replica | 4,096 |
 | SQL proof tuple products / view expansion passes | 4,096 / 16 |
 
-Every held partition has its own key, logs and checkpoint. The 200-partition
+Every held table partition has its own derived key, logs and checkpoint. The 200-partition
 measurement (`cargo test -p rocky-secure --lib measure_200_partitions --locked
 -- --ignored --nocapture`, debug build) set these review budgets:
 

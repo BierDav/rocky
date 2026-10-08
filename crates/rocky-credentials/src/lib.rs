@@ -4,6 +4,7 @@
 //! what these verify. See `docs/runtime/credentials.md`.
 mod coordination;
 mod enroll;
+mod group;
 mod horizon;
 mod identity;
 mod issue;
@@ -20,6 +21,7 @@ pub use enroll::{
     Admission, Exchange, Invitation, PairRequest, RenewRequest, Renewal, open_enrollment,
     seal_enrollment,
 };
+pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
 pub use horizon::{
     ExistenceBase, ExistenceIdentity, HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonCut,
     HorizonLog, HorizonPeer, HorizonStatement, SignedHorizon,
@@ -31,7 +33,7 @@ pub use identity::{
 pub use issue::{Authority, Grant, MAX_GRANTS, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
-pub use partition::{PartitionGrant, PartitionKeyEnvelope};
+pub use partition::PartitionGrant;
 pub use pseudonym::{
     AuthorRange, Extended, Extension, MAX_AUTHOR, Pseudonym, PseudonymRequest, SealedDevice,
 };

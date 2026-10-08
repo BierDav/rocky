@@ -123,7 +123,10 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
                 None => Unsupported::RemovedTable(name.clone()),
             })?;
         let (old_key, new_key) = (logical::key_shape(before), logical::key_shape(after));
-        if old_key != new_key || before.partition_by != after.partition_by {
+        if old_key != new_key
+            || before.partition_by != after.partition_by
+            || before.partition_group != after.partition_group
+        {
             return Err(Unsupported::ChangedKey(name.clone()));
         }
         let old_fields = logical::register_shapes(before);
@@ -359,6 +362,7 @@ mod tests {
             columns,
             primary_key: vec!["id".into()],
             partition_by: Vec::new(),
+            partition_group: None,
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
 

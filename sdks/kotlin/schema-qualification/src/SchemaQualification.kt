@@ -12,7 +12,7 @@ fun main(args: Array<String>) {
         }
     }
     val data = Json.parseToJsonElement(samples.definitionJson("09".repeat(32))).jsonObject
-    check(data.getValue("format").jsonPrimitive.int == 3)
+    check(data.getValue("format").jsonPrimitive.int == 4)
     check(runCatching { schema("reserved") { table("t") { text("id"); primaryKey("id") } } }.isFailure)
     check(runCatching { schema("reserved") { table("t") { integer("row_kind"); primaryKey("id") } } }.isFailure)
     val table = data.getValue("tables").jsonArray.single().jsonObject
@@ -146,6 +146,41 @@ fun main(args: Array<String>) {
         File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
         File(args[0], "$name-wire.json").writeText(declaration.json())
     }
+    val groupExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.GroupDatabase/1.json").readText()
+    val groupedImport = schemaFromRoom("groupedroom", groupExport) {
+        table("lists") { partitionBy("id", group = "list") }
+        table("items") { partitionBy("list", group = "list") }
+    }
+    val groupedHand = schema("groupedroom") {
+        table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+        table("items") { integer("list"); text("key"); text("title"); primaryKey("list", "key"); partitionBy("list", group = "list") }
+    }
+    check(groupedHand.definitionJson("09".repeat(32)) == groupedImport.definitionJson("09".repeat(32)))
+    for ((name, declaration) in listOf("groups-hand" to groupedHand, "groups-import" to groupedImport)) {
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    }
+    for (mismatch in 0..2) {
+        val message = runCatching {
+            schema("badgroups") {
+                table("parents") { text("customer"); primaryKey("customer"); partitionBy("customer", group = "customer") }
+                table("children") {
+                    if (mismatch == 0) integer("customer")
+                    else column(Column.text("customer").copy(collation = if (mismatch == 1) Collation.Nocase else Collation.Binary))
+                    text("key"); primaryKey("customer", "key")
+                    if (mismatch == 2) partitionBy("customer", "key", group = "customer")
+                    else partitionBy("customer", group = "customer")
+                }
+            }
+        }.exceptionOrNull()?.message ?: error("accepted mismatched group slots")
+        check("parents" in message && "children" in message)
+    }
+    check(runCatching {
+        schema("privategroups") {
+            table("parents") { text("customer"); primaryKey("customer"); partitionBy("customer") }
+            table("children") { text("customer"); primaryKey("customer"); partitionBy("customer", group = "parents") }
+        }
+    }.exceptionOrNull()?.message?.contains("reserved") == true)
     val importedSamples = schemaFromRoom("samples", sampleExport)
     check(importedSamples.definitionJson("09".repeat(32)) == samples.definitionJson("09".repeat(32)))
     for ((name, declaration) in listOf("samples-import" to importedSamples, "market-import" to importedMarket, "market-hand" to market))
@@ -223,5 +258,5 @@ fun main(args: Array<String>) {
     // Only format-3 tables exist: a register table without a key is refused before the engine sees it.
     check(runCatching { Schema("legacy", tables = listOf(Table("t", listOf(Column.text("x"))))) }.exceptionOrNull()?.message ==
         "every table declares a primary key; use the schema builder")
-    println("schema builder, existence log and shopping/market/scalar Room import qualification passed")
+    println("schema builder, groups, existence log and shopping/market/scalar Room import qualification passed")
 }

@@ -8,8 +8,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Current descriptor format, including row identities and optional partitions.
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 3;
+/// Current descriptor format, including row identities and partition groups.
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 4;
 /// Largest canonical descriptor a parser accepts.
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -143,6 +143,8 @@ pub struct LogicalTable {
     /// Column SQL names in key order.
     pub primary_key: Vec<String>,
     pub partition_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_group: Option<String>,
     pub indexes: Vec<LogicalIndex>,
     pub foreign_keys: Vec<LogicalForeignKey>,
     /// Publish row liveness to readers of other scopes.
@@ -786,6 +788,8 @@ struct ReplicatedTable<'a> {
     unique: Vec<ReplicatedUnique<'a>>,
     references: Vec<ReplicatedReference<'a>>,
     partition_by: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partition_group: Option<&'a str>,
     existence_log: bool,
 }
 #[derive(Serialize)]
@@ -847,6 +851,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
             .iter()
             .filter_map(|name| table.column(name).map(|column| column.logical.as_str()))
             .collect(),
+        partition_group: table.partition_group.as_deref(),
         existence_log: table.existence_log,
     }
 }
@@ -886,6 +891,7 @@ impl LogicalSchema {
         if !self.tables.is_sorted_by(|a, b| a.logical < b.logical) {
             return invalid("tables are not sorted by unique logical name");
         }
+        self.partition_groups()?;
         let mut names = BTreeSet::new();
         for table in &self.tables {
             table.validate()?;
@@ -910,7 +916,7 @@ impl LogicalSchema {
                 for name in ["id", "row_kind"] {
                     let column = table.column(name).ok_or_else(|| {
                         SchemaError::Invalid(format!(
-                            "{}.{} is required by descriptor format 3",
+                            "{}.{} is required by descriptor format 4",
                             table.sql_name, name
                         ))
                     })?;
@@ -1307,6 +1313,7 @@ mod tests {
                 columns: vec![column("key", Affinity::Text), column("title", Affinity::Text), column("id", Affinity::Integer), column("row_kind", Affinity::Integer)],
                 primary_key: vec!["key".into()],
                 partition_by: Vec::new(),
+            partition_group: None,
                 indexes: vec![LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None }],
                 foreign_keys: Vec::new(),
 

@@ -79,6 +79,7 @@ pub(crate) fn schema() -> LogicalSchema {
             ],
             primary_key: vec!["key".into()],
             partition_by: Vec::new(),
+            partition_group: None,
             indexes: vec![rocky_core::LogicalIndex {
                 name: "notes_identity".into(),
                 unique: true,

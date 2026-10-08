@@ -81,6 +81,8 @@ pub trait Application {
 mod strong;
 pub use strong::*;
 
+mod partition_groups;
+pub use partition_groups::{GroupAddress, PartitionGroup};
 mod partition;
 pub use partition::{
     MAX_PARTITION_BYTES, PartitionError, PartitionSelection, PartitionSelector, PartitionTuple,

@@ -10,10 +10,10 @@ schema declarations and the packaged SDK;
 
 ```kotlin
 val shopping = schema("shopping") {
-    table("lists") { text("title"); primaryKey("id"); partitionBy("id") }
+    table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
     table("items") {
         integer("list"); text("key"); integer("amount")
-        primaryKey("list", "key"); partitionBy("list")
+        primaryKey("list", "key"); partitionBy("list", group = "list")
     }
     view("partial_items", "SELECT * FROM items WHERE row_kind = 0")
 }
@@ -31,11 +31,35 @@ Apply `partitionBy` in the import overlay; do not edit the generated JSON.
 
 ```kotlin
 schemaFromRoom("shopping", exportedJson) {
-    table("items") { partitionBy("list") }
+    table("lists") { partitionBy("id", group = "list") }
+    table("items") { partitionBy("list", group = "list") }
 }
 ```
 
-Changing partition columns requires a new installation; generation admission
+## Partition groups
+
+`lists.id` and `items.list` map to one group's slot by position. Every member
+must have equal slot counts, affinities and collations; build and installation
+refuse a mismatch naming both tables. Names are case-sensitive and unique in the
+group namespace. Omitting `group` creates a private group named by the table's
+logical identity; another table cannot name that group. An unpartitioned table
+cannot join. Group declarations affect canonical bytes and replicated identity.
+
+`LogicalSchema.partition_groups()` exposes groups, ordered slots and member
+tables to native runtime/SDK consumers. `group_address(domain, table, values)`
+returns the same address across members for SQL-equal positional values,
+including NOCASE and RTRIM spellings, independent of their column identities.
+The address binds the domain and group name in slot declaration order.
+[Decision 0037](../decisions/0037-partition-groups.md) pins its encoding.
+
+This phase implements schema membership and addresses. Keys and lifecycle still
+use per-table scopes: [phase 3](../features_06/03-group-secrets.md) implements the
+shared secret, derived table keys and group holding rule. Partitioned conflict
+policies, references, existence logs and command control remain refused.
+
+Changing an existing table's group or renaming a group is refused by generation
+admission; a new table may join an existing group. Removing a table remains
+refused. Changing partition columns requires a new installation; generation admission
 refuses to reinterpret existing rows under another scope.
 
 ## Keys, credentials and subscriptions
@@ -142,7 +166,8 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | --- | --- |
 | Partition tuple | Sorted, nonempty map from column commitment to canonical key component, by the business-key codec (affinity, collation). Nulls, duplicates and tuples over 1 KiB are refused |
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
-| Definition/descriptor | Format 3, including optional `partition_by` and views; others are refused before installation writes |
+| Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
+| Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Frame | Row format 5 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body unchanged; each opening commits to its frame header and tuple |

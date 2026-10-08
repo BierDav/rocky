@@ -236,6 +236,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
         auto_generate: false,
         primary_key: vec![columns[0].sql_name.clone()],
         partition_by: Vec::new(),
+        partition_group: None,
         columns,
         indexes: vec![rocky_core::LogicalIndex {
             name: format!("{name}_identity"),

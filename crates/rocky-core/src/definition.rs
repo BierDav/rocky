@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// The `SchemaSource::kind` of descriptors built from a definition.
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 3;
+pub const DEFINITION_FORMAT: u32 = 4;
 /// Largest definition document `SchemaDefinition::parse` accepts.
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
@@ -44,6 +44,8 @@ pub struct TableDefinition {
     pub primary_key: Vec<String>,
     #[serde(default)]
     pub partition_by: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_group: Option<String>,
     #[serde(default)]
     pub indexes: Vec<IndexDefinition>,
     /// References to the identity of another mergeable table.
@@ -411,6 +413,7 @@ impl TableDefinition {
             columns,
             primary_key: self.primary_key.clone(),
             partition_by: self.partition_by.clone(),
+            partition_group: self.partition_group.clone(),
             indexes,
             foreign_keys: Vec::new(),
 
@@ -425,7 +428,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":3,
+        "format":4,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -512,7 +515,7 @@ mod tests {
 
     #[test]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 4] {
+        for format in [0, 1, 2, 3, 5] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -612,7 +615,7 @@ mod constraint_tests {
     use crate::{Incompatibility, Profile};
 
     const SHOP: &str = r#"{
-        "format":3,
+        "format":4,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "shop",
         "tables": [
@@ -804,7 +807,7 @@ mod constraint_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":3,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[test]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -854,7 +857,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":3,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"]{extra}}}]}}"#
+                r#"{{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -887,7 +890,7 @@ mod partition_tests {
     fn existence_logs_bind_the_manifest_and_refuse_nondeterministic_support_rows() {
         let shop = |lists: &str, extra: &str| {
             format!(
-                r#"{{"format":3,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
+                r#"{{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
             )
         };
         let build = |json: String| {

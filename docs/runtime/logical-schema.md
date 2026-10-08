@@ -25,7 +25,7 @@ the logical name is a new item. The descriptor is stored in the file at
 install and another one is refused at open; shapes change through
 [generations](generations.md).
 
-Format 3 installs row identity, optional `partition_by` and static views
+Format 4 installs row identity, partition groups, optional `partition_by` and static views
 ([partitioned scopes](partitioned-scopes.md)). Any other format is
 refused by a read-only preflight before database initialization or SDK
 enrollment writes.

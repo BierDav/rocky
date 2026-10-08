@@ -704,6 +704,7 @@ mod tests {
             columns,
             primary_key: key.iter().map(|key| key.to_string()).collect(),
             partition_by: Vec::new(),
+            partition_group: None,
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
 

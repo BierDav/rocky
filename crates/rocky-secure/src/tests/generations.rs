@@ -63,6 +63,7 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
         columns,
         primary_key: vec!["key".into()],
         partition_by: Vec::new(),
+        partition_group: None,
         indexes: vec![LogicalIndex {
             name: format!("{name}_identity"),
             unique: true,

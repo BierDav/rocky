@@ -18,6 +18,10 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   Generation plans refuse reader-scope remapping. Key/type changes, removals,
   renames and nonnullable replicated field additions are unsupported.
 
+Partition group membership and names are immutable for existing tables, as are
+partition columns. A new mergeable table may join an existing group with matching
+slots. See [partition groups](partitioned-scopes.md#partition-groups).
+
 `rocky_core::classify` and `classify_commands` reject unsupported changes before
 activation. A signed transition binds application, old/new manifest, schema/handler
 pairs and oldest admissible schema generation. A generation-number edit alone

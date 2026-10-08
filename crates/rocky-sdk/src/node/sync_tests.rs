@@ -5,7 +5,7 @@ use crate::{
     transport::{Connector, memory::Hub},
 };
 
-const SCHEMA: &str = r#"{"application":"sync","version":1,"format":3,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SCHEMA: &str = r#"{"application":"sync","version":1,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 async fn node(
     root: &std::path::Path,
@@ -311,7 +311,7 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
-        r#"{"format":3,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
+        r#"{"format":4,"application":"numeric_consumer","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#,
     )?;
     let store: Arc<dyn crate::SecretStore> =
         Arc::new(FileSecretStore::new(root.path().join("secrets")));

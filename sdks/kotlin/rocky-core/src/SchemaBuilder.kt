@@ -80,6 +80,7 @@ class TableBuilder internal constructor(val name: String) {
     private val columns = linkedMapOf<String, Column>()
     private var key: List<String> = emptyList()
     private var partitions: List<String> = emptyList()
+    private var partitionGroup: String? = null
     private val indexes = linkedMapOf<String, Index>()
     private val foreignKeys = mutableListOf<ForeignKey>()
     var tableClass: TableClass = TableClass.Mergeable
@@ -101,7 +102,9 @@ class TableBuilder internal constructor(val name: String) {
     fun real(name: String, nullable: Boolean = false) = column(Column.real(name, nullable))
     fun blob(name: String, nullable: Boolean = false) = column(Column.blob(name, nullable))
     fun primaryKey(vararg columns: String) { key = columns.toList() }
-    fun partitionBy(vararg columns: String) {
+    fun partitionBy(vararg columns: String, group: String? = null) {
+        require(group == null || group.matches(IDENTIFIER)) { "$name: invalid partition group $group" }
+        partitionGroup = group
         require(columns.isNotEmpty() && columns.size <= 16 && columns.distinct().size == columns.size) { "$name: declare 1 to 16 distinct partition columns" }
         partitions = columns.toList()
     }
@@ -164,6 +167,6 @@ class TableBuilder internal constructor(val name: String) {
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }
         require(roomIdentityIndex == null || roomIdentityIndex == identity) { "$name: Room identity index must contain partition columns followed by id" }
-        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog)
+        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog, partitionGroup = partitionGroup)
     }
 }

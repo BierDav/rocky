@@ -30,6 +30,9 @@ impl PartitionValue {
         value.validate()?;
         Ok(value)
     }
+    pub(crate) fn canonical_bytes(&self) -> &[u8] {
+        &self.0
+    }
     pub fn value(&self) -> Result<SqlValue, PartitionError> {
         self.validate()?;
         key_values(&self.0)

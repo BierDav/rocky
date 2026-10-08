@@ -1059,7 +1059,7 @@ async fn incompatible_schemas_bindings_and_codecs_are_refused() {
 #[tokio::test]
 async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
     let definition = serde_json::json!({
-        "format":3, "publisher": "11".repeat(32), "application": "identity-descriptor",
+        "format":4, "publisher": "11".repeat(32), "application": "identity-descriptor",
         "tables": [
             {"name": "links", "class": "mergeable", "columns": [
                 {"name": "a", "type": "text", "not_null": true},
@@ -1089,7 +1089,7 @@ async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
 
 #[tokio::test]
 async fn trusted_id_reservations_roll_back_and_continue_after_tombstones_and_reopen() {
-    let definition = serde_json::json!({"format":3,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
+    let definition = serde_json::json!({"format":4,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()
@@ -1203,7 +1203,7 @@ async fn trusted_id_reservations_roll_back_and_continue_after_tombstones_and_reo
 
 #[tokio::test]
 async fn trusted_partition_ids_and_agreed_statements() {
-    let definition = serde_json::json!({"format":3,"publisher":"11".repeat(32),"application":"trusted-partitions","tables":[{"name":"bookings","class":"mergeable","columns":[{"name":"month","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["month","key"],"partition_by":["month"]}],"views":[{"name":"partial_bookings","create_sql":"CREATE VIEW partial_bookings AS SELECT * FROM bookings WHERE row_kind=0"}]});
+    let definition = serde_json::json!({"format":4,"publisher":"11".repeat(32),"application":"trusted-partitions","tables":[{"name":"bookings","class":"mergeable","columns":[{"name":"month","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["month","key"],"partition_by":["month"]}],"views":[{"name":"partial_bookings","create_sql":"CREATE VIEW partial_bookings AS SELECT * FROM bookings WHERE row_kind=0"}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()

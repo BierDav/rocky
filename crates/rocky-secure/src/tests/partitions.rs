@@ -17,7 +17,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let publisher = PrivateKey::new();
-        let definition = serde_json::json!({"format":3,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let definition = serde_json::json!({"format":4,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
         let mut schema = SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()

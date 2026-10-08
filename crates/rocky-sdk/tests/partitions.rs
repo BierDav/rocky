@@ -1,7 +1,7 @@
 use rocky_sdk::{Database, Open, Session};
 use serde_json::{Value, json};
 use std::path::Path;
-const SCHEMA: &str = r#"{"format":3,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE row_kind=0"}]}"#;
+const SCHEMA: &str = r#"{"format":4,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE row_kind=0"}]}"#;
 fn open(directory: &Path) -> Open<'_> {
     Open {
         directory,
@@ -207,7 +207,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
 #[tokio::test]
 async fn own_id_partitions_continue_the_table_log() {
     let root = tempfile::tempdir().unwrap();
-    let schema = r#"{"format":3,"application":"ownid","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
+    let schema = r#"{"format":4,"application":"ownid","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
     let options = || Open {
         directory: root.path(),
         schema,

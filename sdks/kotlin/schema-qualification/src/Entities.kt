@@ -73,3 +73,13 @@ data class PartialPartitionSample(val sensor: String, val sequence: Long, val re
 @ConstructedBy(PartitionDatabaseConstructor::class)
 abstract class PartitionDatabase : RoomDatabase()
 expect object PartitionDatabaseConstructor : RoomDatabaseConstructor<PartitionDatabase> { override fun initialize(): PartitionDatabase }
+
+@Entity(tableName = "lists")
+data class GroupList(@PrimaryKey val id: Long, val title: String, @ColumnInfo(name = "row_kind") val rowKind: Long = 0)
+@Entity(tableName = "items", primaryKeys = ["list", "key"],
+    indices = [Index(value = ["list", "id"], unique = true, name = "items_identity")])
+data class GroupItem(val list: Long, val key: String, val title: String, val id: Long, @ColumnInfo(name = "row_kind") val rowKind: Long = 0)
+@Database(entities = [GroupList::class, GroupItem::class], version = 1, exportSchema = true)
+@ConstructedBy(GroupDatabaseConstructor::class)
+abstract class GroupDatabase : RoomDatabase()
+expect object GroupDatabaseConstructor : RoomDatabaseConstructor<GroupDatabase> { override fun initialize(): GroupDatabase }

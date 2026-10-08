@@ -1063,8 +1063,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":3,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-        for format in [0, 1, 2, 4] {
+        const SCHEMA: &str = r#"{"format":4,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        for format in [0, 1, 2, 3, 5] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("rocky.sqlite");
             let conn = rocky_storage::sqlite::Connection::open(&path)?;
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_numeric_consumer_restores_pseudonym_after_reopen() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":3,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":4,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         async fn call(
             database: &Database,
             session: &Session,
@@ -1217,7 +1217,7 @@ mod tests {
         let opened = Database::create(
             Open {
                 directory: directory.path(),
-                schema: r#"{"application":"saturation","version":1,"format":3,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+                schema: r#"{"application":"saturation","version":1,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,
                 network: None,
                 commands: None,

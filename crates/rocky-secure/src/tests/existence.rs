@@ -9,7 +9,7 @@ use crate::{ExistenceEvent, ExistenceRecord, MAX_SECURE_BYTES, ReceiveStatus, Se
 use rocky_core::{DomainId, LogicalSchema, Scope, SqlValue, TypedRows};
 
 const DEFINITION: &str = r#"{
-    "format": 3, "publisher": "PUBLISHER", "application": "erp",
+    "format": 4, "publisher": "PUBLISHER", "application": "erp",
     "tables": [
         {"name": "lists", "class": "mergeable",
          "columns": [{"name": "title", "type": "text", "not_null": true}],

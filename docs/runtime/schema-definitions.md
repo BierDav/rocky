@@ -31,7 +31,7 @@ descriptor and both fingerprints are identical.
 
 | Entry | Meaning |
 | --- | --- |
-| `format` | 3, including optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)); others are refused |
+| `format` | 4, including partition groups, optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)); others are refused |
 | `publisher`, `application` | Bind table and field identities; 64 hexadecimal digits |
 | `update_policy` | `changed` (default) or `assigned`; see [SQL sessions](sql-sessions.md#what-a-commit-publishes) |
 | table `class` | `mergeable`, `local_only`, [`command_controlled`](confirmed-tables.md) or `confirmed_read_only` (trusted only) |
@@ -42,6 +42,7 @@ descriptor and both fingerprints are identical.
 | column `local_only` | Declared, and refused inside a mergeable table |
 | index `unique`, `on_conflict`; table `foreign_keys` | [Mergeable constraints](mergeable-constraints.md), secure only |
 | table `existence_log` | Other reader scopes may reference it; see [existence logs](existence-logs.md) |
+| table `partition_group` | Explicit group name; `partition_by` maps columns by position to matching affinity/collation slots ([groups](partitioned-scopes.md#partition-groups)) |
 
 Do not declare `id` or `row_kind`: the definition supplies both and the
 identity index ([row identity](logical-schema.md#row-identity)). A primary key
@@ -128,7 +129,7 @@ for the secure profile only.
 | Policy unique indexes, identity foreign keys, existence logs | Refused | [Resolved by hidden rows](mergeable-constraints.md) |
 | `CHECK`, plain unique constraints and auto keys in mergeable tables | Refused | Refused |
 | Declared foreign keys on non-mergeable tables | Refused | Refused |
-| Static views (format 3) | Expanded | Expanded |
+| Static views (format 4) | Expanded | Expanded |
 | Engine catalog verified against the descriptor at open | Yes | No; the stored descriptor is compared |
 | Read scope | The whole domain | Whole rows of each table's reader scope |
 
@@ -143,7 +144,7 @@ so none exist.
 
 - `./kotlin check qualify -m schema-qualification`: compiles the importer
   with `-Werror`; hand-built and imported shopping, market, scalar,
-  partitioned and `ConstraintDatabase` fixtures have equal canonical bytes and
+  partitioned, grouped and `ConstraintDatabase` fixtures have equal canonical bytes and
   fingerprints; named refusals (`autoGenerate`, a missing identity field, a
   missing or misnamed identity index); each schema installs natively and
   reopens with its import.

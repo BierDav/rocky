@@ -20,6 +20,7 @@ async fn main() -> Result<(), Failure> {
         ("market-hand", "market-import"),
         ("constraints-hand", "constraints-import"),
         ("partitions-hand", "partitions-import"),
+        ("groups-hand", "groups-import"),
         ("existence-hand", "existence-import"),
     ] {
         let hand = descriptor(&directory.join(format!("{hand}.json")))?;
@@ -40,6 +41,21 @@ async fn main() -> Result<(), Failure> {
             hand.supported_on(Profile::Trusted)?;
         }
         hand.supported_on(Profile::Secure)?;
+        if hand
+            .partition_groups()?
+            .iter()
+            .any(|group| group.name == "list")
+        {
+            let scope = rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: hand.app_id(),
+                domain: DomainId([1; 16]),
+            };
+            assert_eq!(
+                hand.group_address(scope, "lists", &[rocky_core::SqlValue::Integer(42)])?,
+                hand.group_address(scope, "items", &[rocky_core::SqlValue::Integer(42)])?
+            );
+        }
         if hand
             .tables
             .iter()
@@ -66,6 +82,7 @@ async fn main() -> Result<(), Failure> {
         ("market-hand", "market-import"),
         ("constraints-hand", "constraints-import"),
         ("partitions-hand", "partitions-import"),
+        ("groups-hand", "groups-import"),
         ("existence-hand", "existence-import"),
     ] {
         let path = scratch.path().join(hand);
@@ -86,6 +103,8 @@ async fn main() -> Result<(), Failure> {
             "shopping_items"
         } else if hand == "constraints-hand" || hand == "existence-hand" {
             "children"
+        } else if hand == "groups-hand" {
+            "items"
         } else if hand == "partitions-hand" {
             "partition_samples"
         } else {
@@ -118,7 +137,7 @@ async fn main() -> Result<(), Failure> {
         }
     }
     println!(
-        "six hand/import descriptor and fingerprint pairs passed; all SDK schemas installed and reopened"
+        "seven hand/import descriptor and fingerprint pairs passed; all SDK schemas installed and reopened"
     );
     Ok(())
 }

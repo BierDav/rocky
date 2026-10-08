@@ -1,0 +1,49 @@
+#!/bin/sh
+# Prints the next version of a release channel; see docs/releasing.md.
+#
+#   scripts/release/version nightly|alpha|beta|rc|stable < existing-tag-names
+#
+# Needs git-cliff and a clone with full history and tags.
+set -eu
+
+channel=${1:?usage: version nightly|alpha|beta|rc|stable < tags}
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+tags=$(cat)
+
+has_tag() { printf '%s\n' "$tags" | grep -qxF "v$1"; }
+
+base=$(git-cliff --config "$repo_root/cliff.toml" --repository "$repo_root" --bumped-version)
+base=${base#v}
+printf '%s\n' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "version: git-cliff proposed '$base'" >&2; exit 1; }
+# git-cliff repeats the last stable version when no commit since it bumps anything.
+if has_tag "$base"; then
+    base=$(printf '%s\n' "$base" | awk -F. '{ print $1 "." $2 "." $3 + 1 }')
+fi
+pattern=$(printf '%s' "$base" | sed 's/\./\\./g')
+
+# The highest N of v<base>-<label>.N, or nothing.
+latest() { printf '%s\n' "$tags" | sed -n "s/^v$pattern-$1\\.\\([0-9][0-9]*\\)\$/\\1/p" | sort -n | tail -n 1; }
+
+case "$channel" in
+stable) echo "$base" ;;
+nightly)
+    version="$base-nightly.$(date -u +%Y%m%d)"
+    n=2
+    candidate=$version
+    while has_tag "$candidate"; do candidate="$version.$n"; n=$((n + 1)); done
+    echo "$candidate"
+    ;;
+alpha | beta | rc)
+    # Prereleases of one version advance alpha -> beta -> rc, never back.
+    case "$channel" in alpha) later='beta rc' ;; beta) later='rc' ;; rc) later='' ;; esac
+    for label in $later; do
+        if [ -n "$(latest "$label")" ]; then
+            echo "version: $base already has a $label prerelease; release $label or later" >&2
+            exit 1
+        fi
+    done
+    n=$(latest "$channel")
+    echo "$base-$channel.$((${n:-0} + 1))"
+    ;;
+*) echo "version: unknown channel '$channel'" >&2; exit 2 ;;
+esac

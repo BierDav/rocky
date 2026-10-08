@@ -1,0 +1,54 @@
+#!/bin/sh
+# Checks commit messages against Conventional Commits; see docs/commits.md.
+#
+#   scripts/commitlint FILE          one message (`-` reads stdin); the commit-msg hook
+#   scripts/commitlint --jj [REVSET] every described commit in REVSET (default: trunk()..@)
+set -eu
+
+types='feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert'
+header="^($types)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ ]"
+# Commits Git and jj produce themselves, which a later squash removes.
+generated='^(Merge |Revert "|(fixup|squash|amend)! )'
+
+# Prints the problem with the message on stdin, if any.
+problem() {
+    message=$(grep -v '^#' | sed -e '/./,$!d')
+    first=$(printf '%s\n' "$message" | sed -n 1p)
+    if [ -z "$first" ]; then
+        echo "the message is empty"
+    elif printf '%s\n' "$first" | grep -Eq "$generated"; then
+        :
+    elif ! printf '%s\n' "$first" | grep -Eq "$header"; then
+        echo "the header is not 'type(scope)!: description' with type one of ${types}"
+    elif [ -n "$(printf '%s\n' "$message" | sed -n 2p)" ]; then
+        echo "the header must be followed by a blank line"
+    fi
+}
+
+report() { # label, message on stdin
+    found=$(problem)
+    [ -z "$found" ] && return 0
+    echo "commitlint: $1: $found" >&2
+    return 1
+}
+
+case "${1:-}" in
+--jj)
+    revset=${2:-'trunk()..@'}
+    failed=0
+    # The working-copy commit has no description until it is described.
+    for id in $(jj log --no-graph -r "($revset) ~ (@ & description(exact:\"\"))" -T 'commit_id ++ "\n"'); do
+        jj log --no-graph -r "$id" -T description | report "$(jj log --no-graph -r "$id" -T 'change_id.short()')" || failed=1
+    done
+    exit "$failed"
+    ;;
+'' | -h | --help)
+    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+-) report "stdin" ;;
+*)
+    # shellcheck disable=SC2094 # the file name is only a label
+    report "$1" <"$1"
+    ;;
+esac

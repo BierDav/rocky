@@ -3,6 +3,8 @@ name: Baseline checks
 on:
   push:
   pull_request:
+  # The release workflow gates every release on these checks.
+  workflow_call:
 
 permissions:
   contents: read

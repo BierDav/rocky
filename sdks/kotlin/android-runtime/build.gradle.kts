@@ -47,9 +47,12 @@ publishing {
         register<MavenPublication>("release") {
             groupId = RuntimeArtifact.GROUP
             artifactId = RuntimeArtifact.NAME
-            version = RuntimeArtifact.VERSION
+            // Releases pass -ProckyVersion; Maven local keeps the development version the toolchain verifies.
+            version = providers.gradleProperty("rockyVersion").getOrElse(RuntimeArtifact.VERSION)
             afterEvaluate { from(components["release"]) }
             pom.properties.put(RuntimeArtifact.DIGEST_PROPERTY, providers.provider { rustSourcesDigest(repository.toPath()) })
         }
     }
+    // The release workflow uploads this directory to GitHub Packages; see docs/releasing.md.
+    repositories { maven { name = "staging"; url = uri(repository.resolve("local/release-maven")) } }
 }

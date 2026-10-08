@@ -15,6 +15,8 @@ Select the guide for your task rather than reading every document.
 | Compose independent Kotlin APIs or consume packaged artifacts | [SDK packaging](runtime/sdk-packaging.md) |
 | Inspect phase-8 execution/platform evidence | [Recovery/SDK evidence](runtime/sdk-packaging.md#build-and-consume-a-package) |
 | Set up tooling or run checks | [Development](development.md) |
+| Write commit messages | [Commit messages](commits.md) |
+| Publish a nightly, alpha, beta, rc or stable release | [Releasing](releasing.md) |
 | Locate the owning module | [Module boundaries](modules.md) |
 | Use the pure operation/reducer APIs | [Implemented semantics](applications/todo/operation-semantics.md) |
 | Install shared-file domains, strong transitions or typed reads | [App-owned runtime](runtime/app-runtime.md) |

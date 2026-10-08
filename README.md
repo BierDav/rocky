@@ -152,6 +152,7 @@ Read [module boundaries](docs/modules.md) for ownership and dependencies.
 Use [the documentation index](docs/README.md) to select a focused guide.
 
 - [Development workflow](docs/development.md)
+- [Commit messages](docs/commits.md) and [releasing](docs/releasing.md)
 - [Agent instructions](AGENTS.md)
 - [Documentation conventions](docs/documentation.md)
 - [Implemented operation semantics](docs/applications/todo/operation-semantics.md)

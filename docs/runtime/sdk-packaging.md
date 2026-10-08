@@ -75,7 +75,8 @@ ABI, compiles the ORM-neutral SDK and a Kotlin-only consumer, and writes
 `local/packaged-sdk`: `lib/rocky-core-jvm.jar` (bindings plus JNA OS/CPU
 resources), the JNA, coroutines, serialization and Kotlin standard-library
 jars, `Consumer.kt`, `consumer.jar`, a launcher and a SHA-256 inventory.
-Nothing is published. `./kotlin check packaged -m packaged-consumer` copies
+[Releases](../releasing.md) publish the jar to GitHub Packages as
+`rocky:rocky-core-jvm` and the directory as a release asset. `./kotlin check packaged -m packaged-consumer` copies
 only artifacts outside the repository and runs with an empty environment and
 only Java on `PATH`. It covers local sessions, readiness Flow and cancellation,
 handle reconciliation, Kotlin handlers, durable tickets, network ownership,

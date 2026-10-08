@@ -1,0 +1,35 @@
+#!/bin/sh
+# Uploads every artifact of Maven repository directories to GitHub Packages, with
+# MD5 and SHA-1 checksums; see docs/releasing.md.
+#
+#   GH_TOKEN=... GITHUB_ACTOR=... GITHUB_REPOSITORY=owner/repo scripts/release/maven-deploy DIRECTORY...
+set -eu
+
+registry="https://maven.pkg.github.com/$GITHUB_REPOSITORY"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+put() { # file, repository path
+    status=$(curl --silent --show-error --output "$work/response" --write-out '%{http_code}' \
+        --user "$GITHUB_ACTOR:$GH_TOKEN" --upload-file "$1" "$registry/$2")
+    case "$status" in
+    2??) echo "uploaded $2" ;;
+    # A version is immutable; a retried release finds its earlier uploads.
+    409) echo "already published $2" ;;
+    *) echo "maven-deploy: $2: HTTP $status" >&2; cat "$work/response" >&2; exit 1 ;;
+    esac
+}
+
+for repository in "$@"; do
+    # Gradle's own checksums and metadata are replaced by ours and the registry's.
+    find "$repository" -type f ! -name 'maven-metadata*' ! -name '*.md5' ! -name '*.sha1' \
+        ! -name '*.sha256' ! -name '*.sha512' | sort >"$work/files"
+    while IFS= read -r file; do
+        path=${file#"$repository"/}
+        put "$file" "$path"
+        openssl dgst -md5 -r "$file" | cut -d' ' -f1 | tr -d '\n' >"$work/md5"
+        openssl dgst -sha1 -r "$file" | cut -d' ' -f1 | tr -d '\n' >"$work/sha1"
+        put "$work/md5" "$path.md5"
+        put "$work/sha1" "$path.sha1"
+    done <"$work/files"
+done

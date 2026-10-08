@@ -24,7 +24,8 @@ The runtime is a stripped release build with 16 KiB page alignment, linked by ND
 Building the runtime needs the Android SDK with platform `android-35` and NDK `28.2.13676358`
 (`ANDROID_HOME`, `ANDROID_NDK_HOME`), and rustup. Without rustup on `PATH`, the build provisions a
 checksum-pinned rustup under `local/android-rust`; `rust-toolchain.toml` selects the compiler and the
-build adds the two Android targets. Nothing is published remotely. An Android app built from the
+build adds the two Android targets. [Releases](../releasing.md) publish these coordinates, and the
+runtime, to GitHub Packages at the release version; locally built ones stay `0.1.0`. An Android app built from the
 toolchain modules instead depends on the `rocky-runtime-android` module, which brings the same runtime
 and JNA's dispatch library.
 

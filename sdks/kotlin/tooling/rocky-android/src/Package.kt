@@ -7,7 +7,8 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.*
 
-private const val VERSION = "0.1.0"
+// Releases set ROCKY_VERSION (docs/releasing.md); it is not an input, so rebuild after changing it.
+private val VERSION = System.getenv("ROCKY_VERSION") ?: "0.1.0"
 private const val KOTLIN = "2.4.20"
 private const val GOOGLE = "https://dl.google.com/android/maven2/"
 

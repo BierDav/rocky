@@ -17,6 +17,8 @@
 - Use `jj status`, `jj diff`, `jj log` and `jj file list` to inspect work.
 - Git-backed remote transport is accessed through `jj git fetch` / `jj git push`.
 - Preserve unrelated changes. Do not abandon or restore someone else's work.
+- Describe changes with [Conventional Commits](docs/commits.md); release versions
+  are computed from them. Check with `scripts/commitlint --jj` before pushing.
 - Do not push, rewrite shared history or create bookmarks unless the task calls
   for it. Leave completed edits in the current change unless asked otherwise.
 

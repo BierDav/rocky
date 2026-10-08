@@ -1,0 +1,3 @@
+#!/bin/sh
+# Git commit-msg hook; installed by scripts/install-hooks.
+exec "$(dirname -- "$0")/../../scripts/commitlint" "$1"

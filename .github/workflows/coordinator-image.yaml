@@ -35,13 +35,22 @@ on:
       - ".dockerignore"
       - ".github/workflows/coordinator-image.yaml"
   workflow_dispatch:
+  # The release workflow adds the version and its channel tag; see docs/releasing.md.
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      channel:
+        type: string
+        required: true
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: coordinator-image-${{ github.ref }}
+  group: coordinator-image-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -125,23 +134,35 @@ jobs:
 
       # Each architecture is a single-platform image, so merge them rather than
       # pushing another index. `main` is the moving tag selfhosted-platform
-      # tracks; `sha-<commit>` and the reported digest are immutable.
+      # tracks; a release instead adds its version and moving channel tag.
+      # `sha-<commit>`, versions and the reported digest are immutable.
       - name: Merge the architecture images
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
-          docker buildx imagetools create \
-            --tag "${IMAGE}:main" \
+          set -euo pipefail
+          if [ -n "${VERSION}" ]; then
+            set -- --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${CHANNEL}"
+          else
+            set -- --tag "${IMAGE}:main"
+          fi
+          docker buildx imagetools create "$@" \
             --tag "${IMAGE}:sha-${GITHUB_SHA}" \
             "${IMAGE}:${GITHUB_SHA}-amd64" \
             "${IMAGE}:${GITHUB_SHA}-arm64"
 
       - name: Report the manifest digest
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "${IMAGE}:main"
-          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${IMAGE}:main" | tr -d '"')"
+          tag="${IMAGE}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "${tag}"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${tag}" | tr -d '"')"
           {
             echo "### Coordinator image"
             echo
-            echo "- \`${IMAGE}:main\`"
+            echo "- \`${IMAGE}:${VERSION:-main}\`"
             echo "- digest: \`${digest}\`"
           } >> "$GITHUB_STEP_SUMMARY"

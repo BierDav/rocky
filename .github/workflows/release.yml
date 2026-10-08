@@ -1,0 +1,327 @@
+name: Release
+
+# Publishes a versioned release to GitHub Packages and GitHub Releases: nightly
+# when shipped code changed, or a manually chosen channel. The version is
+# computed from Conventional Commits; see docs/releasing.md.
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel; the version number is computed
+        type: choice
+        options:
+          - alpha
+          - beta
+          - rc
+          - stable
+          - nightly
+        default: alpha
+
+permissions:
+  contents: read
+
+# Version numbers are allocated from existing tags, so releases never overlap.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release: ${{ steps.changes.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+    env:
+      CHANNEL: ${{ inputs.channel || 'nightly' }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Require the default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Releases are cut from ${{ github.event.repository.default_branch }}, not ${GITHUB_REF_NAME}."
+          exit 1
+
+      # git-cliff reads the commit history and tags.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether to release
+        id: changes
+        run: |
+          set -euo pipefail
+          release=true
+          if [ "${CHANNEL}" = nightly ]; then
+            latest="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // ""')"
+            if [ -n "${latest}" ]; then
+              release="$(scripts/release/code-changed "${latest}" "${GITHUB_SHA}")"
+              if [ "${release}" != true ]; then
+                echo "No shipped code changed since ${latest}; no nightly release." >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+          fi
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+
+      - uses: taiki-e/install-action@v2
+        if: steps.changes.outputs.release == 'true'
+        with:
+          tool: git-cliff@2.14.2
+
+      - name: Compute the version and notes
+        id: version
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          version="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" \
+            --jq '.[].ref | ltrimstr("refs/tags/")' | scripts/release/version "${CHANNEL}")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi >> "$GITHUB_OUTPUT"
+          mkdir -p "$RUNNER_TEMP/notes"
+          {
+            git-cliff --unreleased --tag "v${version}" --strip all
+            echo
+            echo "### Packages"
+            echo
+            echo "- \`ghcr.io/bierdav/rocky-db-coordinator:${version}\`"
+            echo "- \`ghcr.io/bierdav/rocky-db-peer:${version}\`"
+            echo "- Maven \`https://maven.pkg.github.com/${GITHUB_REPOSITORY}\`: \`rocky:rocky-core-jvm\`,"
+            echo "  \`rocky:rocky-core-android\`, \`rocky:rocky-sqlite\`, \`rocky:rocky-room\` and"
+            echo "  \`rocky:rocky-runtime-android\`, version \`${version}\`"
+          } > "$RUNNER_TEMP/notes/notes.md"
+          { echo "## v${version}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.changes.outputs.release == 'true'
+        with:
+          name: notes
+          path: ${{ runner.temp }}/notes
+
+  check:
+    name: Checks
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    uses: ./.github/workflows/check.yml
+
+  coordinator-image:
+    name: Coordinator image
+    needs: [version, check]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/coordinator-image.yaml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      channel: ${{ needs.version.outputs.channel }}
+
+  peer-image:
+    name: Custody peer image
+    needs: [version, check]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/peer-image.yaml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      channel: ${{ needs.version.outputs.channel }}
+
+  jvm:
+    name: JVM SDK ${{ matrix.platform }}
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          # The qualified JVM targets of docs/runtime/sdk-packaging.md.
+          - platform: darwin-aarch64
+            runner: macos-latest
+          - platform: linux-x86-64
+            runner: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get install --yes --no-install-recommends libclang-dev pkg-config
+
+      - name: Install the repository toolchain
+        working-directory: source
+        run: rustup show active-toolchain
+
+      - name: Package and qualify the SDK
+        working-directory: source
+        run: ./kotlin check packaged -m packaged-consumer
+
+      - name: Collect the package
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp local/packaged-sdk/lib/rocky-core-jvm.jar dist/
+          tar -czf "dist/rocky-kotlin-sdk-${VERSION}-${{ matrix.platform }}.tar.gz" -C local packaged-sdk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jvm-${{ matrix.platform }}
+          path: source/dist
+
+  android:
+    name: Android SDK
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The versions docs/runtime/android.md names.
+      - name: Install the Android platform and NDK
+        run: |
+          set -euo pipefail
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "${sdkmanager}" --licenses > /dev/null || true
+          "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Install the repository toolchain
+        working-directory: source
+        run: rustup show active-toolchain
+
+      # Maven local keeps the development version the toolchain verifies; the
+      # staging repository holds the release version.
+      - name: Build the Android runtime
+        working-directory: source
+        run: |
+          set -euo pipefail
+          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
+          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime \
+            -ProckyVersion="${VERSION}" publishReleasePublicationToStagingRepository
+
+      - name: Package the Android SDK
+        working-directory: source
+        env:
+          ROCKY_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # shellcheck disable=SC1010 # `do` is the toolchain's command
+          ./kotlin do packageAndroid -m rocky-runtime-android
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            source/local/release-maven
+            source/local/packaged-android/maven
+
+  publish:
+    name: Publish
+    needs: [version, check, coordinator-image, peer-image, jvm, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CHANNEL: ${{ needs.version.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish the Maven artifacts
+        run: |
+          set -euo pipefail
+          source/scripts/release/jvm-maven "${VERSION}" dist/maven-jvm \
+            dist/jvm-darwin-aarch64/rocky-core-jvm.jar dist/jvm-linux-x86-64/rocky-core-jvm.jar
+          source/scripts/release/maven-deploy dist/maven-jvm \
+            dist/android/release-maven dist/android/packaged-android/maven
+
+      - name: Create the GitHub release
+        run: |
+          set -euo pipefail
+          if [ "${CHANNEL}" = latest ]; then
+            set -- --latest
+          else
+            set -- --prerelease --latest=false
+          fi
+          gh release create "v${VERSION}" "$@" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "v${VERSION}" \
+            --notes-file dist/notes/notes.md \
+            dist/jvm-*/rocky-kotlin-sdk-*.tar.gz
+
+      # Nightly GitHub releases and tags are kept for two weeks of builds;
+      # their package versions stay in GitHub Packages.
+      - name: Prune old nightly releases
+        if: needs.version.outputs.channel == 'nightly'
+        run: |
+          set -euo pipefail
+          gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("-nightly\\."))] | sort_by(.createdAt) | reverse | .[14:] | .[].tagName' \
+          | while read -r tag; do
+              gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+            done

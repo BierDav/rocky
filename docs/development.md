@@ -26,9 +26,12 @@ Keep related edits in one change. Review the diff and check results before
 describing or separating changes. Preserve work outside your task.
 
 ```sh
-jj describe -m "Describe the concrete change"
+jj describe -m "fix(rocky-runtime): describe the concrete change"
 jj new
 ```
+
+Descriptions follow [Conventional Commits](commits.md); `scripts/commitlint --jj`
+checks them, since Jujutsu runs no Git hooks.
 
 Use these commands when intentionally finishing a change and starting another.
 Agents normally leave their edits in the current change for review.
@@ -105,6 +108,11 @@ The repository toolchain file is also the toolchain source of truth in CI.
 
 Required status checks are a hosting setting; the workflow file does not configure
 branch protection. No remotely hosted CI run has been verified by this baseline.
+
+The commit-message workflow checks every pushed and pull-request commit
+([commit messages](commits.md)). The release workflow publishes nightly and on
+demand to GitHub Packages; it is the one workflow that clones history, which
+git-cliff needs to compute the version ([releasing](releasing.md)).
 
 ## Code and tests
 

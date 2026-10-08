@@ -32,7 +32,8 @@ issuers use `Credentials.prepare` and `RockyDatabase.install`.
 Contributors build the package with `./kotlin do packageSdk -m packaged-consumer` and
 qualify it with `./kotlin check packaged -m packaged-consumer`. Consumers use only the
 resulting JVM jars/resources; Rust generation tools are not required at launch or for
-application schemas and handlers. Nothing is published automatically.
+application schemas and handlers. [Releases](../../docs/releasing.md) publish them to
+GitHub Packages.
 
 Partitioned schema declarations, Room overlays, scoped keys/grants and
 transactional per-partition IDs are described in

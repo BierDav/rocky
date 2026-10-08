@@ -1,0 +1,51 @@
+name: Commit messages
+
+# Every pushed or proposed commit follows Conventional Commits, which the
+# release versions are computed from; see docs/commits.md.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Check the commit messages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PULL_REQUEST}" ]; then
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PULL_REQUEST}/commits" \
+              --jq '.[] | [.sha, (.commit.message | @base64)] | @tsv' > "$RUNNER_TEMP/commits"
+          else
+            jq -r '.commits[] | [.id, (.message | @base64)] | @tsv' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/commits"
+          fi
+          failed=0
+          while IFS="$(printf '\t')" read -r sha message; do
+            printf '%s' "$message" | base64 --decode | source/scripts/commitlint - 2>&1 \
+              | sed "s/^commitlint: stdin/commitlint: ${sha}/" || failed=1
+          done < "$RUNNER_TEMP/commits"
+          exit "$failed"

@@ -15,7 +15,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub const DEFAULT_LISTEN: &str = "127.0.0.1:47470";
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:0";
 const MAGIC: &[u8; 4] = b"RKY1";
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Connections whose preamble is still awaited.
@@ -136,5 +136,36 @@ impl Transport for Tcp {
             }
             self.incoming.lock().await.close();
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::TransportOptions;
+    use rocky_core::net::Connector;
+
+    #[tokio::test]
+    async fn default_issuers_listen_concurrently_on_distinct_ports() {
+        let options = TransportOptions::Tcp {
+            listen: None,
+            advertised: None,
+        };
+        let a = options.start(true, [1; 32]).await.unwrap();
+        let b = options.start(true, [2; 32]).await.unwrap();
+        let aa: std::net::SocketAddr = a.address().await.unwrap().parse().unwrap();
+        let bb: std::net::SocketAddr = b.address().await.unwrap().parse().unwrap();
+        assert_ne!(aa.port(), 0);
+        assert_ne!(aa, bb);
+        a.listen(true);
+        let mut outgoing = b.connect(&aa.to_string(), Protocol::Pair).await.unwrap();
+        let (protocol, mut incoming) = a.accept().await.unwrap();
+        assert_eq!(protocol, Protocol::Pair);
+        outgoing.write_all(b"ok").await.unwrap();
+        let mut bytes = [0; 2];
+        incoming.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ok");
+        a.close().await;
+        b.close().await;
     }
 }

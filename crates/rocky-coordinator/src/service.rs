@@ -119,7 +119,7 @@ pub struct Metrics {
     /// Client requests answered, and those answered from a read barrier.
     pub requests: u64,
     pub reads: u64,
-    /// Refused for a full client or tenant lane.
+    /// Refused for a full voter connection, client or tenant lane.
     pub busy: u64,
     /// Answered `Denied`, and answered without an authoritative result.
     pub denied: u64,
@@ -141,6 +141,15 @@ impl Counters {
             Err(CoordinationError::Unavailable) => self.unavailable.fetch_add(1, Ordering::Relaxed),
             _ => 0,
         };
+    }
+    fn connection_slot(&self, slots: &Arc<Semaphore>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        match slots.clone().try_acquire_owned() {
+            Ok(slot) => Some(slot),
+            Err(_) => {
+                self.busy.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
     }
     fn snapshot(&self) -> Metrics {
         Metrics {
@@ -454,7 +463,7 @@ impl VoterService {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             };
-            let Ok(slot) = slots.clone().try_acquire_owned() else {
+            let Some(slot) = self.counters.connection_slot(&slots) else {
                 continue;
             };
             let service = self.clone();
@@ -645,3 +654,23 @@ impl VoterService {
     }
 }
 pub use crate::client::NetworkCoordinator;
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+
+    #[test]
+    fn saturated_voter_connections_are_counted_in_status_metrics() {
+        let counters = Counters::default();
+        let slots = Arc::new(Semaphore::new(64));
+        let held: Vec<_> = (0..64)
+            .map(|_| counters.connection_slot(&slots).unwrap())
+            .collect();
+        assert!(counters.connection_slot(&slots).is_none());
+        assert_eq!(counters.snapshot().busy, 1);
+        assert_eq!(counters.snapshot().requests, 0);
+        drop(held);
+        assert!(counters.connection_slot(&slots).is_some());
+        assert_eq!(counters.snapshot().busy, 1);
+    }
+}

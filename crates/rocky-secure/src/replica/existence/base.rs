@@ -190,7 +190,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("horizon table missing"))?
             .columns
             .iter()
-            .position(|column| column.sql_name == "id")
+            .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
             .ok_or_else(|| denied("horizon requires row incarnations"))?;
         let select = format!("{} AND row_kind=0", table.select);
         Ok(

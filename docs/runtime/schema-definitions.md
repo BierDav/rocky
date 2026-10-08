@@ -9,7 +9,7 @@ descriptor and both fingerprints are identical.
 
 ```json
 {
-  "format": 3,
+  "format": 4,
   "publisher": "6b6b…6b",
   "application": "notebook",
   "update_policy": "changed",

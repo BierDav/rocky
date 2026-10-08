@@ -50,7 +50,12 @@ impl TypedRows {
             let key: Vec<usize> = table
                 .primary_key
                 .iter()
-                .filter_map(|name| table.columns.iter().position(|c| c.sql_name == *name))
+                .filter_map(|name| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|c| c.sql_name.eq_ignore_ascii_case(name))
+                })
                 .collect();
             let id = schema.table_id(table);
             tables.insert(
@@ -233,12 +238,12 @@ impl TypedRows {
         let id_index = logical
             .columns
             .iter()
-            .position(|column| column.sql_name == "id")
+            .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
             .ok_or("missing identity column")?;
         let kind_index = logical
             .columns
             .iter()
-            .position(|column| column.sql_name == "row_kind")
+            .position(|column| column.sql_name.eq_ignore_ascii_case("row_kind"))
             .ok_or("missing row kind column")?;
         let mut identity = None;
         for fields in change.before.iter().chain(change.after.iter()) {
@@ -281,7 +286,7 @@ impl TypedRows {
                     let position = logical
                         .columns
                         .iter()
-                        .position(|column| &column.sql_name == name)
+                        .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                         .ok_or("unknown partition column")?;
                     let column = &logical.columns[position];
                     let value = values

@@ -149,7 +149,7 @@ durability the result is flushed only when exposed. A package names the
 executor's checkpoint base and covers the operations after it, so a request is
 refused with `Quota` once more than 32,768 operations follow that base. A newer
 checkpoint lowers the count
-([decision 0039](../decisions/0042-bounded-strong-cut.md)). `execute_pending`
+([Decision 0042](../decisions/0042-bounded-strong-cut.md)). `execute_pending`
 reads only unreleased requests without an applied result.
 
 ## WAL checkpoints

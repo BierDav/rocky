@@ -175,7 +175,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let position = logical
             .columns
             .iter()
-            .position(|column| column.sql_name == "id")
+            .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
             .ok_or_else(|| denied("missing id column"))?;
         values[position] = SqlValue::Integer(identity.integer());
         let tuple = typed

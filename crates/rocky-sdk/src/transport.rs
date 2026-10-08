@@ -18,7 +18,7 @@ mod tcp;
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransportOptions {
     /// Plain TCP. A node listens on `listen`; the domain creator listens
-    /// on the default address without it.
+    /// on an ephemeral loopback port without it.
     Tcp {
         #[serde(default)]
         listen: Option<String>,

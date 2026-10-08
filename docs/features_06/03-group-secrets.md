@@ -93,7 +93,7 @@ secret length. `rocky-sdk::groups` resolves group partitions against the current
 generation, stores one secret per epoch in the installation vault and derives
 member keys on open, install, renewal and rotation. SDK identity version 9 holds
 group records and issuer partition holders; version 8 is refused.
-[Decision 0039](../decisions/0040-group-secrets.md) pins both formats. Kotlin
+[Decision 0040](../decisions/0040-group-secrets.md) pins both formats. Kotlin
 `partitions` takes group partitions: create, share, install, register, subscribe,
 bootstrap, unsubscribe, evict and status.
 

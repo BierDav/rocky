@@ -53,10 +53,11 @@ endpoint or transport goes to its own constructor instead.
 | In-process hub | `memory` | Tests and deterministic faults |
 | Yours | Your name | Anything that carries a byte stream |
 
-TCP listens on `listen`; without it an issuer listens on `127.0.0.1:47470` and
-a member only dials, so it cannot be another member's peer. Two issuing apps
-on one host must not share the default port. Invitations and contacts carry
-`advertised`, or the bound address.
+TCP listens on `listen`; without it an issuer listens on an ephemeral loopback
+port (`127.0.0.1:0`) and a member only dials, so it cannot be another member's
+peer. Multiple issuing apps can use their defaults concurrently. Invitations
+and contacts carry `advertised`, or the bound address. Configure `listen` and `advertised` for
+stable or remotely reachable TCP routes.
 
 `rocky_sdk::transport::memory::Hub` joins named nodes of one process with
 bounded pipes, counts starts, dials and closes, and injects faults: `stalled`
@@ -180,7 +181,7 @@ peer. Disable both options or name your own relay to depend on no public service
 | `RockyEndpoint` inbound streams per application protocol | 64 |
 | Dial and stream open | iroh and SDK dial 15 s each; TCP connect and preamble 10 s |
 | Session frame read or write | 10 s |
-| Pairing/renewal exchange | 30 s overall |
+| Pairing/renewal exchange | 30 s after dialing; each route has its own dial deadline |
 | Sessions per sync and peer | 16 |
 | Closing a network service | 5 s drain, then cancellation |
 

@@ -64,7 +64,7 @@ sealed interface GrantProfile {
 sealed interface PeerTransport {
     /** The starter's own iroh endpoint. `relay` is `default`, `staging`, `disabled` or a relay URL. */
     data class Iroh(val relay: String = "default", val discovery: Boolean = true, val bind: String? = null) : PeerTransport
-    /** Plain TCP. A device listens on `listen`; without it an issuer listens on 127.0.0.1:47470 and a member only dials. */
+    /** Plain TCP. A device listens on `listen`; without it an issuer listens on an ephemeral loopback port and a member only dials. */
     data class Tcp(val listen: String? = null, val advertised: String? = null) : PeerTransport
     /** A transport the application implements, starts and closes. Closing the database leaves it open. */
     class Custom(val transport: StreamTransport) : PeerTransport

@@ -210,9 +210,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Err(denied("key differs from retained crypto state"))
             };
         }
+        if inner.opening_keys().any(|held| held.key == key.key) {
+            return Err(denied(
+                "key material is already installed under another scope or epoch",
+            ));
+        }
         if key.generation == 0
             || key.generation > i64::MAX as u64
-            || inner.opening_keys().any(|held| held.key == key.key)
             || !inner.can_read_key(key.scope, &inner.local_grants(time)?)
         {
             return Err(denied(

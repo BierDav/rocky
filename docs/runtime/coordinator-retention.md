@@ -80,8 +80,10 @@ migrated. The client evidence file (at most 32 MiB) holds at most 4,096 receipts
 and 64 observed heads. When full, it evicts the oldest receipt that is neither
 the newest of its scope (the head-regression watermark) nor this client's own
 receipt above its acknowledged floor; if every receipt is pinned, new evidence
-gets `Backpressure` until the client acknowledges. Export evidence needed for
-long-term history before eviction. Importing an old receipt never rewinds the
+gets `Backpressure` until the client acknowledges. Exceeding the encoded
+32 MiB file bound also returns `Backpressure`, without replacing the durable
+file. Eviction precomputes the newest sequence per scope in one cache pass.
+Export evidence needed for long-term history before eviction. Importing an old receipt never rewinds the
 live head. Unknown formats are refused with `UnsupportedFormat`; formats 1 and 2
 still migrate on open until the
 [compatibility removal](../features_06/01-remove-compatibility-code.md).

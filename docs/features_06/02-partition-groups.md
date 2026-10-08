@@ -69,10 +69,12 @@ while other gates ran: initialization 9.663 s, authenticated catch-up 17.337 s,
 409.6 B per partition at 4 KiB/page. All existing budgets passed. This remains
 a single-table probe, not phase 9's four-table group sync qualification.
 
-The assigned base retains its unpartitioned format-2 path; phase 1 removes it
-and lands first. This change adds no migration, legacy reader or alternate group
-encoding. Shared-secret distribution, group holding, constraints and row moves
-remain later phases; no mobile/device or real-network qualification is claimed.
+After reconciliation with phase 1, format 4 is the sole definition/descriptor
+format for every schema. All other versions are refused; there is no migration,
+legacy reader or alternate group encoding. Shared-secret distribution and
+group holding are implemented by phase 3, native partition constraints by
+phase 4. Row moves remain a later phase; no mobile/device or real-network
+qualification is claimed.
 
 Verification completed in the assigned jj workspace on parent `357dbbb4`:
 

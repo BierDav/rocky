@@ -73,7 +73,7 @@ impl<A: RowApplication> Inner<A> {
                 let position = table
                     .columns
                     .iter()
-                    .position(|column| column.sql_name == name)
+                    .position(|column| column.sql_name.eq_ignore_ascii_case(&name))
                     .ok_or_else(|| denied("protected index column missing"))?;
                 let column = &table.columns[position];
                 let value = column

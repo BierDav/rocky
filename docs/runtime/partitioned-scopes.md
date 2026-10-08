@@ -67,7 +67,7 @@ refuses to reinterpret existing rows under another scope.
 ## Group secrets
 
 One random secret per group partition and key epoch derives every member
-table's key ([decision 0039](../decisions/0040-group-secrets.md)). Reading is
+table's key ([Decision 0040](../decisions/0040-group-secrets.md)). Reading is
 all-or-nothing per group partition; write rights stay per table. A table that
 joins the group in a later generation derives its key from the held secret.
 
@@ -174,7 +174,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
 | Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
-| Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0039](../decisions/0040-group-secrets.md)) |
+| Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0040](../decisions/0040-group-secrets.md)) |
 | Frame | Row format 5 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body unchanged; each opening commits to its frame header and tuple |

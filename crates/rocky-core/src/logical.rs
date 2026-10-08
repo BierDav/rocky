@@ -538,7 +538,7 @@ impl LogicalTable {
     /// partition columns in front of `id`.
     pub fn identity_columns(&self) -> Vec<String> {
         let mut columns = self.partition_by.clone();
-        if !columns.iter().any(|name| name == "id") {
+        if !columns.iter().any(|name| name.eq_ignore_ascii_case("id")) {
             columns.push("id".into());
         }
         columns
@@ -550,13 +550,15 @@ impl LogicalTable {
                 .columns
                 .iter()
                 .map(|column| &column.name)
-                .eq(self.identity_columns().iter())
+                .zip(self.identity_columns())
+                .all(|(column, identity)| column.eq_ignore_ascii_case(&identity))
+            && index.columns.len() == self.identity_columns().len()
     }
 
     pub fn column(&self, sql_name: &str) -> Option<&LogicalColumn> {
         self.columns
             .iter()
-            .find(|column| column.sql_name == sql_name)
+            .find(|column| column.sql_name.eq_ignore_ascii_case(sql_name))
     }
     /// Key columns in key order.
     pub fn key(&self) -> impl Iterator<Item = &LogicalColumn> {
@@ -565,7 +567,11 @@ impl LogicalTable {
     /// Replicated register columns, the key excluded, in declaration order.
     pub fn registers(&self) -> impl Iterator<Item = &LogicalColumn> {
         self.columns.iter().filter(|column| {
-            column.class == ColumnClass::Mergeable && !self.primary_key.contains(&column.sql_name)
+            column.class == ColumnClass::Mergeable
+                && !self
+                    .primary_key
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&column.sql_name))
         })
     }
     fn validate(&self) -> Result<(), SchemaError> {
@@ -594,7 +600,7 @@ impl LogicalTable {
         let mut key = BTreeSet::new();
         if self.primary_key.len() > usize::from(u8::MAX)
             || self.primary_key.iter().any(|column| {
-                !key.insert(column)
+                !key.insert(column.to_ascii_lowercase())
                     || self
                         .column(column)
                         .is_none_or(|column| column.class != ColumnClass::Mergeable)
@@ -620,14 +626,13 @@ impl LogicalTable {
             }
         }
         for key in &self.foreign_keys {
-            if key.columns.is_empty()
-                || key.columns.len() != key.references.len()
-                || key
-                    .columns
-                    .iter()
-                    .any(|column| self.column(column).is_none())
-            {
+            if key.columns.is_empty() || key.columns.len() != key.references.len() {
                 return invalid(format!("{name} foreign key"));
+            }
+            for column in &key.columns {
+                if self.column(column).is_none() {
+                    return invalid(format!("{name} column {column}"));
+                }
             }
         }
         Ok(())
@@ -661,7 +666,12 @@ impl LogicalTable {
             }
         }
         if self.class != TableClass::Mergeable {
-            if !self.foreign_keys.is_empty() {
+            if !self.foreign_keys.is_empty()
+                || tokenize(&self.create_sql)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|token| keyword(token, "REFERENCES"))
+            {
                 return Err(Incompatibility::ForeignKey);
             }
             if let Some((index, _)) = self.policy_indexes().next() {
@@ -692,12 +702,19 @@ impl LogicalTable {
             return Err(Incompatibility::UniqueConstraint);
         }
         for (index, policy) in self.policy_indexes() {
-            let reserved = |name: &str| ["id", "row_kind"].contains(&name);
+            let reserved = |name: &str| {
+                ["id", "row_kind"]
+                    .iter()
+                    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+            };
             if index.create_sql != unique_index_sql(&self.sql_name, &index.name, &index.columns)
                 || index.columns.iter().any(|column| {
                     reserved(&column.name)
                         || (policy == ConflictPolicy::SetNull
-                            && (self.primary_key.contains(&column.name)
+                            && (self
+                                .primary_key
+                                .iter()
+                                .any(|name| name.eq_ignore_ascii_case(&column.name))
                                 || self
                                     .column(&column.name)
                                     .is_none_or(|column| column.not_null)))
@@ -721,11 +738,17 @@ impl LogicalTable {
                 || !(self.create_sql.contains(&format!("{clause},"))
                     || self.create_sql.contains(&format!("{clause})")))
                 || key.columns.iter().any(|name| {
-                    ["id", "row_kind"].contains(&name.as_str())
+                    ["id", "row_kind"]
+                        .iter()
+                        .any(|reserved| name.eq_ignore_ascii_case(reserved))
                         || self.column(name).is_none_or(|column| {
                             column.affinity != Affinity::Integer
                                 || (set_null
-                                    && (column.not_null || self.primary_key.contains(name)))
+                                    && (column.not_null
+                                        || self
+                                            .primary_key
+                                            .iter()
+                                            .any(|column| column.eq_ignore_ascii_case(name))))
                         })
                 });
             if refused {
@@ -905,8 +928,11 @@ impl LogicalSchema {
             let mut partitions = BTreeSet::new();
             if table.partition_by.len() > 16
                 || table.partition_by.iter().any(|name| {
-                    !partitions.insert(name)
-                        || !table.primary_key.contains(name)
+                    !partitions.insert(name.to_ascii_lowercase())
+                        || !table
+                            .primary_key
+                            .iter()
+                            .any(|column| column.eq_ignore_ascii_case(name))
                         || table.column(name).is_none_or(|column| {
                             !column.not_null
                                 || column.class != ColumnClass::Mergeable
@@ -939,7 +965,12 @@ impl LogicalSchema {
                         ));
                     }
                 }
-                if table.primary_key != table.identity_columns()
+                if !(table.primary_key.len() == table.identity_columns().len()
+                    && table
+                        .primary_key
+                        .iter()
+                        .zip(table.identity_columns())
+                        .all(|(name, identity)| name.eq_ignore_ascii_case(&identity)))
                     && !table
                         .indexes
                         .iter()
@@ -1019,19 +1050,24 @@ impl LogicalSchema {
                     .iter()
                     .find(|target| target.sql_name.eq_ignore_ascii_case(&key.table));
                 let mergeable = target.is_some_and(|target| target.class == TableClass::Mergeable);
-                if table.class != TableClass::Mergeable {
-                    // A replicated delete must never fail on another table's rows.
-                    if target.is_some_and(|target| target.class.typed()) {
-                        return incompatible(&table.sql_name, Incompatibility::ForeignKey);
+                if let Some(target) = target {
+                    for name in &key.references {
+                        if target.column(name).is_none() {
+                            return invalid(format!("{} column {name}", target.sql_name));
+                        }
                     }
-                    continue;
                 }
                 // Only the parent's identity names one incarnation.
                 if !target.is_some_and(|target| {
                     mergeable
                         && target.partition_by.is_empty()
-                        && target.sql_name == key.table
-                        && target.identity_columns() == key.references
+                        && target
+                            .identity_columns()
+                            .iter()
+                            .map(String::as_str)
+                            .zip(&key.references)
+                            .all(|(identity, reference)| identity.eq_ignore_ascii_case(reference))
+                        && target.identity_columns().len() == key.references.len()
                 }) {
                     return incompatible(
                         &table.sql_name,
@@ -1049,7 +1085,9 @@ impl LogicalSchema {
                 Some("existence log on a table that is not mergeable".to_string())
             } else if !table.partition_by.is_empty() {
                 Some(format!("partition_by ({})", table.partition_by.join(",")))
-            } else if table.primary_key != ["id"] {
+            } else if !(table.primary_key.len() == 1
+                && table.primary_key[0].eq_ignore_ascii_case("id"))
+            {
                 Some(format!("primary key ({})", table.primary_key.join(",")))
             } else {
                 None
@@ -1169,7 +1207,7 @@ impl LogicalSchema {
                     child
                         .foreign_keys
                         .iter()
-                        .any(|key| key.table == table.sql_name)
+                        .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
                 }))
     }
     /// Tables whose rows' liveness their existence log decides.
@@ -1216,7 +1254,9 @@ impl LogicalSchema {
         self.tables.iter().filter(|table| table.class.typed())
     }
     pub fn table(&self, sql_name: &str) -> Option<&LogicalTable> {
-        self.tables.iter().find(|table| table.sql_name == sql_name)
+        self.tables
+            .iter()
+            .find(|table| table.sql_name.eq_ignore_ascii_case(sql_name))
     }
     pub fn table_id(&self, table: &LogicalTable) -> Commitment {
         definition_item_id(self.publisher, self.app_id(), "entity", &table.logical)
@@ -1280,7 +1320,7 @@ impl LogicalIndex {
     pub fn is_identity(&self) -> bool {
         self.unique
             && self.columns.len() == 1
-            && self.columns[0].name == "id"
+            && self.columns[0].name.eq_ignore_ascii_case("id")
             && !self.columns[0].descending
     }
 }
@@ -1329,6 +1369,71 @@ mod tests {
             views: Vec::new(),
         }
     }
+    #[test]
+    fn sql_column_and_reference_names_use_ascii_case_insensitive_lookup() {
+        let mut schema = schema();
+        let table = &mut schema.tables[0];
+        table.primary_key = vec!["KEY".into()];
+        assert_eq!(table.column("TITLE").unwrap().sql_name, "title");
+        assert_eq!(table.key().next().unwrap().sql_name, "key");
+        assert!(!table.registers().any(|column| column.sql_name == "key"));
+        let key = LogicalForeignKey {
+            columns: vec!["link".into()],
+            table: "ITEMS".into(),
+            references: vec!["ID".into()],
+            on_delete: DELETE_CASCADE.into(),
+            on_update: "NO ACTION".into(),
+        };
+        table.columns.push(column("link", Affinity::Integer));
+        table.create_sql.pop();
+        table
+            .create_sql
+            .push_str(&format!(",{})", foreign_key_clause(&key)));
+        table.foreign_keys.push(key);
+        schema.installable().unwrap();
+        schema.tables[0].foreign_keys[0].references = vec!["missing".into()];
+        let clause = foreign_key_clause(&schema.tables[0].foreign_keys[0]);
+        schema.tables[0].create_sql = format!("CREATE TABLE items ({clause})");
+        assert_eq!(
+            schema.installable(),
+            Err(SchemaError::Invalid("items column missing".into()))
+        );
+        let mut duplicate = schema.clone();
+        duplicate.tables[0]
+            .columns
+            .push(column("TITLE", Affinity::Text));
+        assert_eq!(
+            duplicate.validate(),
+            Err(SchemaError::Invalid("items column TITLE".into()))
+        );
+    }
+
+    #[test]
+    fn local_sql_cannot_hide_an_undeclared_reference() {
+        let mut schema = schema();
+        schema.tables[0].class = TableClass::LocalOnly;
+        schema.tables[0].create_sql = "CREATE TABLE items (id INTEGER REFERENCES items(id))".into();
+        assert_eq!(
+            schema.installable(),
+            Err(SchemaError::Incompatible {
+                table: "items".into(),
+                reason: Incompatibility::ForeignKey,
+            })
+        );
+        schema.tables[0].create_sql =
+            "CREATE TABLE items (id INTEGER, FOREIGN KEY(id) REFERENCES items(id))".into();
+        assert!(matches!(
+            schema.installable(),
+            Err(SchemaError::Incompatible {
+                reason: Incompatibility::ForeignKey,
+                ..
+            })
+        ));
+        schema.tables[0].create_sql =
+            "CREATE TABLE items (id INTEGER, title TEXT DEFAULT 'REFERENCES')".into();
+        schema.installable().unwrap();
+    }
+
     #[test]
     fn command_controlled_tables_install_with_their_class_signed() {
         let schema = schema();

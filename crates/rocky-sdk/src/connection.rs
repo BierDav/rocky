@@ -148,16 +148,41 @@ fn query_only(sql: &str) -> Option<Option<bool>> {
 const NEXT_ID: &str = "rocky_next_id";
 
 /// The table of `SELECT rocky_next_id('table')` or `SELECT
-/// rocky_next_id(?)`; None for any other statement.
+/// rocky_next_id(?)`; refuses other calls and leaves unrelated SQL alone.
 fn next_id(sql: &str, params: &[SqlValue]) -> Result<Option<(String, Vec<SqlValue>)>, Failure> {
     let words = room::words(sql);
+    let function =
+        |word: &str| !word.starts_with('\'') && room::unquote(word).eq_ignore_ascii_case(NEXT_ID);
+    let names_function = words
+        .windows(2)
+        .any(|pair| function(&pair[0]) && pair[1] == "(");
+    if !names_function {
+        return Ok(None);
+    }
     if words.len() < 5
         || !words[0].eq_ignore_ascii_case("SELECT")
-        || !words[1].eq_ignore_ascii_case(NEXT_ID)
+        || !function(&words[1])
         || words[2] != "("
         || words.last().is_none_or(|word| word != ")")
+        || words[3..words.len() - 1]
+            .iter()
+            .any(|word| word == "(" || word == ")")
     {
-        return Ok(None);
+        return Err(failure(code::ERROR, "rocky_next_id requires a standalone SELECT rocky_next_id(table, ...) without aliases or expressions").into());
+    }
+    if words[3..words.len() - 1].iter().any(|word| word == "-") {
+        return Err(failure(
+            code::ERROR,
+            "rocky_next_id negative literals must be supplied as bound parameters",
+        )
+        .into());
+    }
+    if words.len().is_multiple_of(2) {
+        return Err(failure(
+            code::ERROR,
+            "rocky_next_id requires an argument after each comma",
+        )
+        .into());
     }
     let mut bound = params.iter();
     let mut args = Vec::new();
@@ -717,5 +742,39 @@ impl TableEvents {
                 .map(|cause| format!("{cause:?}").to_ascii_lowercase())
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod next_id_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_next_id_shapes_are_refused_before_sql_execution() {
+        for sql in [
+            "SELECT rocky_next_id('t') AS x",
+            "SELECT \"rocky_next_id\"('t') AS x",
+            "SELECT rocky_next_id('t') + 1",
+            "SELECT 1, rocky_next_id('t')",
+            "SELECT rocky_next_id('t', 1), rocky_next_id('t', 2)",
+        ] {
+            let error = next_id(sql, &[]).unwrap_err();
+            assert!(
+                error.to_string().contains("standalone SELECT"),
+                "{sql}: {error}"
+            );
+        }
+        let error = next_id("SELECT rocky_next_id('t', -1)", &[]).unwrap_err();
+        assert!(error.to_string().contains("negative literals"), "{error}");
+        let error = next_id("SELECT rocky_next_id('t',)", &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("argument after each comma"),
+            "{error}"
+        );
+        assert_eq!(
+            next_id("SELECT rocky_next_id('t', ?)", &[SqlValue::Integer(-1)]).unwrap(),
+            Some(("t".into(), vec![SqlValue::Integer(-1)]))
+        );
+        assert!(next_id("SELECT 'rocky_next_id(t)'", &[]).unwrap().is_none());
     }
 }

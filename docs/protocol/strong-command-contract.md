@@ -25,7 +25,7 @@ retained operations after it, and names that base in the package. Compare the
 resulting visible-state digest to the request. Missing history stays pending; a
 base past the cut, or none, stays pending without loading any operation; an
 operation of the cut this replica rejected, or a mismatched digest, fails.
-See [decision 0039](../decisions/0042-bounded-strong-cut.md).
+See [Decision 0042](../decisions/0042-bounded-strong-cut.md).
 Do not replace sealed input with the executor's newer live projection. The cut
 must be dependency-closed and contain contiguous prefixes for each listed author.
 

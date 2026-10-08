@@ -233,7 +233,7 @@ impl<A: RowApplication> SecureSql<A> {
                 let position = logical
                     .columns
                     .iter()
-                    .position(|column| &column.sql_name == name)
+                    .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                     .ok_or_else(|| denied("unknown partition column"))?;
                 row[position] = value.clone();
             }

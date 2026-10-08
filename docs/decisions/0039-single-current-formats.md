@@ -7,7 +7,7 @@ paths or historical encodings. Existing installations reinstall. The current
 [roadmap contract](../features_06/README.md#no-backward-compatibility) supersedes
 compatibility clauses in earlier decisions.
 
-- Schema descriptors and definitions use format 3. Canonical descriptors carry
+- Schema descriptors and definitions use format 4 ([partition groups](0037-partition-groups.md)). Canonical descriptors carry
   partition and liveness fields explicitly; replicated shapes carry their class
   and constraints explicitly. Key reuse is a row-incarnation feature, with no
   inert schema flag. Kotlin and native producers use the same format.
@@ -22,7 +22,8 @@ compatibility clauses in earlier decisions.
   checkpoint tags are likewise checked before an encrypted writer opens.
   Fresh checkpoint metadata belongs to resumable bootstrap, not open-time adoption.
 - Credential extensions and horizons use 2, client evidence caches use 3,
-  SDK identities use 8, invitations use 4 and contacts use 2. Routing behavior
+  SDK identities use 9 ([group secrets](0040-group-secrets.md)), invitations
+  use 4 and contacts use 2. Routing behavior
   is explicit data rather than an alternate version.
 
 Application schema generations, placement relocation and key epochs remain

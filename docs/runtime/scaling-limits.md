@@ -74,7 +74,7 @@ Strong commands on one long-lived domain, one row per write, default retention
 | 100,000 | 1,660 | 153 / 162 ms |
 | 200,000 | 3,305 | 300 / 309 ms |
 
-Every lifetime here was refused before [decision 0039](../decisions/0042-bounded-strong-cut.md).
+Every lifetime here was refused before [Decision 0042](../decisions/0042-bounded-strong-cut.md).
 The cost grows with the rows of the checkpoint copy loaded into memory,
 not with the cut.
 

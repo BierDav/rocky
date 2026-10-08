@@ -759,7 +759,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     && child
                         .foreign_keys
                         .iter()
-                        .any(|key| key.table == table.sql_name)
+                        .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
             });
             if (keyed(&table.sql_name) || referenced)
                 && let Some(projected) = typed.by_name(&table.sql_name)

@@ -1,9 +1,9 @@
 name: Coordinator image
 
 # Builds the `rocky-voter` container image for the public coordination service
-# and publishes a multi-architecture manifest to public GHCR. The deployment
-# pins the manifest digest in selfhosted-platform; see
-# docs/runtime/coordinator-deployment.md.
+# and publishes a multi-architecture manifest to GHCR as a private package.
+# The deployment pins the manifest digest in selfhosted-platform; see
+# docs/runtime/coordinator-operations.md.
 
 on:
   push:
@@ -121,8 +121,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # New GHCR packages are private. Set this package's visibility to public
-    # once (Package settings), or the cluster cannot pull it anonymously.
+    # The package stays private; deployments supply a ghcr-pull registry secret.
     steps:
       - uses: docker/setup-buildx-action@v3
 

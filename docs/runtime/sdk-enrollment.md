@@ -8,6 +8,10 @@ credentials made elsewhere install without it. It runs on
 reaches peers through a [transport](sdk-transports.md). Qualified on loopback
 only; not a cryptographic audit.
 
+Enrollment dialing tries every supplied route with its own 15-second deadline.
+After a route connects, the request and reply have a separate 30-second deadline;
+two stalled routes do not prevent trying a later route.
+
 ## Domain and identities
 
 A schema's collections become typed secure tables in one domain. Each
@@ -56,7 +60,7 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 8 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, author ranges and assignment counters, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation, known devices and a pending revocation |
+| `identity.json` | 9 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, group partition secrets and issuer grant holders, author ranges and assignment counters, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation, known devices and a pending revocation |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 

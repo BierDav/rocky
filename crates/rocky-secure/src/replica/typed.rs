@@ -195,7 +195,7 @@ impl Typed {
     pub(super) fn by_name(&self, sql_name: &str) -> Option<&Projected> {
         self.tables
             .iter()
-            .find(|table| table.table.sql_name == sql_name)
+            .find(|table| table.table.sql_name.eq_ignore_ascii_case(sql_name))
     }
     /// The tables a session may name: every local table and the mergeable
     /// tables of `scopes`.
@@ -225,7 +225,7 @@ impl Typed {
                                 && child
                                     .foreign_keys
                                     .iter()
-                                    .any(|key| key.table == table.sql_name)
+                                    .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
                         }))
             })
             .map(|table| table.sql_name.as_str())

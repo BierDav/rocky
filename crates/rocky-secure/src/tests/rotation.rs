@@ -368,3 +368,34 @@ async fn policy_epoch_alone_refreshes_the_checkpoint_without_a_new_write() {
     assert_eq!(after.statement.previous, Some(before.id().unwrap()));
     assert_eq!(replica.audit(f.public).await.unwrap().rows, 1);
 }
+
+#[tokio::test]
+async fn reusing_another_scopes_key_names_the_collision_and_keeps_epochs() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        dir.path().join("keys.db"),
+        f.app(),
+        config(&f, &node, f.full(), 1, vec![key(f.public, 1, OLD)]),
+    )
+    .await
+    .unwrap();
+    let error = replica
+        .install_key_epoch(key(f.private, 1, OLD))
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("already installed under another scope or epoch"),
+        "{error}"
+    );
+    assert_eq!(replica.key_epochs(f.public).await, vec![1]);
+    assert!(replica.key_epochs(f.private).await.is_empty());
+    replica
+        .install_key_epoch(key(f.private, 1, NEW))
+        .await
+        .unwrap();
+    assert_eq!(replica.key_epochs(f.private).await, vec![1]);
+}

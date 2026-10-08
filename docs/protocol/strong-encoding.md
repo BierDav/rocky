@@ -37,7 +37,7 @@ executor rebuilt the cut from. The cut covers, per author, the operations after
 it up to the request frontier. A base author outside the frontier, a base ahead
 of it, or more than 32,768 covered operations are refused. Bytes without the
 magic are refused; there is no other package format.
-[Decision 0039](../decisions/0042-bounded-strong-cut.md) explains the choice.
+[Decision 0042](../decisions/0042-bounded-strong-cut.md) explains the choice.
 
 ## General command extension
 

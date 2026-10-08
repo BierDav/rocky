@@ -88,7 +88,7 @@ Partitioned `SetNull` is refused, as permitted by the brief, so policy projectio
 cannot null partition columns. Cross-partition uniqueness, partitioned foreign
 keys and command control remain refused.
 
-[Decision 0039](../decisions/0041-partition-constraint-state.md): verify constrained installations against SQLite's catalog at open,
+[Decision 0041](../decisions/0041-partition-constraint-state.md): verify constrained installations against SQLite's catalog at open,
 including typed identity/policy indexes, private candidate tables/indexes and
 support bookkeeping. The current private support format has one shape,
 `secure_support(tab, scope, id)`. Earlier shapes and missing or altered indexes

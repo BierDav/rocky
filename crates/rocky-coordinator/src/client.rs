@@ -13,6 +13,7 @@ use rocky_core::{
 };
 use rocky_credentials::{SignedCoordinationGrant, SignedTenantAdmission};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -93,12 +94,16 @@ impl ClientCache {
             return Ok(());
         }
         if self.receipts.len() >= MAX_EVIDENCE {
+            let mut newest = BTreeMap::<Scope, u64>::new();
+            for receipt in &self.receipts {
+                let sequence = newest
+                    .entry(receipt.receipt.confirmation.scope)
+                    .or_default();
+                *sequence = (*sequence).max(receipt.receipt.sequence);
+            }
             let kept = |e: &ReceiptEvidence| {
                 let confirmation = &e.receipt.confirmation;
-                let newest = !self.receipts.iter().any(|other| {
-                    other.receipt.confirmation.scope == confirmation.scope
-                        && other.receipt.sequence > e.receipt.sequence
-                });
+                let newest = newest.get(&confirmation.scope) == Some(&e.receipt.sequence);
                 let pinned = confirmation.request.node == own
                     && confirmation.request.sequence.get() > self.floor(confirmation.scope);
                 newest || pinned
@@ -267,15 +272,7 @@ impl NetworkCoordinator {
         replies
     }
     fn persist(&self, cache: &ClientCache) -> Result<(), CoordinationError> {
-        let data = encode(cache)?;
-        if data.len() > MAX_STORE {
-            return Err(CoordinationError::Denied);
-        }
-        if let Some(parent) = self.evidence_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| CoordinationError::Corrupt)?;
-        }
-        atomic_write(&self.evidence_path, &data, "client_evidence")
-            .map_err(|_| CoordinationError::Corrupt)
+        persist_cache(&self.evidence_path, cache)
     }
     pub async fn retain_evidence(
         &self,
@@ -629,4 +626,15 @@ impl Coordinator for NetworkCoordinator {
             }
         })
     }
+}
+
+fn persist_cache(path: &std::path::Path, cache: &ClientCache) -> Result<(), CoordinationError> {
+    let data = encode(cache)?;
+    if data.len() > MAX_STORE {
+        return Err(CoordinationError::Backpressure);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| CoordinationError::Corrupt)?;
+    }
+    atomic_write(path, &data, "client_evidence").map_err(|_| CoordinationError::Corrupt)
 }

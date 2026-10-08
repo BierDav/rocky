@@ -78,7 +78,10 @@ COMMIT;
 
 A [partitioned](partitioned-scopes.md#ids-and-transactions) table takes its
 partition values after the name: `rocky_next_id('items', ?)`. Arguments are
-string literals, integers or `?`. The statement returns one integer column. Further reservations of the
+string literals, non-negative integer literals or `?`. Negative values must be
+bound through `?`. The call must be a standalone `SELECT` without aliases,
+other result columns or expressions; unsupported shapes return a driver error.
+The statement returns one integer column. Further reservations of the
 transaction continue the same author's sequence, so a bulk insert may use the
 ids that follow one reservation; a rollback to a savepoint or of the
 transaction releases what it reserved. It fails with code 8 on a reader, and

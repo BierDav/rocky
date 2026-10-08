@@ -1044,7 +1044,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     table
                         .columns
                         .iter()
-                        .position(|column| column.sql_name == "id")
+                        .position(|column| column.sql_name.eq_ignore_ascii_case("id"))
                 })
                 .ok_or_else(|| denied("horizon requires row incarnations"))?;
             let blob = encode(&scope)?;

@@ -67,7 +67,7 @@ impl Table {
             table
                 .columns
                 .iter()
-                .position(|column| column.sql_name == name)
+                .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                 .ok_or_else(|| Error::Incompatible(format!("missing row {name}")))
         };
         Self::with_identity(
@@ -90,7 +90,12 @@ impl Table {
         let key: Vec<usize> = table
             .primary_key
             .iter()
-            .filter_map(|key| table.columns.iter().position(|c| c.sql_name == *key))
+            .filter_map(|key| {
+                table
+                    .columns
+                    .iter()
+                    .position(|c| c.sql_name.eq_ignore_ascii_case(key))
+            })
             .collect();
         if key.len() != table.primary_key.len() {
             return Err(Error::Incompatible(format!(
@@ -128,7 +133,7 @@ impl Table {
                     key: table
                         .primary_key
                         .iter()
-                        .position(|key| *key == column.sql_name),
+                        .position(|key| key.eq_ignore_ascii_case(&column.sql_name)),
                 })
                 .collect(),
             indexes: table

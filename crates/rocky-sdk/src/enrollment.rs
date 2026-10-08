@@ -2535,8 +2535,8 @@ pub async fn exchange(
     protocol: Protocol,
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
+    let mut stream = dial(transport, addresses, protocol).await?;
     tokio::time::timeout(2 * TIMEOUT, async {
-        let mut stream = dial(transport, addresses, protocol).await?;
         write_message(&mut stream, request).await?;
         let reply = read_message(&mut stream).await?;
         let _ = stream.shutdown().await;
@@ -2636,3 +2636,76 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::transport::BoxFuture;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Routes {
+        attempts: AtomicUsize,
+        stream: Mutex<Option<Stream>>,
+    }
+    impl Transport for Routes {
+        fn kind(&self) -> &str {
+            "test"
+        }
+        fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+            Box::pin(async { Ok("third".into()) })
+        }
+        fn connect<'a>(
+            &'a self,
+            address: &'a str,
+            _: Protocol,
+        ) -> BoxFuture<'a, Result<Stream, Failure>> {
+            Box::pin(async move {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                if address != "third" {
+                    std::future::pending::<()>().await;
+                }
+                Ok(self.stream.lock().unwrap().take().unwrap())
+            })
+        }
+        fn accept(&self) -> BoxFuture<'_, Option<(Protocol, Stream)>> {
+            Box::pin(async { None })
+        }
+        fn close(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exchange_tries_later_routes_after_two_full_dial_deadlines() {
+        let (client, server) = tokio::io::duplex(1024);
+        let mut server: Stream = Box::new(server);
+        let transport = Routes {
+            attempts: AtomicUsize::new(0),
+            stream: Mutex::new(Some(Box::new(client))),
+        };
+        let answer = tokio::spawn(async move {
+            assert_eq!(read_message(&mut server).await.unwrap(), b"request");
+            // Use some of the exchange budget, after the two dial budgets.
+            tokio::time::sleep(TIMEOUT).await;
+            write_message(&mut server, br#"{"reply":"6f6b"}"#)
+                .await
+                .unwrap();
+        });
+        let start = tokio::time::Instant::now();
+        let reply = exchange(
+            &transport,
+            &["first".into(), "second".into(), "third".into()],
+            Protocol::Pair,
+            b"request",
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, b"ok");
+        assert_eq!(transport.attempts.load(Ordering::SeqCst), 3);
+        assert!(start.elapsed() >= 3 * TIMEOUT);
+        answer.await.unwrap();
+    }
+}

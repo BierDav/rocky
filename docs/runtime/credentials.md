@@ -198,6 +198,9 @@ written after the rotation stays sealed from it even when obtained elsewhere.
 `secure_key_epochs` every earlier one; the recovery inventory's `key_epochs`
 names the latest per scope.
 
+Installing key material already held under another scope or epoch is refused
+with an explicit duplicate-material error, separately from missing read rights.
+
 ## Qualification
 
 `cargo test -p rocky-credentials`, `cargo test -p rocky-secure --lib tests::rotation`

@@ -140,7 +140,7 @@ are in [existence logs](existence-logs.md).
 
 ## Persisted constraints and open verification
 
-[Decision 0039](../decisions/0041-partition-constraint-state.md) records the format
+[Decision 0041](../decisions/0041-partition-constraint-state.md) records the format
 and catalog boundary. The current private support bookkeeping shape is `secure_support(tab, scope, id)`
 with that composite primary key. Puppet and virtual-row lookups use the full
 partition-and-id identity; partitioned support tables and references remain
@@ -149,6 +149,10 @@ installations compare the declared typed indexes, private candidate tables and
 indexes, and support bookkeeping table to SQLite's stored SQL. Missing or changed
 identity/policy indexes or an older private table shape fail open before use.
 Reinstall an incompatible installation.
+
+When one frame writes different unique-index columns of two conflicting rows,
+the index stamps can be equal. The larger row id wins that tie consistently
+on receipt, projection rebuild and reopen.
 
 ## Qualification
 

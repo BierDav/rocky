@@ -178,7 +178,7 @@ during step 1 and keeps the WAL from being reset during step 3.
 - A strong command still holds the complete state of its cut in memory, now the
   checkpoint copy plus the operations after it. A result names the executor's
   base, and more than 32,768 operations after it are refused with `Quota`
-  ([decision 0039](../decisions/0042-bounded-strong-cut.md)).
+  ([Decision 0042](../decisions/0042-bounded-strong-cut.md)).
 - An executor whose checkpoint is past a request's cut, or that has none,
   reports `StrongPending(CutBase)`. A confirmed result whose cut is behind this
   replica's checkpoint stays pending until a newer checkpoint is imported.

@@ -39,15 +39,49 @@ struct Shop {
 }
 impl Shop {
     fn new() -> Self {
+        Self::with_sql_case(false)
+    }
+    fn with_sql_case(mixed: bool) -> Self {
         let publisher = PrivateKey::new();
-        let schema = rocky_core::SchemaDefinition::parse(
-            DEFINITION
-                .replace("PUBLISHER", &publisher.public_key().to_string())
-                .as_bytes(),
-        )
-        .unwrap()
-        .build()
-        .unwrap();
+        let definition = DEFINITION.replace("PUBLISHER", &publisher.public_key().to_string());
+        let definition = if mixed {
+            definition.replace("\"table\": \"lists\"", "\"table\": \"LISTS\"")
+        } else {
+            definition
+        };
+        let mut schema = rocky_core::SchemaDefinition::parse(definition.as_bytes())
+            .unwrap()
+            .build()
+            .unwrap();
+        if mixed {
+            for table in &mut schema.tables {
+                for name in &mut table.primary_key {
+                    *name = name.to_ascii_uppercase();
+                }
+                for index in &mut table.indexes {
+                    for column in &mut index.columns {
+                        column.name = column.name.to_ascii_uppercase();
+                    }
+                    if index.on_conflict.is_some() {
+                        index.create_sql = rocky_core::unique_index_sql(
+                            &table.sql_name,
+                            &index.name,
+                            &index.columns,
+                        );
+                    }
+                }
+                for key in &mut table.foreign_keys {
+                    let before = rocky_core::foreign_key_clause(key);
+                    key.table = key.table.to_ascii_uppercase();
+                    for name in key.columns.iter_mut().chain(&mut key.references) {
+                        *name = name.to_ascii_uppercase();
+                    }
+                    table.create_sql = table
+                        .create_sql
+                        .replace(&before, &rocky_core::foreign_key_clause(key));
+                }
+            }
+        }
         let manifest = schema.manifest(&[DomainId([1; 16])]);
         let domain = Scope {
             mesh: MeshId([1; 16]),
@@ -747,4 +781,143 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
     assert!(rows(&session, ITEMS).await.is_empty());
     fresh.rebuild_projection(shop.lists).await.unwrap();
     assert_eq!(rows(&session, ITEMS).await, visible);
+}
+
+#[tokio::test]
+async fn equal_unique_stamps_from_different_columns_choose_the_larger_row_id() {
+    let shop = Shop::new();
+    let dir = TempDir::new().unwrap();
+    let nodes = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let mut replicas = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        replicas.push(
+            shop.open(
+                &dir.path().join(format!("tie{index}.db")),
+                node,
+                41 + index as u32,
+            )
+            .await,
+        );
+    }
+    let mut sessions = Vec::new();
+    for replica in &replicas {
+        sessions.push(shop.sql(replica).await);
+    }
+    let (lists, parents) = commit(
+        &sessions[0],
+        &[
+            ("INSERT INTO lists(title,id) VALUES('a',?id)", vec![]),
+            ("INSERT INTO lists(title,id) VALUES('b',?id)", vec![]),
+        ],
+    )
+    .await;
+    let (ids, initial) = commit(
+        &sessions[0],
+        &[
+            (
+                "INSERT INTO items(list,code,id) VALUES(?,'z',?id)",
+                vec![integer(lists[0])],
+            ),
+            (
+                "INSERT INTO items(list,code,id) VALUES(?,'y',?id)",
+                vec![integer(lists[1])],
+            ),
+        ],
+    )
+    .await;
+    for replica in &replicas[1..] {
+        deliver(replica, &parents).await;
+        deliver(replica, &initial).await;
+    }
+    let (_, offline) = commit(
+        &sessions[0],
+        &[(
+            "UPDATE items SET code='x' WHERE id=?",
+            vec![integer(ids[0])],
+        )],
+    )
+    .await;
+    let (_, advance) = commit(
+        &sessions[1],
+        &[(
+            "UPDATE items SET note='advance' WHERE id=?",
+            vec![integer(ids[1])],
+        )],
+    )
+    .await;
+    let (_, tied) = commit(
+        &sessions[1],
+        &[
+            (
+                "UPDATE items SET list=? WHERE id=?",
+                vec![integer(lists[1]), integer(ids[0])],
+            ),
+            (
+                "UPDATE items SET code='x' WHERE id=?",
+                vec![integer(ids[1])],
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        tied.len(),
+        1,
+        "one frame writes the two unique-index columns"
+    );
+    deliver(&replicas[0], &advance).await;
+    deliver(&replicas[0], &tied).await;
+    deliver(&replicas[1], &offline).await;
+    deliver(&replicas[2], &advance).await;
+    deliver(&replicas[2], &tied).await;
+    deliver(&replicas[2], &offline).await;
+    let expected = vec![vec![
+        integer(*ids.iter().max().unwrap()),
+        integer(lists[1]),
+        text("x"),
+    ]];
+    const QUERY: &str = "SELECT id,list,code FROM items ORDER BY id";
+    for session in &sessions {
+        assert_eq!(rows(session, QUERY).await, expected);
+    }
+    replicas[2].rebuild_projection(shop.items).await.unwrap();
+    assert_eq!(rows(&sessions[2], QUERY).await, expected);
+    drop(sessions);
+    drop(replicas.pop());
+    let reopened = shop.open(&dir.path().join("tie2.db"), &nodes[2], 43).await;
+    assert_eq!(rows(&shop.sql(&reopened).await, QUERY).await, expected);
+}
+
+#[tokio::test]
+async fn case_insensitive_schema_references_install_capture_and_resolve() {
+    let shop = Shop::with_sql_case(true);
+    let dir = TempDir::new().unwrap();
+    let nodes = [PrivateKey::new(), PrivateKey::new()];
+    let a = shop
+        .open(&dir.path().join("case-a.db"), &nodes[0], 51)
+        .await;
+    let b = shop
+        .open(&dir.path().join("case-b.db"), &nodes[1], 52)
+        .await;
+    let (sa, sb) = (shop.sql(&a).await, shop.sql(&b).await);
+    let (lists, parents) = commit(
+        &sa,
+        &[("INSERT INTO lists(title,id) VALUES('list',?id)", vec![])],
+    )
+    .await;
+    deliver(&b, &parents).await;
+    let (_, inserted) = commit(
+        &sa,
+        &[(
+            "INSERT INTO items(list,code,id) VALUES(?,'milk',?id)",
+            vec![integer(lists[0])],
+        )],
+    )
+    .await;
+    deliver(&b, &inserted).await;
+    assert_eq!(rows(&sa, ITEMS).await, rows(&sb, ITEMS).await);
+    assert_eq!(rows(&sb, ITEMS).await.len(), 1);
+    let (_, deleted) = commit(&sa, &[("DELETE FROM lists WHERE title='list'", vec![])]).await;
+    deliver(&b, &deleted).await;
+    assert!(rows(&sa, ITEMS).await.is_empty());
+    assert!(rows(&sb, ITEMS).await.is_empty());
 }

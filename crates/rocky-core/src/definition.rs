@@ -199,7 +199,7 @@ impl SchemaDefinition {
             for key in keys {
                 let references = identities
                     .iter()
-                    .find(|(name, _)| *name == key.table)
+                    .find(|(name, _)| name.eq_ignore_ascii_case(&key.table))
                     .map(|(_, columns)| columns.clone())
                     .ok_or_else(|| {
                         SchemaError::Invalid(format!(

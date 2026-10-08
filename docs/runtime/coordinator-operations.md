@@ -59,9 +59,8 @@ only, and starts three voter processes. Nothing it writes is a production key.
 native runners, merges them with `docker buildx imagetools create` and pushes
 `ghcr.io/bierdav/rocky-db-coordinator:main` and `:sha-<commit>` on qualifying
 `main` pushes; pull requests only build. The image is the binary as entrypoint
-and carries no keys, configuration or trust bundle. New GHCR packages are
-private: either make the package public or give the cluster a `ghcr-pull`
-registry secret. Pin the manifest digest (`:main` moves; Argo CD does not roll a
+and carries no keys, configuration or trust bundle. The GHCR package stays
+private; give the cluster a `ghcr-pull` registry secret. Pin the manifest digest (`:main` moves; Argo CD does not roll a
 workload when a tag moves), kept current with Renovate.
 
 Run one voter per node as a DaemonSet with host networking and a node-local
@@ -71,6 +70,9 @@ cluster manifests and guide live in the `selfhosted-platform` repository
 (`docs/coordinator.md`); genesis and keys are never committed. The coordinator
 holds metadata only; application ciphertext custody is the separate
 [always-on peer](always-on-peer.md).
+
+The `busy` status counter includes connections refused when all 64 voter TCP
+slots are occupied, as well as full client and tenant lanes.
 
 ## Observe
 

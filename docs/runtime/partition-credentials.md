@@ -87,7 +87,7 @@ data bind the version, manifest, group address, epoch, recipient, issuer and
 ephemeral public key. Wrong recipients, keys, contexts, zero DH shared secrets,
 other versions or sealed lengths and modified ciphertext are refused.
 `from_bytes` enforces a 4 KiB canonical CBOR bound; decoding alone does not
-verify the issuer signature. [Decision 0039](../decisions/0040-group-secrets.md)
+verify the issuer signature. [Decision 0040](../decisions/0040-group-secrets.md)
 pins both formats.
 
 An envelope grants no rights. The receiving application verifies credentials

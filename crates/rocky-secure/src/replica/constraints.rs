@@ -201,7 +201,7 @@ impl Constraints {
         let node_of = |sql_name: &str| {
             constrained
                 .iter()
-                .position(|index| tables[*index].table.sql_name == sql_name)
+                .position(|index| tables[*index].table.sql_name.eq_ignore_ascii_case(sql_name))
         };
         let mut nodes = Vec::new();
         for &index in &constrained {
@@ -213,7 +213,7 @@ impl Constraints {
                 table
                     .columns
                     .iter()
-                    .position(|column| column.sql_name == name)
+                    .position(|column| column.sql_name.eq_ignore_ascii_case(name))
                     .ok_or_else(|| {
                         incompatible(format!("{}.{name} is not a column", table.sql_name))
                     })

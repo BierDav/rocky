@@ -30,6 +30,10 @@ Format 4 installs row identity, partition groups, optional `partition_by` and st
 refused by a read-only preflight before database initialization or SDK
 enrollment writes.
 
+SQL table and column lookups compare ASCII case insensitively, including
+foreign-key targets. Missing target columns report the table and column name.
+Logical names retain their declared identity.
+
 ## Row identity
 
 Every table, local and command tables included, has `id INTEGER NOT NULL` and
@@ -80,7 +84,7 @@ differences are in [schema definitions](schema-definitions.md#check-a-profile-be
 | --- | --- |
 | Auto-generated key | Concurrent devices would assign the same key |
 | Unique index or constraint, `CHECK`, foreign key | Two valid offline writes could not both apply (the secure profile resolves [declared policies](mergeable-constraints.md)) |
-| Declared foreign key on any non-mergeable table | A replicated delete could fail on another table's rows |
+| Foreign key on any non-mergeable table, including raw `REFERENCES` SQL | A replicated delete could fail on another table's rows |
 | Generated column, NUMERIC affinity, nullable or absent key | No single stored form |
 | Local-only column | Checkpoints digest whole rows |
 | Collation other than `BINARY`, `NOCASE`, `RTRIM` | Refused at generation |

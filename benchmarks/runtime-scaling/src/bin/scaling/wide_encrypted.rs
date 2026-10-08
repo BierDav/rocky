@@ -36,6 +36,7 @@ fn config(
     };
     let user = PrivateKey::new();
     let deployment = PrivateKey::new();
+    let extension = credentials::Extension::new(credentials::Extended::default())?;
     let capability = |subject, kind, delegations| Capability {
         manifest: hash,
         subject,
@@ -45,7 +46,7 @@ fn config(
         expires: u64::MAX,
         epoch: 1,
         delegations,
-        extension: None,
+        extension: extension.clone(),
     };
     Ok(SecureConfig {
         publisher: publisher.public_key(),

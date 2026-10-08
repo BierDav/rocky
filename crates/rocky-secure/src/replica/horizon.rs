@@ -166,58 +166,6 @@ impl<A: RowApplication> Inner<A> {
         );
         Ok(HorizonCut { scope, logs, state })
     }
-    async fn legacy_horizon_existence(&self, scope: ResourceScope) -> Result<HorizonCut, Error> {
-        let rows = collect_rows(self.conn.query(
-            "SELECT signer,max(sequence) FROM secure_existence_log WHERE scope=? GROUP BY signer ORDER BY signer",
-            [encode(&scope)?],
-        ).await?).await?;
-        let mut logs = Vec::new();
-        for row in rows {
-            let [SqlValue::Blob(signer), SqlValue::Integer(sequence)] = row.as_slice() else {
-                return Err(Error::Corrupt("existence horizon log".into()));
-            };
-            let mut head = self.conn.query("SELECT hash FROM secure_existence_log WHERE scope=? AND signer=? AND sequence=?",
-                bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Blob(signer.clone()), SqlValue::Integer(*sequence)])).await?;
-            let head = head
-                .next()
-                .await?
-                .ok_or_else(|| Error::Corrupt("existence horizon head".into()))?
-                .get::<Vec<u8>>(0)?;
-            logs.push(HorizonLog {
-                signer: checkpoint::key_of(signer)?,
-                sequence: *sequence as u64,
-                head: checkpoint::row_of(&head)?,
-            });
-        }
-        let state = collect_rows(
-            self.conn
-                .query(
-                    "SELECT id,created,deleted FROM secure_existence WHERE scope=? ORDER BY id",
-                    [encode(&scope)?],
-                )
-                .await?,
-        )
-        .await?;
-        let state = state
-            .into_iter()
-            .map(|row| {
-                let [SqlValue::Integer(id), created, deleted] = row.as_slice() else {
-                    return Err(Error::Corrupt("existence horizon state".into()));
-                };
-                let hash = |value: &SqlValue| match value {
-                    SqlValue::Null => Ok(None),
-                    SqlValue::Blob(bytes) => checkpoint::row_of(bytes).map(Some),
-                    _ => Err(Error::Corrupt("existence horizon hash".into())),
-                };
-                Ok((*id, hash(created)?, hash(deleted)?))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(HorizonCut {
-            scope,
-            logs,
-            state: rocky_core::commitment("rocky.horizon-existence-state.v1", &encode(&state)?),
-        })
-    }
     fn verify_horizon(&self, signed: &SignedHorizon) -> Result<(), Error> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
@@ -263,12 +211,9 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         for cut in &statement.existence {
-            let actual = if statement.format == 1 {
-                self.legacy_horizon_existence(cut.scope).await?
-            } else {
-                self.horizon_existence_for(cut.scope, Some(statement.scope))
-                    .await?
-            };
+            let actual = self
+                .horizon_existence_for(cut.scope, Some(statement.scope))
+                .await?;
             if actual != *cut {
                 return Err(denied(
                     "sync referenced existence logs to the horizon cut before acknowledging",

@@ -140,7 +140,8 @@ async fn registration_does_not_authorize_accounting_and_learned_deletion_revokes
         expires: u64::MAX,
         epoch: 1,
         delegations,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     let signed = SignedManifest::sign(&manifest, &accounting).unwrap();
     let policy = SignedPolicy::sign(

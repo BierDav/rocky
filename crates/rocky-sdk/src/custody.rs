@@ -49,7 +49,7 @@ impl CustodyPeer {
         let identity = directory.join("identity.json");
         let existing = identity.exists();
         if existing {
-            let (settings, _) = Settings::load(&identity)?;
+            let settings = Settings::load(&identity)?;
             if !matches!(settings.profile, Profile::Custody { .. })
                 || settings.authority.is_some()
                 || !settings.keys.is_empty()

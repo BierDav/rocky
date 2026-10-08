@@ -1012,7 +1012,8 @@ async fn renewed_policy_preserves_applied_command_history_and_denies_old_invocat
         expires: u64::MAX,
         epoch: 2,
         delegations,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     let credentials = CredentialChain(vec![
         SignedCapability::sign(

@@ -907,14 +907,12 @@ fn a_frame_author_must_be_the_number_its_signing_key_was_assigned() {
     let mut forged = pseudonym.clone();
     let mut leaf = forged.0.pop().expect("leaf").capability;
     let device = leaf.extended().expect("extended").device;
-    leaf.extension = Some(
-        Extension::new(Extended {
-            partitions: Vec::new(),
-            authors: Some(AuthorRange::new(250, 250).expect("range")),
-            device,
-        })
-        .expect("extension"),
-    );
+    leaf.extension = Extension::new(Extended {
+        partitions: Vec::new(),
+        authors: Some(AuthorRange::new(250, 250).expect("range")),
+        device,
+    })
+    .expect("extension");
     forged
         .0
         .push(SignedCapability::sign(leaf, &authors.assigner).expect("signed"));
@@ -1014,16 +1012,6 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
             VALIDITY,
         )
         .expect("root");
-    // Old encodings are untouched: no extension, no new bytes.
-    let plain = domain
-        .authority()
-        .issue(holder.public_key(), grants.clone(), 1, VALIDITY)
-        .expect("plain");
-    assert!(
-        !serde_json::to_string(&plain)
-            .expect("json")
-            .contains("extension")
-    );
     assert_eq!(root.capability.authors().expect("authors"), Some(range));
     let prefix = CredentialChain(vec![root.clone()]);
     let delegate = PrivateKey::new();
@@ -1057,14 +1045,12 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     assert!(verify(&chain).is_ok());
     // A delegate that signs itself a wider range is refused on verification.
     let mut wide = narrowed.0[1].capability.clone();
-    wide.extension = Some(
-        Extension::new(Extended {
-            partitions: Vec::new(),
-            authors: Some(AuthorRange::new(5, 15).expect("range")),
-            device: None,
-        })
-        .expect("extension"),
-    );
+    wide.extension = Extension::new(Extended {
+        partitions: Vec::new(),
+        authors: Some(AuthorRange::new(5, 15).expect("range")),
+        device: None,
+    })
+    .expect("extension");
     let widened = CredentialChain(vec![
         root.clone(),
         SignedCapability::sign(wide, &holder).expect("signed"),
@@ -1093,7 +1079,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     .expect("bytes");
     let later: Extension = serde_json::from_value(serde_json::json!(bytes)).expect("later");
     let mut capability = root.capability.clone();
-    capability.extension = Some(later);
+    capability.extension = later;
     let refused = CredentialChain(vec![
         SignedCapability::sign(capability, &domain.publisher).expect("signed"),
     ])
@@ -1103,7 +1089,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         Ok(Ok(_)) => String::new(),
     };
     assert!(
-        message.contains("newer than this runtime supports"),
+        message.contains("unsupported credential extension version"),
         "{message}"
     );
 }
@@ -1195,89 +1181,6 @@ fn a_pseudonym_request_proves_both_keys_and_keeps_an_earlier_number() {
     )
     .expect("request");
     assert_eq!(rekeyed.previous_author(anchor.0, anchor.1, range), None);
-}
-
-#[test]
-fn a_legacy_capability_keeps_its_canonical_bytes_and_signature() {
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct LegacyCapability {
-        manifest: Commitment,
-        subject: PublicKey,
-        kind: PrincipalKind,
-        grants: Vec<ResourceGrant>,
-        not_before: u64,
-        expires: u64,
-        epoch: u64,
-        delegations: u8,
-    }
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct LegacySigned {
-        issuer: PublicKey,
-        capability: LegacyCapability,
-        signature: p2panda_core::Signature,
-    }
-    let domain = Domain::new();
-    let user = PrivateKey::new();
-    let signed = domain
-        .authority()
-        .issue(
-            user.public_key(),
-            Profile::Issuer.grants(&domain.resources).expect("grants"),
-            1,
-            VALIDITY,
-        )
-        .expect("issued");
-    let c = &signed.capability;
-    let old = LegacyCapability {
-        manifest: c.manifest,
-        subject: c.subject,
-        kind: c.kind,
-        grants: c.grants.clone(),
-        not_before: c.not_before,
-        expires: c.expires,
-        epoch: c.epoch,
-        delegations: c.delegations,
-    };
-    let encoded = encode(&old).expect("legacy bytes");
-    assert_eq!(encode(c).expect("bytes"), encoded);
-    let message = encode(&("rocky.capability.v1", &old)).expect("legacy signing bytes");
-    let old = LegacySigned {
-        issuer: domain.publisher.public_key(),
-        capability: old,
-        signature: domain.publisher.sign(&message),
-    };
-    // Decode bytes signed using exactly the pre-extension format.
-    let bytes = encode(&old).expect("legacy signed");
-    let decoded: SignedCapability =
-        p2panda_core::cbor::decode_cbor(bytes.as_slice()).expect("decoded");
-    assert_eq!(encode(&decoded).expect("encoded"), bytes);
-    let chain = device_chain(decoded, &user, PrivateKey::new().public_key()).expect("chain");
-    let node = chain.0.last().expect("node").capability.subject;
-    chain
-        .verify(
-            domain.publisher.public_key(),
-            domain.manifest.hash(),
-            node,
-            &domain.policy().statement,
-            NOW,
-        )
-        .expect("legacy signature verifies");
-    // The old decoder ignores an extension, then its original signature
-    // check refuses the new chain: unknown authority is never dropped safely.
-    let extended = domain
-        .authority()
-        .issue_terms(
-            user.public_key(),
-            c.grants.clone(),
-            (1, Some(AuthorRange::ALL)),
-            1,
-            VALIDITY,
-        )
-        .expect("extended");
-    let bytes = encode(&extended).expect("extended bytes");
-    let old: LegacySigned = p2panda_core::cbor::decode_cbor(bytes.as_slice()).expect("old decoder");
-    let message = encode(&("rocky.capability.v1", &old.capability)).expect("old signing bytes");
-    assert!(!old.issuer.verify(&message, &old.signature));
 }
 
 #[test]

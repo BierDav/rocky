@@ -89,17 +89,13 @@ pub struct Capability {
     pub expires: u64,
     pub epoch: u64,
     pub delegations: u8,
-    /// Author ranges/pseudonyms (`docs/runtime/credential-primitives.md`) and partition grants
-    /// (`docs/runtime/partitioned-scopes.md`). Absent, legacy encoding and signatures are preserved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension: Option<Extension>,
+    /// Author ranges, pseudonym binding and partition selectors.
+    pub extension: Extension,
 }
 impl Capability {
-    /// What the extension carries; nothing without one.
+    /// The versioned authority fields of this capability.
     pub fn extended(&self) -> Result<Extended, Error> {
-        self.extension
-            .as_ref()
-            .map_or_else(|| Ok(Extended::default()), Extension::read)
+        self.extension.read()
     }
     /// The author numbers this link assigns, or a pseudonym holds.
     pub fn authors(&self) -> Result<Option<AuthorRange>, Error> {

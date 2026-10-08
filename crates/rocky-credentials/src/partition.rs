@@ -426,7 +426,7 @@ impl crate::CredentialChain {
                 delegations,
                 not_before: time.saturating_sub(skew).max(parent.not_before),
                 expires: time.saturating_add(ttl).min(parent.expires),
-                extension: Some(crate::Extension::new(extended)?),
+                extension: crate::Extension::new(extended)?,
                 ..parent.clone()
             },
             holder,
@@ -481,11 +481,11 @@ impl crate::Authority<'_> {
         let mut capability = self
             .issue_terms(subject, grants, terms, epoch, validity)?
             .capability;
-        capability.extension = Some(crate::Extension::new(crate::Extended {
+        capability.extension = crate::Extension::new(crate::Extended {
             authors: terms.1,
             partitions,
             ..crate::Extended::default()
-        })?);
+        })?;
         let signed = crate::SignedCapability::sign(capability, self.publisher)?;
         crate::CredentialChain(vec![signed.clone()]).links(
             self.publisher.public_key(),

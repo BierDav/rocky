@@ -60,7 +60,8 @@ pub(super) fn config<A: RowCommandApplication>(
         expires: u64::MAX,
         epoch: 1,
         delegations: 1,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     let root = SignedCapability::sign(cap.clone(), publisher).unwrap();
     let leaf = SignedCapability::sign(

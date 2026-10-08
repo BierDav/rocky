@@ -14,7 +14,7 @@ use sha2::{Digest, Sha512};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
-const EXTENSION_VERSION: u32 = 1;
+const EXTENSION_VERSION: u32 = 2;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -136,8 +136,7 @@ fn montgomery(key: &PublicKey) -> Result<MontgomeryPoint, Error> {
         .ok_or_else(|| denied("invalid publisher key"))
 }
 
-/// A capability's extension: the canonical bytes of a versioned body. A
-/// capability without one encodes exactly as before the extension existed.
+/// A capability's required, canonical versioned authority fields.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Extension(Vec<u8>);
@@ -145,11 +144,8 @@ pub struct Extension(Vec<u8>);
 #[serde(deny_unknown_fields)]
 struct Body {
     version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     authors: Option<AuthorRange>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     device: Option<SealedDevice>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     partitions: Vec<crate::PartitionGrant>,
 }
 /// Reads only the version, whatever else a later body holds.
@@ -168,11 +164,7 @@ pub struct Extended {
 impl Extension {
     pub fn new(extended: Extended) -> Result<Self, Error> {
         let body = Body {
-            version: if extended.partitions.is_empty() {
-                EXTENSION_VERSION
-            } else {
-                2
-            },
+            version: EXTENSION_VERSION,
             partitions: extended.partitions,
             authors: extended.authors,
             device: extended.device,
@@ -188,25 +180,14 @@ impl Extension {
         }
         let versioned: Versioned = p2panda_core::cbor::decode_cbor(self.0.as_slice())
             .map_err(|_| denied("invalid credential extension"))?;
-        if ![EXTENSION_VERSION, 2].contains(&versioned.version) {
-            return Err(Error::Denied(format!(
-                "credential extension version {} is newer than this runtime supports; upgrade",
-                versioned.version
-            )));
-        }
-        if versioned.version == EXTENSION_VERSION && self.0.len() > 1024 {
-            return Err(denied("credential extension quota"));
+        if versioned.version != EXTENSION_VERSION {
+            return Err(denied("unsupported credential extension version"));
         }
         let body: Body = decode_bounded(&self.0, MAX_EXTENSION)?;
-        if body.authors.is_none() && body.device.is_none() && body.partitions.is_empty()
-            || body.authors.is_some_and(|authors| !authors.valid())
-        {
+        if body.authors.is_some_and(|authors| !authors.valid()) {
             return Err(denied("invalid credential extension"));
         }
-        if (body.version == 1 && !body.partitions.is_empty())
-            || (body.version == 2 && body.partitions.is_empty())
-            || body.partitions.len() > crate::MAX_GRANTS
-        {
+        if body.partitions.len() > crate::MAX_GRANTS {
             return Err(denied("invalid partition credential extension"));
         }
         for grant in &body.partitions {
@@ -377,5 +358,44 @@ impl PseudonymRequest {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(bytes, MAX_CREDENTIAL_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extensions_have_one_version_and_explicit_empty_authority() {
+        let current = Extension::new(Extended::default()).unwrap();
+        assert_eq!(current.read().unwrap(), Extended::default());
+        let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
+        assert_eq!(body.version, EXTENSION_VERSION);
+        for version in [0, 1, 3, u32::MAX] {
+            let other = Extension(
+                encode(&Body {
+                    version,
+                    authors: None,
+                    device: None,
+                    partitions: Vec::new(),
+                })
+                .unwrap(),
+            );
+            assert_eq!(
+                other.read().unwrap_err().to_string(),
+                "unsupported credential extension version"
+            );
+        }
+        #[derive(Serialize)]
+        struct MissingSelectors {
+            version: u32,
+        }
+        let missing = Extension(
+            encode(&MissingSelectors {
+                version: EXTENSION_VERSION,
+            })
+            .unwrap(),
+        );
+        assert!(missing.read().is_err());
     }
 }

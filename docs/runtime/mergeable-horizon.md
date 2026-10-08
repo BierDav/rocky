@@ -99,8 +99,8 @@ reverse a parent's retirement at the same cut.
 | Native session | `rocky.native-session.v4` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
-The code still accepts earlier horizon, checkpoint, frame, identity and
-creation-witness versions; [phase 1](../features_06/01-remove-compatibility-code.md)
+Horizon statements accept only format 2, with an explicit existence-base list.
+Earlier checkpoint, frame, identity and creation-witness versions remain pending; [phase 1](../features_06/01-remove-compatibility-code.md)
 removes them. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema

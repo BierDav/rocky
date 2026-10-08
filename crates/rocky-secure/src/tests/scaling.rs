@@ -492,7 +492,8 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
             expires: u64::MAX,
             epoch: 1,
             delegations,
-            extension: None,
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+                .unwrap(),
         };
         SecureConfig {
             publisher: f.publisher.public_key(),

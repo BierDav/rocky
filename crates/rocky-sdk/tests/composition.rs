@@ -110,7 +110,7 @@ async fn a_database_opens_reads_writes_and_reopens_without_a_network() -> Result
     assert!(network.is_none());
     let client = Client::new(&database)?;
     let domain = client.ok(json!({"type": "domain"})).await;
-    assert_eq!(domain["creator"], json!(true));
+    assert_eq!(domain["issuer"], json!(true));
     assert_eq!(domain["transport"], "");
     client.add(1, "Milk").await;
     assert_eq!(client.titles().await, ["Milk"]);

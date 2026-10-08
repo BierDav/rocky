@@ -36,7 +36,7 @@ mod tests;
 pub const MAX_EVIDENCE: usize = 4096;
 /// One encoded `ReceiptEvidence` a peer may hand over.
 const MAX_EVIDENCE_BYTES: usize = 16 * 1024;
-/// Version 3 adds the acknowledged floors; version 2 files migrate.
+/// Current evidence cache format, including acknowledged floors.
 const CACHE_FORMAT: u32 = 3;
 #[derive(Clone, Serialize, Deserialize)]
 struct ClientCache {
@@ -46,40 +46,23 @@ struct ClientCache {
     heads: Vec<StrongHead>,
     /// Per scope, the request sequence through which this client retired
     /// its own identities. Its evidence above it is pinned.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     settled: Vec<(Scope, u64)>,
 }
-/// The version 1 evidence file, migrated on open.
-#[derive(Clone, Serialize, Deserialize)]
-struct LegacyCache {
-    genesis: Commitment,
-    receipts: Vec<ReceiptEvidence>,
-    heads: Vec<StrongHead>,
-}
 impl ClientCache {
-    fn read(data: &[u8], own: NodeId) -> Result<Self, CoordinationError> {
-        match decode::<Self>(data) {
-            Ok(mut cache) if cache.format == 2 && cache.settled.is_empty() => {
-                cache.format = CACHE_FORMAT;
-                Ok(cache)
-            }
-            Ok(cache) if cache.format == CACHE_FORMAT => Ok(cache),
-            Ok(_) => Err(CoordinationError::UnsupportedFormat),
-            Err(_) => {
-                let legacy: LegacyCache = decode(data)?;
-                let mut cache = Self {
-                    format: CACHE_FORMAT,
-                    genesis: legacy.genesis,
-                    receipts: Vec::new(),
-                    heads: legacy.heads,
-                    settled: Vec::new(),
-                };
-                for evidence in legacy.receipts {
-                    cache.insert(evidence, own)?;
-                }
-                Ok(cache)
-            }
+    fn read(data: &[u8]) -> Result<Self, CoordinationError> {
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
         }
+        if data.len() > MAX_STORE {
+            return Err(CoordinationError::Denied);
+        }
+        let format: Format = p2panda_core::cbor::decode_cbor(data)
+            .map_err(|_| CoordinationError::UnsupportedFormat)?;
+        if format.format != CACHE_FORMAT {
+            return Err(CoordinationError::UnsupportedFormat);
+        }
+        decode(data)
     }
     /// The floor through which `own` acknowledged its identities in `scope`.
     fn floor(&self, scope: Scope) -> u64 {
@@ -147,6 +130,11 @@ impl NetworkCoordinator {
                 .map_err(|_| CoordinationError::Corrupt)?
                 .join(evidence_path)
         };
+        if evidence_path.exists() {
+            ClientCache::read(
+                &std::fs::read(&evidence_path).map_err(|_| CoordinationError::Corrupt)?,
+            )?;
+        }
         if let Some(parent) = evidence_path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| CoordinationError::Corrupt)?;
         }
@@ -167,7 +155,6 @@ impl NetworkCoordinator {
         let cache = if evidence_path.exists() {
             ClientCache::read(
                 &std::fs::read(&evidence_path).map_err(|_| CoordinationError::Corrupt)?,
-                node_id(key.public_key()),
             )?
         } else {
             ClientCache {

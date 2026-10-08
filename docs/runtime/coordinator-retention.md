@@ -74,7 +74,9 @@ verifies it before applying, so a second executor or custodian can assemble
 confirmed state after the identities retired
 ([design rationale](encrypted-commands.md#portable-result-evidence)).
 
-The client evidence file (format 3, at most 32 MiB) holds at most 4,096 receipts
+Only client evidence format 3 is accepted, with explicit acknowledged floors;
+other versions are refused before lock-file or cache writes. No cache is
+migrated. The client evidence file (at most 32 MiB) holds at most 4,096 receipts
 and 64 observed heads. When full, it evicts the oldest receipt that is neither
 the newest of its scope (the head-regression watermark) nor this client's own
 receipt above its acknowledged floor; if every receipt is pinned, new evidence

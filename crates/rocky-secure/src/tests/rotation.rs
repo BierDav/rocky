@@ -33,7 +33,8 @@ fn chain(
         expires: u64::MAX,
         epoch,
         delegations,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     CredentialChain(vec![
         SignedCapability::sign(

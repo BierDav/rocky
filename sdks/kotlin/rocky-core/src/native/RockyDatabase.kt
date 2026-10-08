@@ -168,7 +168,7 @@ class Credentials internal constructor(private val session: RockySession) {
         session.client.call(request("pseudonym_owner") { put("pseudonym", credential) }).let {
             PseudonymOwner(it.getValue("node").jsonPrimitive.content, it.getValue("collection").jsonPrimitive.content, it.getValue("author").jsonPrimitive.int)
         }
-    /** An issuer migrated without a range claims one disjoint from every other issuer's range. */
+    /** An issuer without a range claims one disjoint from every other issuer's range. */
     suspend fun claimAuthorRange(first: Int, last: Int) {
         session.client.call(request("pseudonym_range") { put("first", first); put("last", last) })
     }

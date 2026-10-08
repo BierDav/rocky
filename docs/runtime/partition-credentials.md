@@ -60,8 +60,8 @@ paired grants. An insert/update/delete is admitted only if the precise row
 write passes `RowWrite::permitted_by` against those grants. Issuers can still
 open the pseudonym's device through `pseudonym_device`.
 
-Selectors are capability extension version 2; an extension without them
-encodes as [version 1](credential-primitives.md#chain-format). The ordinary `verify`, `verify_pseudonym` and `verify_author` APIs refuse a
+Every capability carries [extension version 2](credential-primitives.md#chain-format),
+including an empty selector list. The ordinary `verify`, `verify_pseudonym` and `verify_author` APIs refuse a
 partition leaf; callers must not drop its selectors and treat it as a table
 capability. Concrete grants and selector grants attenuate independently;
 converting a selector into a concrete grant inside a delegated chain is not

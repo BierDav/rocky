@@ -57,11 +57,12 @@ rows are plaintext at rest.
 | Record | Version | Content |
 | --- | --- | --- |
 | `identity.json` | 8 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, author ranges and assignment counters, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation, known devices and a pending revocation |
-| Invitation `rocky://join/` | 3; 4 with `via_custody: true` | Issuer routes, publisher key, profile, secret token, expiry |
-| Contact `rocky://peer/` | 1; 2 with `enrollment_only: true` | Publisher key, node key, routes, issuer flag |
+| Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
+| Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
-Version and routing flag must agree. Any other version is refused and the file
-is left unchanged. Assignment records and counters are saved before a
+Each record accepts only its listed version, independent of routing flags.
+Other versions are refused before installation writes; identity files and keys
+are never migrated. Reinstall with the current build. Assignment records and counters are saved before a
 credential is returned.
 
 ## Invitations and pairing
@@ -236,6 +237,10 @@ Not covered: publisher key backup, login providers, desktop keychains.
 
 ## Design rationale
 
+Status: current identity and routing formats supersede their compatibility
+clauses as of 2026-10-08. Identity 8, invitation 4 and contact 2 each have one
+reader; other versions require reinstall.
+
 - Identity is transport-independent: a domain is its definition identity and
   publisher key, a device its node key under a credential chain. Routes are
   replaceable hints, so an address or transport change needs only a fresh
@@ -243,7 +248,7 @@ Not covered: publisher key backup, login providers, desktop keychains.
 - Contacts are unsigned. The session handshake proves the node key and the
   credential chain authorizes every request; a signature would only suggest
   that routes are trusted.
-- Routed invitations and enrollment-only contacts carry their own versions so
-  a custody route is never taken for an issuer's row-sync route.
+- Invitations and contacts each have one format, with explicit custody and
+  enrollment-only flags that keep renewal routes separate from row sync.
 - Peers are configured on both sides; nothing is discovered, elected or
   relayed for others, which keeps who serves whom auditable.

@@ -23,9 +23,6 @@ fun main(args: Array<String>) {
     File(args[0]).mkdirs()
     File(args[0], "samples.json").writeText(samples.definitionJson("09".repeat(32)))
     val root = File(args[1])
-    // Exports from before row identity carry a text id; they are refusal inputs, not edited exports.
-    val legacyShoppingExport = File(root, "sdks/kotlin/schema-qualification/fixtures/legacy/shopping-text-id.json").readText()
-    check(runCatching { schemaFromRoom("shopping", legacyShoppingExport) }.exceptionOrNull()?.message?.contains("id must be a non-null integer identity field") == true)
     // The shopping entity's key is the id Rocky issues.
     val shoppingExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/2.json").readText()
     val shopping = schemaFromRoom("shopping", shoppingExport) {
@@ -112,8 +109,6 @@ fun main(args: Array<String>) {
         }
     }
     check(importedDefaults.definitionJson("09".repeat(32)) == manualDefaults.definitionJson("09".repeat(32)))
-    val legacyMarketExport = File(root, "sdks/kotlin/schema-qualification/fixtures/legacy/market-text-id.json").readText()
-    check(runCatching { schemaFromRoom("market", legacyMarketExport) }.isFailure)
     // Natural keys: each entity declares the identity index Rocky creates, by Rocky's name for it.
     val marketExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.MarketDatabase/2.json").readText()
     val importedMarket = schemaFromRoom("market", marketExport)

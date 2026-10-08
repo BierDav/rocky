@@ -431,17 +431,12 @@ impl Authority<'_> {
     }
 }
 
-/// The extension of a link that assigns `authors`, if any.
-fn ranged(authors: Option<AuthorRange>) -> Result<Option<Extension>, Error> {
-    authors
-        .map(|authors| {
-            Extension::new(Extended {
-                partitions: Vec::new(),
-                authors: Some(authors),
-                device: None,
-            })
-        })
-        .transpose()
+/// The authority fields of a link that may assign authors.
+fn ranged(authors: Option<AuthorRange>) -> Result<Extension, Error> {
+    Extension::new(Extended {
+        authors,
+        ..Extended::default()
+    })
 }
 
 /// A device's chain under its user capability: the user delegates the
@@ -463,14 +458,10 @@ impl CredentialChain {
             subject: node,
             kind: PrincipalKind::Node,
             delegations: 0,
-            extension: if last.extended()?.partitions.is_empty() {
-                None
-            } else {
-                Some(Extension::new(Extended {
-                    partitions: last.extended()?.partitions,
-                    ..Extended::default()
-                })?)
-            },
+            extension: Extension::new(Extended {
+                partitions: last.extended()?.partitions,
+                ..Extended::default()
+            })?,
             ..last.clone()
         };
         self.0.push(SignedCapability::sign(leaf, holder)?);
@@ -571,11 +562,11 @@ impl CredentialChain {
             expires: time.saturating_add(ttl).min(parent.expires).min(until),
             epoch: parent.epoch,
             delegations: 0,
-            extension: Some(Extension::new(Extended {
+            extension: Extension::new(Extended {
                 partitions: Vec::new(),
                 authors: Some(AuthorRange::new(author, author)?),
                 device: Some(SealedDevice::seal(publisher, key, author, device)?),
-            })?),
+            })?,
         };
         if leaf.not_before >= leaf.expires {
             return Err(denied("delegation outlives its parent"));

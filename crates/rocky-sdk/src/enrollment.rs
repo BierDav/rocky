@@ -31,15 +31,11 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// `identity.json`. Version 4 had one creator with full-rights members;
-/// versions 3–7 migrate on load; version 6 records signed generation
-/// lineage, version 7 separates enrollment relay routes, version 8 author
-/// ranges and pseudonyms (`docs/runtime/credential-primitives.md`).
+/// Current `identity.json` format.
 pub const VERSION: u32 = 8;
-/// Invitation URIs. Version 3 names the grant profile; earlier versions
-/// granted every right and are refused.
-const INVITE_VERSION: u32 = 3;
-const CONTACT_VERSION: u32 = 1;
+/// Current invitation format, with an explicit custody routing flag.
+const INVITE_VERSION: u32 = 4;
+const CONTACT_VERSION: u32 = 2;
 /// Peers one device syncs with and serves.
 pub const MAX_PEERS: usize = 16;
 const MAX_ISSUERS: usize = 8;
@@ -59,6 +55,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 /// The persisted identity of one installation. It holds no secret; keys
 /// are in the `SecretStore` under `installation`.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub version: u32,
     pub installation: String,
@@ -75,7 +72,6 @@ pub struct Settings {
     pub profile: Profile,
     /// The key epochs held of each collection this device reads, ascending.
     pub keys: BTreeMap<String, Vec<u64>>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub partitions: BTreeMap<String, PartitionRecord>,
     /// Present on a device that holds the publisher key.
     pub authority: Option<Issuing>,
@@ -83,34 +79,24 @@ pub struct Settings {
     /// in `peers`.
     pub issuers: Vec<PublicKey>,
     /// A fixed issuer whose pairing/renewal responses this custody node relays.
-    #[serde(default)]
     pub enrollment_upstream: Option<PublicKey>,
     /// The nodes this device syncs with and serves, by node key, with the
     /// routes last learned for each.
-    #[serde(default)]
     pub peers: BTreeMap<PublicKey, Contact>,
-    #[serde(default)]
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
-    #[serde(default)]
     pub logged_out: bool,
     /// The generations the domain left, oldest first. Empty until its
     /// first upgrade; see `docs/runtime/generations.md`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<crate::generation::Step>,
     /// The author numbers this device assigns to pseudonyms, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minting: Option<Minting>,
     /// This device's pseudonym chain for each collection it writes.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pseudonyms: BTreeMap<String, CredentialChain>,
     /// Assignments survive lost answers and retries of the same key.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub author_assignments: BTreeMap<PublicKey, AssignedAuthor>,
     /// Retained across removal/replacement of a supplied author range.
-    #[serde(default)]
     pub author_high_water: u32,
     /// An issuer's assignment key, separate from every node/user identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_issuer: Option<PublicKey>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -245,9 +231,7 @@ struct ContactRecord {
     routes: Vec<Route>,
     /// A hint that the node renews credentials. Its answers are believed
     /// only when the publisher key signed them.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     issuer: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     enrollment_only: bool,
 }
 impl ContactRecord {
@@ -259,12 +243,12 @@ impl ContactRecord {
                 .as_bytes(),
         )?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if !matches!(value["v"].as_u64(), Some(1 | 2)) {
+        if value["v"].as_u64() != Some(u64::from(CONTACT_VERSION)) {
             return Err("unsupported contact version".into());
         }
         let record: Self = serde_json::from_value(value)?;
-        if record.enrollment_only != (record.v == 2) || (record.enrollment_only && !record.issuer) {
-            return Err("invalid contact routing version".into());
+        if record.enrollment_only && !record.issuer {
+            return Err("invalid enrollment-only contact".into());
         }
         Ok(record)
     }
@@ -294,7 +278,6 @@ pub(crate) struct Invite {
     publisher: PublicKey,
     expires: u64,
     pub(crate) profile: Profile,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     via_custody: bool,
 }
 /// Sealed under a key derived from the invitation token.
@@ -337,14 +320,8 @@ struct Sealed {
     issuers: Vec<String>,
 }
 impl Sealed {
-    /// Earlier issuers sealed the reader keys alone.
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
-        serde_json::from_slice(bytes).or_else(|_| {
-            Ok(Self {
-                keys: serde_json::from_slice(bytes)?,
-                issuers: Vec::new(),
-            })
-        })
+        Ok(serde_json::from_slice(bytes)?)
     }
 }
 
@@ -357,20 +334,12 @@ impl Invite {
                 .as_bytes(),
         )?;
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        match value["v"].as_u64() {
-            Some(3 | 4) => {
-                let invite: Self = serde_json::from_value(value)?;
-                Contact::checked(invite.routes.clone())?;
-                if invite.via_custody != (invite.v == 4) {
-                    return Err("invalid invitation routing version".into());
-                }
-                Ok(invite)
-            }
-            Some(1 | 2) => {
-                Err("this invitation names no grant profile; ask the issuer for a new one".into())
-            }
-            _ => Err("unsupported invitation version".into()),
+        if value["v"].as_u64() != Some(u64::from(INVITE_VERSION)) {
+            return Err("unsupported invitation version".into());
         }
+        let invite: Self = serde_json::from_value(value)?;
+        Contact::checked(invite.routes.clone())?;
+        Ok(invite)
     }
 }
 /// A pending join or installation, persisted before anything is sent, so
@@ -519,38 +488,12 @@ fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
 }
 
 impl Settings {
-    /// Loads the identity, migrating versions 3–7. Any other version
-    /// is refused. Returns whether pre-v5 transport keys need migration.
-    pub fn load(path: &Path) -> Result<(Self, bool), Failure> {
-        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-        let migrated = match value["version"].as_u64() {
-            Some(8) => false,
-            Some(5..=7) => {
-                value["version"] = VERSION.into();
-                false
-            }
-            Some(4) => {
-                migrate_v4(&mut value)?;
-                true
-            }
-            Some(3) => {
-                migrate_v3(&mut value)?;
-                migrate_v4(&mut value)?;
-                true
-            }
-            Some(newer) if newer > u64::from(VERSION) => {
-                return Err(format!(
-                    "this directory was written by a newer SDK (identity version {newer}); upgrade to open it"
-                )
-                .into());
-            }
-            _ => {
-                return Err(
-                    "this directory belongs to another SDK profile; create or join the domain again"
-                        .into(),
-                );
-            }
-        };
+    /// Loads only the current identity format, without changing the file or keys.
+    pub fn load(path: &Path) -> Result<Self, Failure> {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        if value["version"].as_u64() != Some(u64::from(VERSION)) {
+            return Err("unsupported identity version; reinstall the domain".into());
+        }
         let settings: Self = serde_json::from_value(value)?;
         for contact in settings
             .peers
@@ -569,7 +512,7 @@ impl Settings {
         {
             return Err("identity holds too many peers".into());
         }
-        Ok((settings, migrated))
+        Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<(), Failure> {
         write_private(path, &serde_json::to_vec(self)?)
@@ -1383,7 +1326,7 @@ impl Settings {
     }
     fn minting(&mut self) -> Result<&mut Minting, Failure> {
         self.minting.as_mut().ok_or_else(|| {
-            "this device assigns no author numbers; a migrated issuer claims a range first".into()
+            "this device assigns no author numbers; claim an author range first".into()
         })
     }
     /// The collection whose table `table` names.
@@ -1640,8 +1583,7 @@ impl Settings {
             .ok_or("empty pseudonym")?;
         Ok((node, self.collection_of(table)?, author))
     }
-    /// Gives an issuer without one, such as one migrated from identity
-    /// version 6 or 7, the author numbers it assigns. Ranges of issuers must
+    /// Gives an issuer without one the author numbers it assigns. Ranges of issuers must
     /// not overlap; nothing can check that between them.
     pub fn claim_authors(&mut self, range: AuthorRange) -> Result<(), Failure> {
         if !self.issuer() || self.minting.is_some() {
@@ -2505,76 +2447,6 @@ impl Settings {
     }
 }
 
-/// Rewrites a version 4 identity: the creator becomes an issuer, a member
-/// a writer of every collection renewed by its creator, and every held
-/// reader key is key epoch 1. A pending invitation named no profile and
-/// is dropped.
-fn migrate_v4(value: &mut serde_json::Value) -> Result<(), Failure> {
-    let invalid = || -> Failure { "invalid version 4 identity".into() };
-    let schema = Schema::parse(&serde_json::to_string(&value["schema"])?)?;
-    let collections: Vec<String> = schema.names().into_iter().map(String::from).collect();
-    let writer = serde_json::json!({"kind": "writer", "scopes": collections});
-    let object = value.as_object_mut().ok_or_else(invalid)?;
-    let role = object.remove("role").ok_or_else(invalid)?;
-    let (profile, authority, issuers) = match role["role"].as_str() {
-        Some("creator") => {
-            let mut devices = role["devices"].clone();
-            for device in devices.as_object_mut().ok_or_else(invalid)?.values_mut() {
-                device["profile"] = writer.clone();
-            }
-            (
-                serde_json::json!({"kind": "issuer"}),
-                serde_json::json!({"invitation": null, "devices": devices, "rotation": null}),
-                serde_json::json!([]),
-            )
-        }
-        Some("member") => (
-            writer,
-            serde_json::Value::Null,
-            serde_json::json!([role["creator"]]),
-        ),
-        _ => return Err(invalid()),
-    };
-    let keys: serde_json::Map<String, serde_json::Value> = collections
-        .iter()
-        .map(|name| (name.clone(), serde_json::json!([1])))
-        .collect();
-    object.insert("profile".into(), profile);
-    object.insert("authority".into(), authority);
-    object.insert("issuers".into(), issuers);
-    object.insert("keys".into(), keys.into());
-    object.insert("version".into(), VERSION.into());
-    Ok(())
-}
-
-/// Rewrites a version 3 identity: the transport-kind binding and the
-/// creator's address become one route of the creator's contact.
-fn migrate_v3(value: &mut serde_json::Value) -> Result<(), Failure> {
-    let object = value.as_object_mut().ok_or("invalid identity")?;
-    let transport = match object.remove("transport") {
-        Some(serde_json::Value::String(transport)) => transport,
-        _ => return Err("invalid version 3 identity".into()),
-    };
-    let mut peers = serde_json::Map::new();
-    if object["role"]["role"] == "member" {
-        let creator = object["role"]["creator"].take();
-        let (Some(node), Some(address)) = (creator["node"].as_str(), creator["address"].as_str())
-        else {
-            return Err("invalid version 3 identity".into());
-        };
-        let routes = if transport.is_empty() || address.is_empty() {
-            serde_json::json!([])
-        } else {
-            serde_json::json!([{"transport": transport, "address": address}])
-        };
-        peers.insert(node.to_owned(), serde_json::json!({"routes": routes}));
-        object["role"]["creator"] = serde_json::json!(node);
-    }
-    object.insert("peers".into(), peers.into());
-    object.insert("version".into(), 4.into());
-    Ok(())
-}
-
 /// A stream to the first of `addresses` that answers.
 pub async fn dial(
     transport: &dyn Transport,
@@ -2665,16 +2537,7 @@ async fn read_message(stream: &mut Stream) -> Result<Vec<u8>, Failure> {
 /// routes. Grants, invitation token and issuer identity stay unchanged.
 pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Failure> {
     fn contact(uri: &str) -> Result<ContactRecord, Failure> {
-        let bytes = BASE64URL_NOPAD.decode(
-            uri.trim()
-                .strip_prefix("rocky://peer/")
-                .ok_or("invalid contact URI")?
-                .as_bytes(),
-        )?;
-        let record: ContactRecord = serde_json::from_slice(&bytes)?;
-        if !matches!(record.v, 1 | 2) || record.enrollment_only != (record.v == 2) {
-            return Err("unsupported contact routing version".into());
-        }
+        let record = ContactRecord::parse(uri)?;
         Contact::checked(record.routes.clone())?;
         Ok(record)
     }
@@ -2685,7 +2548,6 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
             return Err("relay belongs to another domain".into());
         }
         invitation.routes = relay.routes;
-        invitation.v = 4;
         invitation.via_custody = true;
         Ok(format!(
             "rocky://join/{}",
@@ -2700,11 +2562,51 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
             return Err("relay belongs to another domain".into());
         }
         issuer.routes = relay.routes;
-        issuer.v = 2;
         issuer.enrollment_only = true;
         Ok(format!(
             "rocky://peer/{}",
             BASE64URL_NOPAD.encode(&serde_json::to_vec(&issuer)?)
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contact_versions_are_independent_of_routing_flags() {
+        let key = PrivateKey::new().public_key();
+        let mut record = ContactRecord {
+            v: CONTACT_VERSION,
+            publisher: key,
+            node: key,
+            routes: Vec::new(),
+            issuer: true,
+            enrollment_only: false,
+        };
+        let uri = |record: &ContactRecord| {
+            format!(
+                "rocky://peer/{}",
+                BASE64URL_NOPAD.encode(&serde_json::to_vec(record).unwrap())
+            )
+        };
+        for enrollment_only in [false, true] {
+            record.enrollment_only = enrollment_only;
+            assert_eq!(
+                ContactRecord::parse(&uri(&record)).unwrap().enrollment_only,
+                enrollment_only
+            );
+        }
+        for version in [0, 1, 3, u32::MAX] {
+            record.v = version;
+            assert_eq!(
+                ContactRecord::parse(&uri(&record))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "unsupported contact version"
+            );
+        }
     }
 }

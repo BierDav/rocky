@@ -60,7 +60,6 @@ pub struct HorizonStatement {
     /// Digest of the materialized input, including hidden rows and tombstones.
     pub state: Commitment,
     pub existence: Vec<HorizonCut>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bases: Vec<ExistenceBase>,
     /// Parent row cuts in the same reader scope; logged parents need only liveness.
     pub related: Vec<HorizonCut>,
@@ -73,25 +72,25 @@ impl HorizonStatement {
                 && logs.windows(2).all(|p| p[0].signer < p[1].signer)
                 && logs.iter().all(|log| log.sequence <= i64::MAX as u64)
         };
-        if ![1, HORIZON_FORMAT].contains(&self.format)
-            || (self.format == 1 && !self.bases.is_empty())
-            || (self.format == 2
-                && (self.bases.len() != self.existence.len()
-                    || self.bases.iter().zip(&self.existence).any(|(base, cut)| {
-                        base.scope != cut.scope
-                            || !encode(base).is_ok_and(|bytes| {
-                                rocky_core::commitment("rocky.horizon-existence-state.v2", &bytes)
-                                    == cut.state
-                            })
-                            || base.identities.len() > 256
-                            || base
-                                .identities
-                                .windows(2)
-                                .any(|pair| pair[0].author >= pair[1].author)
-                            || base.identities.iter().any(|mark| {
-                                rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err()
-                            })
-                    })))
+        if self.format != HORIZON_FORMAT {
+            return Err(denied("unsupported horizon format"));
+        }
+        if self.bases.len() != self.existence.len()
+            || self.bases.iter().zip(&self.existence).any(|(base, cut)| {
+                base.scope != cut.scope
+                    || !encode(base).is_ok_and(|bytes| {
+                        rocky_core::commitment("rocky.horizon-existence-state.v2", &bytes)
+                            == cut.state
+                    })
+                    || base.identities.len() > 256
+                    || base
+                        .identities
+                        .windows(2)
+                        .any(|pair| pair[0].author >= pair[1].author)
+                    || base.identities.iter().any(|mark| {
+                        rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err()
+                    })
+            })
             || self.sequence == 0
             || (self.sequence == 1) != self.previous.is_none()
             || !logs_valid(&self.logs)
@@ -111,9 +110,7 @@ impl HorizonStatement {
             || !self.peers.windows(2).all(|p| p[0].node < p[1].node)
             || self.peers.iter().any(|peer| peer.expires <= self.issued)
         {
-            return Err(denied(
-                "unsupported or invalid horizon statement; upgrade the runtime",
-            ));
+            return Err(denied("invalid horizon statement"));
         }
         Ok(())
     }
@@ -158,7 +155,25 @@ impl SignedHorizon {
         Ok(bytes)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, crate::MAX_CREDENTIAL_BYTES)
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        #[derive(Deserialize)]
+        struct Envelope {
+            statement: Format,
+        }
+        if bytes.len() > crate::MAX_CREDENTIAL_BYTES {
+            return Err(denied("secure frame quota"));
+        }
+        let envelope: Envelope =
+            p2panda_core::cbor::decode_cbor(bytes).map_err(|_| denied("invalid secure frame"))?;
+        if envelope.statement.format != HORIZON_FORMAT {
+            return Err(denied("unsupported horizon format"));
+        }
+        let signed: Self = decode_bounded(bytes, crate::MAX_CREDENTIAL_BYTES)?;
+        signed.statement.validate()?;
+        Ok(signed)
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,6 +205,71 @@ impl HorizonAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_current_horizons_roundtrip_and_other_versions_share_one_refusal() {
+        let issuer = PrivateKey::new();
+        let scope = ResourceScope {
+            domain: rocky_core::Scope {
+                mesh: rocky_core::MeshId([1; 16]),
+                app: rocky_core::AppId([2; 16]),
+                domain: rocky_core::DomainId([3; 16]),
+            },
+            table: [4; 32],
+            encryption: [5; 32],
+        };
+        let statement = HorizonStatement {
+            format: HORIZON_FORMAT,
+            manifest: [6; 32],
+            policy_epoch: 1,
+            scope,
+            sequence: 1,
+            previous: None,
+            issued: 10,
+            logs: Vec::new(),
+            state: [7; 32],
+            existence: Vec::new(),
+            bases: Vec::new(),
+            related: Vec::new(),
+            peers: Vec::new(),
+        };
+        let signed = SignedHorizon::sign(statement.clone(), &issuer).unwrap();
+        let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
+        current.verify(issuer.public_key()).unwrap();
+        assert_eq!(current.statement, statement);
+        for format in [0, 1, 3, u32::MAX] {
+            let mut other = signed.clone();
+            other.statement.format = format;
+            assert_eq!(
+                other.verify(issuer.public_key()).unwrap_err().to_string(),
+                "unsupported horizon format"
+            );
+            assert_eq!(
+                SignedHorizon::from_bytes(&other.to_bytes().unwrap())
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported horizon format"
+            );
+            assert!(SignedHorizon::sign(other.statement, &issuer).is_err());
+            #[derive(Serialize)]
+            struct Format {
+                format: u32,
+            }
+            #[derive(Serialize)]
+            struct Envelope {
+                statement: Format,
+            }
+            let incomplete = encode(&Envelope {
+                statement: Format { format },
+            })
+            .unwrap();
+            assert_eq!(
+                SignedHorizon::from_bytes(&incomplete)
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported horizon format"
+            );
+        }
+    }
     #[test]
     fn behind_deadline_uses_the_shorter_bound_without_overflow() {
         let node = PrivateKey::new().public_key();

@@ -371,7 +371,8 @@ fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey
         expires: u64::MAX,
         epoch,
         delegations,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     SecureConfig {
         publisher: f.publisher.public_key(),

@@ -1,6 +1,8 @@
 # 1. Remove compatibility code
 
-Status: not started.
+Status: incomplete; credential, horizon, SDK identity/routing and client-cache
+slices implemented. The completion gate remains blocked by the formats listed
+under remaining contracts below.
 Owner: every crate with a persisted or wire format; the Kotlin SDK and its
 qualification fixtures. Depends on nothing. Wave 0.
 Follow the [execution contract](README.md#agent-execution-contract).
@@ -86,3 +88,91 @@ Further sites found on 2026-10-08:
 - Application schema generation transitions still pass their tests.
 - `./scripts/check` and the Kotlin checks pass; the removed lines and tests
   are counted in this brief.
+
+## Phase 1 inventory (2026-10-08)
+
+Verified against source at parent `357dbbb4`; this inventory distinguishes
+format compatibility from product history. Completion is not yet claimed.
+
+| Owner | Multiple readers, migrations or historical refusals | Current format / required action |
+| --- | --- | --- |
+| `rocky-core` | `LogicalSchema` accepts 1/2/3; `SchemaDefinition` accepts 2/3; omitted descriptor fields preserve fingerprints; unused `reuses_keys` and `KeyReuse` | Descriptor and definition 3; require identity columns, delete old tags and preservation-only fields/branches |
+| `rocky-coordinator` | Client evidence cache: untagged `LegacyCache`, upgrade from 2, optional `settled`; old `raft.cbor` refusal | Client cache 3 with required floors; audit raft store's single format refusal |
+| `rocky-credentials` | Capability extension 1/2 and optional extension preserving signatures; horizon 1/2 and optional bases; key envelopes' version checks | Extension 2, horizon 2; one current capability encoding; retain only current envelope versions |
+| `rocky-sdk` | Identity 3–7 migrations to 8 and transport-key creation; invitation 3/4 and contact 1/2 use versions as routing flags; renewal `Sealed` fallback to bare keys; `creator` JSON alias | Identity 8, invitation 4 and contact 2 with explicit routing flags; one sealed-renewal shape; remove alias |
+| `rocky-sdk` | Legacy collection/register schemas, Room/policy generator `generate_room`, descriptor default 2 | Definition/descriptor 3; delete generator and fixtures; update Kotlin producers |
+| `rocky-secure` | Frame default 1, row readers 1–5, command body 1/2, optional result evidence; replica identity labels v1–v5 accepted beside current identity | One current frame/body encoding; one identity label; required result evidence |
+| `rocky-secure` | Checkpoint 2 upgrade, accepted checkpoints 3–6, optional witness/partition/finalized fields, `secure_legacy_creations`; existence records 1/2, format-1 horizon existence | Checkpoint 6, existence 2, horizon 2; delete upgrades/witness transfers and legacy table |
+| `rocky-runtime` / `rocky-storage` | Turso sidecar/foreign-engine refusal, old descriptor refusal, unscoped single-domain file open/refusal, missing-checkpoint adoption, request-hold backfill, `CommandState::Prepared` | One current file identity checked before initialization; delete historical adoption/backfill and specific refusal paths |
+| Kotlin | `schema-qualification/fixtures/legacy` and legacy-loading checks; schema format producers | Current schema fixtures only; version refusal regression remains |
+
+Application schema generations and signed lineage remain authenticated history
+within the current format. Placement relocation (`rocky_migrations`) remains a
+resumable product operation. Reader-key epochs and rotation remain features;
+versioned cryptographic domain-separation labels are not themselves old readers.
+The phase has no dependency prerequisite. Existing partition/constraint refusals
+remain in force; this phase does not implement later roadmap phases.
+
+## Implemented slices and evidence
+
+The coordinator now reads only cache 3 with explicit acknowledged floors and
+checks it before lock-file writes. Credentials require extension 2, including
+empty authority, and horizon 2 with explicit existence bases. Horizon version
+refusal precedes decoding the rest of the signed body; the format-1 existence
+calculation is deleted. SDK identities read only 8 without migration or missing
+transport-key creation. Invitations use 4 and contacts 2 with independent,
+explicit routing flags. Renewal no longer falls back to bare reader keys;
+JSON replies carry `issuer` only. Current credential constructors, including
+the desktop composition and runtime-scaling probes, use explicit extensions.
+
+Three compatibility-only Rust tests were deleted; one migration Rust test and
+one migration Kotlin test were replaced with refusal regressions. Three mixed
+retention/authority tests keep their behavior checks without legacy clauses.
+Four additional Rust regressions cover cache versions/missing floors, horizon
+versions, extension versions/empty authority and contact routing flags. Two
+legacy Kotlin fixture files and their two qualification assertions were removed.
+SDK refusal tests compare identity/database/secret-file bytes and prove that
+unsupported invitations create no installation directory.
+
+Measured diff: 49 files, 624 added lines and 993 removed lines.
+Counts include source, tests, fixtures and guides; they are diff counts, not net
+production-code removal.
+
+Final diff counts and command results are recorded in the local evidence report
+at `local/p01-evidence/report.md`. The evidence is for this partial change,
+not the whole phase. Full Kotlin checking passed with 50 JVM tests after
+rebuilding the Android runtime. Native checks passed 2 tests; packaged JVM
+consumption passed; schema qualification passed 6 descriptor/fingerprint pairs;
+schema tests passed 4; Room passed 12; shopping checks passed 25 JVM tests and
+desktop compilation; SQLite passed 5; inventory qualification passed, including
+3 intentionally rejected Kotlin type-mismatch fixtures. Credentials passed 24.
+Rust baseline and secure-suite completion must be read from the final report.
+
+## Remaining blocking contracts
+
+The first two completion bullets are not satisfied. There is no external
+implementation dependency blocking this phase; the following required work
+remains in this change's continuation:
+
+- Core descriptor 1/2/3 and definition 2/3 must become current 3 only. Remove
+  unused `reuses_keys`/`KeyReuse` and fingerprint-preservation omissions; update
+  Kotlin producers and supported generation fixtures, preserving generation
+  transitions.
+- SDK collection/register schema paths and `generate_room` remain. Delete the
+  generator and its fixtures/tests, replacing meaningful storage/session tests
+  with current definitions rather than dropping their invariants.
+- Secure row formats 1–5, bundle bodies 1/2, checkpoint upgrade and readers
+  3–6, old replica identity adoption, existence records 1/2, witness transfer,
+  `secure_legacy_creations` and defaulted result evidence remain. One current
+  checkpoint must still represent optional partition, horizon and finalization
+  state without falsely finalizing an admitted cut.
+- Runtime/storage historical engine/sidecar and row-identity refusal paths,
+  unscoped file opening/refusal, checkpoint adoption, request-hold backfill and
+  `CommandState::Prepared` remain. Replace them with one current file-format
+  admission before initialization writes; do not remove durability or recovery
+  state needed by current files.
+- Finish owning guides and remaining decision compatibility clauses, then
+  recount removals and rerun every completion gate after those changes.
+
+No device UI, Android device execution, real-network distributed deployment or
+performance qualification is established by this partial change's checks.

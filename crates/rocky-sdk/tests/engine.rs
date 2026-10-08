@@ -154,12 +154,12 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     let transport = || at(port);
     let creator = Db::create(&root.path().join("a"), transport())?;
     assert_eq!(
-        creator.ok(json!({"type": "domain"})).await["creator"],
+        creator.ok(json!({"type": "domain"})).await["issuer"],
         json!(true)
     );
     let member = Db::join(&root.path().join("b"), &creator.invite().await, at(0))?;
     assert_eq!(
-        member.ok(json!({"type": "domain"})).await["creator"],
+        member.ok(json!({"type": "domain"})).await["issuer"],
         json!(false)
     );
     assert_eq!(member.scope, creator.scope);

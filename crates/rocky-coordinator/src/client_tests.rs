@@ -34,7 +34,7 @@ fn evidence(scope: Scope, sequence: u64, key: &PrivateKey) -> ReceiptEvidence {
 }
 
 #[test]
-fn evidence_cache_migrates_and_plateaus_without_losing_scope_watermarks() {
+fn evidence_cache_plateaus_without_losing_scope_watermarks() {
     let key = PrivateKey::new();
     let other = Scope {
         domain: DomainId([9; 16]),
@@ -42,12 +42,14 @@ fn evidence_cache_migrates_and_plateaus_without_losing_scope_watermarks() {
     };
     let watermark = evidence(other, 1, &key);
     assert!(encode(&watermark).unwrap().len() <= 4096);
-    let legacy = LegacyCache {
+    let current = ClientCache {
+        format: CACHE_FORMAT,
+        settled: Vec::new(),
         genesis: [4; 32],
         receipts: vec![watermark.clone()],
         heads: Vec::new(),
     };
-    let mut cache = ClientCache::read(&encode(&legacy).unwrap(), fixtures::LAPTOP).unwrap();
+    let mut cache = ClientCache::read(&encode(&current).unwrap()).unwrap();
     assert_eq!(cache.format, CACHE_FORMAT);
     for sequence in 1..=MAX_EVIDENCE as u64 + 32 {
         cache
@@ -64,11 +66,11 @@ fn evidence_cache_migrates_and_plateaus_without_losing_scope_watermarks() {
         .unwrap();
     assert_eq!(newest, MAX_EVIDENCE as u64 + 32);
     assert_eq!(cache.receipts.len(), MAX_EVIDENCE);
-    let roundtrip = ClientCache::read(&encode(&cache).unwrap(), fixtures::LAPTOP).unwrap();
+    let roundtrip = ClientCache::read(&encode(&cache).unwrap()).unwrap();
     assert_eq!(roundtrip.receipts, cache.receipts);
     cache.format += 1;
     assert!(matches!(
-        ClientCache::read(&encode(&cache).unwrap(), fixtures::LAPTOP),
+        ClientCache::read(&encode(&cache).unwrap()),
         Err(CoordinationError::UnsupportedFormat)
     ));
 }
@@ -100,16 +102,38 @@ fn unacknowledged_own_evidence_is_never_evicted() {
     cache.insert(next, fixtures::PHONE).unwrap();
     assert!(!cache.receipts.iter().any(|e| e.receipt.sequence == 1));
     assert!(cache.receipts.iter().any(|e| e.receipt.sequence == 11));
-    // A version 2 file migrates; floors survive a round trip.
-    let roundtrip = ClientCache::read(&encode(&cache).unwrap(), fixtures::PHONE).unwrap();
+    let roundtrip = ClientCache::read(&encode(&cache).unwrap()).unwrap();
     assert_eq!(roundtrip.settled, vec![(fixtures::SCOPE, 10)]);
-    let mut old = cache.clone();
-    old.format = 2;
-    old.settled.clear();
-    assert_eq!(
-        ClientCache::read(&encode(&old).unwrap(), fixtures::PHONE)
-            .unwrap()
-            .format,
-        CACHE_FORMAT
-    );
+}
+
+#[test]
+fn evidence_cache_refuses_every_other_version_and_missing_floors() {
+    let mut cache = ClientCache {
+        format: CACHE_FORMAT,
+        genesis: [4; 32],
+        receipts: Vec::new(),
+        heads: Vec::new(),
+        settled: Vec::new(),
+    };
+    for format in [0, 1, 2, 4, u32::MAX] {
+        cache.format = format;
+        assert!(matches!(
+            ClientCache::read(&encode(&cache).unwrap()),
+            Err(CoordinationError::UnsupportedFormat)
+        ));
+    }
+    #[derive(Serialize)]
+    struct MissingFloors {
+        format: u32,
+        genesis: Commitment,
+        receipts: Vec<ReceiptEvidence>,
+        heads: Vec<StrongHead>,
+    }
+    let incomplete = MissingFloors {
+        format: CACHE_FORMAT,
+        genesis: cache.genesis,
+        receipts: cache.receipts,
+        heads: cache.heads,
+    };
+    assert!(ClientCache::read(&encode(&incomplete).unwrap()).is_err());
 }

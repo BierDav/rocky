@@ -26,14 +26,12 @@ fn delegated(
         expires: ROOT_EXPIRES,
         epoch: 1,
         delegations: 2,
-        extension: Some(
-            rocky_credentials::Extension::new(rocky_credentials::Extended {
-                partitions: Vec::new(),
-                authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
-                device: None,
-            })
-            .unwrap(),
-        ),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            partitions: Vec::new(),
+            authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
+            device: None,
+        })
+        .unwrap(),
     };
     let mut middle = Capability {
         subject: deployment.public_key(),
@@ -46,7 +44,8 @@ fn delegated(
         subject: node.public_key(),
         kind: PrincipalKind::Node,
         delegations: 0,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
         ..middle.clone()
     };
     CredentialChain(vec![
@@ -81,14 +80,12 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         &|link, _| link.not_before = 0,
         &|link, _| link.delegations = 2,
         &|link, _| {
-            link.extension = Some(
-                rocky_credentials::Extension::new(rocky_credentials::Extended {
-                    partitions: Vec::new(),
-                    authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
-                    device: None,
-                })
-                .unwrap(),
-            )
+            link.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
+                partitions: Vec::new(),
+                authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
+                device: None,
+            })
+            .unwrap()
         },
     ];
     // The narrowing chain is admitted everywhere below.

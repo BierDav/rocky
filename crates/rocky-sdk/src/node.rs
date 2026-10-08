@@ -535,7 +535,6 @@ impl Node {
                 let settings = self.settings.lock().await;
                 Ok(json!({
                     "scope": self.domain.scope,
-                    "creator": settings.issuer(),
                     "issuer": settings.issuer(),
                     "profile": settings.profile,
                     "collections": settings.schema.names(),
@@ -883,7 +882,6 @@ impl Node {
                 let issuer = settings.issuers.contains(node);
                 json!({
                     "node": node.to_hex(),
-                    "creator": issuer,
                     "issuer": issuer,
                     "routes": contact.routes,
                     "state": state,
@@ -1069,7 +1067,6 @@ impl Node {
             "node": status.node.to_hex(),
             "epoch": status.epoch.to_string(),
             "expires": status.expires.to_string(),
-            "creator": settings.issuer(),
             "issuer": settings.issuer(),
             "profile": settings.profile,
             "transport": self.kind(),

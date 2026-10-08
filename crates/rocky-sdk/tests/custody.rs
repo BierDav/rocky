@@ -293,7 +293,7 @@ async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator
 }
 
 #[tokio::test]
-async fn version_six_migrates_and_routed_records_preserve_authority() -> Result<(), Failure> {
+async fn routed_records_preserve_authority_with_the_current_version() -> Result<(), Failure> {
     use data_encoding::BASE64URL_NOPAD;
     use rocky_sdk::route_enrollment;
     let root = tempfile::tempdir()?;
@@ -318,25 +318,6 @@ async fn version_six_migrates_and_routed_records_preserve_authority() -> Result<
     assert_eq!(routed["enrollment_only"], true);
     assert_eq!(routed["node"], original["node"]);
     assert_eq!(routed["publisher"], original["publisher"]);
-    let node = issuer.node().await;
     issuer.close().await;
-    let path = root.path().join("identity.json");
-    let mut identity: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    identity["version"] = json!(6);
-    identity
-        .as_object_mut()
-        .ok_or("identity")?
-        .remove("enrollment_routes");
-    identity
-        .as_object_mut()
-        .ok_or("identity")?
-        .remove("enrollment_upstream");
-    std::fs::write(&path, serde_json::to_vec(&identity)?)?;
-    let issuer = Device::open(root.path(), None)?;
-    assert_eq!(issuer.node().await, node);
-    issuer.close().await;
-    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    assert_eq!(identity["version"], 8);
-    assert_eq!(identity["enrollment_routes"], json!({}));
     Ok(())
 }

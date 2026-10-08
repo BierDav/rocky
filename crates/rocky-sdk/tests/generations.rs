@@ -288,26 +288,3 @@ async fn a_handler_generation_runs_only_after_the_coordinator_activates_it() -> 
     a.close().await;
     Ok(())
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn version_five_identity_migrates_without_replacing_signing_keys() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
-    let device = Device::create(root.path(), None)?;
-    let node = device.node().await;
-    device.add(1, "retained").await;
-    device.close().await;
-    let path = root.path().join("identity.json");
-    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    identity["version"] = json!(5);
-    let object = identity.as_object_mut().expect("identity object");
-    object.remove("lineage");
-    object.remove("minting");
-    std::fs::write(&path, serde_json::to_vec(&identity)?)?;
-    let device = Device::open(root.path(), None)?;
-    assert_eq!(device.node().await, node);
-    assert_eq!(device.titles().await, ["retained"]);
-    device.close().await;
-    let migrated: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    assert_eq!(migrated["version"], 8);
-    Ok(())
-}

@@ -60,7 +60,8 @@ impl Fixture {
             expires: u64::MAX,
             epoch: 1,
             delegations,
-            extension: None,
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+                .unwrap(),
         };
         CredentialChain(vec![
             SignedCapability::sign(
@@ -849,7 +850,8 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         expires: 100,
         epoch: 1,
         delegations: 1,
-        extension: None,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
+            .unwrap(),
     };
     let base = Capability {
         subject: node.public_key(),

@@ -69,7 +69,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|peer| peer["creator"] == json!(true))
+        .filter(|peer| peer["issuer"] == json!(true))
         .cloned()
         .collect();
     assert_eq!(creators.len(), 1);
@@ -263,165 +263,84 @@ fn encode(value: &Value, prefix: &str) -> String {
         BASE64URL_NOPAD.encode(value.to_string().as_bytes())
     )
 }
-/// Rewrites a current identity file as version 4 wrote it, or as version
-/// 3 did when `transport` names the kind it was bound to.
-fn downgrade(directory: &Path, transport: Option<&str>) -> Result<(), Failure> {
-    let path = directory.join("identity.json");
-    let mut identity: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-    assert_eq!(identity["version"], 8);
-    let object = identity.as_object_mut().ok_or("identity")?;
-    object.remove("minting");
-    let authority = object.remove("authority").ok_or("authority")?;
-    let issuers = object.remove("issuers").ok_or("issuers")?;
-    object.remove("profile");
-    object.remove("keys");
-    let role = if authority.is_null() {
-        json!({"role": "member", "creator": issuers[0]})
-    } else {
-        let mut devices = authority["devices"].clone();
-        for device in devices.as_object_mut().ok_or("devices")?.values_mut() {
-            device.as_object_mut().ok_or("device")?.remove("profile");
-        }
-        json!({"role": "creator", "invitation": null, "devices": devices})
-    };
-    object.insert("role".into(), role);
-    object.insert("version".into(), json!(4));
-    if let Some(transport) = transport {
-        let peers = object.remove("peers").ok_or("peers")?;
-        if object["role"]["role"] == "member" {
-            let node = object["role"]["creator"].clone();
-            let address = peers[node.as_str().ok_or("creator")?]["routes"][0]["address"].clone();
-            object["role"]["creator"] = json!({"node": node, "address": address});
-        }
-        object.insert("transport".into(), json!(transport));
-        object.insert("version".into(), json!(3));
-    }
-    std::fs::write(path, identity.to_string())?;
-    Ok(())
-}
-
 #[tokio::test]
-async fn earlier_records_migrate_and_unknown_versions_are_refused() -> Result<(), Failure> {
+async fn other_identity_and_invitation_versions_are_refused_without_writes() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let devices = enroll(root.path(), &hub, &["b", "c"]).await?;
-    let [a, b, c] = &devices[..] else {
-        return Err("devices".into());
-    };
-    a.add(1, "Milk").await;
-    // Invitations from before grant profiles granted every right. They and
-    // unknown versions enroll nobody.
+    let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer")))?;
     let invite = decode(&a.invite().await, "rocky://join/")?;
-    assert_eq!(invite["v"], 3);
-    assert_eq!(
-        invite["profile"],
-        json!({"kind": "writer", "scopes": ["items"]})
-    );
-    let first = json!({
-        "v": 1,
-        "transport": invite["routes"][0]["transport"],
-        "address": invite["routes"][0]["address"],
-        "token": invite["token"],
-        "publisher": invite["publisher"],
-        "expires": invite["expires"],
-    });
-    let mut second = invite.clone();
-    second["v"] = json!(2);
-    second.as_object_mut().ok_or("invite")?.remove("profile");
-    let mut newer = invite.clone();
-    newer["v"] = json!(4);
-    for (name, refused) in [("d", first), ("e", second), ("f", newer)] {
-        let joined = Device::join(
-            &root.path().join(name),
-            &encode(&refused, "rocky://join/"),
-            memory(&hub, name),
+    assert_eq!(invite["v"], 4);
+    for version in [0, 1, 2, 3, 5, u32::MAX] {
+        let mut other = invite.clone();
+        other["v"] = json!(version);
+        let directory = root.path().join(format!("join-{version}"));
+        assert!(
+            Device::join(
+                &directory,
+                &encode(&other, "rocky://join/"),
+                memory(&hub, "join")
+            )
+            .is_err()
         );
-        assert!(joined.is_err());
+        assert!(!directory.exists());
     }
-    for device in [a, b, c] {
-        device.close().await;
-    }
-
-    // A member from before version 5 that never served a peer has no
-    // route key yet. The migration makes it, once.
-    let secrets = |name: &str| -> Result<Vec<String>, Failure> {
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(root.path().join(name).join("secrets"))? {
-            names.push(entry?.file_name().to_string_lossy().into_owned());
-        }
-        names.sort();
-        Ok(names)
-    };
-    let route_key = |name: &str| -> Result<std::path::PathBuf, Failure> {
-        let file = secrets(name)?
-            .into_iter()
-            .find(|file| file.ends_with(".transport"))
-            .ok_or("route key")?;
-        Ok(root.path().join(name).join("secrets").join(file))
-    };
-    std::fs::remove_file(route_key("b")?)?;
-    downgrade(&root.path().join("a"), Some("memory"))?;
-    downgrade(&root.path().join("b"), Some("memory"))?;
-    downgrade(&root.path().join("c"), None)?;
-    // Versions 3 and 4 open without a network and are rewritten once.
-    for name in ["b", "c"] {
-        let device = Device::open(&root.path().join(name), None)?;
-        let session = device.ok(json!({"type": "session"})).await;
-        assert_eq!(
-            session["profile"],
-            json!({"kind": "writer", "scopes": ["items"]})
-        );
-        assert_eq!(session["issuer"], json!(false));
-        device.close().await;
-        let saved: Value = serde_json::from_slice(&std::fs::read(
-            root.path().join(name).join("identity.json"),
-        )?)?;
-        assert_eq!(saved["version"], 8);
-        assert_eq!(saved["keys"], json!({"items": [1]}));
-        assert!(saved.get("transport").is_none() && saved.get("role").is_none());
-    }
-    let a = Device::open(&root.path().join("a"), Some(memory(&hub, "a")))?;
-    let b = Device::open(&root.path().join("b"), Some(memory(&hub, "b")))?;
-    let domain = a.ok(json!({"type": "domain"})).await;
-    assert_eq!(domain["profile"], json!({"kind": "issuer"}));
-    let devices = a.ok(json!({"type": "devices"})).await;
-    assert_eq!(devices["devices"].as_array().map(Vec::len), Some(2));
-    let issuer = b.peer(&a.node().await).await;
-    assert_eq!(issuer["issuer"], json!(true));
-    assert_eq!(
-        issuer["routes"],
-        json!([{"transport": "memory", "address": "a"}])
-    );
-    b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(b.titles().await, ["Milk"]);
-    // The migrated member renews with the migrated issuer.
-    b.ok(json!({"type": "renew"})).await;
+    a.add(1, "retained").await;
     a.close().await;
-    b.close().await;
-
-    // After the migration a lost key is an error: none is made in its place.
-    let before = secrets("b")?;
-    std::fs::remove_file(route_key("b")?)?;
-    assert!(Device::open(&root.path().join("b"), Some(memory(&hub, "b"))).is_err());
-    assert_eq!(secrets("b")?.len(), before.len() - 1);
-    let reader = before
-        .iter()
-        .find(|file| file.ends_with(".reader.items"))
-        .ok_or("reader key")?;
-    std::fs::remove_file(root.path().join("b/secrets").join(reader))?;
-    assert!(Device::open(&root.path().join("b"), None).is_err());
-    assert_eq!(secrets("b")?.len(), before.len() - 2);
-
-    // Other versions are refused and left as they are.
-    for version in [2, 9] {
-        let path = root.path().join("c/identity.json");
-        let mut identity: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-        identity["version"] = json!(version);
-        std::fs::write(&path, identity.to_string())?;
-        assert!(Device::open(&root.path().join("c"), None).is_err());
-        let kept: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-        assert_eq!(kept["version"], version);
+    let directory = root.path().join("a");
+    let path = directory.join("identity.json");
+    let original = std::fs::read(&path)?;
+    let database = std::fs::read(directory.join("rocky.sqlite"))?;
+    fn files(
+        directory: &Path,
+    ) -> Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>, Failure> {
+        let mut snapshot = std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                snapshot.extend(files(&path)?);
+            } else {
+                snapshot.insert(path.clone(), std::fs::read(path)?);
+            }
+        }
+        Ok(snapshot)
     }
+    let mut errors = Vec::new();
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9, u32::MAX] {
+        let mut identity: Value = serde_json::from_slice(&original)?;
+        identity["version"] = json!(version);
+        let bytes = serde_json::to_vec(&identity)?;
+        std::fs::write(&path, &bytes)?;
+        let before = files(&directory)?;
+        let opened = Device::open(&directory, None);
+        let error = match opened {
+            Err(error) => error.to_string(),
+            Ok(device) => {
+                device.close().await;
+                return Err("unsupported identity opened".into());
+            }
+        };
+        errors.push(error);
+        let after = files(&directory)?;
+        assert_eq!(
+            after.keys().collect::<Vec<_>>(),
+            before.keys().collect::<Vec<_>>()
+        );
+        for (path, bytes) in &before {
+            assert!(
+                after.get(path) == Some(bytes),
+                "file changed: {}",
+                path.display()
+            );
+        }
+        assert_eq!(std::fs::read(&path)?, bytes);
+        assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
+    }
+    assert!(errors.iter().all(|error| error == &errors[0]));
+    std::fs::write(&path, original)?;
+    let a = Device::open(&directory, None)?;
+    assert_eq!(a.titles().await, ["retained"]);
+    a.close().await;
     Ok(())
 }
 

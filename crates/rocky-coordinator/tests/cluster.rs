@@ -7,6 +7,25 @@ use support::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_persistent_voters_fence_recover_and_verify_offline() {
     let mut cluster = Cluster::start().await;
+    #[derive(serde::Serialize)]
+    struct OtherCache {
+        format: u32,
+    }
+    let path = cluster.dir.path().join("refused.evidence");
+    for format in [0, 1, 2, 4, u32::MAX] {
+        let bytes = p2panda_core::cbor::encode_cbor(&OtherCache { format }).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let refused = rocky_coordinator::service::NetworkCoordinator::open(
+            cluster.genesis.clone(),
+            cluster.genesis.root,
+            cluster.genesis.genesis.mesh,
+            cluster.phone.clone(),
+            path.clone(),
+        );
+        assert!(matches!(refused, Err(CoordinationError::UnsupportedFormat)));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!path.with_file_name("refused.evidence.lock").exists());
+    }
     let admin = cluster.client(&cluster.admin, "admin");
     let issuer = cluster.client(&cluster.issuer, "issuer");
     let alice = cluster.client(&cluster.executor, "alice");

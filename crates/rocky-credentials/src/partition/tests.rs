@@ -193,13 +193,11 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
         );
         // A malicious holder signs the expanded grant without using issuance APIs.
         let mut leaf = delegated.0[1].capability.clone();
-        leaf.extension = Some(
-            Extension::new(Extended {
-                partitions: vec![wide],
-                ..Extended::default()
-            })
-            .unwrap(),
-        );
+        leaf.extension = Extension::new(Extended {
+            partitions: vec![wide],
+            ..Extended::default()
+        })
+        .unwrap();
         let forged = CredentialChain(vec![
             prefix.0[0].clone(),
             SignedCapability::sign(leaf, &user).unwrap(),
@@ -564,11 +562,7 @@ fn partition_keys_open_only_for_the_pinned_recipient_context_and_epoch() {
 }
 
 #[test]
-fn legacy_verifiers_refuse_partition_extensions_and_selectors_cannot_be_dropped() {
-    #[derive(serde::Deserialize)]
-    struct Version {
-        version: u32,
-    }
+fn partition_selectors_cannot_be_dropped() {
     let publisher = PrivateKey::new();
     let user = PrivateKey::new();
     let node = PrivateKey::new();
@@ -583,18 +577,11 @@ fn legacy_verifiers_refuse_partition_extensions_and_selectors_cannot_be_dropped(
             VALIDITY,
         )
         .unwrap();
-    let extension = root.capability.extension.clone().unwrap();
-    let opaque: Vec<u8> =
-        decode_bounded(&encode(&extension).unwrap(), crate::MAX_CREDENTIAL_BYTES).unwrap();
-    let old: Version = p2panda_core::cbor::decode_cbor(opaque.as_slice()).unwrap();
-    assert_eq!(old.version, 2);
-    // `docs/runtime/credential-primitives.md`'s verifier accepts version 1 only.
-    assert_ne!(old.version, 1);
     let chain = CredentialChain(vec![root])
         .complete(&user, node.public_key())
         .unwrap();
     let mut leaf = chain.0[1].capability.clone();
-    leaf.extension = None;
+    leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();
     let dropped = CredentialChain(vec![
         chain.0[0].clone(),
         SignedCapability::sign(leaf, &user).unwrap(),
@@ -615,7 +602,7 @@ fn legacy_verifiers_refuse_partition_extensions_and_selectors_cannot_be_dropped(
             .is_err()
     );
     let mut parent = chain.0[0].capability.clone();
-    parent.extension = None;
+    parent.extension = crate::Extension::new(crate::Extended::default()).unwrap();
     let dropped = CredentialChain(vec![
         SignedCapability::sign(parent, &publisher).unwrap(),
         chain.0[1].clone(),

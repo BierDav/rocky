@@ -26,6 +26,10 @@ impl Fixture {
     fn config(&self, node: &PrivateKey) -> Result<SecureConfig, Error> {
         let manifest = self.app().definition();
         let (user, deployment) = (PrivateKey::new(), PrivateKey::new());
+        let extension = rocky_secure::credentials::Extension::new(
+            rocky_secure::credentials::Extended::default(),
+        )
+        .map_err(signing)?;
         let capability = |subject, kind, delegations| Capability {
             manifest: manifest.hash(),
             subject,
@@ -47,7 +51,7 @@ impl Fixture {
             expires: u64::MAX,
             epoch: 1,
             delegations,
-            extension: None,
+            extension: extension.clone(),
         };
         Ok(SecureConfig {
             publisher: self.publisher.public_key(),

@@ -207,6 +207,9 @@ impl Database {
     }
     fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
         let directory = open.directory.to_path_buf();
+        if let Install::Join { invitation } = &install {
+            crate::enrollment::Invite::parse(invitation)?;
+        }
         let setup = Setup {
             schema: Schema::parse(open.schema)?,
             secrets: open
@@ -586,13 +589,8 @@ async fn identity(
             .await
         }
         Install::Installed => {
-            let (mut settings, migrated) = Settings::load(path)?;
-            // Before version 5 a device made its route key on first use.
-            // The migration makes it once; afterwards a missing key is an error.
+            let mut settings = Settings::load(path)?;
             let vault = settings.vault(secrets);
-            if migrated && vault.find("transport")?.is_none() {
-                vault.create("transport")?;
-            }
             if settings.logged_out {
                 return Err("this device logged out; join the domain again".into());
             }
@@ -653,7 +651,7 @@ async fn restore(
         )?;
     }
     let (settings, link) = if path.exists() {
-        let (settings, _) = Settings::load(path)?;
+        let settings = Settings::load(path)?;
         let vault = settings.vault(secrets);
         let key = Settings::transport_key(&vault)?;
         let link = network.start(settings.issuer(), key).await?;
@@ -699,7 +697,13 @@ async fn run(
     hello: &std::sync::mpsc::SyncSender<Greeting>,
 ) -> Result<(), Failure> {
     let directory = setup.directory.clone();
+    if matches!(setup.install, Install::Installed) && directory.join("identity.json").exists() {
+        Settings::load(&directory.join("identity.json"))?;
+    }
     rocky_storage::database::refuse_old_row_identity(&directory.join("rocky.sqlite")).await?;
+    if matches!(setup.install, Install::Installed) {
+        Settings::load(&directory.join("identity.json"))?;
+    }
     std::fs::create_dir_all(&directory)?;
     let lock = std::fs::OpenOptions::new()
         .create(true)

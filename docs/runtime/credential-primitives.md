@@ -137,7 +137,7 @@ val device = issuer.credentials.pseudonymOwner(credential).node
 ```
 
 `Credentials.claimAuthorRange(first, last)` is the Kotlin range claim; it
-exists for migrated identities and goes with them. `Credentials.grant` and `Credentials.delegate` take optional `authors`;
+assigns a range to an issuer that has none. `Credentials.grant` and `Credentials.delegate` take optional `authors`;
 the five pseudonym calls cross the native session's versioned JSON ABI.
 
 The creator starts with `[1, 2³¹−1]`. An issuer invitation splits the free
@@ -161,13 +161,14 @@ and sessions.
 
 ### Chain format
 
-`Capability.extension` is the canonical CBOR of a versioned body; an extension
-with no field, unknown fields, a non-canonical encoding or an unknown version
-is refused.
+`Capability.extension` is required canonical CBOR of a format-2 body. All
+fields are explicit, including an empty partition list and null author/device
+bindings. Missing extensions, unknown fields, noncanonical encodings and every
+other version are refused; no earlier signatures or encodings are preserved.
 
 | Body field | Content |
 | --- | --- |
-| `version` | 1, or 2 when `partitions` is present |
+| `version` | 2 |
 | `authors` | `{first, last}`: the numbers this link assigns, or the single number of a pseudonym leaf. `1 ≤ first ≤ last ≤ 2³¹−1` |
 | `device` | Pseudonym leaf only: the node key sealed to the publisher |
 | `partitions` | [Selector grants](partition-credentials.md#issuance-and-verification) |
@@ -203,8 +204,12 @@ ranges; sealed-device privacy. JVM desktop and loopback only.
 
 ## Design rationale
 
-- Ranges and the sealed device live in an optional extension, not in
-  `Capability`: a new capability field would change every chain's signature.
+Status: compatibility clause superseded on 2026-10-08 by the phase-1
+single-format contract.
+
+- Every capability carries the same version-2 authority body. Ranges, the
+  sealed device and partition selectors are explicit; old bytes and signatures
+  are not retained.
 - The device is sealed asymmetrically to the publisher key so delegates with a
   range can assign numbers without holding a publisher secret.
 - A device's own user key never signs its pseudonym, and a delegated assigner

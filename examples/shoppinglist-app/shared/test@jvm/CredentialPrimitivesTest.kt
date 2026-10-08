@@ -65,22 +65,23 @@ class CredentialPrimitivesTest {
         } finally { other?.close(); reader?.close(); writer?.close(); issuer?.close(); root.deleteRecursively() }
     }
 
-    @Test fun `a migrated issuer explicitly claims a disjoint author range`() = runBlocking<Unit> {
-        val root = Files.createTempDirectory("rocky-author-migration").toFile()
-        var issuer: RockyDatabase? = null
+    @Test fun `other identity versions refuse through the native ABI without writes`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-identity-refusal").toFile()
         try {
             val directory = File(root, "a")
             RockyDatabase.local(directory, ItemsSchema).close()
             val identity = File(directory, "identity.json")
-            val old = Json.parseToJsonElement(identity.readText()).jsonObject
-            identity.writeText(JsonObject(old - "minting" + ("version" to JsonPrimitive(6))).toString())
-            val a = RockyDatabase.open(directory, ItemsSchema).also { issuer = it }
-            assertFailsWith<RockyException> { a.credentials.claimAuthorRange(0, 60) }
-            a.credentials.claimAuthorRange(50, 60)
-            val credential = a.credentials.assignPseudonym(a.credentials.pseudonymRequest("items"))
-            assertEquals(AuthorPseudonym("items", 50), a.credentials.installPseudonym(credential))
-            assertFailsWith<RockyException> { a.credentials.claimAuthorRange(1, 100) }
-            assertEquals(8, Json.parseToJsonElement(identity.readText()).jsonObject.getValue("version").jsonPrimitive.int)
-        } finally { issuer?.close(); root.deleteRecursively() }
+            val current = Json.parseToJsonElement(identity.readText()).jsonObject
+            val database = File(directory, "rocky.sqlite")
+            val kept = database.readBytes()
+            for (version in listOf(0, 1, 2, 3, 4, 5, 6, 7, 9, Int.MAX_VALUE)) {
+                val bytes = JsonObject(current + ("version" to JsonPrimitive(version))).toString().toByteArray()
+                identity.writeBytes(bytes)
+                val error = assertFailsWith<RockyException> { RockyDatabase.open(directory, ItemsSchema) }
+                assertTrue(error.message.orEmpty().contains("unsupported identity version"))
+                assertContentEquals(bytes, identity.readBytes())
+                assertContentEquals(kept, database.readBytes())
+            }
+        } finally { root.deleteRecursively() }
     }
 }

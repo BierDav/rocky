@@ -92,7 +92,10 @@ impl SecureDemo {
                 expires: u64::MAX,
                 epoch: 1,
                 delegations: 1,
-                extension: None,
+                extension: rocky_secure::credentials::Extension::new(
+                    rocky_secure::credentials::Extended::default(),
+                )
+                .map_err(signing)?,
             },
             &publisher,
         )
@@ -112,7 +115,10 @@ impl SecureDemo {
                     expires: u64::MAX,
                     epoch: 1,
                     delegations: 0,
-                    extension: None,
+                    extension: rocky_secure::credentials::Extension::new(
+                        rocky_secure::credentials::Extended::default(),
+                    )
+                    .map_err(signing)?,
                 },
                 &user,
             )

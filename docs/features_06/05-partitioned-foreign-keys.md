@@ -37,6 +37,16 @@ for an unpartitioned logged parent from an unpartitioned child.
    different groups, to an unlogged parent in another scope, `RESTRICT` and
    natural-key references stay refused with precise messages.
 
+Known gaps; the search is not complete:
+
+- `rocky-secure/src/replica/horizon.rs` resolves a parent through
+  `typed.by_name`, which returns the table scope, not the child's partition
+  scope. Once this phase allows the reference, a cut would name a scope with
+  no logs and could match vacuously. Resolve the parent from the child's
+  partition tuple; [phase 6](06-horizon-checkpoints-bootstrap.md) builds on it.
+- Existence record version 2 is written only for partitioned tables, which
+  installation refuses today, so that path is untested until this phase.
+
 ## Completion gate
 
 - Deleting list A hides A's items on every device holding A; a device holding

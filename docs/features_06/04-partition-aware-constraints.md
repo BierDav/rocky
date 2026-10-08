@@ -44,6 +44,14 @@ list; the search is not complete:
   `secure_support`; `follow` reads winners by table scope.
 - A unique index's `SetNull` policy would null partition columns; refuse it
   on partitioned tables or exempt them.
+- The loss cache, seeds and `secure_support(tab, id)` are keyed by
+  `(node, id)`, and reference selects match the parent `id` alone; the
+  candidate primary key already holds the partition columns.
+- The equal-stamp tie breaks on `id` since 2026-10-08. With partitions it
+  must break on partition and `id`.
+- The secure profile never compares the engine catalog at open, so a dropped
+  unique or identity index goes unnoticed and resolution loses its backstop.
+  Decide here whether partitioned indexes are verified.
 
 Foreign keys stay refused until [phase 5](05-partitioned-foreign-keys.md).
 

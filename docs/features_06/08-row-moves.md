@@ -51,6 +51,12 @@ row store; a move must carry them.
    admissible in B.
 7. SDK, SQL and Kotlin surface for a move, including Room.
 
+Known gap: `rocky-secure/src/replica/apply.rs` drops an insert with an older
+or missing basis with `continue` and no signal to its author. A move is a
+delete and an insert, so a late update could vanish unseen. Report consumed
+operations, and confirm `RebootstrapReport.rejected` names a behind device's
+unsent inserts.
+
 ## Completion gate
 
 The six scenarios of [the scope's acceptance](scope-moving-rows.md#acceptance),

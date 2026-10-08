@@ -34,6 +34,32 @@ it as today. Frames, logs, checkpoints, grants and pseudonyms do not change.
 5. Revocation: one saved intent rotates the secret; every table's epoch
    advances together. An interruption resumes to a state where all tables of
    the partition are on the same epoch.
+   Revocation must cover every partition the device could read, not only the
+   collections of its enrollment profile. Today `Settings::rotate` skips a
+   partition whose table the stored profile does not read, and `partition_grant`
+   records nothing on the issuer, so a device granted a partition after
+   enrollment keeps reading it after revocation. Required:
+   - the issuer records each partition grant and delegation against the
+     device and its user subject, durably and before the chain is returned;
+   - rotation covers every recorded group partition of the revoked device, and
+     every known group partition when the issuer never recorded the device;
+   - revoking a device revokes its user subject even when the issuer knows it
+     only through a partition grant, so a fresh node key cannot renew;
+   - `share` refuses a revoked recipient and a non-current epoch.
+
+Known gaps in `rocky-sdk/src/node/partition.rs` and `rocky-credentials`; the
+search is not complete:
+
+- `register_partition` runs before the envelope is opened and its grants are
+  verified, so a bad envelope leaves a registered address; `vault.put` runs
+  before the epoch-capacity check and can orphan a secret. Verify first.
+- `partition_create` starts at epoch 1 while rotation uses the policy epoch, so
+  a create after a rotation installs below the current epoch.
+- Rotation creates each key locally with `vault.create`; a second issuer holds
+  no key for the new epoch until it receives an envelope and can rotate only
+  the partitions it knows. The group secret, not the issuer, is the unit.
+- `rocky-credentials/src/partition.rs` hardcodes the sealed length for a
+  32-byte secret.
 6. Holding rule: subscribe, unsubscribe, evict and bootstrap take a group
    partition. An application may leave a named table out explicitly, for
    example large attachments on a phone. Leaving out a table that a held
@@ -48,6 +74,11 @@ it as today. Frames, logs, checkpoints, grants and pseudonyms do not change.
   secret.
 - After revocation the removed device opens no row written afterwards in any
   table of the group; remaining readers do, from one new envelope each.
+- A device enrolled without read on a table, then granted one of its
+  partitions, opens no row written there after its revocation; the same holds
+  when the issuer knows the device only through that grant, and its user key
+  cannot renew under a new node key.
+- Sharing to a revoked recipient is refused.
 - A crash at every step of a rotation recovers to one epoch across the group.
 - A table added to the group later is readable without a new envelope.
 - A phone holds a list and its items while leaving out a third table.

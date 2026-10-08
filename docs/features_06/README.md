@@ -11,6 +11,8 @@ repeating them:
   partition groups, the group secret, unique indexes and foreign keys.
 - [Moving rows between partitions](scope-moving-rows.md).
 
+Defects outside these phases are in [fix later](../fix_later/README.md).
+
 Deferred: [partitioned existence logs](../ideas/partitioned_existence_logs.md)
 and [partitioned command tables](../ideas/partitioned_command_tables.md).
 
@@ -43,14 +45,16 @@ passed its completion gate. Size is a relative budget, not a schedule.
 | --- | --- | --- | --- | --- |
 | 1 | [Remove compatibility code](01-remove-compatibility-code.md) | none | M | One current version per format; no migrations, legacy readers or legacy tests |
 | 2 | [Partition groups in the schema](02-partition-groups.md) | none; lands after 1 on the descriptor | M | Decision 0037; explicit groups in the descriptor, the Kotlin builder and the Room overlay |
-| 3 | [Group secrets](03-group-secrets.md) | 2 | L | One secret and one envelope per group partition; derived table keys; group share, revoke, subscribe and evict |
+| 3 | [Group secrets](03-group-secrets.md) | 2 | L | One secret and one envelope per group partition; derived table keys; group share, revoke, subscribe and evict; revocation covers partitions granted after enrollment |
 | 4 | [Partition-aware constraint identities](04-partition-aware-constraints.md) | 2 | XL | Resolution keyed by partition; unique indexes with a policy on partitioned tables |
 | 5 | [Foreign keys on partitioned tables](05-partitioned-foreign-keys.md) | 4 | L | In-group references and references to an unpartitioned logged parent, with `CASCADE` and `SET NULL` per partition |
 | 6 | [Horizon, checkpoints and bootstrap](06-horizon-checkpoints-bootstrap.md) | 4, 5 | L | Hidden rows and orphans finalized, checkpointed and rebuilt per partition |
 | 7 | [Builder, Room import and the shopping schema](07-builder-room-and-shopping-schema.md) | 4, 5 | M | The scope's schema, with categories, installs by hand and from Room |
 | 8 | [Row moves](08-row-moves.md) | 4, 5; lands after 1 on the frame and after 6 on the checkpoint | XL | Decision 0038; an atomic move whose late updates follow the row |
 | 9 | [Group sync measurement](09-group-sync-measurement.md) | 3, 5, 6 | M | ERP fixture with a four-table group over 200 partitions; a budget, and batching if it is exceeded |
-| 10 | [Qualification](10-qualification.md) | all | M | Phase 16's scenarios and the move scenarios, on devices, with evidence |
+| 10 | [Qualification](10-qualification.md) | all | M | The shopping acceptance scenarios and the move scenarios, on devices, with evidence |
+| 11 | [Bounded strong cut](11-bounded-strong-cut.md) | none; lands after 1 on the frame | M | A strong cut bounded by operations since the pruning base, not by the domain's lifetime |
+| 12 | [Small fixes](12-small-fixes.md) | none | S | Local defects from the 2026-10-08 guide review, each with a regression test |
 
 ## Dependency graph
 
@@ -69,9 +73,14 @@ flowchart LR
     P8["8 Row moves (XL)"]
     P9["9 Group sync measurement (M)"]
     P10["10 Qualification (M)"]
+    P11["11 Bounded strong cut (M)"]
+    P12["12 Small fixes (S)"]
 
     P1 -.-> P2
     P1 -.-> P8
+    P1 -.-> P11
+    P11 --> P10
+    P12 --> P10
     P6 -.-> P8
     P1 --> P10
     P2 --> P3
@@ -89,7 +98,7 @@ flowchart LR
 
 ### Critical path
 
-2 → 4 → 5 → 8 → 10 and 2 → 4 → 5 → 6 → 9 → 10 both weigh 17 of 29. Phase 4
+2 → 4 → 5 → 8 → 10 and 2 → 4 → 5 → 6 → 9 → 10 both weigh 17 of 32. Phase 4
 is on both and is the largest single risk. Decision 0038 for moves may be
 drafted while phases 4 and 5 implement; its code waits for their gates.
 
@@ -97,7 +106,7 @@ drafted while phases 4 and 5 implement; its code waits for their gates.
 
 | Wave | Phases that can run in parallel |
 | --- | --- |
-| 0 | 1, 2 (2 lands after 1) |
+| 0 | 1, 2, 11, 12 (2 and 11 land after 1) |
 | 1 | 3, 4 |
 | 2 | 5 |
 | 3 | 6, 7, 8 (8 lands after 6) |
@@ -111,6 +120,7 @@ drafted while phases 4 and 5 implement; its code waits for their gates.
 | Schema descriptor and definition | 1 (single format), 2 (groups), 7 (lifted refusals) | 1, then 2, then 7 |
 | Key envelope and SDK key store | 1, 3 | 1, then 3 |
 | Frame envelope | 1 (single row format), 8 (move) | 1, then 8 |
+| Strong request and result frame | 1, 11 (cut) | 1, then 11 |
 | Checkpoint | 1, 6 (per-partition state), 8 (unfinalized move links) | 1, then 6, then 8 |
 
 Each format change needs a [decision record](../decisions/README.md).

@@ -37,6 +37,33 @@ serde defaults that preserve earlier bytes; the search is not complete:
 - [Mergeable horizon](../runtime/mergeable-horizon.md) and [encrypted checkpoints](../runtime/encrypted-checkpoints.md) note the formats still accepted until this phase.
 - Kotlin: `fixtures/legacy` and the checks that load them.
 
+Further sites found on 2026-10-08:
+
+- `rocky-coordinator/src/client.rs`: format-2 upgrade and `serde(default)` on
+  `settled`, beside `LegacyCache`.
+- `rocky-sdk/src/enrollment.rs`: identity versions 3 to 7; invitation `v` 3
+  or 4 and contact `v` 1 or 2 used as flags for custody and enrollment-only.
+  One version each, with an explicit field.
+- `rocky-sdk/src/node.rs`: peer and network JSON emit `creator` beside
+  `issuer` for older callers.
+- `rocky-secure`: `row_format` 1 to 5 (`wire.rs`, `replica/apply.rs`);
+  replica identity readers in `replica.rs`, `replica/generation.rs` and
+  `replica/backup.rs`; existence record versions 1 and 2
+  (`replica/existence.rs`); `Message::Result.evidence` with `serde(default)`
+  (`network.rs`).
+- `rocky-credentials/src/horizon.rs`: `HORIZON_FORMAT` 1 and 2.
+- `rocky-runtime`: `refuse_foreign_engine` and the Turso sidecar check
+  (`rocky-storage/src/database.rs`), `refuse_old_row_identity`, the legacy
+  single-domain refusal (`layout.rs`, `lib.rs`, `runtime.rs`), files without
+  `rocky_checkpoint` and the request-hold backfill (`worker.rs`),
+  `CommandState::Prepared` (`worker/strong.rs`).
+- `rocky-core/src/logical.rs`: `Incompatibility::KeyReuse` is never
+  constructed and `reuses_keys` is serialized and fingerprinted but read
+  nowhere. Remove both.
+- `rocky-sdk/src/room.rs`: `generate_room` is used by tests only, refuses the
+  identity columns the Kotlin importer requires and can emit invalid SQL.
+  Delete it.
+
 ## Ordered slices
 
 1. Inventory: list every format with more than one accepted version, every

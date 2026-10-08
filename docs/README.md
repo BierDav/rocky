@@ -71,6 +71,7 @@ Select the guide for your task rather than reading every document.
 | Understand engine selection, buffered commits and the file layout | [Storage engine and durability](runtime/write-concurrency.md#design-rationale) |
 | Record a new architectural decision | [Decision records](decisions/README.md) |
 | Find optimizations deferred until a workload needs them | [Optimizations on demand](optimizations_on_demand/README.md) |
+| Find known defects that are not scheduled | [Fix later](fix_later/README.md) |
 
 Implemented guides live under `runtime/`, wire/behavior contracts under
 `protocol/`, and application-specific guidance under `applications/`.

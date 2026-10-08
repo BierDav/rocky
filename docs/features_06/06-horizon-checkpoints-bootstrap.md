@@ -32,6 +32,21 @@ related partitions.
    rows and support rows; other partitions are untouched.
 5. A horizon in one partition never waits for a device that does not hold it.
 
+Known gaps in `rocky-secure/src/replica`; the search is not complete:
+
+- `typed.rs` and `existence/base.rs` call `rebuild_constraints(None)` inside
+  the finalize, rebootstrap and base-import transaction, rebuilding every
+  table. Scope the rebuild to the affected partition.
+- `horizon.rs`, `pending_horizons`, decodes every stored horizon and its
+  checkpoint record on each write and frame admission. Per-partition horizons
+  multiply that; persist a pending flag or index.
+- Finalize is one transaction proportional to the scope's rows and filters
+  `row_kind = 0` only on logged tables; unlogged support parents rely on
+  virtual rows always having id 0.
+- The checkpoint `format` number encodes which optional parts are present.
+  After [phase 1](01-remove-compatibility-code.md) it is one version with
+  optional fields; add per-partition state as a field, not a new number.
+
 ## Completion gate
 
 - After the horizon, a deleted list's items and a lost duplicate title are

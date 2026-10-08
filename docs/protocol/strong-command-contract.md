@@ -20,9 +20,12 @@ A request ID is `(origin_node_id, request_sequence)` in a separate persisted
 command counter namespace. Persist the request before dispatch; repeat delivery
 uses the same bytes. Do not consume operation author sequences for commands.
 
-The executor retrieves all dependencies named by that cut and replays precisely
-the cut from retained canonical history. Compare the resulting visible-state
-digest to the request. Missing history stays pending; a mismatched digest fails.
+The executor rebuilds precisely the cut from its checkpoint base and the
+retained operations after it, and names that base in the package. Compare the
+resulting visible-state digest to the request. Missing history stays pending; a
+base past the cut, or none, stays pending without loading any operation; an
+operation of the cut this replica rejected, or a mismatched digest, fails.
+See [decision 0039](../decisions/0042-bounded-strong-cut.md).
 Do not replace sealed input with the executor's newer live projection. The cut
 must be dependency-closed and contain contiguous prefixes for each listed author.
 
@@ -40,9 +43,10 @@ are u64; commitments are 32 raw bytes. IDs use the operation contract's types.
 - Request bytes: mesh, app, domain, caller, request ID, UTF-8 method name,
   method version, schema generation, handler generation, sorted frontier,
   visible-state digest. Request ID uses node bytes then command sequence.
-- Package bytes: length-prefixed request bytes, configuration, executor, epoch, expected sequence,
-  expected head, schema generation, handler generation, publication sequence,
-  frontier, length-prefixed sorted-row state bytes, sorted unique required operation IDs.
+- Package bytes: magic `rocky.package.v2`, length-prefixed request bytes,
+  configuration, executor, epoch, expected sequence, expected head, schema
+  generation, handler generation, publication sequence, frontier, cut base
+  frontier, length-prefixed sorted-row state bytes.
 - Confirmation: mesh, app, domain, configuration, executor, epoch, request ID,
   request hash, expected sequence, expected head, schema generation, handler
   generation, result commitment, new head.

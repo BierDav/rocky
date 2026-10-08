@@ -165,15 +165,19 @@ where
                     return Err(corrupt());
                 }
                 if replay {
-                    let replayed = match self.predecessor(&package.base).await {
-                        Ok(previous) => {
-                            self.replay_cut(&package.request, previous.as_deref()).await
+                    let replayed = match (
+                        self.predecessor(&package.base).await,
+                        self.cut_base(&package.request),
+                    ) {
+                        (Ok(previous), Ok(base)) => {
+                            self.replay_cut(&package.request, previous.as_deref(), &base)
+                                .await
                         }
-                        Err(error) => Err(error),
+                        (Err(error), _) | (_, Err(error)) => Err(error),
                     };
                     match replayed {
-                        Ok((expected, required)) => {
-                            if package.rows != expected || package.required != required {
+                        Ok(expected) => {
+                            if package.rows != expected {
                                 return Err(corrupt());
                             }
                         }

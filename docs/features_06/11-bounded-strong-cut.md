@@ -1,6 +1,6 @@
 # 11. Bounded strong cut
 
-Status: not started.
+Status: done on 2026-10-08. [Decision 0039](../decisions/0042-bounded-strong-cut.md) records the format.
 Owner: `rocky-runtime` strong worker and request/result frames; `rocky-secure`
 command path. Depends on nothing; lands after
 [phase 1](01-remove-compatibility-code.md) on the frame. Wave 0.

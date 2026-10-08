@@ -293,6 +293,7 @@ fn pending_code(reason: PendingReason) -> &'static str {
         PendingReason::Executor => "executor",
         PendingReason::MissingHead => "missing_head",
         PendingReason::StaleFence => "stale_fence",
+        PendingReason::CutBase => "cut_base",
     }
 }
 fn snapshot(result: ReadSnapshot) -> Value {

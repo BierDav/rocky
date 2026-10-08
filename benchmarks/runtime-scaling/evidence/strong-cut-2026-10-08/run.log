@@ -1,0 +1,3 @@
+strong-cut lifetime=50000 max_after_base=830: n=8 throughput=12/s p50_us=83832 p99_us=92182 max_us=92182
+strong-cut lifetime=100000 max_after_base=1660: n=8 throughput=7/s p50_us=152633 p99_us=162171 max_us=162171
+strong-cut lifetime=200000 max_after_base=3305: n=8 throughput=3/s p50_us=299930 p99_us=308822 max_us=308822

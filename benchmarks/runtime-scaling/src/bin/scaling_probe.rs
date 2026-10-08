@@ -604,6 +604,53 @@ async fn strong() -> Result<(), Failure> {
     }
     Ok(())
 }
+/// Strong commands on one long-lived domain with automatic checkpoints: a
+/// cut costs the operations after the executor's checkpoint base, so
+/// lifetimes past the former 43,690-operation refusal still execute.
+async fn strong_cut() -> Result<(), Failure> {
+    let dir = tempfile::tempdir()?;
+    let runtime = shared(dir.path(), 1, RuntimeOptions::default()).await?;
+    let replica = runtime.domain(scope(1))?;
+    let coordinator = rocky_coordinator::MemoryCoordinator::default();
+    coordinator.register(scope(1), CALLER, [6; 16], vec![NODE], 1, 1)?;
+    coordinator.acquire(scope(1), CALLER, NODE)?;
+    let mut total = 0;
+    let mut command = 0u16;
+    for target in [50_000usize, 100_000, 200_000] {
+        write(&replica, 8, target - total, "c").await?;
+        total = target;
+        let mut timings = Vec::new();
+        let mut after = 0;
+        let started = Instant::now();
+        for _ in 0..8 {
+            command += 1;
+            let mut handle = [5; 32];
+            handle[..2].copy_from_slice(&command.to_le_bytes());
+            let command_started = Instant::now();
+            replica
+                .submit_command_with_arguments(
+                    rocky_runtime::CommandHandle(handle),
+                    inventory_app::RESERVE,
+                    1u64.to_le_bytes().to_vec(),
+                    [9; 32],
+                )?
+                .committed()
+                .await?;
+            replica.execute_pending(&coordinator).await?;
+            timings.push(command_started.elapsed());
+            let results = replica.confirmed_publications().await?;
+            let latest = results.last().ok_or("no confirmed result")?;
+            after = after.max(latest.package.required()?.len());
+        }
+        line(
+            &format!("strong-cut lifetime={target} max_after_base={after}"),
+            timings,
+            started.elapsed(),
+        );
+    }
+    runtime.close().await?;
+    Ok(())
+}
 fn resident_mib() -> u64 {
     let pid = std::process::id().to_string();
     std::process::Command::new("ps")
@@ -683,6 +730,9 @@ async fn main() -> Result<(), Failure> {
     }
     if all || section == "strong" {
         strong().await?;
+    }
+    if all || section == "strong-cut" {
+        strong_cut().await?;
     }
     if all || section == "retention" {
         retention().await?;

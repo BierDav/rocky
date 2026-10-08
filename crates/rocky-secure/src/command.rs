@@ -270,7 +270,7 @@ impl ConfirmedCommand {
                 .verify(&self.signature_bytes()?, &self.signature)
             || package.confirmation()? != receipt.confirmation
             || package.sequence != receipt.sequence
-            || !package.required.is_empty()
+            || !without_cut(&package)?
         {
             return Err(denied("invalid encrypted command result"));
         }
@@ -312,6 +312,11 @@ impl ConfirmedCommand {
 pub(crate) struct RowProjection {
     pub(crate) before: BTreeMap<Commitment, rocky_core::RowFields>,
     pub(crate) after: BTreeMap<Commitment, rocky_core::RowFields>,
+}
+/// Encrypted commands run on confirmed rows, never on a mergeable cut: the
+/// package names no base and the shared derivation covers no operation.
+fn without_cut(package: &StrongPackage) -> Result<bool, Error> {
+    Ok(package.cut_base.0.is_empty() && package.required()?.is_empty())
 }
 fn bounded<T: Serialize>(value: &T) -> Result<Vec<u8>, Error> {
     let bytes = encode(value)?;
@@ -630,3 +635,59 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tickets(handle BLOB PRIMARY KEY,request BLOB NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS secure_command_progress(request BLOB PRIMARY KEY,state INTEGER NOT NULL,sequence INTEGER)",
 ];
+
+#[cfg(test)]
+mod cut_tests {
+    use super::*;
+    use rocky_core::{AppliedFrontier, AuthorSequence, NodeId, RequestId, fixtures};
+
+    #[test]
+    fn an_encrypted_result_refuses_any_mergeable_cut() {
+        let at = |sequence| {
+            AppliedFrontier(vec![(
+                fixtures::LAPTOP,
+                AuthorSequence::new(sequence).unwrap(),
+            )])
+        };
+        let mut package = StrongPackage {
+            request: StrongRequest {
+                scope: fixtures::SCOPE,
+                caller: fixtures::OWNER,
+                id: RequestId {
+                    node: NodeId([3; 16]),
+                    sequence: AuthorSequence::new(1).unwrap(),
+                },
+                method: "Publish".into(),
+                version: 1,
+                schema: 1,
+                handler: 1,
+                client_request: [1; 32],
+                arguments: vec![],
+                policy: [1; 32],
+                frontier: AppliedFrontier::default(),
+                digest: [1; 32],
+            },
+            base: StrongHead {
+                scope: fixtures::SCOPE,
+                configuration: [7; 16],
+                executor: NodeId([3; 16]),
+                epoch: 1,
+                schema: 1,
+                handler: 1,
+                sequence: 0,
+                head: rocky_core::genesis(fixtures::SCOPE, [7; 16]),
+            },
+            sequence: 1,
+            rows: vec![],
+            cut_base: AppliedFrontier::default(),
+        };
+        assert!(without_cut(&package).unwrap());
+        // Operations after an empty base, a base with nothing after it, or both.
+        package.request.frontier = at(2);
+        assert!(!without_cut(&package).unwrap());
+        package.cut_base = at(2);
+        assert!(!without_cut(&package).unwrap());
+        package.cut_base = at(1);
+        assert!(!without_cut(&package).unwrap());
+    }
+}

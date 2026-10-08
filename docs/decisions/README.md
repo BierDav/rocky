@@ -16,9 +16,10 @@ naturally holds.
 | [0039](0039-single-current-formats.md) | One current persisted and wire format |
 | [0040](0040-group-secrets.md) | Group secrets, derived table keys, group envelopes and rotation |
 | [0041](0041-partition-constraint-state.md) | Partition constraint identities, current private state and catalog verification |
+| [0042](0042-bounded-strong-cut.md) | A strong cut named by its checkpoint base |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves; the next unreserved record is 0042.
+not reused. 0038 is reserved for row moves; the next unreserved record is 0043.
 
 ## Rationale by topic
 

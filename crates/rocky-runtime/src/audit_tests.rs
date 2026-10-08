@@ -59,7 +59,7 @@ async fn rejection_isolated_from_independent_work_and_preparation_survives() {
         base: coordinator.head(fixtures::SCOPE).unwrap(),
         sequence: 1,
         rows: vec![0; 4],
-        required: vec![],
+        cut_base: Default::default(),
     };
     let forged = StrongReceipt {
         confirmation: package.confirmation().unwrap(),

@@ -37,7 +37,7 @@ fn version_one_commitment_vectors_and_strict_frames() {
         },
         sequence: 1,
         rows: vec![0; 4],
-        required: Vec::new(),
+        cut_base: AppliedFrontier::default(),
     };
     let c = p.confirmation().unwrap();
     assert_eq!(
@@ -54,11 +54,11 @@ fn version_one_commitment_vectors_and_strict_frames() {
     );
     assert_eq!(
         hex(&c.result),
-        "29c1567673ac5baf7f7a80a62b6b08dddba29ad44cc87aeed63028756537c4ea"
+        "de8e2010001f02e68e1a598eb9a34bd5a82c047a67ba3f6917716cb557d2859c"
     );
     assert_eq!(
         hex(&c.new_head),
-        "af37782eb3a0cb627934a1678f13649762a60b80983694227cbce08212176a6b"
+        "14043bf2f8fda50c1c9639ec6ba7635a83f1f0dc80a7bc69369b068b4329081f"
     );
     assert_eq!(
         StrongRequest::decode(&request.encode().unwrap()).unwrap(),
@@ -66,17 +66,22 @@ fn version_one_commitment_vectors_and_strict_frames() {
     );
     assert_eq!(request.encode().unwrap().len(), 159);
     let bytes = p.encode().unwrap();
-    assert_eq!(bytes.len(), 275);
+    assert_eq!(bytes.len(), 291);
     assert_eq!(StrongPackage::decode(&bytes).unwrap(), p);
     for n in 0..bytes.len() {
         assert!(StrongPackage::decode(&bytes[..n]).is_err());
     }
-    let mut extra = bytes;
+    let mut extra = bytes.clone();
     extra.push(0);
     assert_eq!(
         StrongPackage::decode(&extra),
         Err(ProtocolError::TrailingBytes)
     );
+    // Any other format is refused, including the earlier one without magic.
+    assert!(StrongPackage::decode(&bytes[16..]).is_err());
+    let mut other = bytes;
+    other[15] = b'1';
+    assert!(StrongPackage::decode(&other).is_err());
     let receipt = StrongReceipt {
         confirmation: c,
         sequence: 1,
@@ -145,4 +150,110 @@ fn request_sequences_carry_issue_time_and_strictly_increase() {
     let third = next_request_sequence(second, now - 60).unwrap().get();
     assert_eq!((third, issued_at(third)), (second + 1, now));
     assert!(next_request_sequence(0, u64::MAX >> 8).is_err());
+}
+
+fn frontier(entries: &[(NodeId, u64)]) -> AppliedFrontier {
+    AppliedFrontier(
+        entries
+            .iter()
+            .map(|(node, sequence)| (*node, AuthorSequence::new(*sequence).unwrap()))
+            .collect(),
+    )
+}
+
+#[test]
+fn a_cut_covers_only_the_operations_after_its_base() {
+    let (laptop, phone) = (fixtures::LAPTOP, fixtures::PHONE);
+    let cut = frontier(&[(laptop, 100_000), (phone, 3)]);
+    let base = frontier(&[(laptop, 99_998)]);
+    assert_eq!(cut_size(&base, &cut), Ok(5));
+    let ids = cut_operations(&base, &cut).unwrap();
+    let named: Vec<_> = ids.iter().map(|id| (id.node, id.sequence.get())).collect();
+    assert_eq!(
+        named,
+        [
+            (laptop, 99_999),
+            (laptop, 100_000),
+            (phone, 1),
+            (phone, 2),
+            (phone, 3)
+        ]
+    );
+    // Without a base the lifetime counts, and is refused past the bound.
+    assert_eq!(cut_size(&AppliedFrontier::default(), &cut), Ok(100_003));
+    assert_eq!(
+        cut_operations(&AppliedFrontier::default(), &cut),
+        Err(ProtocolError::InvalidLength)
+    );
+    let edge = frontier(&[(laptop, 99_998 + MAX_CUT_OPERATIONS as u64)]);
+    assert_eq!(
+        cut_operations(&base, &edge).unwrap().len(),
+        MAX_CUT_OPERATIONS
+    );
+    // A base ahead of the cut, or naming an author outside it, is refused.
+    for base in [
+        frontier(&[(laptop, 100_001)]),
+        frontier(&[(NodeId([0x77; 16]), 1)]),
+    ] {
+        assert_eq!(
+            cut_size(&base, &cut),
+            Err(ProtocolError::InvalidDependencies)
+        );
+    }
+}
+
+#[test]
+fn a_package_names_its_base_and_refuses_one_outside_the_bound() {
+    let request = StrongRequest {
+        scope: fixtures::SCOPE,
+        caller: fixtures::OWNER,
+        id: RequestId {
+            node: fixtures::PHONE,
+            sequence: AuthorSequence::new(1).unwrap(),
+        },
+        method: "PublishListSnapshot".into(),
+        version: 1,
+        schema: 1,
+        handler: 1,
+        client_request: [0; 32],
+        arguments: Vec::new(),
+        policy: [0; 32],
+        frontier: frontier(&[(fixtures::LAPTOP, 200_000)]),
+        digest: [1; 32],
+    };
+    let mut package = StrongPackage {
+        request,
+        base: StrongHead {
+            scope: fixtures::SCOPE,
+            configuration: [7; 16],
+            executor: fixtures::LAPTOP,
+            epoch: 1,
+            schema: 1,
+            handler: 1,
+            sequence: 0,
+            head: genesis(fixtures::SCOPE, [7; 16]),
+        },
+        sequence: 1,
+        rows: vec![0; 4],
+        cut_base: frontier(&[(fixtures::LAPTOP, 199_990)]),
+    };
+    let bytes = package.encode().unwrap();
+    let decoded = StrongPackage::decode(&bytes).unwrap();
+    assert_eq!(decoded, package);
+    assert_eq!(decoded.required().unwrap().len(), 10);
+    assert_eq!(
+        StrongPackage::request_bytes(&bytes),
+        Some(package.request.encode().unwrap().as_slice())
+    );
+    // The base is bound: another one is another result.
+    let mut moved = package.clone();
+    moved.cut_base = frontier(&[(fixtures::LAPTOP, 199_991)]);
+    assert_ne!(
+        moved.confirmation().unwrap().result,
+        package.confirmation().unwrap().result
+    );
+    package.cut_base = frontier(&[(fixtures::LAPTOP, 1)]);
+    assert_eq!(package.encode(), Err(ProtocolError::InvalidLength));
+    package.cut_base = frontier(&[(fixtures::LAPTOP, 200_001)]);
+    assert_eq!(package.encode(), Err(ProtocolError::InvalidDependencies));
 }

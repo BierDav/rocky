@@ -92,10 +92,10 @@ where
                     "fetched result does not match discovered head".into(),
                 ));
             }
-            for id in &publication.package.required {
+            for id in publication.package.required()? {
                 let id = ScopedOperationId {
                     scope: options.scope,
-                    operation: *id,
+                    operation: id,
                 };
                 if self.operation(id).await?.is_none() {
                     let Some(bytes) = source.operation(id).await? else {

@@ -126,7 +126,11 @@ outage verification, duplicate/reordered results, takeover, ledger/package loss
 and every interrupted request/preparation/accept/apply boundary
 (`preparation_acceptance_and_apply_failures_recover_at_each_boundary`,
 `death_between_the_merged_steps_of_a_result_leaves_none_of_them`,
-`losing_buffered_strong_steps_keeps_the_exposed_attempt_and_recovers`). The
+`losing_buffered_strong_steps_keeps_the_exposed_attempt_and_recovers`).
+`strong_cut_tests` cover a cut bounded by the executor's checkpoint base on a
+domain with more than 100,000 lifetime operations, verification after
+rebootstrap and after pruning, refused bases, and a rejected operation inside a
+cut ([decision 0039](../decisions/0042-bounded-strong-cut.md)). The
 smoke run drives the WebView through publication, outage, resumption at the
 original cut and takeover.
 

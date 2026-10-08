@@ -16,11 +16,6 @@ use rocky_core::*;
 
 /// A retained package with its state, receipt, verified and applied flags.
 pub(super) type Attempt = (StrongPackage, String, Option<StrongReceipt>, bool, bool);
-/// The encoded request a package begins with; see `StrongPackage::encode`.
-fn package_request(package: &[u8]) -> Option<&[u8]> {
-    let (length, rest) = package.split_first_chunk::<4>()?;
-    rest.get(..u32::from_le_bytes(*length) as usize)
-}
 fn attempt(row: &[SqlValue]) -> Result<Attempt, Error> {
     let [
         SqlValue::Blob(bytes),
@@ -167,7 +162,7 @@ where
             ));
         }
         let attempts = self.attempts().await?;
-        // One hash per attempt: a package names every operation of its cut.
+        // One hash per attempt: computing it encodes the package.
         let mut hashes = Vec::with_capacity(attempts.len());
         for (package, _, receipt, _, _) in &attempts {
             hashes.push(match receipt {
@@ -326,7 +321,7 @@ where
             Vec::new(),
             |row| {
                 if let [crate::sqlite::Value::Blob(package)] = row
-                    && let Some(request) = package_request(package)
+                    && let Some(request) = StrongPackage::request_bytes(package)
                 {
                     resolved.insert(request.to_vec());
                 }
@@ -435,15 +430,31 @@ where
         }
         Err(Error::StrongPending(crate::PendingReason::MissingHead))
     }
+    /// The base this replica rebuilds `request`'s cut from: its checkpoint
+    /// copy's frontier. Without one, or with one past the cut, the request
+    /// is pending; the cut is never widened to history before the base.
+    pub(super) fn cut_base(&self, request: &StrongRequest) -> Result<AppliedFrontier, Error> {
+        let pending = || Error::StrongPending(crate::PendingReason::CutBase);
+        let base = self.retention.base().ok_or_else(pending)?;
+        let base = AppliedFrontier(
+            base.iter()
+                .filter(|(_, sequence)| *sequence > 0)
+                .map(|(node, sequence)| Ok((*node, AuthorSequence::new(*sequence)?)))
+                .collect::<Result<_, ProtocolError>>()?,
+        );
+        cut_size(&base, &request.frontier).map_err(|_| pending())?;
+        Ok(base)
+    }
     /// Rebuilds the complete state of a sealed cut and executes the request
-    /// on it: the checkpoint copy's rows, then the retained operations up to
-    /// the cut. A cut behind the checkpoint cannot be rebuilt here. The state
-    /// is held in memory while this runs; see `docs/runtime/local-replica.md`.
+    /// on it: the checkpoint copy's rows at `base`, then the retained
+    /// operations after it up to the cut. The state is held in memory while
+    /// this runs; see `docs/runtime/local-replica.md`.
     pub(super) async fn replay_cut(
         &self,
         request: &StrongRequest,
         previous: Option<&[u8]>,
-    ) -> Result<(Vec<u8>, Vec<OperationId>), Error> {
+        base: &AppliedFrontier,
+    ) -> Result<Vec<u8>, Error> {
         self.handler(&request.method)?
             .validate(request)
             .map_err(application)?;
@@ -451,8 +462,12 @@ where
             return Err(Error::Rejected("foreign command scope".into()));
         }
         request.encode()?;
-        let missing = || Error::StrongPending(crate::PendingReason::MissingInput);
-        let base = self.retention.base().ok_or_else(missing)?;
+        let below = |node: NodeId| {
+            base.0
+                .iter()
+                .find(|(author, _)| *author == node)
+                .map_or(0, |(_, sequence)| sequence.get())
+        };
         let cut = |node: NodeId| {
             request
                 .frontier
@@ -461,54 +476,39 @@ where
                 .find(|(author, _)| *author == node)
                 .map_or(0, |(_, sequence)| sequence.get())
         };
-        if base.iter().any(|(node, sequence)| cut(*node) < *sequence) {
-            return Err(missing());
-        }
-        let covered = |id: OperationId| {
-            base.iter()
-                .any(|(node, sequence)| *node == id.node && id.sequence.get() <= *sequence)
-        };
-        // The identities of a cut follow from its frontier: every author's
-        // operations up to it. A result frame cannot name more than it holds.
-        let total: u64 = request.frontier.0.iter().map(|(_, s)| s.get()).sum();
-        if total.saturating_mul(24) > crate::MAX_FRAME_BYTES as u64 {
-            return Err(Error::Quota {
-                resource: "result frame",
-                limit: crate::MAX_FRAME_BYTES,
-            });
-        }
-        let mut required = Vec::new();
+        let covered = |id: OperationId| id.sequence.get() <= below(id.node);
         let mut pending = std::collections::BTreeMap::new();
         for (node, sequence) in &request.frontier.0 {
-            for index in 1..=sequence.get() {
-                required.push(OperationId {
-                    node: *node,
-                    sequence: AuthorSequence::new(index)?,
-                });
-            }
-            let after = base
-                .iter()
-                .find(|(author, _)| author == node)
-                .map_or(0, |(_, sequence)| *sequence);
+            let after = below(*node);
             let tail = crate::sqlite::params![node.0.to_vec(), after as i64, sequence.get() as i64];
-            // Reject unknown cuts before loading any operation.
-            let mut count = self.conn().query("SELECT COUNT(*) FROM rocky_operations WHERE node=? AND sequence>? AND sequence<=? AND status<>'rejected'", tail.clone()).await?;
-            if count
+            // Count every held operation of the cut before loading any. One
+            // this replica rejected is held and never supplied by sync, so
+            // the cut cannot be rebuilt here: refused, not pending.
+            let mut count = self.conn().query("SELECT COUNT(*),COALESCE(SUM(status='rejected'),0) FROM rocky_operations WHERE node=? AND sequence>? AND sequence<=?", tail.clone()).await?;
+            let row = count
                 .next()
                 .await?
-                .map(|row| row.get::<i64>(0))
-                .transpose()?
-                != Some((sequence.get() - after) as i64)
-            {
-                return Err(missing());
+                .ok_or_else(|| Error::Corrupt("cut count".into()))?;
+            if row.get::<i64>(0)? != (sequence.get() - after) as i64 {
+                return Err(Error::StrongPending(crate::PendingReason::MissingInput));
             }
-            let mut selected = self.conn().query("SELECT bytes FROM rocky_operations WHERE node=? AND sequence>? AND sequence<=? AND status<>'rejected'", tail).await?;
+            if row.get::<i64>(1)? != 0 {
+                return Err(Error::Rejected(
+                    "sealed input holds an operation this replica rejected".into(),
+                ));
+            }
+            let mut selected = self
+                .conn()
+                .query(
+                    "SELECT bytes FROM rocky_operations WHERE node=? AND sequence>? AND sequence<=?",
+                    tail,
+                )
+                .await?;
             while let Some(row) = selected.next().await? {
                 let op = Envelope::decode(&row.get::<Vec<u8>>(0)?)?;
                 pending.insert(op.id, op);
             }
         }
-        required.sort();
         if pending.values().any(|op| {
             op.dependencies
                 .iter()
@@ -516,7 +516,7 @@ where
         }) {
             return Err(Error::Rejected("input cut is not dependency closed".into()));
         }
-        let mut state = if base.is_empty() {
+        let mut state = if base.0.is_empty() {
             A::State::default()
         } else {
             self.base_state().await?
@@ -565,12 +565,9 @@ where
         if state_commitment(&bytes) != request.digest {
             return Err(Error::Rejected("sealed input digest mismatch".into()));
         }
-        Ok((
-            self.handler(&request.method)?
-                .execute_after(&state, request, previous)
-                .map_err(application)?,
-            required,
-        ))
+        self.handler(&request.method)?
+            .execute_after(&state, request, previous)
+            .map_err(application)
     }
     /// The registered method of this version. Every version inside the
     /// application's support horizon is listed; another one is refused.
@@ -846,8 +843,18 @@ where
                 self.handler(&request.method)?
                     .admit(&request, &self.policy)
                     .map_err(application)?;
+                // Only the operations after the base count towards the bound.
+                let cut_base = self.cut_base(&request)?;
+                if cut_size(&cut_base, &request.frontier)? > MAX_CUT_OPERATIONS as u64 {
+                    return Err(Error::Quota {
+                        resource: "strong cut",
+                        limit: MAX_CUT_OPERATIONS,
+                    });
+                }
                 let previous = self.predecessor(&base).await?;
-                let (rows, required) = self.replay_cut(&request, previous.as_deref()).await?;
+                let rows = self
+                    .replay_cut(&request, previous.as_deref(), &cut_base)
+                    .await?;
                 let package = StrongPackage {
                     request,
                     sequence: base
@@ -856,7 +863,7 @@ where
                         .ok_or(ProtocolError::InvalidCounter)?,
                     base,
                     rows,
-                    required,
+                    cut_base,
                 };
                 if package.encode()?.len().saturating_add(1024) > crate::MAX_FRAME_BYTES {
                     return Err(Error::Quota {
@@ -1147,13 +1154,22 @@ where
                     let Some((p, _, receipt, _, _)) = next else {
                         return Ok(None);
                     };
+                    // A verifier rebuilds the cut from its own base, which
+                    // may differ from the executor's; the rows must agree.
                     let previous = worker.predecessor(&p.base).await?;
-                    let (expected, required) =
-                        match worker.replay_cut(&p.request, previous.as_deref()).await {
-                            Err(Error::StrongPending(_)) => return Ok(None),
-                            result => result?,
-                        };
-                    if p.rows != expected || p.required != required {
+                    let replayed = match worker.cut_base(&p.request) {
+                        Ok(base) => {
+                            worker
+                                .replay_cut(&p.request, previous.as_deref(), &base)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let expected = match replayed {
+                        Err(Error::StrongPending(_)) => return Ok(None),
+                        result => result?,
+                    };
+                    if p.rows != expected {
                         return Err(Error::Rejected(
                             "result differs from exact input replay".into(),
                         ));

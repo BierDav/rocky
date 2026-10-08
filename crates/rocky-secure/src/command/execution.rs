@@ -447,7 +447,7 @@ impl<A: RowCommandApplication> Inner<A> {
                 .ok_or_else(|| denied("strong counter exhausted"))?,
             base,
             rows: PackageSet::bind(&parts)?.to_bytes()?,
-            required: vec![],
+            cut_base: Default::default(),
         };
         let mut result = ConfirmedCommand {
             command: command.clone(),

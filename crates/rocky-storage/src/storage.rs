@@ -22,6 +22,9 @@ pub enum PendingReason {
     Executor,
     MissingHead,
     StaleFence,
+    /// This replica holds no checkpoint base the cut can be rebuilt from:
+    /// none, or one past the cut. Sync does not supply it.
+    CutBase,
 }
 #[derive(Debug)]
 pub struct StorageFailure {

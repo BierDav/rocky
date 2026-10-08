@@ -145,11 +145,12 @@ precedes the acknowledgments because a sender drops its outbox entry on them.
 A command takes three commits on its executor: the published request, the
 prepared package, and the result stored, verified and applied together
 ([design rationale](strong-publication.md#design-rationale)). With buffered
-durability the result is flushed only when exposed. A package names every
-operation of its sealed cut, so a request is refused with `Quota` once the sum
-of its frontier's author sequences exceeds 43,690. This counts lifetime
-operations; pruning does not lower it. `execute_pending` reads only unreleased
-requests without an applied result.
+durability the result is flushed only when exposed. A package names the
+executor's checkpoint base and covers the operations after it, so a request is
+refused with `Quota` once more than 32,768 operations follow that base. A newer
+checkpoint lowers the count
+([decision 0039](../decisions/0042-bounded-strong-cut.md)). `execute_pending`
+reads only unreleased requests without an applied result.
 
 ## WAL checkpoints
 

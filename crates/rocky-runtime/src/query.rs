@@ -272,7 +272,10 @@ where
             let missing_input = retained.iter().any(|result| {
                 result.package.base.sequence == snapshot.strong_head.sequence
                     && Some(result.package.base.head) == snapshot.strong_head.head
-                    && result.package.required.iter().any(|id| !held.holds(*id))
+                    && result
+                        .package
+                        .required()
+                        .is_ok_and(|ids| ids.iter().any(|id| !held.holds(*id)))
             });
             return Ok(StrongRead::Pending {
                 discovered: head,

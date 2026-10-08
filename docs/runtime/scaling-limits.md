@@ -17,7 +17,7 @@ cargo run --release -p rocky-runtime-bench --bin scaling_probe --locked -- <sect
 
 | Section | Measures |
 | --- | --- |
-| `all` | `domains`, `files`, `clients`, `history`, `observers`, `strong`, `retention`, `wide`, `encrypted`, `hardening`; about fifteen minutes |
+| `all` | `domains`, `files`, `clients`, `history`, `observers`, `strong`, `strong-cut`, `retention`, `wide`, `encrypted`, `hardening`; about fifteen minutes |
 | `layouts` | Sixteen domains over one, four and sixteen files |
 | `stored ROWS TABLES DIR` | Writes, point reads and pages at e.g. 500,000 rows; rerun on `DIR` for a fresh process |
 | `checkpoints OPS ROWS TABLES` | Sustained edits with checkpoints and pruning |
@@ -44,7 +44,7 @@ Turso engine, are in [engine-scale](../../benchmarks/engine-scale/RESULTS.md).
 | Read transaction | 500 ms | Retryable error |
 | Busy file | 10 attempts, 318 ms of backoff | `RetryExhausted` |
 | File lock at open | About 100 ms of retries | `Incompatible` |
-| Strong cut | Sum of the cut's author sequences ≤ 43,690 (24 bytes each in a 1 MiB frame), counted over lifetime, not retained, operations | `Quota` |
+| Strong cut | 32,768 operations after the executor's checkpoint base; lifetime operations do not count | `Quota` (`strong cut`) |
 | Trusted `SyncState` | 256 held operations above the prefix; 32 operations per range page | Truncated list / cursor |
 | Schema bootstrap | 64 statements per transaction; 4 files installed concurrently | — |
 
@@ -64,6 +64,19 @@ Trusted path writes, writes/s:
 Without group commit `full` stays at about 300 writes/s whatever the load, so
 sharing flushes is the whole gain. More files help buffered writes and cost
 flushed ones; every exposure is a flush.
+
+Strong commands on one long-lived domain, one row per write, default retention
+(`strong-cut`, [evidence](../../benchmarks/runtime-scaling/evidence/strong-cut-2026-10-08/)):
+
+| Lifetime operations | Most operations after the base | Command median / slowest |
+| ---: | ---: | --- |
+| 50,000 | 830 | 84 / 92 ms |
+| 100,000 | 1,660 | 153 / 162 ms |
+| 200,000 | 3,305 | 300 / 309 ms |
+
+Every lifetime here was refused before [decision 0039](../decisions/0042-bounded-strong-cut.md).
+The cost grows with the rows of the checkpoint copy loaded into memory,
+not with the cut.
 
 Reads and storage, 500,000 live rows in one domain:
 
@@ -168,8 +181,9 @@ Missed or pending:
   the p99 tail; queueing behind the single writer sets the rest. Database-file
   flushes averaged 191 to 228 ms on the cloud hosts against 66 to 77 ms locally.
 - **Per-step cost rises over a soak** without attribution.
-- **Strong commands** replay their sealed cut in memory and name every lifetime
-  operation of it; `strong_status`, `strong_results` and their pages decode
+- **Strong commands** replay their sealed cut in memory from the replica's
+  checkpoint base; a verifier with an older base replays more than the
+  executor did, bounded by its retained bytes. `strong_status`, `strong_results` and their pages decode
   every retained result on the writer thread.
 - **`query()` and `observe()`** return the whole projection on the writer thread.
 - **Cold read connections** parse the whole file schema before their read

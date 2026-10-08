@@ -1257,7 +1257,7 @@ async fn confirmed_result_binds_private_subpackages_without_granting_access() {
         base,
         sequence: 1,
         rows: binding.to_bytes().unwrap(),
-        required: vec![],
+        cut_base: Default::default(),
     };
     let receipt = coordinator
         .confirm(package.confirmation().unwrap())

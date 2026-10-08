@@ -2,6 +2,10 @@ use crate::*;
 use sha2::{Digest, Sha256};
 
 pub const MAX_STRONG_BYTES: usize = 16 * 1024 * 1024;
+/// Most operations a strong cut covers after its base.
+pub const MAX_CUT_OPERATIONS: usize = 32_768;
+/// The one package format; bytes without it are refused.
+const PACKAGE_MAGIC: &[u8; 16] = b"rocky.package.v2";
 pub type Commitment = [u8; 32];
 pub type Configuration = [u8; 16];
 /// Application-selected method and active generations for sealed-input commands.
@@ -111,7 +115,10 @@ pub struct StrongPackage {
     pub sequence: u64,
     /// Canonical immutable application-owned result bytes.
     pub rows: Vec<u8>,
-    pub required: Vec<OperationId>,
+    /// The checkpoint frontier the executor rebuilt the cut from. The cut
+    /// covers the operations after it up to the request's frontier; see
+    /// `StrongPackage::required`.
+    pub cut_base: AppliedFrontier,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CoordinationError {
@@ -245,6 +252,54 @@ fn valid_frontier(v: &AppliedFrontier) -> Result<(), ProtocolError> {
         return Err(ProtocolError::InvalidDependencies);
     }
     Ok(())
+}
+/// How many operations a cut covers after `base`: per author, those after
+/// the base up to `frontier`. A base author outside the frontier, or ahead
+/// of it, is refused.
+pub fn cut_size(base: &AppliedFrontier, frontier: &AppliedFrontier) -> Result<u64, ProtocolError> {
+    valid_frontier(base)?;
+    valid_frontier(frontier)?;
+    let mut size = 0u64;
+    for (author, below) in &base.0 {
+        match frontier.0.iter().find(|(node, _)| node == author) {
+            Some((_, through)) if below <= through => {}
+            _ => return Err(ProtocolError::InvalidDependencies),
+        }
+    }
+    for (author, through) in &frontier.0 {
+        let below = base
+            .0
+            .iter()
+            .find(|(node, _)| node == author)
+            .map_or(0, |(_, sequence)| sequence.get());
+        size += through.get() - below;
+    }
+    Ok(size)
+}
+/// The operations a cut covers after `base`, sorted; at most
+/// `MAX_CUT_OPERATIONS`.
+pub fn cut_operations(
+    base: &AppliedFrontier,
+    frontier: &AppliedFrontier,
+) -> Result<Vec<OperationId>, ProtocolError> {
+    if cut_size(base, frontier)? > MAX_CUT_OPERATIONS as u64 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mut operations = Vec::new();
+    for (node, through) in &frontier.0 {
+        let below = base
+            .0
+            .iter()
+            .find(|(author, _)| author == node)
+            .map_or(0, |(_, sequence)| sequence.get());
+        for sequence in below + 1..=through.get() {
+            operations.push(OperationId {
+                node: *node,
+                sequence: AuthorSequence::new(sequence)?,
+            });
+        }
+    }
+    Ok(operations)
 }
 impl StrongRequest {
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -393,14 +448,16 @@ impl StrongPackage {
             || self.request.handler > self.base.handler
             || self.base.sequence >= MAX_COUNTER
             || self.sequence != self.base.sequence + 1
-            || self.required.windows(2).any(|p| p[0] >= p[1])
         {
             return Err(ProtocolError::InvalidDependencies);
+        }
+        if cut_size(&self.cut_base, &self.request.frontier)? > MAX_CUT_OPERATIONS as u64 {
+            return Err(ProtocolError::InvalidLength);
         }
         if self.rows.len() > MAX_STRONG_BYTES {
             return Err(ProtocolError::InvalidLength);
         }
-        let mut b = Vec::new();
+        let mut b = PACKAGE_MAGIC.to_vec();
         blob(&mut b, &self.request.encode()?);
         b.extend(self.base.configuration);
         b.extend(self.base.executor.0);
@@ -411,11 +468,8 @@ impl StrongPackage {
         b.extend(self.base.handler.to_le_bytes());
         b.extend(self.sequence.to_le_bytes());
         frontier(&mut b, &self.request.frontier);
+        frontier(&mut b, &self.cut_base);
         blob(&mut b, &self.rows);
-        b.extend((self.required.len() as u32).to_le_bytes());
-        for id in &self.required {
-            put_id(&mut b, id.node, id.sequence);
-        }
         if b.len() > MAX_STRONG_BYTES {
             return Err(ProtocolError::InvalidLength);
         }
@@ -426,6 +480,9 @@ impl StrongPackage {
             return Err(ProtocolError::InvalidLength);
         }
         let mut r = Wire(b);
+        if &r.array::<16>()? != PACKAGE_MAGIC {
+            return Err(ProtocolError::InvalidLength);
+        }
         let request = StrongRequest::decode(r.blob()?)?;
         let base = StrongHead {
             scope: request.scope,
@@ -441,23 +498,30 @@ impl StrongPackage {
         if r.frontier()? != request.frontier {
             return Err(ProtocolError::InvalidDependencies);
         }
+        let cut_base = r.frontier()?;
         let rows = r.blob()?.to_vec();
-        let count = r.count(24)?;
-        let mut required = Vec::new();
-        for _ in 0..count {
-            let (node, sequence) = r.id()?;
-            required.push(OperationId { node, sequence });
-        }
         r.end()?;
         let s = Self {
             request,
             base,
             sequence,
             rows,
-            required,
+            cut_base,
         };
         s.encode()?;
         Ok(s)
+    }
+    /// The operations the cut covers after its base: what a verifier must
+    /// hold beyond its own checkpoint to rebuild the cut.
+    pub fn required(&self) -> Result<Vec<OperationId>, ProtocolError> {
+        cut_operations(&self.cut_base, &self.request.frontier)
+    }
+    /// The encoded request at the start of encoded package bytes, without
+    /// decoding the rest.
+    pub fn request_bytes(package: &[u8]) -> Option<&[u8]> {
+        let rest = package.strip_prefix(PACKAGE_MAGIC)?;
+        let (length, rest) = rest.split_first_chunk::<4>()?;
+        rest.get(..u32::from_le_bytes(*length) as usize)
     }
     pub fn confirmation(&self) -> Result<Confirmation, ProtocolError> {
         let result = commitment("rocky.mvp.result.v1", &self.encode()?);

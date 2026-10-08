@@ -841,6 +841,9 @@ mod crash_tests;
 mod retention_tests;
 
 #[cfg(test)]
+mod strong_cut_tests;
+
+#[cfg(test)]
 mod wide_schema_tests;
 
 #[cfg(all(test, unix))]

@@ -11,12 +11,10 @@ use rocky_runtime::{
     Replica, Runtime, RuntimeConfig, RuntimeOptions, SqlError, SqlOptions, SqlRows, SqlSession,
     migrate_placement,
 };
-use rocky_sdk::{Access, TypedApp, generate_room};
+use rocky_sdk::{Access, TypedApp};
 use std::path::Path;
 
-const SHOPPING: &str = include_str!("fixtures/shopping-identity.json");
-const SHOPPING_POLICY: &str =
-    include_str!("../../../examples/shoppinglist-app/shared/schemas/rocky-policy.json");
+const SHOPPING: &str = include_str!("fixtures/shopping-descriptor.json");
 const CALLER: PrincipalId = PrincipalId([7; 16]);
 const NODE: NodeId = NodeId([1; 16]);
 const PEER: NodeId = NodeId([2; 16]);
@@ -28,7 +26,7 @@ fn int(value: i64) -> SqlValue {
     SqlValue::Integer(value)
 }
 fn shopping() -> LogicalSchema {
-    generate_room(SHOPPING, SHOPPING_POLICY).expect("shopping schema")
+    LogicalSchema::parse(SHOPPING.as_bytes()).expect("shopping schema")
 }
 fn tenant(schema: &LogicalSchema, tenant: u16) -> Scope {
     let mut domain = [0; 16];

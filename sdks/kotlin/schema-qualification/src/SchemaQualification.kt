@@ -12,7 +12,7 @@ fun main(args: Array<String>) {
         }
     }
     val data = Json.parseToJsonElement(samples.definitionJson("09".repeat(32))).jsonObject
-    check(data.getValue("format").jsonPrimitive.int == 2)
+    check(data.getValue("format").jsonPrimitive.int == 3)
     check(runCatching { schema("reserved") { table("t") { text("id"); primaryKey("id") } } }.isFailure)
     check(runCatching { schema("reserved") { table("t") { integer("row_kind"); primaryKey("id") } } }.isFailure)
     val table = data.getValue("tables").jsonArray.single().jsonObject
@@ -220,7 +220,7 @@ fun main(args: Array<String>) {
     }
     check(reversed.definitionJson("09".repeat(32)) == market.definitionJson("09".repeat(32)))
     check(reversed.json() == market.json())
-    // Only format-2 tables exist: a register table without a key is refused before the engine sees it.
+    // Only format-3 tables exist: a register table without a key is refused before the engine sees it.
     check(runCatching { Schema("legacy", tables = listOf(Table("t", listOf(Column.text("x"))))) }.exceptionOrNull()?.message ==
         "every table declares a primary key; use the schema builder")
     println("schema builder, existence log and shopping/market/scalar Room import qualification passed")

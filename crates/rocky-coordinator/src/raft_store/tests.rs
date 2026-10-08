@@ -150,12 +150,6 @@ fn stores_fail_closed_on_corruption_lost_state_and_old_formats() {
         open(directory.path(), true),
         Err(CoordinationError::CoordinationStateLost)
     ));
-    let legacy = tempfile::tempdir().unwrap();
-    std::fs::write(legacy.path().join("raft.cbor"), b"v1").unwrap();
-    assert!(matches!(
-        open(legacy.path(), true),
-        Err(CoordinationError::UnsupportedFormat)
-    ));
 }
 
 #[test]
@@ -223,4 +217,36 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
         Store::open(directory.path(), genesis, false, Limits::default()),
         Err(CoordinationError::Corrupt)
     ));
+}
+
+#[test]
+fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
+    let (genesis, _, _) = certified();
+    for format in [0, FORMAT - 1, FORMAT + 1] {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        drop(Store::open(&source, genesis.clone(), true, Limits::default()).unwrap());
+        let backup = directory.path().join("backup");
+        Store::backup(&source, genesis.clone(), 1, &backup).unwrap();
+        for path in [&source, &backup] {
+            let state = path.join("state.cbor");
+            let mut hard: Hard = unseal(STATE_LABEL, &read(&state).unwrap()).unwrap();
+            hard.format = format;
+            std::fs::write(state, seal(STATE_LABEL, &hard).unwrap()).unwrap();
+        }
+        std::fs::remove_file(source.join("LOCK")).unwrap();
+        let before = read(&source.join("state.cbor")).unwrap();
+        assert!(matches!(
+            Store::open(&source, genesis.clone(), false, Limits::default()),
+            Err(CoordinationError::UnsupportedFormat)
+        ));
+        assert_eq!(read(&source.join("state.cbor")).unwrap(), before);
+        assert!(!source.join("LOCK").exists());
+        let output = directory.path().join("restored");
+        assert!(matches!(
+            Store::restore(&backup, &genesis, 1, &output),
+            Err(CoordinationError::UnsupportedFormat)
+        ));
+        assert!(!output.exists());
+    }
 }

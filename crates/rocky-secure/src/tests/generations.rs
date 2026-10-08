@@ -5,7 +5,7 @@ use crate::sql::SqlOptions;
 use crate::storage::rows;
 use rocky_core::{
     Affinity, Collation, ColumnClass, DomainId, Generation, GenerationTransition, IndexColumn,
-    LogicalColumn, LogicalIndex, LogicalSchema, LogicalTable, ROW_IDENTITY_SCHEMA_FORMAT,
+    LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalIndex, LogicalSchema, LogicalTable,
     RowApplication, SchemaSource, Scope, SqlValue, TableClass, TypedRows, UpdatePolicy,
 };
 use rocky_credentials::SignedTransition;
@@ -74,7 +74,7 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
             on_conflict: None,
         }],
         foreign_keys: Vec::new(),
-        reuses_keys: false,
+
         existence_log: false,
     }
 }
@@ -123,7 +123,7 @@ impl Lineage {
             ));
         }
         LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: *self.publisher.public_key().as_bytes(),
             application: "lineage".into(),
             source: SchemaSource {

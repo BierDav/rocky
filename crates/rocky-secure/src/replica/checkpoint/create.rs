@@ -152,7 +152,7 @@ impl<A: RowApplication> Inner<A> {
                 .is_some_and(|signed| signed.statement.finalized.is_some())
             {
                 inner
-                    .capture_checkpoint_witnesses(scope, id, "secure_checkpoint_build_stubs")
+                    .capture_checkpoint_creations(scope, id, "secure_checkpoint_build_stubs")
                     .await?;
             }
             let (rows, tombstones, digest, applied) = inner.scope_state(id).await?;
@@ -282,15 +282,7 @@ impl<A: RowApplication> Inner<A> {
             let horizon = capture.horizon;
             let finalized = capture.finalized;
             let statement = CheckpointStatement {
-                format: if finalized.is_some() {
-                    6
-                } else if horizon.is_some() {
-                    5
-                } else if inner.partitions.contains_key(&scope) {
-                    4
-                } else {
-                    3
-                },
+                format: 6,
                 finalized,
                 horizon,
                 partition: inner.partitions.get(&scope).cloned(),

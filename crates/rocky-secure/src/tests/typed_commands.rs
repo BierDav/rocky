@@ -6,7 +6,7 @@ use rocky_coordinator::MemoryCoordinator;
 use rocky_core::{
     Affinity, Collation, ColumnClass, CommandDefinitions, CommandFailure, CommandFuture,
     CommandHost, Confirmation, CoordinationFuture, Coordinator, DomainId, HandlerInput,
-    HandlerOutput, LogicalColumn, LogicalSchema, LogicalTable, Outcome, ROW_IDENTITY_SCHEMA_FORMAT,
+    HandlerOutput, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalSchema, LogicalTable, Outcome,
     RequestId, RowApplication, SchemaSource, Scope, SqlValue, StrongHead, StrongReceipt,
     TableClass, TableWrite, TypedCommands, TypedRows, UpdatePolicy,
 };
@@ -248,7 +248,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
             on_conflict: None,
         }],
         foreign_keys: Vec::new(),
-        reuses_keys: false,
+
         existence_log: false,
     }
 }
@@ -278,7 +278,7 @@ impl World {
     pub(super) fn with_stock(class: TableClass) -> Self {
         let publisher = PrivateKey::new();
         let schema = LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: *publisher.public_key().as_bytes(),
             application: "reservations".into(),
             source: SchemaSource {

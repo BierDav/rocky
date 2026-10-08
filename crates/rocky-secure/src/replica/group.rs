@@ -419,6 +419,13 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Staged::Duplicate);
         }
         self.verify_frame(frame, time)?;
+        let operation = frame.operation()?;
+        let extension = &operation.header.extensions;
+        if let Some(key) = self.opening_key(extension.scope, extension.generation)
+            && let Ok(plaintext) = decrypt(&key.key, &encode(extension)?, &frame.body)
+        {
+            RowPayload::check_formats(&plaintext)?;
+        }
         let local = self.local_grants(time)?;
         if !local.iter().any(|grant| {
             grant.scope == operation.header.extensions.scope

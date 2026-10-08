@@ -412,19 +412,10 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         open: Option<usize>,
     ) -> Result<EncryptedCommand, Error> {
         let mut inner = self.inner.lock().await;
-        // Version 1 keeps the input identity of handles committed before
-        // versions existed.
-        let input = if version == 1 {
-            rocky_core::commitment(
-                "rocky.command-input.v1",
-                &encode(&(scope, method, arguments))?,
-            )
-        } else {
-            rocky_core::commitment(
-                "rocky.command-input.v2",
-                &encode(&(scope, method, version, arguments))?,
-            )
-        };
+        let input = rocky_core::commitment(
+            "rocky.command-input.v2",
+            &encode(&(scope, method, version, arguments))?,
+        );
         let retained = collect_rows(
             inner
                 .conn

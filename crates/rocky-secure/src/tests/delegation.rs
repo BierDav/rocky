@@ -148,7 +148,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             &writer,
             Extensions {
                 author: None,
-                row_format: 1,
+                row_format: 5,
                 partition: None,
                 manifest: f.app().definition().hash(),
                 scope: f.public,

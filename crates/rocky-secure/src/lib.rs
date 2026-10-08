@@ -23,12 +23,12 @@ pub use recovery::{
 mod store;
 mod wire;
 pub use replica::{
-    AuditReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus,
-    CheckpointWitnessPage, CiphertextPage, Companion, CustodySummary, Describe, EXISTENCE_FORMAT,
-    EncryptedReplica, EvictReport, ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent,
-    ExistencePage, ExistenceRecord, FrontierLog, GenerationStatus, GenerationStep, Holding,
-    HorizonPage, HorizonProgress, KeyMaterial, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES,
-    MAX_BUNDLE_ROWS, MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_GENERATIONS, MAX_SNAPSHOT_BYTES,
+    AuditReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus, CiphertextPage,
+    Companion, CustodySummary, Describe, EXISTENCE_FORMAT, EncryptedReplica, EvictReport,
+    ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent, ExistencePage, ExistenceRecord,
+    FrontierLog, GenerationStatus, GenerationStep, Holding, HorizonPage, HorizonProgress,
+    KeyMaterial, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS,
+    MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_GENERATIONS, MAX_SNAPSHOT_BYTES,
     MAX_SNAPSHOT_ROWS, PLAN_ROWS, PeerLag, ProjectionPlan, PruneBlock, PruneReport, ROWS_PER_FRAME,
     RangePage, RebootstrapReport, ReceiveStatus, RemotePage, ReplicaRole, ReplicaStatus,
     RetentionLimits, RetentionPolicy, RoleConfig, ScopeFrontier, ScopeStatus, SecureCommit,
@@ -108,3 +108,5 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+pub use replica::check_replica_format;

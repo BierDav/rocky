@@ -203,7 +203,7 @@ impl<A: RowApplication> Inner<A> {
                     if sequence != opening.sequence {
                         return Err(Error::Corrupt("bundle sequence plan".into()));
                     }
-                    RowPayload::bundle(membership, writes.clone(), opening.author.is_some())
+                    RowPayload::bundle(membership, writes.clone())
                 })
                 .await?;
             authored.push(frame);
@@ -363,8 +363,11 @@ impl<A: RowApplication> Inner<A> {
         let own = Opening {
             scope: trigger.header.extensions.scope,
             sequence: trigger.header.seq_num,
-            author: (trigger.header.extensions.row_format >= 2)
-                .then_some(trigger.header.public_key),
+            author: trigger
+                .header
+                .extensions
+                .author
+                .map(|_| trigger.header.public_key),
         };
         if !required.contains(&(usize::from(membership.index), own)) {
             self.reject(trigger.hash).await?;

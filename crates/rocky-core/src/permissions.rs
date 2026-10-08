@@ -179,8 +179,7 @@ pub trait RowApplication: Send + Sync + 'static {
     /// Immutable ACL-controlling fields of this definition; the runtime may cache them.
     fn permission_fields(&self) -> BTreeSet<Commitment>;
     fn validate_changes(&self, changes: &[RowChange]) -> Result<(), String>;
-    /// The visible incarnation of an identity-aware row; compiled legacy
-    /// contracts without logical tables use their existing row identity.
+    /// Optional partition identity of an application row.
     fn row_partition(&self, _change: &RowChange) -> Result<Option<crate::PartitionTuple>, String> {
         Ok(None)
     }

@@ -143,9 +143,7 @@ async fn prepare<A: StoredApplication>(
             ));
         }
         State::Foreign => {
-            return Err(Error::Incompatible(
-                "legacy single-domain file; export into a new shared file".into(),
-            ));
+            return Err(Error::Incompatible("unsupported runtime layout".into()));
         }
     };
     for index in used..MAX_FILES {
@@ -234,7 +232,7 @@ pub(crate) async fn bootstrap<'a, A: StoredApplication + 'a>(
             domain.identity,
             &domain.app,
             &domain.config,
-        ));
+        )?);
     }
     crate::bootstrap::install(root, binding, statements).await
 }

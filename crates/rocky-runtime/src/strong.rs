@@ -10,7 +10,6 @@ pub struct ConfirmedPublication {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandState {
     Queued,
-    Prepared,
     OutcomeUnknown,
     ConfirmedLocally,
     PeerApplied,

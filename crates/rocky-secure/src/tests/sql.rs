@@ -3,8 +3,8 @@ use super::*;
 use crate::sql::{AbortReason, SqlError, SqlOptions, SqlState};
 use crate::storage::collect_rows;
 use rocky_core::{
-    Affinity, Collation, ColumnClass, DomainId, LogicalColumn, LogicalSchema, LogicalTable,
-    ROW_IDENTITY_SCHEMA_FORMAT, RowApplication, SchemaSource, Scope, SqlValue, TableClass,
+    Affinity, Collation, ColumnClass, DomainId, LOGICAL_SCHEMA_FORMAT, LogicalColumn,
+    LogicalSchema, LogicalTable, RowApplication, SchemaSource, Scope, SqlValue, TableClass,
     TypedRows, UpdatePolicy,
 };
 
@@ -63,7 +63,7 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
             on_conflict: None,
         }],
         foreign_keys: Vec::new(),
-        reuses_keys: false,
+
         existence_log: false,
     }
 }
@@ -83,7 +83,7 @@ impl Typed {
         );
         drafts.class = TableClass::LocalOnly;
         let schema = LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: *publisher.public_key().as_bytes(),
             application: "secure-sql".into(),
             source: SchemaSource {
@@ -340,7 +340,7 @@ fn sql_error(result: Result<SecureRows, Error>) -> SqlError {
     }
 }
 
-// Historical SQL scenarios now allocate real format-2 identities.
+// Historical SQL scenarios now allocate current identities.
 async fn insert(
     session: &SecureSql<TypedRows>,
     sql: &str,
@@ -1339,7 +1339,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format": 2, "publisher": "PUBLISHER",
+        "format":3, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"mergeable", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -1470,7 +1470,7 @@ fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     // Use definition generation, not handwritten identity DDL.
     let definition = r#"{
-        "format": 2, "publisher": "PUBLISHER",
+        "format":3, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "mergeable", "columns": [
                 {"name": "key", "type": "text", "not_null": true},
@@ -1594,7 +1594,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 4);
+    assert_eq!(operation.header.extensions.row_format, 5);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
         .await
@@ -1855,19 +1855,25 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
             operation.header.timestamp + 1,
         ),
         vec![],
-        &encode(&vec![change]).unwrap(),
+        &crate::wire::RowPayload::witness(
+            crate::wire::RowPayload::rows(&[change]).unwrap(),
+            vec![],
+            None,
+            vec![],
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 3);
+    assert_eq!(signed.statement.format, 6);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 
 #[tokio::test]
 async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replacement() {
     let publisher = PrivateKey::new();
-    let definition = r#"{"format":2,"publisher":"PUBLISHER","application":"pair_identity","tables":[
+    let definition = r#"{"format":3,"publisher":"PUBLISHER","application":"pair_identity","tables":[
         {"name":"items","class":"mergeable","columns":[{"name":"left","type":"text","not_null":true},{"name":"right","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["left","right"]},
         {"name":"salaries","class":"mergeable","columns":[{"name":"amount","type":"integer","not_null":true}],"primary_key":["id"]}
     ]}"#.replace("PUBLISHER", &publisher.public_key().to_string());
@@ -2140,7 +2146,7 @@ async fn local_identity_columns_refuse_reserved_kinds_and_mutation() {
 }
 
 #[tokio::test]
-async fn incarnation_key_index_backfills_reopens_and_tracks_rebuild_and_eviction() {
+async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
     let fixture = identity_fixture();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("indexed.sqlite");
@@ -2190,17 +2196,6 @@ async fn incarnation_key_index_backfills_reopens_and_tracks_rebuild_and_eviction
             [encode(&fixture.items).unwrap(), vec![0; 32], Vec::new()],
         ).await.unwrap()).await.unwrap();
         assert!(plan.iter().any(|row| row.iter().any(|value| matches!(value, SqlValue::Text(detail) if detail.contains("secure_row_keys_key") && detail.contains("scope=? AND key=? AND row>?")))), "{plan:?}");
-        // Simulate a format-2 file written before the derived index existed.
-        inner
-            .conn
-            .execute("DROP TRIGGER secure_row_keys_delete", ())
-            .await
-            .unwrap();
-        inner
-            .conn
-            .execute("DROP TABLE secure_row_keys", ())
-            .await
-            .unwrap();
     }
     drop(writer);
     drop(replica);

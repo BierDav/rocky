@@ -4,16 +4,13 @@ mod audit;
 mod create;
 mod prune;
 mod transfer;
-mod witnesses;
 use super::*;
 pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, HorizonPage, RebootstrapReport};
-pub use witnesses::CheckpointWitnessPage;
 
 pub(crate) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_legacy_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_build_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -31,7 +28,6 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_witnesses(scope INTEGER PRIMARY KEY,cursor BLOB,complete INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -101,12 +97,9 @@ pub struct CustodySummary {
 pub struct CheckpointStatement {
     pub format: u32,
     /// Most recently admitted issuer declaration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon: Option<Box<rocky_credentials::SignedHorizon>>,
     /// Last cut atomically finalized into the replay base.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized: Option<Box<rocky_credentials::SignedHorizon>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<rocky_core::PartitionTuple>,
     pub identities: Vec<IdentityMark>,
     pub definition: Commitment,
@@ -175,6 +168,19 @@ impl SignedCheckpoint {
         Ok(bytes)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            statement: Format,
+        }
+        let version: Version =
+            p2panda_core::cbor::decode_cbor(bytes).map_err(|_| denied("invalid checkpoint"))?;
+        if version.statement.format != 6 {
+            return Err(denied("unsupported checkpoint format"));
+        }
         decode(bytes)
     }
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -186,17 +192,15 @@ impl SignedCheckpoint {
     /// The signature and the frontier's canonical order.
     pub(crate) fn verify_signature(&self) -> Result<(), Error> {
         let statement = &self.statement;
-        if ![3, 4, 5, 6].contains(&statement.format)
-            || (statement.format >= 5) != statement.horizon.is_some()
-            || (statement.format == 6) != statement.finalized.is_some()
-            || (statement.format < 5 && (statement.format == 4) != statement.partition.is_some())
-            || statement.partition.as_ref().is_some_and(|tuple| {
-                tuple
-                    .scope(statement.scope.domain, statement.scope.table)
-                    .ok()
-                    != Some(statement.scope)
-            })
-            || statement.identities.len() > MAX_CHECKPOINT_LOGS
+        if statement.format != 6 {
+            return Err(denied("unsupported checkpoint format"));
+        }
+        if statement.partition.as_ref().is_some_and(|tuple| {
+            tuple
+                .scope(statement.scope.domain, statement.scope.table)
+                .ok()
+                != Some(statement.scope)
+        }) || statement.identities.len() > MAX_CHECKPOINT_LOGS
             || statement
                 .identities
                 .windows(2)
@@ -565,10 +569,8 @@ pub(super) fn handle_item(handle: &[u8], input: &[u8], hash: &[u8]) -> Vec<u8> {
 /// What a checkpoint must reproduce, captured in one transaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Capture {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon: Option<Box<rocky_credentials::SignedHorizon>>,
     /// Last cut atomically finalized into the replay base.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized: Option<Box<rocky_credentials::SignedHorizon>>,
     pub identities: Vec<IdentityMark>,
     pub frontier: Vec<LogPosition>,
@@ -1340,5 +1342,55 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         inner.stage_fault = Some((stage, skip));
         inner.stage_exit = true;
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    pub(in crate::replica) async fn capture_checkpoint_creations(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        table: &str,
+    ) -> Result<(), Error> {
+        self.conn
+            .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
+            .await?;
+        self.conn.execute(format!("INSERT INTO {table} SELECT scope,hash,clock FROM secure_stubs WHERE scope=? AND creation=1"), [id]).await?;
+        let mut after = Vec::new();
+        loop {
+            let rows = collect_rows(self.conn.query("SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?", bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Blob(after.clone()),SqlValue::Integer(STEP_ROWS as i64)])).await?).await?;
+            if rows.is_empty() {
+                break;
+            }
+            for row in rows {
+                let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = row.as_slice() else {
+                    return Err(Error::Corrupt("creation witness row".into()));
+                };
+                after = key.clone();
+                let record: Materialized = decode(bytes)?;
+                let clock = match self.stub(record.creation).await? {
+                    Some((_, clock)) => clock,
+                    None => {
+                        self.frame(record.creation)
+                            .await?
+                            .ok_or_else(|| denied("checkpoint creation witness missing"))?
+                            .operation()?
+                            .header
+                            .timestamp
+                    }
+                };
+                self.conn
+                    .execute(
+                        format!("INSERT OR IGNORE INTO {table} VALUES(?,?,?)"),
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(record.creation.as_bytes().to_vec()),
+                            integer(clock),
+                        ]),
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
     }
 }

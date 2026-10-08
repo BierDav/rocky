@@ -82,7 +82,13 @@ impl ExistenceRecord {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode(bytes)
+        let record: Self = decode(bytes)?;
+        if record.statement.version != EXISTENCE_FORMAT {
+            return Err(Error::Incompatible(
+                "unsupported existence record format; upgrade the runtime".into(),
+            ));
+        }
+        Ok(record)
     }
     /// The signature over the statement under the signer's key.
     fn signed(&self) -> Result<bool, Error> {
@@ -105,7 +111,7 @@ impl ExistenceRecord {
         previous: Option<Commitment>,
     ) -> Self {
         let statement = Statement {
-            version: 1,
+            version: EXISTENCE_FORMAT,
             manifest,
             scope,
             id: RowIdentity::from_integer(id).expect("test identity"),
@@ -183,11 +189,7 @@ impl<A: RowApplication> Inner<A> {
                 .row_partition(&write.change)
                 .map_err(|error| denied(&error))?;
             let statement = Statement {
-                version: if partition.is_some() {
-                    EXISTENCE_FORMAT
-                } else {
-                    1
-                },
+                version: EXISTENCE_FORMAT,
                 manifest: self.manifest,
                 scope,
                 id,
@@ -248,9 +250,7 @@ impl<A: RowApplication> Inner<A> {
     /// delete right, and that a creation's `id` belongs to its author.
     fn verify_existence(&self, record: &ExistenceRecord, time: u64) -> Result<(), Error> {
         let statement = &record.statement;
-        if ![1, EXISTENCE_FORMAT].contains(&statement.version)
-            || (statement.version == 2) != statement.partition.is_some()
-        {
+        if statement.version != EXISTENCE_FORMAT {
             return Err(Error::Incompatible(
                 "unsupported existence record format; upgrade the runtime".into(),
             ));

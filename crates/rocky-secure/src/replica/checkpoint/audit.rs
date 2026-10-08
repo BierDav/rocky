@@ -1,5 +1,4 @@
-//! Bookkeeping for files written before checkpoints, the open-time check of
-//! what follows the latest checkpoint, and the explicit full audit.
+//! Open-time verification of the retained suffix and the explicit full audit.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,82 +18,6 @@ fn mismatch() -> Error {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// Adds positions, log tips, scope digests and counters to a file that
-    /// has none. Runs once, inside the opening transaction; such a file holds
-    /// at most the former quota of 4,096 records.
-    pub(in crate::replica) async fn install_bookkeeping(&self) -> Result<(), Error> {
-        if !rows(&self.conn, "SELECT 1 FROM secure_retained")
-            .await?
-            .is_empty()
-        {
-            return Ok(());
-        }
-        self.conn
-            .execute(
-                "INSERT INTO secure_retained SELECT 1,COUNT(*),COALESCE(SUM(LENGTH(header)+LENGTH(body)),0),0,? FROM secure_operations",
-                [Lt::new().to_bytes()],
-            )
-            .await?;
-        let (mut handles, mut digest) = (0i64, Lt::new());
-        for record in rows(&self.conn, "SELECT handle,input,hash FROM secure_handles").await? {
-            let [
-                SqlValue::Blob(handle),
-                SqlValue::Blob(input),
-                SqlValue::Blob(hash),
-            ] = record.as_slice()
-            else {
-                return Err(Error::Corrupt("mutation handle".into()));
-            };
-            digest.add(HANDLE_LABEL, &handle_item(handle, input, hash));
-            handles += 1;
-        }
-        self.conn
-            .execute(
-                "UPDATE secure_retained SET handles=?,handle_digest=?",
-                bindings(vec![
-                    SqlValue::Integer(handles),
-                    SqlValue::Blob(digest.to_bytes()),
-                ]),
-            )
-            .await?;
-        for record in rows(
-            &self.conn,
-            "SELECT scope FROM secure_operations UNION SELECT scope FROM secure_rows",
-        )
-        .await?
-        {
-            let [SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(Error::Corrupt("stored scope".into()));
-            };
-            let scope: ResourceScope = decode(bytes)?;
-            let id = self.scope_id(scope).await?;
-            // Stamp order is the order the open-time replay always used.
-            let order = self.replay_order(scope).await?;
-            for (_, hash) in &order {
-                let frame = self
-                    .frame(*hash)
-                    .await?
-                    .ok_or_else(|| Error::Corrupt("missing replay record".into()))?;
-                self.note_applied(id, &frame.operation()?).await?;
-            }
-            let sets = self
-                .row_sets(
-                    "SELECT row,fields FROM secure_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
-                    SqlValue::Blob(bytes.clone()),
-                    None,
-                )
-                .await?;
-            self.store_scope_state(
-                id,
-                sets.rows,
-                sets.tombstones,
-                &sets.digest,
-                order.len() as u64,
-            )
-            .await?;
-        }
-        Ok(())
-    }
     /// Streams the stored rows of one table and scope into their digest.
     /// With `stubs`, every row's creation operation must still be known.
     async fn row_sets(

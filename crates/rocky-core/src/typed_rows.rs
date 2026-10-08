@@ -408,8 +408,8 @@ impl RowApplication for TypedRows {
 mod tests {
     use super::*;
     use crate::{
-        Affinity, Collation, ColumnClass, LogicalColumn, LogicalTable, MeshId,
-        ROW_IDENTITY_SCHEMA_FORMAT, ResourceScope, SchemaSource, Scope, TableClass, UpdatePolicy,
+        Affinity, Collation, ColumnClass, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalTable,
+        MeshId, ResourceScope, SchemaSource, Scope, TableClass, UpdatePolicy,
     };
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
@@ -425,7 +425,7 @@ mod tests {
     }
     fn rows() -> TypedRows {
         let schema = LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: [1; 32],
             application: "typed".into(),
             source: SchemaSource {
@@ -450,7 +450,7 @@ mod tests {
                 partition_by: Vec::new(),
                 indexes: vec![crate::LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![crate::IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None }],
                 foreign_keys: Vec::new(),
-                reuses_keys: false,
+
                 existence_log: false,
             }],
             views: Vec::new(),

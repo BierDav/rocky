@@ -108,7 +108,7 @@ async fn a_backup_restores_into_a_fresh_identity_without_forking_or_resending()
     Ok(())
 }
 
-const COUNTER: &str = r#"{"application":"counter","version":1,"commands":{"format":1,"handler":1,"commands":[{"name":"Add","version":1,"handler":"counts.add.v1","arguments":[{"name":"amount","type":"integer"}],"accepted":[{"name":"value","type":"integer"}],"rejected":[],"invocation":"counts","result":"counts","resources":["counts"]}]},"format":2,"tables":[{"name":"counts","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const COUNTER: &str = r#"{"application":"counter","version":1,"commands":{"format":1,"handler":1,"commands":[{"name":"Add","version":1,"handler":"counts.add.v1","arguments":[{"name":"amount","type":"integer"}],"accepted":[{"name":"value","type":"integer"}],"rejected":[],"invocation":"counts","result":"counts","resources":["counts"]}]},"format":3,"tables":[{"name":"counts","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
 struct Counter;
 impl rocky_sdk::CommandHandler for Counter {

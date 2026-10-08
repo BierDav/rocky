@@ -11,7 +11,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<EncryptedFrame, Error> {
         let writes: Vec<RowWrite> = changes.iter().cloned().map(RowWrite::changed).collect();
         let frame = self
-            .author_frame(&writes, dependencies, time, |_| encode(&changes))
+            .author_frame(&writes, dependencies, time, |_| RowPayload::rows(changes))
             .await?;
         self.put_handle(&handle, &input, frame.id()?.as_bytes())
             .await?;
@@ -236,13 +236,7 @@ impl<A: RowApplication> Inner<A> {
             signing_key,
             Extensions {
                 author: signer.map(|author| author.number),
-                row_format: if partition.is_some() {
-                    5
-                } else if signer.is_some() {
-                    4
-                } else {
-                    1
-                },
+                row_format: 5,
                 partition,
                 manifest: self.manifest,
                 scope,
@@ -258,16 +252,12 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(|| denied("logical clock exhausted"))?,
             ),
             previous.into_iter().collect(),
-            &if signer.is_some() {
-                RowPayload::witness(
-                    payload(sequence)?,
-                    witnesses.into_iter().collect(),
-                    basis,
-                    releases.into_iter().collect(),
-                )?
-            } else {
-                payload(sequence)?
-            },
+            &RowPayload::witness(
+                payload(sequence)?,
+                witnesses.into_iter().collect(),
+                basis,
+                releases.into_iter().collect(),
+            )?,
         )?;
         self.verify_frame(&frame, time)?;
         let operation = frame.operation()?;

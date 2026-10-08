@@ -274,10 +274,7 @@ async fn directory_and_alice_share_metadata_voters_and_quorum_loss_keeps_local_w
             .unwrap()
             .commands
             .iter()
-            .any(|c| matches!(
-                c.state,
-                CommandState::Queued | CommandState::OutcomeUnknown | CommandState::Prepared
-            ))
+            .any(|c| matches!(c.state, CommandState::Queued | CommandState::OutcomeUnknown))
     );
     let phone_inventory = Runtime::open(
         cluster.dir.path().join("phone-inventory.db"),

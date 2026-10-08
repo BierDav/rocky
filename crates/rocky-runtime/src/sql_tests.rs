@@ -4,8 +4,8 @@
 use super::*;
 use rocky_core::{
     AdmissionBoundary, Affinity, Application, ApplicationDescriptor, CapturedRow, Collation,
-    ColumnClass, InstalledSchema, Intent, LogicalColumn, LogicalSchema, LogicalTable, MeshId,
-    ProjectionSchema, ProjectionStatement, ROW_IDENTITY_SCHEMA_FORMAT, SchemaSource, Sql, SqlValue,
+    ColumnClass, InstalledSchema, Intent, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalSchema,
+    LogicalTable, MeshId, ProjectionSchema, ProjectionStatement, SchemaSource, Sql, SqlValue,
     SqlWrites, Stamp, TableClass, TransactionToken, UpdatePolicy, Versions,
 };
 use std::collections::BTreeMap;
@@ -49,7 +49,7 @@ pub(crate) fn schema() -> LogicalSchema {
         class: ColumnClass::Mergeable,
     };
     LogicalSchema {
-        format: ROW_IDENTITY_SCHEMA_FORMAT,
+        format: LOGICAL_SCHEMA_FORMAT,
         publisher: [3; 32],
         application: "notes".into(),
         source: SchemaSource {
@@ -90,7 +90,7 @@ pub(crate) fn schema() -> LogicalSchema {
                 on_conflict: None,
             }],
             foreign_keys: Vec::new(),
-            reuses_keys: false,
+
             existence_log: false,
         }],
         views: Vec::new(),

@@ -339,8 +339,8 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 if let Some(key) = inner.opening_key(invocation.scope, invocation.generation) {
                     let args = invocation.open(&key.key)?;
                     if rocky_core::commitment(
-                        "rocky.command-input.v1",
-                        &encode(&(invocation.scope, request.method, &args))?,
+                        "rocky.command-input.v2",
+                        &encode(&(invocation.scope, request.method, request.version, &args))?,
                     ) != record.input
                     {
                         return Err(denied("recovery command input mismatch"));

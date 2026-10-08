@@ -346,7 +346,7 @@ async fn bootstrap_child() {
             crate::bootstrap::ABORT_AFTER_STEP.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    if std::env::var("ROCKY_WIDE_CRASH_MODE").as_deref() == Ok("legacy") {
+    if std::env::var("ROCKY_WIDE_CRASH_MODE").as_deref() == Ok("unscoped") {
         let domain = installation(app(100), 0);
         let _ = Replica::open_with_config(
             path,
@@ -515,10 +515,10 @@ async fn placed_bootstrap_resumes_before_and_after_the_file_completion_marker() 
 }
 
 #[tokio::test]
-async fn legacy_wide_bootstrap_resumes_without_admitting_partial_identity() {
+async fn unscoped_wide_bootstrap_resumes_without_admitting_partial_identity() {
     use std::os::unix::process::ExitStatusExt;
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("legacy.db");
+    let path = dir.path().join("unscoped.db");
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "wide_schema_tests::bootstrap_child",
@@ -526,7 +526,7 @@ async fn legacy_wide_bootstrap_resumes_without_admitting_partial_identity() {
             "--test-threads=1",
         ])
         .env("ROCKY_WIDE_CRASH_PATH", &path)
-        .env("ROCKY_WIDE_CRASH_MODE", "legacy")
+        .env("ROCKY_WIDE_CRASH_MODE", "unscoped")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -549,8 +549,8 @@ async fn legacy_wide_bootstrap_resumes_without_admitting_partial_identity() {
     )
     .await
     .unwrap();
-    note(&replica, 1, "legacy").committed().await.unwrap();
-    assert_eq!(replica.query().await.unwrap().rows[0].1, "legacy");
+    note(&replica, 1, "unscoped").committed().await.unwrap();
+    assert_eq!(replica.query().await.unwrap().rows[0].1, "unscoped");
     replica.close().await.unwrap();
 }
 

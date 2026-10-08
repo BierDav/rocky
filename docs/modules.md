@@ -311,8 +311,7 @@ with a deadline, and command calls submit, run, deliver and settle tickets
 owner's tenant-key registration, control and activation calls. It also accepts
 portable definition tables through the SDK/native schema input and owns `TypedApp`, the typed-table
 application with business keys and row incarnations, and its translation of
-captured SQL rows; the Kotlin builder and Room importer share this definition path. The legacy
-Room/policy importer preserves existing descriptors ([logical schemas](runtime/logical-schema.md)). It uses the existing
+captured SQL rows; the Kotlin builder and Room importer share this definition path. It uses the existing
 runtime, independent of example application reducers. `sdks/native` is the
 excluded UniFFI ABI crate; generated FFI scaffolding is isolated from the safe
 workspace, with no authored unsafe code. Besides the session it exports the
@@ -341,8 +340,7 @@ build, package and qualify the SDK ([build tooling](../sdks/kotlin/README.md#bui
 `examples/shoppinglist-app` is a Kotlin-only Compose Multiplatform consumer whose typed Room entities
 and DAOs run on Rocky's file, with a small repository, shared screen and QRKit helper;
 `androidApp` is its Android app. Its exported Room
-schema qualifies Kotlin import; `rocky-policy.json` remains a legacy Rust
-generation fixture. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
+schema qualifies Kotlin import. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
 driver's pinned acceptance fixture and runs the same DAOs on Rocky's file.
 `sdks/kotlin/schema-qualification` supplies Room-generated
 market-shaped and compound-key scalar fixtures and DAO value tests. The SDK supplies all

@@ -9,7 +9,7 @@ descriptor and both fingerprints are identical.
 
 ```json
 {
-  "format": 2,
+  "format": 3,
   "publisher": "6b6b…6b",
   "application": "notebook",
   "update_policy": "changed",
@@ -31,7 +31,7 @@ descriptor and both fingerprints are identical.
 
 | Entry | Meaning |
 | --- | --- |
-| `format` | 2, or 3 when a table declares `partition_by` or the schema declares `views` ([partitioned scopes](partitioned-scopes.md)); others are refused |
+| `format` | 3, including optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)); others are refused |
 | `publisher`, `application` | Bind table and field identities; 64 hexadecimal digits |
 | `update_policy` | `changed` (default) or `assigned`; see [SQL sessions](sql-sessions.md#what-a-commit-publishes) |
 | table `class` | `mergeable`, `local_only`, [`command_controlled`](confirmed-tables.md) or `confirmed_read_only` (trusted only) |
@@ -42,7 +42,6 @@ descriptor and both fingerprints are identical.
 | column `local_only` | Declared, and refused inside a mergeable table |
 | index `unique`, `on_conflict`; table `foreign_keys` | [Mergeable constraints](mergeable-constraints.md), secure only |
 | table `existence_log` | Other reader scopes may reference it; see [existence logs](existence-logs.md) |
-| table `reuses_keys` | Recorded and fingerprinted; no runtime behavior depends on it |
 
 Do not declare `id` or `row_kind`: the definition supplies both and the
 identity index ([row identity](logical-schema.md#row-identity)). A primary key
@@ -74,7 +73,7 @@ val Samples = schema("samples") {
 
 `boolean` declares an INTEGER column, with Boolean defaults normalized to 0/1.
 `column(Column.text(...).copy(default = JsonPrimitive(...)))` adds defaults,
-collation or logical/derived metadata. `tableClass`, `logical`, `reusesKeys`,
+collation or logical/derived metadata. `tableClass`, `logical`,
 `existenceLog`, `partitionBy`, `view` and `updatePolicy` set the definition
 attributes; `unique`, `onConflict` and `reference` declare
 [constraints](mergeable-constraints.md#declare-them).

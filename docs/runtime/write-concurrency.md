@@ -22,12 +22,12 @@ Initialization creates the schema in one `BEGIN IMMEDIATE` transaction. Only
 from 2 to 64 ms, 318 ms in total, then `RetryExhausted`. A single in-process
 writer never meets them; the bound covers a file briefly held by another
 process. SQLite ends a transaction itself after some errors, such as a full
-disk, so the adapter checks `is_autocommit()` before rolling back. A file whose
-header read or write format byte exceeds 2, or with a non-empty `<file>-log`
-sidecar, was written by another engine and is refused with `Incompatible`.
+disk, so the adapter checks `is_autocommit()` before rolling back. A persisted file must carry the current Rocky application-id tag
+(`0x524b5901`); a read-only check refuses any other tag before lock creation
+or initialization writes.
 
 A second runtime opening the same file fails with `Incompatible` after about
-100 ms of lock retries. The lock is the path with its extension replaced by
+100 ms of lock retries. The lock is the path with
 `.lock`.
 
 ## File layout

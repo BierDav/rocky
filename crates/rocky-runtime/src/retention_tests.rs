@@ -980,33 +980,6 @@ async fn an_aborted_import_keeps_the_projection_and_a_superseded_export_restarts
     phone.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_file_from_before_checkpoints_gains_them_at_open() {
-    let dir = TempDir::new().unwrap();
-    let laptop = open(&dir, fixtures::LAPTOP).await;
-    let kept = create(&laptop, "kept").await.id;
-    edit(&laptop, kept, Action::SetCompleted(true)).await;
-    let before = laptop.query().await.unwrap();
-    laptop.close().await.unwrap();
-    // As an earlier build left it: no checkpoint tables, index or copy.
-    let db = crate::sqlite::Connection::open(&dir.path().join("laptop.db")).unwrap();
-    for sql in [
-        "DROP TABLE rocky_checkpoint",
-        "DROP TABLE rocky_rejected_local",
-        "DROP INDEX rocky_mutation_handles_sequence",
-        "DROP TABLE rocky_ckpt_todos",
-    ] {
-        db.execute(sql, ()).await.unwrap();
-    }
-    drop(db);
-    let laptop = open(&dir, fixtures::LAPTOP).await;
-    assert_eq!(laptop.query().await.unwrap(), before);
-    let report = laptop.audit().await.unwrap();
-    assert!(report.recomputed);
-    assert_eq!((report.rows, report.retained_operations), (1, 2));
-    laptop.close().await.unwrap();
-}
-
 fn child(case: &str, dir: &TempDir) -> std::process::Child {
     std::process::Command::new(std::env::current_exe().unwrap())
         .args([

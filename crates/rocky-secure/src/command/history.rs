@@ -58,18 +58,6 @@ impl<A: RowApplication> Inner<A> {
         self.conn.execute("INSERT INTO secure_preparation_requests VALUES(?,?,?,?) ON CONFLICT(preparation) DO NOTHING", bindings(vec![SqlValue::Blob(key.to_vec()),SqlValue::Blob(package.request.hash()?.to_vec()),SqlValue::Blob(encode(&package.request.scope)?),SqlValue::Integer(package.sequence as i64)])).await?;
         Ok(())
     }
-    pub(crate) async fn index_preparations(&self) -> Result<(), Error> {
-        for record in rows(&self.conn,"SELECT c.handle,c.command FROM secure_recovered_commands c LEFT JOIN secure_tickets t ON t.handle=c.handle WHERE t.handle IS NULL").await? {
-            let [SqlValue::Blob(handle),SqlValue::Blob(bytes)] = record.as_slice() else { return Err(denied("recovered command index")); };
-            let request = decode::<EncryptedCommand>(bytes)?.request()?;
-            self.conn.execute("INSERT INTO secure_tickets VALUES(?,?)", [handle.clone(),request.hash()?.to_vec()]).await?;
-        }
-        for record in rows(&self.conn,"SELECT p.request,p.result FROM secure_preparations p LEFT JOIN secure_preparation_requests i ON i.preparation=p.request WHERE i.preparation IS NULL").await? {
-            let [SqlValue::Blob(key),SqlValue::Blob(bytes)] = record.as_slice() else { return Err(denied("preparation index")); };
-            self.index_preparation(key,&decode::<ConfirmedCommand>(bytes)?).await?;
-        }
-        Ok(())
-    }
     pub(crate) async fn strong_base(&self, scope: ResourceScope) -> Result<StrongState, Error> {
         let mut records = self
             .conn

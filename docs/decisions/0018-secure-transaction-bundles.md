@@ -1,6 +1,7 @@
 # 0018: Secure transaction bundles, session authority and typed secure storage
 
-Status: accepted. Date: 2026-10-05. The API is in
+Status: accepted; body format replaced by [0039](0039-single-current-formats.md)
+on 2026-10-08. Date: 2026-10-05. The API is in
 [secure sessions](../runtime/secure-sessions.md) and
 [secure SQL](../runtime/secure-sql.md); this record keeps the body format, the
 visibility rule and the rejected alternatives.
@@ -17,10 +18,10 @@ recorded inside the encrypted body, never in the header:
 
 | Body field | Meaning |
 | --- | --- |
-| `version` | 1 |
-| `transaction` | Commitment to author and handle: the durable transaction identity |
-| `index` | This frame's position |
-| `members` | One sealed entry per frame, identical in every frame |
+| `version` | 2 |
+| `membership.transaction` | Commitment to author and handle: the durable transaction identity |
+| `membership.index` | This frame's position |
+| `membership.members` | One sealed entry per frame, identical in every frame |
 | `writes` | `RowWrite`s: the exact row change and its write mask |
 
 Entry `i` encrypts member `i`'s scope and sequence under member `i`'s scope

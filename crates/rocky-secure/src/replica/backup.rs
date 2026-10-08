@@ -95,6 +95,7 @@ async fn rebind(
     predecessor: PublicKey,
     node: PublicKey,
 ) -> Result<(), Error> {
+    check_replica_format(path).await?;
     let (owner, raw) = DatabaseOwner::open(path).await?;
     let conn = ScopedConnection::new(raw, None, crate::store::SCHEMA);
     let stored = rows(&conn, "SELECT identity FROM secure_metadata WHERE id=1").await?;
@@ -102,11 +103,7 @@ async fn rebind(
         return Err(denied("the restored file holds no replica"));
     };
     for manifest in manifests {
-        let matches = |key| -> Result<bool, Error> {
-            Ok(identity(*manifest, key)? == *stored
-                || encode(&("rocky.encrypted-replica.v5", *manifest, key))? == *stored
-                || encode(&("rocky.encrypted-replica.v4", *manifest, key))? == *stored)
-        };
+        let matches = |key| -> Result<bool, Error> { Ok(identity(*manifest, key)? == *stored) };
         if matches(node)? {
             return Ok(());
         }

@@ -700,7 +700,7 @@ async fn run(
     if matches!(setup.install, Install::Installed) && directory.join("identity.json").exists() {
         Settings::load(&directory.join("identity.json"))?;
     }
-    rocky_storage::database::refuse_old_row_identity(&directory.join("rocky.sqlite")).await?;
+    rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     if matches!(setup.install, Install::Installed) {
         Settings::load(&directory.join("identity.json"))?;
     }
@@ -712,7 +712,7 @@ async fn run(
         .open(directory.join("sdk.lock"))?;
     lock.try_lock()
         .map_err(|_| "data directory is already in use")?;
-    rocky_storage::database::refuse_old_row_identity(&directory.join("rocky.sqlite")).await?;
+    rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     let path = directory.join("identity.json");
     // Record checkpoint-first intent before enrollment can persist the identity.
     if matches!(setup.install, Install::Join { .. }) && !path.exists() {
@@ -1063,8 +1063,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":2,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
-        for format in [1, 0, 4] {
+        const SCHEMA: &str = r#"{"format":3,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        for format in [0, 1, 2, 4] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("rocky.sqlite");
             let conn = rocky_storage::sqlite::Connection::open(&path)?;
@@ -1099,12 +1099,7 @@ mod tests {
                 .err()
                 .ok_or("old database admitted")?
                 .to_string();
-                assert!(
-                    error.contains("row identity")
-                        && error.contains("export")
-                        && error.contains("reinstall"),
-                    "{error}"
-                );
+                assert!(error.contains("unsupported Rocky file format"), "{error}");
                 assert_eq!(std::fs::read(&path)?, before);
                 for name in [
                     "sdk.lock",
@@ -1122,7 +1117,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_numeric_consumer_restores_pseudonym_after_reopen() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":3,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         async fn call(
             database: &Database,
             session: &Session,
@@ -1222,7 +1217,7 @@ mod tests {
         let opened = Database::create(
             Open {
                 directory: directory.path(),
-                schema: r#"{"application":"saturation","version":1,"format":2,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+                schema: r#"{"application":"saturation","version":1,"format":3,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,
                 network: None,
                 commands: None,

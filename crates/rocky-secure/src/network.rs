@@ -74,14 +74,6 @@ enum Message {
     Checkpoint {
         signed: Option<Box<SignedCheckpoint>>,
     },
-    CheckpointWitnessPull {
-        scope: ResourceScope,
-        checkpoint: Commitment,
-        after: Option<Commitment>,
-    },
-    CheckpointWitnesses {
-        page: CheckpointWitnessPage,
-    },
     CheckpointPull {
         scope: ResourceScope,
         checkpoint: rocky_core::Commitment,
@@ -111,8 +103,7 @@ enum Message {
     Result {
         result: Option<ConfirmedCommand>,
         /// The sender's signed receipt evidence: the result stays verifiable
-        /// after the coordinator retired its identity. Absent from older peers.
-        #[serde(default)]
+        /// after the coordinator retired its identity.
         evidence: Option<Vec<u8>>,
     },
     ResultAck {
@@ -599,29 +590,6 @@ impl NativeSession {
             }
             (after, complete) = (page.next, page.next.is_none());
             replica.stage_checkpoint_page(page).await?;
-        }
-        if finalized_checkpoint {
-            let (mut after, mut complete) = replica.checkpoint_witness_progress(scope).await?;
-            while !complete {
-                if self.low(MAX_SECURE_FRAME) {
-                    return Ok(None);
-                }
-                self.send(&Message::CheckpointWitnessPull {
-                    scope,
-                    checkpoint,
-                    after,
-                })
-                .await?;
-                let Message::CheckpointWitnesses { page } = self.receive().await? else {
-                    return Err(denied("unexpected creation proof response"));
-                };
-                if page.scope != scope || page.checkpoint != checkpoint || page.after != after {
-                    return Err(denied("creation proof outside request"));
-                }
-                after = page.next;
-                complete = after.is_none();
-                replica.stage_checkpoint_witnesses(page).await?;
-            }
         }
         let report = replica.finish_rebootstrap(scope).await?;
         if finalized_checkpoint && let Some(signed) = replica.admitted_horizon(scope).await? {
@@ -1481,16 +1449,6 @@ impl NativeSession {
                     signed: signed.map(Box::new),
                 })
                 .await
-            }
-            Message::CheckpointWitnessPull {
-                scope,
-                checkpoint,
-                after,
-            } => {
-                let page = replica
-                    .checkpoint_witness_page(self.peer, &self.credentials, scope, checkpoint, after)
-                    .await?;
-                self.send(&Message::CheckpointWitnesses { page }).await
             }
             Message::CheckpointPull {
                 scope,

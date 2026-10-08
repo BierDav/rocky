@@ -11,14 +11,11 @@ use rocky_runtime::{
     ReadOptions, Replica, Runtime, RuntimeConfig, SqlError, SqlOptions, SqlRows, SqlSession,
     SqlState, operation_handle,
 };
-use rocky_sdk::{Access, TypedApp, TypedRow, generate_room};
+use rocky_sdk::{Access, TypedApp, TypedRow};
 use std::{path::Path, time::Duration};
 
-const SHOPPING: &str = include_str!("fixtures/shopping-identity.json");
-const SHOPPING_POLICY: &str =
-    include_str!("../../../examples/shoppinglist-app/shared/schemas/rocky-policy.json");
-const EDGE: &str = include_str!("fixtures/edge-identity.json");
-const EDGE_POLICY: &str = include_str!("fixtures/edge-policy.json");
+const SHOPPING: &str = include_str!("fixtures/shopping-descriptor.json");
+const EDGE: &str = include_str!("fixtures/edge-descriptor.json");
 const CALLER: PrincipalId = PrincipalId([7; 16]);
 const DOMAIN: DomainId = DomainId([2; 16]);
 const ALL: &str = "SELECT key,title,completed,searchTitle FROM shopping_items ORDER BY key";
@@ -33,7 +30,7 @@ fn nodes() -> Vec<NodeId> {
     (1..=4).map(|node| NodeId([node; 16])).collect()
 }
 fn shopping() -> LogicalSchema {
-    generate_room(SHOPPING, SHOPPING_POLICY).expect("shopping schema")
+    LogicalSchema::parse(SHOPPING.as_bytes()).expect("shopping schema")
 }
 fn scope(schema: &LogicalSchema) -> Scope {
     Scope {
@@ -559,7 +556,7 @@ async fn conflict_clauses_noops_key_changes_and_returning_follow_sqlite() {
 
 #[tokio::test]
 async fn generated_ids_and_counts_belong_to_the_session() {
-    let schema = generate_room(EDGE, EDGE_POLICY).expect("edge schema");
+    let schema = LogicalSchema::parse(EDGE.as_bytes()).expect("edge schema");
     let dir = tempfile::tempdir().expect("dir");
     let device = Device::open(dir.path(), 1, &schema).await;
     let (session, other) = (device.session().await, device.session().await);

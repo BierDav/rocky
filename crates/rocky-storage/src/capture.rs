@@ -680,8 +680,7 @@ mod tests {
     use super::*;
     use crate::sqlite::{Connection, Run};
     use rocky_core::{
-        Collation, LogicalColumn, LogicalTable, ROW_IDENTITY_SCHEMA_FORMAT, SchemaSource,
-        UpdatePolicy,
+        Collation, LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalTable, SchemaSource, UpdatePolicy,
     };
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
@@ -707,7 +706,7 @@ mod tests {
             partition_by: Vec::new(),
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
-            reuses_keys: false,
+
             existence_log: false,
         }
     }
@@ -727,7 +726,7 @@ mod tests {
         let mut local = table("local", LOCAL, vec![integer("id"), text("body")], &["id"]);
         local.class = TableClass::LocalOnly;
         let schema = LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: [1; 32],
             application: "capture".into(),
             source: SchemaSource {

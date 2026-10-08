@@ -375,7 +375,7 @@ async fn prepare<A: StoredApplication>(
                     domain.identity,
                     &domain.app,
                     &domain.config,
-                ));
+                )?);
             }
         }
         let pending = pending

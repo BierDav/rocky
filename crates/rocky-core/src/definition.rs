@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// The `SchemaSource::kind` of descriptors built from a definition.
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 2;
+pub const DEFINITION_FORMAT: u32 = 3;
 /// Largest definition document `SchemaDefinition::parse` accepts.
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
@@ -26,7 +26,7 @@ pub struct SchemaDefinition {
     #[serde(default = "changed")]
     pub update_policy: UpdatePolicy,
     pub tables: Vec<TableDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub views: Vec<crate::LogicalView>,
 }
 fn changed() -> UpdatePolicy {
@@ -42,21 +42,16 @@ pub struct TableDefinition {
     pub class: TableClass,
     pub columns: Vec<ColumnDefinition>,
     pub primary_key: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub partition_by: Vec<String>,
     #[serde(default)]
     pub indexes: Vec<IndexDefinition>,
-    /// The application inserts a key again after deleting it.
+    /// References to the identity of another mergeable table.
     #[serde(default)]
-    pub reuses_keys: bool,
-    /// References to the identity of another mergeable table. Omitted when
-    /// empty, so earlier definitions keep their identity.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign_keys: Vec<ForeignKeyDefinition>,
     /// Every device of the domain reads the table's row creations and
-    /// deletions, so another reader scope may reference it. Omitted when
-    /// false, so earlier definitions keep their identity.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// deletions, so another reader scope may reference it.
+    #[serde(default)]
     pub existence_log: bool,
 }
 /// What a child shows when its parent is not alive; see `docs/runtime/mergeable-constraints.md`.
@@ -167,24 +162,23 @@ impl SchemaDefinition {
         if json.len() > MAX_DEFINITION_BYTES {
             return invalid("definition quota");
         }
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        let version: Format = serde_json::from_slice(json)
+            .map_err(|error| SchemaError::Invalid(error.to_string()))?;
+        if version.format != DEFINITION_FORMAT {
+            return invalid("unsupported schema definition format");
+        }
         serde_json::from_slice(json).map_err(|error| SchemaError::Invalid(error.to_string()))
     }
     /// The canonical descriptor. It is structurally valid; whether a
     /// profile can install it is `LogicalSchema::supported_on`. The same
     /// definition always builds the same descriptor.
     pub fn build(&self) -> Result<LogicalSchema, SchemaError> {
-        if ![DEFINITION_FORMAT, crate::PARTITION_SCHEMA_FORMAT].contains(&self.format) {
-            return invalid(
-                "row identity requires definition format 2; export with the original build and reinstall into a new database",
-            );
-        }
-        if self.format != crate::PARTITION_SCHEMA_FORMAT
-            && self
-                .tables
-                .iter()
-                .any(|table| !table.partition_by.is_empty())
-        {
-            return invalid("partition columns require definition format 3");
+        if self.format != DEFINITION_FORMAT {
+            return invalid("unsupported schema definition format");
         }
         let mut tables = self
             .tables
@@ -419,7 +413,7 @@ impl TableDefinition {
             partition_by: self.partition_by.clone(),
             indexes,
             foreign_keys: Vec::new(),
-            reuses_keys: self.reuses_keys,
+
             existence_log: self.existence_log,
         })
     }
@@ -431,7 +425,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format": 2,
+        "format":3,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -489,7 +483,7 @@ mod tests {
     #[test]
     fn profile_gaps_are_diagnosed_before_installation() {
         let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
-        definition.tables[0].reuses_keys = true;
+
         definition.tables[0].columns.push(ColumnDefinition {
             name: "search".into(),
             logical: None,
@@ -517,14 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn historical_and_unknown_definitions_require_export_reinstall() {
-        for format in [1, 0, 4] {
+    fn unsupported_definition_and_descriptor_versions_are_refused() {
+        for format in [0, 1, 2, 4] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
-            assert!(error.contains("row identity"));
-            assert!(error.contains("export"));
-            assert!(error.contains("reinstall"));
+            assert_eq!(
+                error,
+                SchemaError::Invalid("unsupported schema definition format".into()).to_string()
+            );
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -559,13 +554,13 @@ mod identity_tests {
     #[test]
     fn identity_columns_are_implicit_on_every_table_and_fingerprinted() {
         let mut definition = SchemaDefinition::parse(super::tests::DEFINITION.as_bytes()).unwrap();
-        definition.format = 2;
+        definition.format = DEFINITION_FORMAT;
         for table in &mut definition.tables {
             table.columns[0].name = "key".into();
             table.primary_key = vec!["key".into()];
         }
         let schema = definition.build().unwrap();
-        assert_eq!(schema.format, crate::ROW_IDENTITY_SCHEMA_FORMAT);
+        assert_eq!(schema.format, crate::LOGICAL_SCHEMA_FORMAT);
         for table in &schema.tables {
             assert_eq!(table.column("id").unwrap().affinity, Affinity::Integer);
             assert_eq!(
@@ -617,7 +612,7 @@ mod constraint_tests {
     use crate::{Incompatibility, Profile};
 
     const SHOP: &str = r#"{
-        "format": 2,
+        "format":3,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "shop",
         "tables": [
@@ -718,24 +713,6 @@ mod constraint_tests {
         assert_ne!(
             cascade.build().unwrap().replicated_fingerprint(),
             nullable.build().unwrap().replicated_fingerprint()
-        );
-    }
-
-    #[test]
-    fn definitions_without_constraints_keep_their_bytes() {
-        let definition = SchemaDefinition::parse(super::tests::DEFINITION.as_bytes()).unwrap();
-        let bytes = String::from_utf8(serde_json::to_vec(&definition).unwrap()).unwrap();
-        assert!(!bytes.contains("foreign_keys") && !bytes.contains("on_conflict"));
-        let schema = definition.build().unwrap();
-        let canonical = String::from_utf8(schema.canonical().unwrap()).unwrap();
-        assert!(!canonical.contains("on_conflict"));
-        let manifest = schema.manifest(&[crate::DomainId([1; 16])]);
-        assert!(
-            manifest
-                .entities
-                .iter()
-                .all(|entity| !entity.shape.contains("unique")
-                    && !entity.shape.contains("references"))
         );
     }
 
@@ -910,7 +887,7 @@ mod partition_tests {
     fn existence_logs_bind_the_manifest_and_refuse_nondeterministic_support_rows() {
         let shop = |lists: &str, extra: &str| {
             format!(
-                r#"{{"format":2,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
+                r#"{{"format":3,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
             )
         };
         let build = |json: String| {
@@ -921,11 +898,11 @@ mod partition_tests {
         };
         let plain = build(shop(r#"["id"]"#, ""));
         let logged = build(shop(r#"["id"]"#, r#","existence_log":true"#));
-        // Omitted when false: earlier descriptors keep their bytes.
+        // Liveness is explicit in the current canonical descriptor.
         assert!(
-            !String::from_utf8(plain.canonical().unwrap())
+            String::from_utf8(plain.canonical().unwrap())
                 .unwrap()
-                .contains("existence_log")
+                .contains("\"existence_log\":false")
         );
         assert!(
             String::from_utf8(logged.canonical().unwrap())

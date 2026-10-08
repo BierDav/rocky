@@ -145,10 +145,7 @@ async fn an_application_runs_strong_commands_on_a_registered_domain() {
             .unwrap()
             .commands
             .iter()
-            .any(|c| matches!(
-                c.state,
-                CommandState::Queued | CommandState::OutcomeUnknown | CommandState::Prepared
-            ))
+            .any(|c| matches!(c.state, CommandState::Queued | CommandState::OutcomeUnknown))
     );
     for id in &down {
         cluster.spawn(*id, false);

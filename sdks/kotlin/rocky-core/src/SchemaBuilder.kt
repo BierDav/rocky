@@ -84,7 +84,7 @@ class TableBuilder internal constructor(val name: String) {
     private val foreignKeys = mutableListOf<ForeignKey>()
     var tableClass: TableClass = TableClass.Mergeable
     var logical: String? = null
-    var reusesKeys: Boolean = false
+
     /**
      * Every device of the domain may read this table's row creations and deletions (never values),
      * so a table in another reader scope may reference it. The key must be `id`; see secure SQL.
@@ -164,6 +164,6 @@ class TableBuilder internal constructor(val name: String) {
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }
         require(roomIdentityIndex == null || roomIdentityIndex == identity) { "$name: Room identity index must contain partition columns followed by id" }
-        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, reusesKeys, foreignKeys.toList(), partitions, existenceLog = existenceLog)
+        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog)
     }
 }

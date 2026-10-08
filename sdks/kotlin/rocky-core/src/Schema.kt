@@ -2,7 +2,7 @@ package rocky
 
 import kotlinx.serialization.json.*
 
-/** A format-2 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
+/** A format-3 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
 data class Schema(val application: String, val version: Int = 1, val tables: List<Table>, val commands: CommandSet? = null, val updatePolicy: UpdatePolicy = UpdatePolicy.Changed, val views: Map<String, String> = emptyMap()) {
     init {
         require(application.matches(IDENTIFIER) && version > 0 && tables.isNotEmpty() && tables.size <= 64)
@@ -11,7 +11,7 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
     }
     /** The definition the runtime installs; equivalent declarations produce equal JSON. */
     fun json(): String = buildJsonObject {
-        put("application", application); put("version", version); put("format", if ((tables.any { it.partitionBy.isNotEmpty() } || views.isNotEmpty())) 3 else 2)
+        put("application", application); put("version", version); put("format", 3)
         put("tables", JsonArray(tables.sortedBy { it.logical ?: it.name }.map { it.definition() }))
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
@@ -22,7 +22,7 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
     fun definitionJson(publisher: String): String {
         require(publisher.matches(Regex("[0-9a-fA-F]{64}"))) { "publisher must be 64 hexadecimal digits" }
         return buildJsonObject {
-            put("format", if ((tables.any { it.partitionBy.isNotEmpty() } || views.isNotEmpty())) 3 else 2); put("publisher", publisher.lowercase()); put("application", application)
+            put("format", 3); put("publisher", publisher.lowercase()); put("application", application)
             if (views.isNotEmpty()) put("views", viewsJson())
             put("update_policy", updatePolicy.wire); put("tables", JsonArray(tables.sortedBy { it.logical ?: it.name }.map { it.definition() }))
         }.toString()
@@ -33,7 +33,7 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
 internal val IDENTIFIER = Regex("[A-Za-z][A-Za-z0-9_]{0,63}")
 data class Table(val name: String, val columns: List<Column>, val primaryKey: List<String> = emptyList(),
     val indexes: List<Index> = emptyList(), val tableClass: TableClass = TableClass.Mergeable,
-    val logical: String? = null, val reusesKeys: Boolean = false, val foreignKeys: List<ForeignKey> = emptyList(),
+    val logical: String? = null, val foreignKeys: List<ForeignKey> = emptyList(),
     val partitionBy: List<String> = emptyList(), internal val roomIdentityIndex: List<String>? = null,
     val existenceLog: Boolean = false) {
     init { require(name.matches(IDENTIFIER) && columns.isNotEmpty() && columns.size <= 128); require(columns.map { it.name }.distinct().size == columns.size) }
@@ -42,7 +42,6 @@ data class Table(val name: String, val columns: List<Column>, val primaryKey: Li
         put("columns", JsonArray(columns.map { it.definition() }))
         put("primary_key", JsonArray(primaryKey.map(::JsonPrimitive)))
         put("indexes", JsonArray(indexes.sortedBy { it.name }.map { it.json() }))
-        put("reuses_keys", reusesKeys)
         if (foreignKeys.isNotEmpty()) put("foreign_keys", JsonArray(foreignKeys.sortedBy { it.columns.joinToString(",") }.map { it.json() }))
         if (partitionBy.isNotEmpty()) put("partition_by", JsonArray(partitionBy.map(::JsonPrimitive)))
         if (existenceLog) put("existence_log", true)

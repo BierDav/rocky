@@ -276,7 +276,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             body: fa.body.clone(),
         }
     };
-    legacy.operation().unwrap();
+    assert!(legacy.operation().is_err());
     assert!(custody.receive(legacy).await.is_err());
 
     assert!(!reader.table_complete(f.scope("A").table).await.unwrap());
@@ -520,7 +520,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 4);
+    assert_eq!(cp.statement.format, 6);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);

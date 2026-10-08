@@ -25,8 +25,8 @@ the logical name is a new item. The descriptor is stored in the file at
 install and another one is refused at open; shapes change through
 [generations](generations.md).
 
-Formats 2 (row identity) and 3 (adds `partition_by` and static views; see
-[partitioned scopes](partitioned-scopes.md)) install. Any other format is
+Format 3 installs row identity, optional `partition_by` and static views
+([partitioned scopes](partitioned-scopes.md)). Any other format is
 refused by a read-only preflight before database initialization or SDK
 enrollment writes.
 
@@ -84,7 +84,7 @@ differences are in [schema definitions](schema-definitions.md#check-a-profile-be
 | Generated column, NUMERIC affinity, nullable or absent key | No single stored form |
 | Local-only column | Checkpoints digest whole rows |
 | Collation other than `BINARY`, `NOCASE`, `RTRIM` | Refused at generation |
-| A view outside format 3 | Only static application views are expanded |
+| A view beyond static SELECT statements | Only static application views are expanded |
 
 Open it with `Replica::open_with_config` or as a `Runtime` domain. Each table
 is created from its descriptor's statement. At every open the trusted runtime

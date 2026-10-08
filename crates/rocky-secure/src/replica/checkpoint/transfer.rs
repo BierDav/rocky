@@ -89,7 +89,6 @@ impl<A: RowApplication> Inner<A> {
     async fn clear_staging(&self, id: i64) -> Result<(), Error> {
         for table in [
             "secure_rebootstrap",
-            "secure_rebootstrap_witnesses",
             "secure_rebootstrap_rows",
             "secure_rebootstrap_stubs",
             "secure_rebootstrap_strong",

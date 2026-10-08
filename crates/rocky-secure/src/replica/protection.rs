@@ -26,11 +26,6 @@ impl<A: RowApplication> Inner<A> {
             .opening_key(extension.scope, extension.generation)
             .ok_or_else(|| denied("row payload key unavailable"))?;
         let payload = RowPayload::decode(&decrypt(&key.key, &encode(extension)?, &frame.body)?)?;
-        if extension.row_format >= 4 && !matches!(payload, RowPayload::Witnessed { .. }) {
-            return Err(denied(
-                "creation-witness frame requires its canonical envelope",
-            ));
-        }
         for hash in payload.protection().1 {
             let hash = Hash::from_bytes(*hash);
             if operation.header.backlink != Some(hash) && !operation.header.previous.contains(&hash)

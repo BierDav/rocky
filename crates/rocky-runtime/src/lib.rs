@@ -389,7 +389,7 @@ where
                     }
                 };
                 runtime.block_on(async move {
-                    // A legacy file is one unscoped domain behind the same file writer.
+                    // One domain can use the file writer directly.
                     let pool = read::ReadPool::new();
                     let setup = async {
                         let (owner, raw) = database::DatabaseOwner::open(&path).await?;

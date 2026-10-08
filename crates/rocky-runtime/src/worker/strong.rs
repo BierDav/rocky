@@ -202,10 +202,9 @@ where
                     CommandState::ConfirmedLocally
                 } else if *released != 0 {
                     state
-                } else if s == "unknown" {
-                    CommandState::OutcomeUnknown
                 } else {
-                    CommandState::Prepared
+                    if s != "unknown" { return Err(Error::Corrupt("invalid preparation state".into())); }
+                    CommandState::OutcomeUnknown
                 };
                 if *applied {
                     let hash = hash.ok_or_else(missing)?;
@@ -878,7 +877,7 @@ where
                 if existing.next().await?.is_none() {
                     self.strong_budget(package.encode()?.len()).await?;
                 }
-                self.conn().execute("INSERT INTO rocky_preparations(hash,bytes,state,receipt,verified,applied) VALUES(?,?,'unknown',NULL,0,0) ON CONFLICT(hash) DO UPDATE SET state='unknown' WHERE rocky_preparations.state='prepared'",crate::sqlite::params![hash.to_vec(),package.encode()?]).await?;
+                self.conn().execute("INSERT INTO rocky_preparations(hash,bytes,state,receipt,verified,applied) VALUES(?,?,'unknown',NULL,0,0) ON CONFLICT(hash) DO NOTHING",crate::sqlite::params![hash.to_vec(),package.encode()?]).await?;
                 Response::Package(package)
             }
             // Only an unresolved request is executed, and none of its

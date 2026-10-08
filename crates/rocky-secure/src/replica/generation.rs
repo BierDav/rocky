@@ -253,11 +253,7 @@ impl<A: RowApplication> Inner<A> {
         let mut start = None;
         for (index, step) in upgrade.steps.iter().enumerate() {
             let manifest = step.manifest.verify(publisher).map_err(credential)?;
-            if identity(manifest.hash(), node)? == stored
-                || encode(&("rocky.encrypted-replica.v5", manifest.hash(), node))? == stored
-                || encode(&("rocky.encrypted-replica.v4", manifest.hash(), node))? == stored
-                || encode(&("rocky.encrypted-replica.v3", manifest.hash(), node))? == stored
-            {
+            if identity(manifest.hash(), node)? == stored {
                 start = Some(index);
                 break;
             }

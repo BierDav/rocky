@@ -222,41 +222,6 @@ async fn transitions_load_only_the_rows_they_touch() {
     source.close().await.unwrap();
 }
 
-/// The index on unapplied operations is added to a file that lacks it.
-#[tokio::test]
-async fn a_file_without_the_unapplied_index_gains_it_at_open() {
-    let dir = TempDir::new().unwrap();
-    let runtime = open(&dir, NODE, RuntimeOptions::default()).await.unwrap();
-    write(&runtime.domain(scope()).unwrap(), None, "kept").await;
-    runtime.close().await.unwrap();
-    let path = dir.path().join("3.db");
-    let indexes = async || {
-        let db = crate::sqlite::Connection::open(&path).unwrap();
-        crate::tests::rows(
-            &db,
-            "SELECT name FROM sqlite_schema WHERE type='index' AND name LIKE '%rocky_operations_unapplied'",
-        )
-        .await
-        .unwrap()
-    };
-    let found = indexes().await;
-    let [SqlValue::Text(name)] = found[0].as_slice() else {
-        panic!("index name");
-    };
-    assert_eq!(found.len(), 1);
-    {
-        let db = crate::sqlite::Connection::open(&path).unwrap();
-        db.execute(format!("DROP INDEX \"{name}\""), ())
-            .await
-            .unwrap();
-    }
-    assert!(indexes().await.is_empty());
-    let runtime = open(&dir, NODE, RuntimeOptions::default()).await.unwrap();
-    assert_eq!(count(&runtime.domain(scope()).unwrap()).await, 1);
-    runtime.close().await.unwrap();
-    assert_eq!(indexes().await.len(), 1);
-}
-
 /// Open does not replay history: the explicit audit finds a tampered row.
 /// With default options a domain grows past the former operation quota,
 /// checkpoints and prunes on its own, and reopens from the checkpoint.

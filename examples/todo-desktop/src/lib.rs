@@ -347,7 +347,6 @@ fn TodoRow(
 fn command_label(state: &rocky_runtime::CommandState) -> &'static str {
     match state {
         rocky_runtime::CommandState::Queued => "queued · pending executor/coordinator",
-        rocky_runtime::CommandState::Prepared => "prepared · awaiting confirmation",
         rocky_runtime::CommandState::OutcomeUnknown => {
             "confirmation outcome unknown · reconciliation pending"
         }

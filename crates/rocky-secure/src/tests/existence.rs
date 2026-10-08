@@ -1202,7 +1202,7 @@ async fn a_horizon_proposal_alone_never_releases_tombstones_or_existence_history
 }
 
 #[tokio::test]
-async fn horizon_checkpoint_fences_legacy_import_and_preserves_declarations_on_rebootstrap() {
+async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declarations_on_rebootstrap() {
     use crate::credentials::SignedHorizon;
     let erp = Erp::new();
     let tmp = TempDir::new().unwrap();
@@ -1225,8 +1225,8 @@ async fn horizon_checkpoint_fences_legacy_import_and_preserves_declarations_on_r
     .await;
     drop(sql);
     let scope = erp.scope("lists");
-    let legacy = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(legacy.statement.format, 3);
+    let before_horizon = source.replica.checkpoint(scope).await.unwrap();
+    assert_eq!(before_horizon.statement.format, 6);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1245,12 +1245,12 @@ async fn horizon_checkpoint_fences_legacy_import_and_preserves_declarations_on_r
     assert!(
         target
             .replica
-            .begin_rebootstrap(legacy.clone())
+            .begin_rebootstrap(before_horizon.clone())
             .await
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 5);
+    assert_eq!(checkpoint.statement.format, 6);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1332,7 +1332,13 @@ async fn horizon_checkpoint_fences_legacy_import_and_preserves_declarations_on_r
     fresh.replica.stage_checkpoint_page(page).await.unwrap();
     erp.existence(&source, &fresh, "lists").await;
     fresh.replica.finish_rebootstrap(scope).await.unwrap();
-    assert!(fresh.replica.begin_rebootstrap(legacy).await.is_err());
+    assert!(
+        fresh
+            .replica
+            .begin_rebootstrap(before_horizon)
+            .await
+            .is_err()
+    );
     let identity = {
         let inner = fresh.replica.inner.lock().await;
         let rows = collect_rows(
@@ -1496,100 +1502,6 @@ async fn horizon_recovery_refuses_packages_that_cannot_preserve_the_declaration(
             .unwrap(),
         Some(Box::new(signed))
     );
-}
-
-#[tokio::test]
-async fn horizon_file_identity_upgrades_v4_and_refuses_unknown_future_files() {
-    let erp = Erp::new();
-    let tmp = TempDir::new().unwrap();
-    let node = PrivateKey::new();
-    let path = tmp.path().join("file.db");
-    let device = erp.open(&path, &node, 1, &TABLES).await;
-    let legacy = crate::encode(&(
-        "rocky.encrypted-replica.v4",
-        erp.manifest_hash(),
-        node.public_key(),
-    ))
-    .unwrap();
-    device
-        .replica
-        .inner
-        .lock()
-        .await
-        .conn
-        .execute("UPDATE secure_metadata SET identity=? WHERE id=1", [legacy])
-        .await
-        .unwrap();
-    drop(device);
-    let upgraded = erp.open(&path, &node, 1, &TABLES).await;
-    let inner = upgraded.replica.inner.lock().await;
-    let rows = collect_rows(
-        inner
-            .conn
-            .query("SELECT identity FROM secure_metadata WHERE id=1", ())
-            .await
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    let [SqlValue::Blob(bytes)] = rows[0].as_slice() else {
-        panic!("identity");
-    };
-    assert_eq!(
-        crate::decode::<(String, Commitment, PublicKey)>(bytes)
-            .unwrap()
-            .0,
-        "rocky.encrypted-replica.v6"
-    );
-    // The current binary must likewise refuse a future fence, without downgrading it.
-    let future = crate::encode(&(
-        "rocky.encrypted-replica.v7",
-        erp.manifest_hash(),
-        node.public_key(),
-    ))
-    .unwrap();
-    inner
-        .conn
-        .execute(
-            "UPDATE secure_metadata SET identity=? WHERE id=1",
-            [future.clone()],
-        )
-        .await
-        .unwrap();
-    drop(inner);
-    drop(upgraded);
-    let result = EncryptedReplica::open(
-        &path,
-        TypedRows::new(erp.schema.clone(), vec![erp.domain.domain]).unwrap(),
-        SecureConfig {
-            publisher: erp.publisher.public_key(),
-            manifest: erp.manifest.clone(),
-            policy: erp.policy.clone(),
-            node: node.clone(),
-            credentials: erp.credentials(&node, erp.grants(&TABLES)),
-            keys: TABLES
-                .iter()
-                .map(|table| KeyMaterial {
-                    scope: erp.scope(table),
-                    generation: 1,
-                    key: rocky_core::commitment("erp.key", table.as_bytes()),
-                })
-                .collect(),
-        },
-    )
-    .await;
-    assert!(result.is_err());
-    let (owner, raw) = crate::database::DatabaseOwner::open(&path).await.unwrap();
-    let conn = crate::scoped_connection::ScopedConnection::new(raw, None, crate::store::SCHEMA);
-    let rows = collect_rows(
-        conn.query("SELECT identity FROM secure_metadata WHERE id=1", ())
-            .await
-            .unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(rows, vec![vec![SqlValue::Blob(future)]]);
-    drop(owner);
 }
 
 #[tokio::test]
@@ -2220,12 +2132,11 @@ async fn horizon_finalization_and_retention_plateau() {
             println!(
                 "finalization churn: cycles={cycle}; rows,stubs,existence_state,existence_records,existence_bytes,operations,bases,logs,checkpoints={measurement:?}"
             );
-            let metadata = stored(&a, "SELECT (SELECT COUNT(*) FROM secure_existence_archive),(SELECT COUNT(*) FROM secure_existence_archive_rows),(SELECT COUNT(*) FROM secure_checkpoint_stubs),(SELECT COUNT(*) FROM secure_checkpoint_build_stubs),(SELECT COUNT(*) FROM secure_legacy_creations),(SELECT COUNT(*) FROM secure_horizon_live_creations),(SELECT COUNT(*) FROM secure_horizon_ack),(SELECT COUNT(*) FROM secure_horizon_rejoined),(SELECT COUNT(*) FROM secure_horizon_bootstrap)").await;
+            let metadata = stored(&a, "SELECT (SELECT COUNT(*) FROM secure_existence_archive),(SELECT COUNT(*) FROM secure_existence_archive_rows),(SELECT COUNT(*) FROM secure_checkpoint_stubs),(SELECT COUNT(*) FROM secure_checkpoint_build_stubs),(SELECT COUNT(*) FROM secure_horizon_live_creations),(SELECT COUNT(*) FROM secure_horizon_ack),(SELECT COUNT(*) FROM secure_horizon_rejoined),(SELECT COUNT(*) FROM secure_horizon_bootstrap)").await;
             assert_eq!(
                 metadata,
                 vec![vec![
                     integer(1),
-                    integer(0),
                     integer(0),
                     integer(0),
                     integer(0),
@@ -2236,7 +2147,7 @@ async fn horizon_finalization_and_retention_plateau() {
                 ]]
             );
             println!(
-                "finalization metadata plateau: cycles={cycle}; archives,archive_rows,checkpoint_proofs,building_proofs,legacy_proofs,live_scratch,acks,rejoined,bootstrap_guards={metadata:?}"
+                "finalization metadata plateau: cycles={cycle}; archives,archive_rows,checkpoint_proofs,building_proofs,live_scratch,acks,rejoined,bootstrap_guards={metadata:?}"
             );
             let other = stored(&b, sql).await;
             assert_eq!(other[0][..9], measurement[0][..9]);
@@ -2804,213 +2715,6 @@ async fn horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unkno
             .is_none()
     );
     other.replica.abort_existence_base(scope).await.unwrap();
-}
-
-#[tokio::test]
-async fn horizon_legacy_creation_proofs_bootstrap_in_pages_and_release_pending_old_edits() {
-    use crate::credentials::SignedHorizon;
-    use tokio::net::{TcpListener, TcpStream};
-    let erp = Erp::new();
-    let dir = TempDir::new().unwrap();
-    let source = erp
-        .open(
-            &dir.path().join("source.db"),
-            &PrivateKey::new(),
-            151,
-            &TABLES,
-        )
-        .await;
-    let target = erp
-        .open(
-            &dir.path().join("target.db"),
-            &PrivateKey::new(),
-            152,
-            &["lists"],
-        )
-        .await;
-    let scope = erp.scope("lists");
-    let (key, credentials) = erp.pseudonym(
-        151,
-        vec![erp.grant("lists", &[Right::Insert, Right::Update, Right::Delete])],
-    );
-    let app = TypedRows::new(erp.schema.clone(), vec![erp.domain.domain]).unwrap();
-    let table = app
-        .tables()
-        .find(|table| table.sql_name == "lists")
-        .unwrap();
-    let values = vec![
-        text("old"),
-        integer(rocky_core::RowIdentity::new(151, 1).unwrap().integer()),
-        integer(0),
-    ];
-    let fields = app.fields(table, &values).unwrap();
-    let row = app.row_id(erp.domain.domain, table, &values).unwrap();
-    let change = RowChange {
-        scope,
-        row,
-        before: None,
-        after: Some(fields.clone()),
-    };
-    let row_key = source
-        .replica
-        .inner
-        .lock()
-        .await
-        .config
-        .keys
-        .iter()
-        .find(|key| key.scope == scope)
-        .unwrap()
-        .key;
-    let extension = crate::wire::Extensions {
-        manifest: erp.manifest_hash(),
-        scope,
-        generation: 1,
-        credentials: credentials.clone(),
-        author: Some(151),
-        row_format: 2,
-        partition: None,
-    };
-    let created = crate::wire::author(
-        &key,
-        extension.clone(),
-        &row_key,
-        (0, None, 1),
-        vec![],
-        &crate::encode(&vec![change]).unwrap(),
-    )
-    .unwrap();
-    source.replica.receive(created.clone()).await.unwrap();
-    let deleted = crate::wire::author(
-        &key,
-        extension,
-        &row_key,
-        (1, Some(created.id().unwrap()), 2),
-        vec![],
-        &crate::encode(&vec![RowChange {
-            scope,
-            row,
-            before: Some(fields.clone()),
-            after: None,
-        }])
-        .unwrap(),
-    )
-    .unwrap();
-    source.replica.receive(deleted).await.unwrap();
-    let signed = SignedHorizon::sign(
-        source.replica.horizon_statement(scope, &[]).await.unwrap(),
-        &erp.publisher,
-    )
-    .unwrap();
-    source.replica.receive_horizon(signed).await.unwrap();
-    let checkpoint = source.replica.finalize_horizon(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.rows.count, 0);
-    assert_eq!(checkpoint.statement.creations.count, 1);
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let replica = source.replica.clone();
-    let node = source.node.clone();
-    let chain = source.credentials.clone();
-    let peer = target.node.public_key();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(stream, node, chain, peer, MAX_SECURE_BYTES)
-            .await
-            .unwrap();
-        while session.serve_once(&replica).await.is_ok() {}
-    });
-    let mut session = NativeSession::authenticate(
-        TcpStream::connect(addr).await.unwrap(),
-        target.node.clone(),
-        target.credentials.clone(),
-        source.node.public_key(),
-        MAX_SECURE_BYTES,
-    )
-    .await
-    .unwrap();
-    assert!(
-        session
-            .sync_scope(&target.replica, scope, MAX_SECURE_FRAME / 2)
-            .await
-            .unwrap()
-            .rebootstrap
-            .is_some()
-    );
-    drop(session);
-    server.await.unwrap();
-    assert_eq!(
-        target.replica.receive(created.clone()).await.unwrap(),
-        ReceiveStatus::Pruned
-    );
-    let (other, chain) = erp.pseudonym(
-        153,
-        vec![erp.grant("lists", &[Right::Insert, Right::Update, Right::Delete])],
-    );
-    let mut changed = values.clone();
-    changed[0] = text("late");
-    let extension = crate::wire::Extensions {
-        manifest: erp.manifest_hash(),
-        scope,
-        generation: 1,
-        credentials: chain,
-        author: Some(153),
-        row_format: 2,
-        partition: None,
-    };
-    let edit = crate::wire::author(
-        &other,
-        extension.clone(),
-        &row_key,
-        (0, None, 3),
-        vec![created.id().unwrap()],
-        &crate::encode(&vec![RowChange {
-            scope,
-            row,
-            before: Some(fields),
-            after: Some(app.fields(table, &changed).unwrap()),
-        }])
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        target.replica.receive(edit.clone()).await.unwrap(),
-        ReceiveStatus::Applied
-    );
-    changed[1] = integer(rocky_core::RowIdentity::new(153, 1).unwrap().integer());
-    let insert = RowChange {
-        scope,
-        row: app.row_id(erp.domain.domain, table, &changed).unwrap(),
-        before: None,
-        after: Some(app.fields(table, &changed).unwrap()),
-    };
-    let continued = crate::wire::author(
-        &other,
-        crate::wire::Extensions {
-            row_format: 4,
-            ..extension
-        },
-        &row_key,
-        (1, Some(edit.id().unwrap()), 4),
-        vec![],
-        &crate::wire::RowPayload::witness(
-            crate::encode(&vec![insert]).unwrap(),
-            vec![],
-            checkpoint
-                .statement
-                .finalized
-                .as_ref()
-                .map(|signed| (signed.statement.sequence, signed.id().unwrap())),
-            vec![],
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        target.replica.receive(continued).await.unwrap(),
-        ReceiveStatus::Applied
-    );
-    assert_eq!(target.replica.snapshot(scope).await.unwrap().rows.len(), 1);
-    target.replica.audit(scope).await.unwrap();
 }
 
 #[tokio::test]

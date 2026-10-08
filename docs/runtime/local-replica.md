@@ -35,7 +35,8 @@ Only the installed application supplies SQL; mutation and UI callers cannot.
 
 `Replica::open(path, app, policy, identity)` opens a local-only domain;
 `open_with_config` adds author bindings and named delivery targets. Open
-compares the stored identity record (storage format 3: mesh, app, domain, node,
+checks the Rocky file tag (`PRAGMA application_id = 0x524b5901`) before
+creating a writer or lock, then compares the stored identity record ( mesh, app, domain, node,
 caller, descriptor versions, authors, targets, manifest and handler bindings)
 before any configuration or schema write and refuses a difference with
 `Incompatible`. An existing file must contain all storage tables; missing

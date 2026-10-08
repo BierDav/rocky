@@ -1,8 +1,9 @@
 # features_06: constraints, groups and moves on partitioned tables
 
-Status: sequenced on 2026-10-08. Phase 1 is partially implemented and has not
-passed its completion gate; each brief records its own status. This is the next-work authority. It completes the shopping
-qualification, whose evidence is in [the audit](../runtime/shopping-qualification.md).
+Status: sequenced on 2026-10-08. Phase 1 passed its completion gate on
+2026-10-09; each brief records its own status. This is the next-work authority.
+It completes the shopping qualification, whose evidence is in
+[the audit](../runtime/shopping-qualification.md).
 
 Read the two scopes first; every brief links their sections instead of
 repeating them:

@@ -16,7 +16,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const SHOPPING: &str = r#"{"format":2,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":3,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"mergeable","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},

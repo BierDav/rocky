@@ -217,10 +217,8 @@ impl<A: RowApplication> Inner<A> {
                         "secure_checkpoints",
                         "secure_rebootstrap",
                         "secure_rebootstrap_stubs",
-                        "secure_rebootstrap_witnesses",
                         "secure_checkpoint_stubs",
                         "secure_checkpoint_build_stubs",
-                        "secure_legacy_creations",
                         "secure_horizon_live_creations",
                     ] {
                         inner

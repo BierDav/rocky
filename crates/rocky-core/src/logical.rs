@@ -8,12 +8,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// Historical descriptors without visible incarnation identity.
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 1;
-/// Descriptors with the shared `id` and `row_kind` columns.
-pub const ROW_IDENTITY_SCHEMA_FORMAT: u32 = 2;
-/// Descriptors with immutable partition columns (`docs/runtime/partitioned-scopes.md`).
-pub const PARTITION_SCHEMA_FORMAT: u32 = 3;
+/// Current descriptor format, including row identities and optional partitions.
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 3;
 /// Largest canonical descriptor a parser accepts.
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -114,7 +110,6 @@ pub struct LogicalIndex {
     pub columns: Vec<IndexColumn>,
     pub create_sql: String,
     /// Required on a unique index of a mergeable table; omitted otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_conflict: Option<ConflictPolicy>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,22 +142,11 @@ pub struct LogicalTable {
     pub columns: Vec<LogicalColumn>,
     /// Column SQL names in key order.
     pub primary_key: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub partition_by: Vec<String>,
     pub indexes: Vec<LogicalIndex>,
     pub foreign_keys: Vec<LogicalForeignKey>,
-    /// The application inserts a key again after deleting it. Omitted from
-    /// the canonical bytes when false, so earlier descriptors keep theirs.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub reuses_keys: bool,
-    /// Every device of the domain may read the table's row creations and
-    /// deletions, so other reader scopes can reference it. Omitted when
-    /// false. See `docs/runtime/existence-logs.md`.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// Publish row liveness to readers of other scopes.
     pub existence_log: bool,
-}
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,8 +177,6 @@ pub enum Incompatibility {
     DerivedColumn(String),
     /// The secure profile installs mergeable and local-only tables only.
     TableClass(TableClass),
-    /// The secure profile keeps deleted keys as permanent tombstones.
-    KeyReuse,
     /// A conflict policy this index cannot have, named by the index.
     ConflictPolicy(String),
     /// A foreign key Rocky cannot resolve, named by its first column.
@@ -797,22 +779,13 @@ struct ReplicatedReference<'a> {
 }
 #[derive(Serialize)]
 struct ReplicatedTable<'a> {
-    /// Omitted for mergeable tables, so their shapes stay as they were.
-    #[serde(skip_serializing_if = "is_mergeable")]
     class: TableClass,
     logical: &'a str,
     key: Vec<ReplicatedColumn<'a>>,
     fields: Vec<ReplicatedColumn<'a>>,
-    /// Constraint policies decide what every replica shows; omitted when
-    /// absent, so tables without them keep their identity.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     unique: Vec<ReplicatedUnique<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     references: Vec<ReplicatedReference<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     partition_by: Vec<&'a str>,
-    /// Liveness comes from the existence log; omitted when false.
-    #[serde(skip_serializing_if = "is_false")]
     existence_log: bool,
 }
 #[derive(Serialize)]
@@ -820,9 +793,6 @@ struct Replicated<'a> {
     format: u32,
     update_policy: UpdatePolicy,
     tables: Vec<ReplicatedTable<'a>>,
-}
-fn is_mergeable(class: &TableClass) -> bool {
-    *class == TableClass::Mergeable
 }
 fn replicated_column(column: &LogicalColumn) -> ReplicatedColumn<'_> {
     ReplicatedColumn {
@@ -906,15 +876,7 @@ impl LogicalSchema {
     }
     /// Structural validity of a canonical descriptor.
     pub fn validate(&self) -> Result<(), SchemaError> {
-        if ![
-            LOGICAL_SCHEMA_FORMAT,
-            ROW_IDENTITY_SCHEMA_FORMAT,
-            PARTITION_SCHEMA_FORMAT,
-        ]
-        .contains(&self.format)
-        {
-            return invalid("unsupported format");
-        }
+        self.require_row_identity()?;
         if self.application.is_empty() || self.application.len() > 128 {
             return invalid("application name");
         }
@@ -927,9 +889,6 @@ impl LogicalSchema {
         let mut names = BTreeSet::new();
         for table in &self.tables {
             table.validate()?;
-            if !table.partition_by.is_empty() && self.format != PARTITION_SCHEMA_FORMAT {
-                return invalid("partition columns require descriptor format 3");
-            }
             let mut partitions = BTreeSet::new();
             if table.partition_by.len() > 16
                 || table.partition_by.iter().any(|name| {
@@ -947,11 +906,11 @@ impl LogicalSchema {
                     table.sql_name
                 ));
             }
-            if self.format >= ROW_IDENTITY_SCHEMA_FORMAT {
+            {
                 for name in ["id", "row_kind"] {
                     let column = table.column(name).ok_or_else(|| {
                         SchemaError::Invalid(format!(
-                            "{}.{} is required by row identity format 2",
+                            "{}.{} is required by descriptor format 3",
                             table.sql_name, name
                         ))
                     })?;
@@ -1015,19 +974,15 @@ impl LogicalSchema {
         }
         let format: Format = serde_json::from_slice(bytes)
             .map_err(|error| SchemaError::Invalid(error.to_string()))?;
-        if ![ROW_IDENTITY_SCHEMA_FORMAT, PARTITION_SCHEMA_FORMAT].contains(&format.format) {
-            return invalid(
-                "row identity requires format 2; export with the original build and reinstall into a new database",
-            );
+        if format.format != LOGICAL_SCHEMA_FORMAT {
+            return invalid("unsupported schema descriptor format");
         }
         Ok(())
     }
     /// Refuses historical and unknown row formats before installation or writes.
     pub fn require_row_identity(&self) -> Result<(), SchemaError> {
-        if ![ROW_IDENTITY_SCHEMA_FORMAT, PARTITION_SCHEMA_FORMAT].contains(&self.format) {
-            return invalid(
-                "row identity requires format 2; export with the original build and reinstall into a new database",
-            );
+        if self.format != LOGICAL_SCHEMA_FORMAT {
+            return invalid("unsupported schema descriptor format");
         }
         Ok(())
     }
@@ -1041,13 +996,6 @@ impl LogicalSchema {
                 reason,
             })
         };
-        if let Some(view) = self
-            .views
-            .first()
-            .filter(|_| self.format != PARTITION_SCHEMA_FORMAT)
-        {
-            return incompatible(&view.name, Incompatibility::View);
-        }
         for table in &self.tables {
             if let Err(reason) = table.installable() {
                 return incompatible(&table.sql_name, reason);
@@ -1164,6 +1112,7 @@ impl LogicalSchema {
         if bytes.len() > MAX_LOGICAL_SCHEMA_BYTES {
             return invalid("descriptor quota");
         }
+        Self::check_stored_row_identity(bytes)?;
         let schema: Self = serde_json::from_slice(bytes)
             .map_err(|error| SchemaError::Invalid(error.to_string()))?;
         if schema.canonical()? != bytes {
@@ -1340,7 +1289,7 @@ mod tests {
     }
     fn schema() -> LogicalSchema {
         LogicalSchema {
-            format: ROW_IDENTITY_SCHEMA_FORMAT,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: [7; 32],
             application: "shop".into(),
             source: SchemaSource {
@@ -1360,7 +1309,7 @@ mod tests {
                 partition_by: Vec::new(),
                 indexes: vec![LogicalIndex { name: "items_identity".into(), unique: true, columns: vec![IndexColumn { name: "id".into(), descending: false }], create_sql: "CREATE UNIQUE INDEX items_identity ON items(id)".into(), on_conflict: None }],
                 foreign_keys: Vec::new(),
-                reuses_keys: false,
+
                 existence_log: false,
             }],
             views: Vec::new(),
@@ -1375,7 +1324,7 @@ mod tests {
         // Mergeable shapes keep their bytes; the class is in the others.
         let domain = [DomainId([1; 16])];
         let (before, after) = (schema.manifest(&domain), commanded.manifest(&domain));
-        assert!(!before.entities[0].shape.contains("class"));
+        assert!(before.entities[0].shape.contains("mergeable"));
         assert!(after.entities[0].shape.contains("command_controlled"));
         assert_eq!(before.fields, after.fields);
         assert_ne!(before.hash(), after.hash());
@@ -1389,28 +1338,6 @@ mod tests {
         // The same rules as a mergeable table apply.
         commanded.tables[0].auto_generate = true;
         assert!(commanded.installable().is_err());
-    }
-    #[test]
-    fn declaring_key_reuse_keeps_earlier_bytes_and_is_part_of_new_ones() {
-        let schema = schema();
-        let bytes = schema.canonical().unwrap();
-        assert!(
-            !String::from_utf8(bytes.clone())
-                .unwrap()
-                .contains("reuses_keys")
-        );
-        let mut reusing = schema.clone();
-        reusing.tables[0].reuses_keys = true;
-        let reused = reusing.canonical().unwrap();
-        assert_eq!(LogicalSchema::parse(&reused).unwrap(), reusing);
-        assert_ne!(
-            schema.fingerprint().unwrap(),
-            reusing.fingerprint().unwrap()
-        );
-        assert_eq!(
-            schema.replicated_fingerprint(),
-            reusing.replicated_fingerprint()
-        );
     }
     #[test]
     fn canonical_descriptors_round_trip_and_reject_other_bytes() {

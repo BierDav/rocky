@@ -3,7 +3,7 @@ mod horizon;
 mod incoming;
 mod rebootstrap;
 mod restore_strong;
-mod retention;
+pub(crate) mod retention;
 mod sql;
 mod strong;
 use crate::read::{Changed, ReadPlan, ReadPool, Reads};
@@ -249,7 +249,7 @@ where
             let stored = rows(&conn, "SELECT identity FROM rocky_replica WHERE id=1").await?;
             if stored != vec![vec![SqlValue::Blob(expected.clone())]] {
                 return Err(Error::Incompatible(
-                    "node, scope, caller or installed definition differs; older files require export with the original build into a new v3 file".into(),
+                    "node, scope, caller or installed definition differs".into(),
                 ));
             }
         }
@@ -263,7 +263,7 @@ where
             crate::bootstrap::install(
                 &conn,
                 &expected,
-                crate::bootstrap::domain_statements(&conn, identity, &app, &config),
+                crate::bootstrap::domain_statements(&conn, identity, &app, &config)?,
             )
             .await?;
             crate::writer::configure(&conn, options.durability).await?;
@@ -394,29 +394,28 @@ where
                     }
                 }
             }
-            // Added by `docs/runtime/local-replica.md`; files from earlier builds gain it here.
-            worker.conn().execute(storage::UNAPPLIED_INDEX, ()).await?;
+            if fresh {
+                worker.conn().execute(storage::UNAPPLIED_INDEX, ()).await?;
+            }
             if worker.app.sql_writes().is_some() {
                 for sql in crate::sql::SCHEMA {
                     worker.conn().execute(*sql, ()).await?;
                 }
             }
-            // Added by `docs/runtime/checkpoints.md`. An earlier file retains its whole
-            // history, so its checkpoint copy starts empty.
-            let installed = tables.contains(&vec![SqlValue::Text("rocky_checkpoint".into())]);
-            for sql in retention::SCHEMA {
-                worker.conn().execute(*sql, ()).await?;
-            }
-            // Requests from before holds were recorded start their hold now.
-            worker
-                .conn()
-                .execute(
-                    "INSERT OR IGNORE INTO rocky_request_holds SELECT node,sequence,?,0 FROM rocky_requests",
-                    [retention::now_millis()],
-                )
-                .await?;
-            if !installed {
+            if fresh {
+                for sql in retention::SCHEMA {
+                    worker.conn().execute(*sql, ()).await?;
+                }
                 worker.install_retention().await?;
+            } else {
+                for table in crate::scoped_connection::tables(retention::SCHEMA)
+                    .into_iter()
+                    .map(|(table, _)| table)
+                {
+                    if !tables.contains(&vec![SqlValue::Text(table.clone())]) {
+                        return Err(Error::Corrupt(format!("missing storage table {table}")));
+                    }
+                }
             }
             Ok(())
         }

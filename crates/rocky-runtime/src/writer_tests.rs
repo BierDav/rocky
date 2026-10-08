@@ -1,7 +1,7 @@
 //! The file writer: cross-domain groups, savepoints, publication after commit,
 //! fairness, reads beside the writer and WAL checkpoints.
 use super::*;
-use crate::scaling_option_tests::{NODE, installations, note, open_node, pause, scope};
+use crate::scaling_option_tests::{NODE, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
 use inventory_app::InventoryApp;
 use rocky_core::*;
@@ -533,52 +533,4 @@ async fn the_wal_stays_bounded_under_sustained_writes_with_readers() {
     runtime.close().await.unwrap();
     // A clean close checkpoints and truncates the log.
     assert!(std::fs::metadata(&wal).map_or(0, |wal| wal.len()) == 0);
-}
-
-#[tokio::test]
-async fn files_from_the_earlier_engine_are_refused_and_never_opened_as_empty() {
-    let dir = TempDir::new().unwrap();
-    let refused = |error: Error| matches!(&error, Error::Incompatible(message) if message.contains("earlier MVCC storage engine"));
-    let create = async |name: &str| {
-        let path = dir.path().join(name);
-        let conn = crate::sqlite::Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE kept(value INTEGER)", ())
-            .await
-            .unwrap();
-        conn.execute("INSERT INTO kept VALUES(7)", ())
-            .await
-            .unwrap();
-        path
-    };
-    // A header whose read and write versions SQLite does not know.
-    let header = create("header.db").await;
-    let mut bytes = std::fs::read(&header).unwrap();
-    bytes[18] = 0xff;
-    bytes[19] = 0xff;
-    std::fs::write(&header, &bytes).unwrap();
-    // A valid SQLite file whose committed rows sit in the engine's log.
-    let logged = create("logged.db").await;
-    let mut log = logged.clone().into_os_string();
-    log.push("-log");
-    std::fs::write(&log, b"logical log frames").unwrap();
-    for path in [&header, &logged] {
-        let before = std::fs::read(path).unwrap();
-        let error = Runtime::open(path, installations(NODE))
-            .await
-            .err()
-            .unwrap();
-        assert!(refused(error));
-        let error = Replica::open(
-            path,
-            todo_app::TodoApp,
-            todo_app::StaticPolicy::default(),
-            crate::tests::identity(),
-        )
-        .await
-        .err()
-        .unwrap();
-        assert!(refused(error));
-        assert_eq!(std::fs::read(path).unwrap(), before);
-    }
-    assert_eq!(std::fs::read(&log).unwrap(), b"logical log frames");
 }

@@ -1,8 +1,6 @@
 # 1. Remove compatibility code
 
-Status: incomplete; credential, horizon, SDK identity/routing and client-cache
-slices implemented. The completion gate remains blocked by the formats listed
-under remaining contracts below.
+Status: complete; all completion gates passed on 2026-10-09.
 Owner: every crate with a persisted or wire format; the Kotlin SDK and its
 qualification fixtures. Depends on nothing. Wave 0.
 Follow the [execution contract](README.md#agent-execution-contract).
@@ -92,7 +90,7 @@ Further sites found on 2026-10-08:
 ## Phase 1 inventory (2026-10-08)
 
 Verified against source at parent `357dbbb4`; this inventory distinguishes
-format compatibility from product history. Completion is not yet claimed.
+format compatibility from product history. Every listed action is implemented.
 
 | Owner | Multiple readers, migrations or historical refusals | Current format / required action |
 | --- | --- | --- |
@@ -115,64 +113,65 @@ remain in force; this phase does not implement later roadmap phases.
 
 ## Implemented slices and evidence
 
-The coordinator now reads only cache 3 with explicit acknowledged floors and
-checks it before lock-file writes. Credentials require extension 2, including
-empty authority, and horizon 2 with explicit existence bases. Horizon version
-refusal precedes decoding the rest of the signed body; the format-1 existence
-calculation is deleted. SDK identities read only 8 without migration or missing
-transport-key creation. Invitations use 4 and contacts 2 with independent,
-explicit routing flags. Renewal no longer falls back to bare reader keys;
-JSON replies carry `issuer` only. Current credential constructors, including
-the desktop composition and runtime-scaling probes, use explicit extensions.
+Core descriptors and definitions accept only 3. Kotlin emits 3; the SDK no
+longer has collection/register decoding or the unused Rust Room generator.
+Meaningful SQL, typed-row and domain tests use current descriptors. Inert key
+reuse flags and fingerprint-preservation omissions are gone.
 
-Three compatibility-only Rust tests were deleted; one migration Rust test and
-one migration Kotlin test were replaced with refusal regressions. Three mixed
-retention/authority tests keep their behavior checks without legacy clauses.
-Four additional Rust regressions cover cache versions/missing floors, horizon
-versions, extension versions/empty authority and contact routing flags. Two
-legacy Kotlin fixture files and their two qualification assertions were removed.
-SDK refusal tests compare identity/database/secret-file bytes and prove that
-unsupported invitations create no installation directory.
+Secure frames accept only 5, always wrapping bundle body 2 in witness envelope
+1. Author and partition metadata are independent optional features. Checkpoint
+6 likewise represents partition, admitted horizon and finalized horizon
+independently; an admitted cut is never silently finalized. Existence records
+accept only 2. Replica identity v6 is checked before writer initialization.
+Legacy proof transfer, tables, checkpoint upgrades, identity adoption and
+open-time command/preparation/retention/row-index backfills are deleted.
+Current creation clocks, command recovery, replay and bounded retention remain.
 
-Measured diff: 49 files, 624 added lines and 993 removed lines.
-Counts include source, tests, fixtures and guides; they are diff counts, not net
-production-code removal.
+SQLite uses one current application-id tag, checked read-only before lock or
+writer initialization. Stored descriptors are checked in both unscoped and
+scoped files. Fresh runtime retention metadata is installed atomically by
+resumable bootstrap. Historical engine/sidecar refusals, request-hold backfill
+and `CommandState::Prepared` are gone. Unknown-outcome recovery stays.
 
-Final diff counts and command results are recorded in the local evidence report
-at `local/p01-evidence/report.md`. The evidence is for this partial change,
-not the whole phase. Full Kotlin checking passed with 50 JVM tests after
-rebuilding the Android runtime. Native checks passed 2 tests; packaged JVM
-consumption passed; schema qualification passed 6 descriptor/fingerprint pairs;
-schema tests passed 4; Room passed 12; shopping checks passed 25 JVM tests and
-desktop compilation; SQLite passed 5; inventory qualification passed, including
-3 intentionally rejected Kotlin type-mismatch fixtures. Credentials passed 24.
-Rust baseline and secure-suite completion must be read from the final report.
+Coordinator caches accept only 3 with required floors. Raft state, logs and
+snapshots are checked before lock writes; restore checks before copying files.
+Current interrupted-write cleanup and corruption recovery remain.
+Credentials require extension 2 and horizon 2. SDK identities accept only 8,
+invitations 4 and contacts 2; routing is explicit data. Renewal has one sealed
+shape; JSON has no `creator` alias. Owning guides and decision 0039 document
+these contracts; decision 0018 links the replacement bundle encoding.
 
-## Remaining blocking contracts
+Twelve legacy-only Rust test functions were deleted. One Rust and one Kotlin
+migration test were replaced with refusal regressions; mixed behavior tests
+keep their admission, retention, routing and recovery checks. Eight new Rust
+test functions in the continuation cover schema tags, file tags and fresh
+reopen, stored descriptors, encrypted identities/checkpoints/frames/payloads,
+and coordinator open/restore before writes. The preceding change added four
+other format/authority/routing regressions. Six obsolete JSON fixtures were
+deleted, with two current descriptor fixtures replacing meaningful SDK uses.
+Two legacy production modules were deleted (Room generator and witness transfer).
 
-The first two completion bullets are not satisfied. There is no external
-implementation dependency blocking this phase; the following required work
-remains in this change's continuation:
+Measured aggregate diff from main: 140 files, 1,767 added and 3,567 removed lines.
+These counts include source, tests, fixtures and guides.
 
-- Core descriptor 1/2/3 and definition 2/3 must become current 3 only. Remove
-  unused `reuses_keys`/`KeyReuse` and fingerprint-preservation omissions; update
-  Kotlin producers and supported generation fixtures, preserving generation
-  transitions.
-- SDK collection/register schema paths and `generate_room` remain. Delete the
-  generator and its fixtures/tests, replacing meaningful storage/session tests
-  with current definitions rather than dropping their invariants.
-- Secure row formats 1–5, bundle bodies 1/2, checkpoint upgrade and readers
-  3–6, old replica identity adoption, existence records 1/2, witness transfer,
-  `secure_legacy_creations` and defaulted result evidence remain. One current
-  checkpoint must still represent optional partition, horizon and finalization
-  state without falsely finalizing an admitted cut.
-- Runtime/storage historical engine/sidecar and row-identity refusal paths,
-  unscoped file opening/refusal, checkpoint adoption, request-hold backfill and
-  `CommandState::Prepared` remain. Replace them with one current file-format
-  admission before initialization writes; do not remove durability or recovery
-  state needed by current files.
-- Finish owning guides and remaining decision compatibility clauses, then
-  recount removals and rerun every completion gate after those changes.
+`./scripts/check` completed with exit 0: 719 passed, 0 failed, 15 ignored across
+workspace/doc tests and the repeated SDK gate without default features. Secure
+passed 153, runtime 154, and storage 26. Generation transitions and current
+crash recovery passed. The four ignored crash-child helpers execute through
+their parent tests; measurements and Docker qualification were not run.
 
-No device UI, Android device execution, real-network distributed deployment or
-performance qualification is established by this partial change's checks.
+The final native gate passed format, Clippy, 2 ABI tests and the build without
+default features. Full Kotlin passed 50 JVM tests. Packaged consumption passed;
+schema qualification passed 6 descriptor/fingerprint pairs and native reopen;
+schema tests passed 4, Room 12, shopping 25 plus desktop compilation, and SQLite
+5. Inventory qualification passed, including 3 intentionally rejected type
+mismatches. Android arm64-v8a and x86_64 release artifacts rebuilt and published
+locally. Both conventional commit descriptions passed `commitlint --jj`.
+
+Exact commands, corrected failures, per-crate counts and logs are in the
+workspace evidence report at `local/p01-evidence/report.md`. The inherited
+change remains intact; the continuation is directly above it, with main unchanged.
+
+No device UI, Android device execution, remote CI, real-network deployment or
+performance qualification is established by these checks. Ignored probes are
+reported separately from executed tests.

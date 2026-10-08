@@ -269,7 +269,6 @@ where
                 let state = match progress.state {
                     None => "unresolved",
                     Some(CommandState::Queued) => "queued",
-                    Some(CommandState::Prepared) => "prepared",
                     Some(CommandState::OutcomeUnknown) => "outcome_unknown",
                     Some(CommandState::ConfirmedLocally) => "confirmed_locally",
                     Some(CommandState::PeerApplied) => "peer_applied",

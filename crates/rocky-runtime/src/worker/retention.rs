@@ -19,6 +19,13 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS rocky_mutation_handles_sequence ON rocky_mutation_handles(node,sequence)",
     "CREATE TABLE IF NOT EXISTS rocky_request_holds(node BLOB NOT NULL,sequence INTEGER NOT NULL,stored INTEGER NOT NULL,released INTEGER NOT NULL,PRIMARY KEY(node,sequence))",
 ];
+pub(crate) fn initial_checkpoint() -> Result<Vec<crate::sqlite::Value>, Error> {
+    Ok(vec![
+        crate::sqlite::Value::Blob(SetDigest::default().encode()),
+        crate::sqlite::Value::Blob(SetDigest::default().encode()),
+        crate::sqlite::Value::Blob(encode_stored(&Stored::default())?),
+    ])
+}
 /// Milliseconds since the Unix epoch on this replica's clock.
 pub(super) fn now_millis() -> i64 {
     std::time::SystemTime::now()

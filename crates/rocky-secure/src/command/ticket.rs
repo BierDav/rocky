@@ -165,28 +165,6 @@ impl<A: rocky_core::RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Results a build without this index applied are indexed once, inside
-    /// the open transaction.
-    pub(crate) async fn index_results(&self) -> Result<(), Error> {
-        let indexed = rows(
-            &self.conn,
-            "SELECT 1 FROM secure_command_progress WHERE state=4 LIMIT 1",
-        )
-        .await?;
-        if !indexed.is_empty() {
-            return Ok(());
-        }
-        for record in rows(&self.conn, "SELECT result FROM secure_results").await? {
-            let [SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(denied("corrupt retained result"));
-            };
-            let result: ConfirmedCommand = decode(bytes)?;
-            let package = result.strong_package()?;
-            self.progress(&package.request.hash()?, CONFIRMED, Some(package.sequence))
-                .await?;
-        }
-        Ok(())
-    }
 }
 impl<A: RowCommandApplication> Inner<A> {
     pub(super) async fn open_tickets(&self) -> Result<usize, Error> {

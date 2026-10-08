@@ -8,14 +8,11 @@ use rocky_runtime::{
     BoundQuery, CheckpointPage, DomainInstallation, Error, Identity, Mutation, ReadOptions,
     Replica, Runtime, RuntimeConfig,
 };
-use rocky_sdk::{Access, TypedApp, TypedRow, generate_room};
+use rocky_sdk::{Access, TypedApp, TypedRow};
 use std::path::{Path, PathBuf};
 
-const SHOPPING: &str = include_str!("fixtures/shopping-identity.json");
-const SHOPPING_POLICY: &str =
-    include_str!("../../../examples/shoppinglist-app/shared/schemas/rocky-policy.json");
-const EDGE: &str = include_str!("fixtures/edge-identity.json");
-const EDGE_POLICY: &str = include_str!("fixtures/edge-policy.json");
+const SHOPPING: &str = include_str!("fixtures/shopping-descriptor.json");
+const EDGE: &str = include_str!("fixtures/edge-descriptor.json");
 const ITEMS: &str = "shopping_items";
 const CALLER: PrincipalId = PrincipalId([7; 16]);
 const DOMAIN: DomainId = DomainId([2; 16]);
@@ -244,8 +241,8 @@ fn installation(
     let mut app = TypedApp::new(schema.clone(), &[DOMAIN])
         .map_err(|error| Error::Incompatible(error.to_string()))?;
     if [
-        rocky_core::ROW_IDENTITY_SCHEMA_FORMAT,
-        rocky_core::PARTITION_SCHEMA_FORMAT,
+        rocky_core::LOGICAL_SCHEMA_FORMAT,
+        rocky_core::LOGICAL_SCHEMA_FORMAT,
     ]
     .contains(&schema.format)
     {
@@ -292,7 +289,7 @@ fn shown(id: &str, title: &str, completed: bool) -> Vec<SqlValue> {
     ]
 }
 fn shopping() -> LogicalSchema {
-    generate_room(SHOPPING, SHOPPING_POLICY).expect("shopping schema")
+    LogicalSchema::parse(SHOPPING.as_bytes()).expect("shopping schema")
 }
 
 #[tokio::test]
@@ -562,7 +559,7 @@ fn line(
 }
 #[tokio::test]
 async fn compound_blob_collated_and_numeric_keys_agree_with_sqlite() {
-    let schema = generate_room(EDGE, EDGE_POLICY).expect("schema");
+    let schema = LogicalSchema::parse(EDGE.as_bytes()).expect("schema");
     let names: Vec<_> = schema.tables.iter().map(|t| t.sql_name.as_str()).collect();
     assert_eq!(names, ["digests", "drafts", "ledger_lines"]);
     let dir = tempfile::tempdir().expect("dir");
@@ -731,7 +728,7 @@ async fn compound_blob_collated_and_numeric_keys_agree_with_sqlite() {
 
 #[tokio::test]
 async fn physical_namespaces_and_checkpoint_imports_keep_row_identity() {
-    let schema = generate_room(EDGE, EDGE_POLICY).expect("schema");
+    let schema = LogicalSchema::parse(EDGE.as_bytes()).expect("schema");
     let dir = tempfile::tempdir().expect("dir");
     let plain = Device::open(dir.path(), 1, &schema).await.expect("plain");
     // The same domain in a shared file, where every table has a physical prefix.
@@ -863,20 +860,43 @@ async fn physical_namespaces_and_checkpoint_imports_keep_row_identity() {
 #[tokio::test]
 async fn renamed_tables_and_columns_keep_their_identity_between_replicas() {
     let schema = shopping();
-    let export = SHOPPING
+    let mut renamed = schema.clone();
+    let table = &mut renamed.tables[0];
+    table.sql_name = "groceries".into();
+    table.create_sql = table
+        .create_sql
         .replace("shopping_items", "groceries")
-        .replace("title", "name")
-        .replace(
-            "3f3baae50e56ddfb547ad32260e40a1d",
-            "00112233445566778899aabbccddeeff",
-        );
-    let policy = r#"{
-        "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
-        "application": "shopping",
-        "tables": {"groceries": {"class": "mergeable", "logical": "shopping_items", "columns": {
-            "name": {"logical": "title"},
-            "searchTitle": {"derived": "lower(name)"}}}}}"#;
-    let renamed = generate_room(&export, policy).expect("renamed schema");
+        .replace("title", "name");
+    table.column("title").expect("title");
+    for column in &mut table.columns {
+        if column.sql_name == "title" {
+            column.sql_name = "name".into();
+        }
+        if let rocky_core::ColumnClass::Derived { rule } = &mut column.class {
+            *rule = rule.replace("title", "name");
+        }
+    }
+    table.primary_key.iter_mut().for_each(|name| {
+        if name == "title" {
+            *name = "name".into();
+        }
+    });
+    for index in &mut table.indexes {
+        index.name = index
+            .name
+            .replace("shopping_items", "groceries")
+            .replace("title", "name");
+        index.create_sql = index
+            .create_sql
+            .replace("shopping_items", "groceries")
+            .replace("title", "name");
+        for column in &mut index.columns {
+            if column.name == "title" {
+                column.name = "name".into();
+            }
+        }
+    }
+    renamed.validate().expect("renamed descriptor");
     assert_ne!(
         schema.fingerprint().expect("old"),
         renamed.fingerprint().expect("new")
@@ -907,8 +927,8 @@ async fn renamed_tables_and_columns_keep_their_identity_between_replicas() {
     assert_eq!(new.read(groceries).await, old.items().await);
 
     // A rename without the logical name is another definition and another app.
-    let unmapped = policy.replace(r#""logical": "shopping_items", "#, "");
-    let other = generate_room(&export, &unmapped).expect("other schema");
+    let mut other = renamed.clone();
+    other.tables[0].logical = "groceries".into();
     assert_ne!(
         schema.replicated_fingerprint(),
         other.replicated_fingerprint()
@@ -917,69 +937,42 @@ async fn renamed_tables_and_columns_keep_their_identity_between_replicas() {
 
 #[tokio::test]
 async fn incompatible_schemas_bindings_and_codecs_are_refused() {
-    let incompatible = |policy: &str| {
-        let schema = generate_room(EDGE, policy).expect("descriptor");
-        match (schema.installable(), TypedApp::new(schema, &[DOMAIN])) {
+    let base = LogicalSchema::parse(EDGE.as_bytes()).expect("descriptor");
+    let incompatible =
+        |schema: LogicalSchema| match (schema.installable(), TypedApp::new(schema, &[DOMAIN])) {
             (Err(SchemaError::Incompatible { table, reason }), Err(_)) => (table, reason),
             _ => panic!("schema was accepted"),
-        }
-    };
-    // An auto-generated key blocks replication of its table.
-    let publisher = r#""publisher":"5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","application":"ledger""#;
+        };
+    let mut auto = base.clone();
+    auto.tables
+        .iter_mut()
+        .find(|table| table.sql_name == "drafts")
+        .unwrap()
+        .class = TableClass::Mergeable;
     assert_eq!(
-        incompatible(&format!(r#"{{{publisher},"default":"mergeable"}}"#)),
+        incompatible(auto),
         ("drafts".into(), Incompatibility::AutoGeneratedKey)
     );
-    let local = r#""drafts":{"class":"local_only"}"#;
+    let mut local = base.clone();
+    local.tables[0].columns[1].class = rocky_core::ColumnClass::LocalOnly;
     assert_eq!(
-        incompatible(&format!(
-            r#"{{{publisher},"default":"mergeable","tables":{{{local},"digests":{{"columns":{{"score":{{"local_only":true}}}}}}}}}}"#
-        )),
+        incompatible(local),
         (
             "digests".into(),
             Incompatibility::LocalColumn("score".into())
         )
     );
+    let mut derived = base;
+    derived.tables[0].columns[1].class = rocky_core::ColumnClass::Derived {
+        rule: "random()".into(),
+    };
     assert_eq!(
-        incompatible(&format!(
-            r#"{{{publisher},"default":"mergeable","tables":{{{local},"digests":{{"columns":{{"score":{{"derived":"random()"}}}}}}}}}}"#
-        )),
+        incompatible(derived),
         (
             "digests".into(),
             Incompatibility::DerivedRule("score".into())
         )
     );
-    // Nothing is replicated by omission, and policy typos are errors.
-    assert!(generate_room(EDGE, &format!("{{{publisher}}}")).is_err());
-    assert!(
-        generate_room(
-            EDGE,
-            &format!(r#"{{{publisher},"default":"local_only","tables":{{"missing":{{}}}}}}"#)
-        )
-        .is_err()
-    );
-    assert!(generate_room(EDGE, &format!(r#"{{{publisher},"default":"local_only","tables":{{"room_table_modification_log":{{}}}}}}"#)).is_err());
-    assert!(generate_room(&EDGE.replacen("0f0e0d0c", "ffffffff", 1), EDGE_POLICY).is_err());
-    assert!(
-        generate_room(
-            &EDGE.replace("COLLATE NOCASE", "COLLATE LOCALIZED"),
-            EDGE_POLICY
-        )
-        .is_err()
-    );
-    let view = EDGE.replacen(
-        r#""setupQueries""#,
-        r#""views":[{"viewName":"open_lines","createSql":"CREATE VIEW `${VIEW_NAME}` AS SELECT 1"}],"setupQueries""#,
-        1,
-    );
-    let schema = generate_room(&view, EDGE_POLICY).expect("descriptor with a view");
-    assert!(matches!(
-        schema.installable(),
-        Err(SchemaError::Incompatible {
-            reason: Incompatibility::View,
-            ..
-        })
-    ));
 
     let schema = shopping();
     let dir = tempfile::tempdir().expect("dir");
@@ -1066,7 +1059,7 @@ async fn incompatible_schemas_bindings_and_codecs_are_refused() {
 #[tokio::test]
 async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
     let definition = serde_json::json!({
-        "format": 2, "publisher": "11".repeat(32), "application": "identity-descriptor",
+        "format":3, "publisher": "11".repeat(32), "application": "identity-descriptor",
         "tables": [
             {"name": "links", "class": "mergeable", "columns": [
                 {"name": "a", "type": "text", "not_null": true},
@@ -1096,7 +1089,7 @@ async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
 
 #[tokio::test]
 async fn trusted_id_reservations_roll_back_and_continue_after_tombstones_and_reopen() {
-    let definition = serde_json::json!({"format":2,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
+    let definition = serde_json::json!({"format":3,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()

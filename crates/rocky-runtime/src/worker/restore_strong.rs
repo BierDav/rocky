@@ -137,7 +137,7 @@ where
                 || package.request.scope != self.identity.scope
                 || ![0, 1].contains(verified)
                 || ![0, 1].contains(is_applied)
-                || !["prepared", "unknown", "confirmed"].contains(&state.as_str())
+                || !["unknown", "confirmed"].contains(&state.as_str())
                 || (*is_applied == 1) != (state == "confirmed")
             {
                 return Err(corrupt());

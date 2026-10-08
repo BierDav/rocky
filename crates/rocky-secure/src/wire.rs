@@ -28,20 +28,9 @@ pub(crate) struct Extensions {
     pub credentials: CredentialChain,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<u32>,
-    #[serde(
-        default = "legacy_row_format",
-        skip_serializing_if = "is_legacy_row_format"
-    )]
     pub row_format: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<rocky_core::PartitionTuple>,
-}
-
-fn legacy_row_format() -> u8 {
-    1
-}
-fn is_legacy_row_format(version: &u8) -> bool {
-    *version == 1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -70,16 +59,13 @@ impl EncryptedFrame {
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
-        if !matches!(
-            (header.extensions.row_format, header.extensions.author),
-            (1, None) | (2..=5, Some(1..=0x7fff_ffff))
-        ) {
-            return Err(denied(
-                "unsupported row identity frame format; upgrade the runtime",
-            ));
+        if header.extensions.row_format != 5 {
+            return Err(denied("unsupported row frame format"));
         }
         let extension = &header.extensions;
-        if matches!(extension.row_format, 3 | 5) != extension.partition.is_some()
+        if extension
+            .author
+            .is_some_and(|author| !(1..=0x7fff_ffff).contains(&author))
             || extension.partition.as_ref().is_some_and(|tuple| {
                 tuple
                     .scope(extension.scope.domain, extension.scope.table)
@@ -87,7 +73,7 @@ impl EncryptedFrame {
                     != Some(extension.scope)
             })
         {
-            return Err(denied("invalid authenticated partition scope"));
+            return Err(denied("invalid authenticated partition scope or author"));
         }
         if header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
@@ -180,7 +166,7 @@ pub(crate) struct Membership {
 #[derive(Serialize, Deserialize)]
 struct BundleBody {
     version: u8,
-    membership: Membership,
+    membership: Option<Membership>,
     writes: Vec<RowWrite>,
 }
 #[derive(Serialize, Deserialize)]
@@ -188,68 +174,81 @@ struct WitnessBody {
     version: u8,
     body: Vec<u8>,
     creations: Vec<(Commitment, Commitment)>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     basis: Option<(u64, Commitment)>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     releases: Vec<Commitment>,
 }
-/// The decrypted body of a row frame.
+/// A current row payload, always protected by a creation witness envelope.
 #[derive(Clone)]
-pub(crate) enum RowPayload {
-    Witnessed {
-        payload: Box<Self>,
-        creations: Vec<(Commitment, Commitment)>,
-        basis: Option<(u64, Commitment)>,
-        releases: Vec<Commitment>,
-    },
-    /// A single-scope batch, the format from before bundles.
-    Rows(Vec<RowChange>),
-    Bundle {
-        membership: Membership,
-        writes: Vec<RowWrite>,
-    },
+pub(crate) struct RowPayload {
+    membership: Option<Membership>,
+    writes: Vec<RowWrite>,
+    creations: Vec<(Commitment, Commitment)>,
+    basis: Option<(u64, Commitment)>,
+    releases: Vec<Commitment>,
 }
 impl RowPayload {
-    pub(crate) fn decode(plaintext: &[u8]) -> Result<Self, Error> {
-        if let Ok(body) = decode::<WitnessBody>(plaintext) {
-            if body.version != 1
-                || body.basis.is_some_and(|(sequence, _)| sequence == 0)
-                || body.releases.len() > 64
-                || body.releases.windows(2).any(|pair| pair[0] >= pair[1])
-                || body.creations.len() > 32
-                || body.creations.windows(2).any(|pair| pair[0].0 >= pair[1].0)
-                || decode::<WitnessBody>(&body.body).is_ok()
-            {
-                return Err(denied("invalid creation witness envelope"));
-            }
-            return Ok(Self::Witnessed {
-                payload: Box::new(Self::decode(&body.body)?),
-                creations: body.creations,
-                basis: body.basis,
-                releases: body.releases,
-            });
+    pub(crate) fn check_formats(plaintext: &[u8]) -> Result<(), Error> {
+        #[derive(Deserialize)]
+        struct Envelope {
+            version: u8,
+            body: Vec<u8>,
         }
-        // A batch is a CBOR array and a bundle a map, so at most one parses.
-        if let Ok(changes) = decode::<Vec<RowChange>>(plaintext) {
-            return Ok(Self::Rows(changes));
+        #[derive(Deserialize)]
+        struct Version {
+            version: u8,
         }
-        let body: BundleBody = decode(plaintext)?;
-        if ![1, 2].contains(&body.version) {
+        let envelope: Envelope = p2panda_core::cbor::decode_cbor(plaintext)
+            .map_err(|_| denied("unsupported creation witness format"))?;
+        if envelope.version != 1 {
+            return Err(denied("unsupported creation witness format"));
+        }
+        let body: Version = p2panda_core::cbor::decode_cbor(envelope.body.as_slice())
+            .map_err(|_| denied("unsupported bundle version"))?;
+        if body.version != 2 {
             return Err(denied("unsupported bundle version"));
         }
-        Ok(Self::Bundle {
+        Ok(())
+    }
+    pub(crate) fn decode(plaintext: &[u8]) -> Result<Self, Error> {
+        Self::check_formats(plaintext)?;
+        let envelope: WitnessBody = decode(plaintext)?;
+        if envelope.version != 1 {
+            return Err(denied("unsupported creation witness format"));
+        }
+        if envelope.basis.is_some_and(|(sequence, _)| sequence == 0)
+            || envelope.releases.len() > 64
+            || envelope.releases.windows(2).any(|pair| pair[0] >= pair[1])
+            || envelope.creations.len() > 32
+            || envelope
+                .creations
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(denied("invalid creation witness envelope"));
+        }
+        let body: BundleBody = decode(&envelope.body)?;
+        if body.version != 2 {
+            return Err(denied("unsupported bundle version"));
+        }
+        Ok(Self {
             membership: body.membership,
             writes: body.writes,
+            creations: envelope.creations,
+            basis: envelope.basis,
+            releases: envelope.releases,
         })
     }
-    pub(crate) fn bundle(
-        membership: Membership,
-        writes: Vec<RowWrite>,
-        identity: bool,
-    ) -> Result<Vec<u8>, Error> {
+    pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: if identity { 2 } else { 1 },
-            membership,
+            version: 2,
+            membership: None,
+            writes: changes.iter().cloned().map(RowWrite::changed).collect(),
+        })
+    }
+    pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
+        encode(&BundleBody {
+            version: 2,
+            membership: Some(membership),
             writes,
         })
     }
@@ -268,38 +267,19 @@ impl RowPayload {
         })
     }
     pub(crate) fn protection(&self) -> (Option<Commitment>, &[Commitment]) {
-        match self {
-            Self::Witnessed {
-                basis, releases, ..
-            } => (basis.map(|(_, hash)| hash), releases),
-            _ => (None, &[]),
-        }
+        (self.basis.map(|(_, hash)| hash), &self.releases)
     }
     pub(crate) fn basis(&self) -> Option<(u64, Commitment)> {
-        match self {
-            Self::Witnessed { basis, .. } => *basis,
-            _ => None,
-        }
+        self.basis
     }
     pub(crate) fn creations(&self) -> &[(Commitment, Commitment)] {
-        match self {
-            Self::Witnessed { creations, .. } => creations,
-            _ => &[],
-        }
+        &self.creations
     }
     pub(crate) fn membership(&self) -> Option<&Membership> {
-        match self {
-            Self::Witnessed { payload, .. } => payload.membership(),
-            Self::Rows(_) => None,
-            Self::Bundle { membership, .. } => Some(membership),
-        }
+        self.membership.as_ref()
     }
     pub(crate) fn into_writes(self) -> Vec<RowWrite> {
-        match self {
-            Self::Witnessed { payload, .. } => payload.into_writes(),
-            Self::Rows(changes) => changes.into_iter().map(RowWrite::changed).collect(),
-            Self::Bundle { writes, .. } => writes,
-        }
+        self.writes
     }
 }
 

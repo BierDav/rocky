@@ -317,14 +317,19 @@ mod tests {
         LogicalColumn {
             logical: name.into(),
             sql_name: name.into(),
-            affinity: Affinity::Text,
+            affinity: if ["id", "row_kind"].contains(&name) {
+                Affinity::Integer
+            } else {
+                Affinity::Text
+            },
             not_null,
             default: None,
             collation: Collation::Binary,
             class: ColumnClass::Mergeable,
         }
     }
-    fn table(name: &str, columns: Vec<LogicalColumn>) -> LogicalTable {
+    fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
+        columns.push(column("row_kind", true));
         let sql: Vec<String> = columns
             .iter()
             .map(|column| {
@@ -334,7 +339,15 @@ mod tests {
                 } else {
                     ""
                 };
-                format!("{} TEXT{null}{key}", column.sql_name)
+                format!(
+                    "{} {}{null}{key}",
+                    column.sql_name,
+                    if column.affinity == Affinity::Integer {
+                        "INTEGER"
+                    } else {
+                        "TEXT"
+                    }
+                )
             })
             .collect();
         LogicalTable {
@@ -348,7 +361,7 @@ mod tests {
             partition_by: Vec::new(),
             indexes: Vec::new(),
             foreign_keys: Vec::new(),
-            reuses_keys: false,
+
             existence_log: false,
         }
     }

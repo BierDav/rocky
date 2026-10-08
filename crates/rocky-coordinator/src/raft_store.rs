@@ -252,6 +252,57 @@ const SNAPSHOT_LABEL: &str = "rocky.raft-snapshot.v2";
 fn snapshot_index(meta: &SnapshotMeta<u64, BasicNode>) -> u64 {
     meta.last_log_id.map_or(0, |id| id.index + 1)
 }
+fn check_store_format(path: &Path, backup: bool) -> Result<(), CoordinationError> {
+    if path.exists() {
+        for entry in std::fs::read_dir(path).map_err(|_| CoordinationError::Corrupt)? {
+            let entry = entry.map_err(|_| CoordinationError::Corrupt)?;
+            if ![
+                "LOCK",
+                "PROVISIONED",
+                "state.cbor",
+                "log",
+                "snapshots",
+                FENCE,
+                "state.cbor.pending",
+                "PROVISIONED.pending",
+                "RESTORED.pending",
+            ]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+                && !(backup && entry.file_name() == BACKUP)
+            {
+                return Err(CoordinationError::UnsupportedFormat);
+            }
+        }
+        let state = path.join("state.cbor");
+        if state.exists() {
+            if unseal::<Hard>(STATE_LABEL, &read(&state)?)?.format != FORMAT {
+                return Err(CoordinationError::UnsupportedFormat);
+            }
+            for directory in ["snapshots", "log"] {
+                for entry in std::fs::read_dir(path.join(directory))
+                    .map_err(|_| CoordinationError::Corrupt)?
+                {
+                    let entry = entry.map_err(|_| CoordinationError::Corrupt)?;
+                    if !entry.file_name().to_string_lossy().ends_with(".cbor") {
+                        continue;
+                    }
+                    let bytes = read(&entry.path())?;
+                    if directory == "snapshots" {
+                        if let Ok(snapshot) = unseal::<SnapshotFile>(SNAPSHOT_LABEL, &bytes)
+                            && snapshot.format != FORMAT
+                        {
+                            return Err(CoordinationError::UnsupportedFormat);
+                        }
+                    } else {
+                        let _: Entry<Types> = unseal(LOG_LABEL, &bytes)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 impl Store {
     pub fn open(
         path: &Path,
@@ -259,6 +310,7 @@ impl Store {
         provision: bool,
         limits: crate::Limits,
     ) -> Result<Self, CoordinationError> {
+        check_store_format(path, false)?;
         std::fs::create_dir_all(path).map_err(|_| CoordinationError::Corrupt)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -271,10 +323,6 @@ impl Store {
             .map_err(|_| CoordinationError::Denied)?;
         let identity = genesis.id()?;
         let marker_path = path.join("PROVISIONED");
-        // Version 1 kept everything in one retain-all image.
-        if path.join("raft.cbor").exists() {
-            return Err(CoordinationError::UnsupportedFormat);
-        }
         let (logs_dir, snapshots_dir) = (path.join("log"), path.join("snapshots"));
         let state_path = path.join("state.cbor");
         let image = if state_path.exists() {
@@ -597,6 +645,7 @@ impl Store {
         if std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some()) {
             return Err(CoordinationError::Configuration);
         }
+        check_store_format(backup, true)?;
         copy_store(backup, path)?;
         // The backup's own leadership is stale: its log may lack entries it
         // committed later, so it restarts as a follower of its last term.

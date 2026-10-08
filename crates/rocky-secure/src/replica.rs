@@ -35,10 +35,9 @@ use crate::{
 };
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{
-    AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CheckpointWitnessPage,
-    CustodySummary, HorizonPage, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport,
-    RebootstrapReport, RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
-    StrongSummary,
+    AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
+    HorizonPage, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, RebootstrapReport,
+    RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint, StrongSummary,
 };
 pub use evict::EvictReport;
 pub use existence::{
@@ -138,8 +137,6 @@ struct Stamp {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Materialized {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    witnessed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protected: Option<protection::Protected>,
     fields: RowFields,
@@ -303,7 +300,7 @@ pub struct Buffered<T> {
     pub value: T,
     pub commit: u64,
 }
-/// Encrypted protocol files use an explicit API; trusted legacy files cannot be opened here.
+/// Encrypted protocol files use an explicit API; trusted files cannot be opened here.
 pub struct EncryptedReplica<A> {
     pub(super) inner: Arc<Mutex<Inner<A>>>,
     queue: Arc<group::Queue>,
@@ -321,6 +318,104 @@ impl<A> Clone for EncryptedReplica<A> {
         }
     }
 }
+fn protocol_schema() -> impl Iterator<Item = &'static str> {
+    [
+        super::command::SCHEMA,
+        generation::SCHEMA,
+        migrate::SCHEMA,
+        backup::SCHEMA,
+        rebuild::SCHEMA,
+        bundle::SCHEMA,
+        typed::SCHEMA,
+        identity::SCHEMA,
+        partition::SCHEMA,
+        checkpoint::SCHEMA,
+        roles::SCHEMA,
+        keys::SCHEMA,
+        existence::SCHEMA,
+        horizon::SCHEMA,
+        constraints::SCHEMA,
+    ]
+    .into_iter()
+    .flat_map(|schema| schema.iter().copied())
+}
+
+/// Refuse another persisted format before opening a writer or changing SDK settings.
+pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
+    rocky_storage::database::check_file_format(path).await?;
+    if !std::fs::metadata(path).is_ok_and(|file| file.len() > 0) {
+        return Ok(());
+    }
+    let raw = crate::sqlite::Connection::open_read_only(path)?;
+    let conn = ScopedConnection::new(raw, None, SCHEMA);
+    let tables = rows(
+        &conn,
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .await?;
+    if tables.is_empty() {
+        return Ok(());
+    }
+    if !tables.contains(&vec![SqlValue::Text("secure_metadata".into())]) {
+        return Err(Error::Incompatible(
+            "unsupported encrypted replica format".into(),
+        ));
+    }
+    let records = rows(&conn, "SELECT identity FROM secure_metadata WHERE id=1").await?;
+    let Some([SqlValue::Blob(bytes)]) = records.first().map(Vec::as_slice) else {
+        return Err(Error::Incompatible(
+            "unsupported encrypted replica format".into(),
+        ));
+    };
+    let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
+    if label != "rocky.encrypted-replica.v6" {
+        return Err(Error::Incompatible(
+            "unsupported encrypted replica format".into(),
+        ));
+    }
+    if tables.contains(&vec![SqlValue::Text("secure_typed".into())]) {
+        for record in rows(&conn, "SELECT descriptor FROM secure_typed").await? {
+            if let [SqlValue::Blob(bytes)] = record.as_slice() {
+                rocky_core::LogicalSchema::check_stored_row_identity(bytes)
+                    .map_err(|error| Error::Incompatible(error.to_string()))?;
+            }
+        }
+    }
+    if tables.contains(&vec![SqlValue::Text("secure_checkpoints".into())]) {
+        #[derive(Deserialize)]
+        struct Format {
+            format: u32,
+        }
+        #[derive(Deserialize)]
+        struct Version {
+            statement: Format,
+        }
+        for record in rows(
+            &conn,
+            "SELECT signed FROM secure_checkpoints WHERE signed IS NOT NULL",
+        )
+        .await?
+        {
+            if let [SqlValue::Blob(bytes)] = record.as_slice() {
+                let version: Version = p2panda_core::cbor::decode_cbor(bytes.as_slice())
+                    .map_err(|_| denied("invalid checkpoint"))?;
+                if version.statement.format != 6 {
+                    return Err(denied("unsupported checkpoint format"));
+                }
+            }
+        }
+    }
+    let schema: Vec<_> = SCHEMA.iter().copied().chain(protocol_schema()).collect();
+    for (table, _) in rocky_storage::scoped_connection::tables(&schema) {
+        if !tables.contains(&vec![SqlValue::Text(table.clone())]) {
+            return Err(Error::Corrupt(format!(
+                "missing secure storage table {table}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn open(path: impl AsRef<Path>, app: A, config: SecureConfig) -> Result<Self, Error> {
         Self::open_upgrading(path, app, config, None).await
@@ -381,21 +476,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
         config.keys = current;
+        check_replica_format(path.as_ref()).await?;
         let (owner, raw) = DatabaseOwner::open(path.as_ref()).await?;
         let conn = Arc::new(ScopedConnection::new(raw, None, SCHEMA));
         configure(&conn).await?;
-        // Add checkpoint, key-epoch and strong-base bookkeeping at open.
-        // The new identity fences writers that cannot maintain those bases.
-        let [first, second, third, fourth, fifth, identity] = [
-            "rocky.encrypted-replica.v1",
-            "rocky.encrypted-replica.v2",
-            "rocky.encrypted-replica.v3",
-            "rocky.encrypted-replica.v4",
-            "rocky.encrypted-replica.v5",
-            "rocky.encrypted-replica.v6",
-        ]
-        .map(|label| encode(&(label, manifest.hash(), config.node.public_key())));
-        let (legacy, identity) = ([first?, second?, third?, fourth?, fifth?], identity?);
+        let identity = generation::identity(manifest.hash(), config.node.public_key())?;
         let mut wal = path.as_ref().as_os_str().to_owned();
         wal.push("-wal");
         let (notifications, _) = watch::channel(0);
@@ -486,24 +571,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .await?;
             }
-            for sql in super::command::SCHEMA
-                .iter()
-                .chain(generation::SCHEMA)
-                .chain(migrate::SCHEMA)
-                .chain(backup::SCHEMA)
-                .chain(rebuild::SCHEMA)
-                .chain(bundle::SCHEMA)
-                .chain(typed::SCHEMA)
-                .chain(identity::SCHEMA)
-                .chain(partition::SCHEMA)
-                .chain(checkpoint::SCHEMA)
-                .chain(roles::SCHEMA)
-                .chain(keys::SCHEMA)
-                .chain(existence::SCHEMA)
-                .chain(horizon::SCHEMA)
-                .chain(constraints::SCHEMA)
-            {
-                inner.conn.execute(sql, ()).await?;
+            if tables.is_empty() {
+                for sql in protocol_schema() {
+                    inner.conn.execute(sql, ()).await?;
+                }
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_retained VALUES(1,0,0,0,?)",
+                        [checkpoint::Lt::new().to_bytes()],
+                    )
+                    .await?;
             }
             if tables.is_empty() {
                 inner.seed(upgrade.as_ref()).await?;
@@ -511,61 +589,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.load_generations().await?;
                 let stored = inner.stored_identity().await?;
                 if !inner.activate(&stored, upgrade.as_ref()).await? {
-                    inner.adopt_metadata(&identity, &legacy).await?;
+                    inner.load_policy(&identity).await?;
                 }
             }
-            // Rebuild legacy checkpoint copies only when their history is still retained.
-            for record in rows(
-                &inner.conn,
-                "SELECT scope,sequence,signed FROM secure_checkpoints WHERE signed IS NOT NULL",
-            )
-            .await?
-            {
-                if let [
-                    SqlValue::Integer(scope),
-                    SqlValue::Integer(sequence),
-                    SqlValue::Blob(bytes),
-                ] = record.as_slice()
-                {
-                    #[derive(serde::Deserialize)]
-                    struct Version {
-                        statement: Format,
-                    }
-                    #[derive(serde::Deserialize)]
-                    struct Format {
-                        format: u32,
-                    }
-                    let version: Version = p2panda_core::cbor::decode_cbor(bytes.as_slice())
-                        .map_err(|_| denied("invalid checkpoint"))?;
-                    if version.statement.format == 2 {
-                        let mut horizons = inner
-                            .conn
-                            .query(
-                                "SELECT 1 FROM secure_logs WHERE scope=? AND horizon>=0 LIMIT 1",
-                                [*scope],
-                            )
-                            .await?;
-                        if horizons.next().await?.is_some() {
-                            return Err(Error::Incompatible("legacy pruned checkpoint requires the previous runtime; strong base format 3 is required".into()));
-                        }
-                        inner
-                            .conn
-                            .execute(
-                                "DELETE FROM secure_checkpoints WHERE scope=? AND sequence=?",
-                                [*scope, *sequence],
-                            )
-                            .await?;
-                        inner
-                            .conn
-                            .execute("DELETE FROM secure_checkpoint_rows WHERE scope=?", [*scope])
-                            .await?;
-                    }
-                }
-            }
-            inner.install_bookkeeping().await?;
-            inner.index_results().await?;
-            inner.index_preparations().await?;
-            inner.index_row_keys().await?;
             inner
                 .conn
                 .execute(
@@ -1152,7 +1178,7 @@ impl<A: RowApplication> Inner<A> {
         }
     }
     /// Checks an existing file's identity and adopts a newer retained policy.
-    async fn adopt_metadata(&mut self, identity: &[u8], legacy: &[Vec<u8>]) -> Result<(), Error> {
+    async fn load_policy(&mut self, identity: &[u8]) -> Result<(), Error> {
         let mut metadata = self
             .conn
             .query("SELECT identity,policy FROM secure_metadata WHERE id=1", ())
@@ -1162,7 +1188,7 @@ impl<A: RowApplication> Inner<A> {
             .await?
             .ok_or_else(|| denied("missing secure metadata"))?;
         let stored = row.get::<Vec<u8>>(0)?;
-        if stored != identity && !legacy.contains(&stored) {
+        if stored != identity {
             return Err(denied("secure file identity mismatch"));
         }
         let stored: SignedPolicy = decode(&row.get::<Vec<u8>>(1)?)?;

@@ -142,7 +142,7 @@ pub(crate) fn domain_statements<A: rocky_core::StoredApplication>(
     identity: crate::Identity,
     app: &A,
     config: &crate::RuntimeConfig,
-) -> Vec<Statement> {
+) -> Result<Vec<Statement>, Error> {
     let mut statements = Vec::new();
     let schema = app.installed_schema().statements;
     let protocol = |sql: &[&str]| -> Vec<Statement> {
@@ -151,6 +151,12 @@ pub(crate) fn domain_statements<A: rocky_core::StoredApplication>(
             .collect()
     };
     statements.extend(protocol(storage::SCHEMA));
+    statements.extend(protocol(crate::worker::retention::SCHEMA));
+    statements.extend(protocol(&[storage::UNAPPLIED_INDEX]));
+    statements.push((
+        mapping.sql("INSERT INTO rocky_checkpoint VALUES(1,?,?,?)"),
+        crate::worker::retention::initial_checkpoint()?,
+    ));
     statements.extend(schema.iter().map(|sql| (mapping.sql(sql), Vec::new())));
     statements.extend(protocol(crate::worker::STRONG_SCHEMA));
     statements.extend(protocol(&[storage::PEER_SCHEMA]));
@@ -168,5 +174,5 @@ pub(crate) fn domain_statements<A: rocky_core::StoredApplication>(
             identity, app, config,
         ))],
     ));
-    statements
+    Ok(statements)
 }

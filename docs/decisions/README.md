@@ -12,9 +12,10 @@ naturally holds.
 | --- | --- |
 | [0018](0018-secure-transaction-bundles.md) | Secure transaction bundles, session authority, typed secure storage |
 | [0028](0028-generation-lineage-and-signed-backups.md) | Generation lineage, projection plans, signed backups |
+| [0039](0039-single-current-formats.md) | One current persisted and wire format |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. The next record is 0037.
+not reused. 0037 and 0038 are reserved by the current roadmap.
 
 ## Rationale by topic
 

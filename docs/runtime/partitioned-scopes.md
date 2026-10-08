@@ -142,9 +142,9 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | --- | --- |
 | Partition tuple | Sorted, nonempty map from column commitment to canonical key component, by the business-key codec (affinity, collation). Nulls, duplicates and tuples over 1 KiB are refused |
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
-| Definition/descriptor | Format 3 with `partition_by` or views, otherwise 2; others are refused before installation writes |
+| Definition/descriptor | Format 3, including optional `partition_by` and views; others are refused before installation writes |
 | Frame | Row format 5 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
-| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; its format number depends on content ([encrypted checkpoints](encrypted-checkpoints.md)) |
+| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body unchanged; each opening commits to its frame header and tuple |
 
 Readers recompute the tuple from both row images and refuse a mismatch before

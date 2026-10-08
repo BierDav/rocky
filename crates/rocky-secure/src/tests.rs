@@ -1423,3 +1423,5 @@ mod sql;
 mod typed_commands;
 
 mod strong_history;
+
+mod formats;

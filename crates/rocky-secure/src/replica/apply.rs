@@ -65,22 +65,18 @@ impl<A: RowApplication> Inner<A> {
                 .app
                 .row_identity(change)
                 .map_err(|message| denied(&message))?
+                && change.before.is_none()
             {
-                if ![2, 3, 4, 5].contains(&extension.row_format) {
-                    return Err(denied("row identity requires frame format 2"));
-                }
-                if change.before.is_none() {
-                    let mark = marks.iter().find(|mark| mark.author == identity.author());
-                    if extension.author != Some(identity.author())
-                        || mark.is_some_and(|mark| {
-                            mark.signer != operation.header.public_key
-                                || (identity.sequence() <= mark.sequence
-                                    && !(finalized && current.is_some()))
-                        })
-                        || !identities.insert(identity)
-                    {
-                        return Err(denied("forged row author or reused identity sequence"));
-                    }
+                let mark = marks.iter().find(|mark| mark.author == identity.author());
+                if extension.author != Some(identity.author())
+                    || mark.is_some_and(|mark| {
+                        mark.signer != operation.header.public_key
+                            || (identity.sequence() <= mark.sequence
+                                && !(finalized && current.is_some()))
+                    })
+                    || !identities.insert(identity)
+                {
+                    return Err(denied("forged row author or reused identity sequence"));
                 }
             }
             if finalized
@@ -94,9 +90,6 @@ impl<A: RowApplication> Inner<A> {
                 && self.protected_conflict(change, &payload).await?
             {
                 continue;
-            }
-            if finalized && change.before.is_none() && extension.row_format < 4 {
-                return Err(Error::Incompatible("new inserts after a horizon require creation-witness frames; upgrade and rebootstrap".into()));
             }
             if change.before.is_none()
                 && let Some((sequence, hash)) = basis
@@ -267,7 +260,6 @@ pub(super) fn merge_row(
         }
     }
     let mut record = current.clone().unwrap_or(Materialized {
-        witnessed: operation.header.extensions.row_format >= 4,
         protected: None,
         fields: BTreeMap::new(),
         stamps: BTreeMap::new(),

@@ -33,7 +33,7 @@ impl Durability {
 }
 /// Most files one `Runtime` spreads its domains over.
 pub(crate) const MAX_FILES: usize = 16;
-/// Explicit layouts can serve larger domain sets without changing legacy layout.
+/// Explicit layouts can serve larger domain sets.
 pub(crate) const MAX_PLACED_FILES: usize = 256;
 /// Most writing steps one group commit may hold.
 pub(crate) const MAX_GROUP_COMMIT: usize = 256;

@@ -579,11 +579,10 @@ impl<A: RowApplication> Inner<A> {
                 .horizon
                 .as_ref()
                 .ok_or_else(|| denied("checkpoint would lose the admitted issuer horizon"))?;
-            let finalized_upgrade = incoming.statement.format == 2
-                && incoming.statement.sequence > held.statement.sequence
+            let newer_finalized_cut = incoming.statement.sequence > held.statement.sequence
                 && checkpoint.statement.finalized.as_ref() == Some(incoming);
             if incoming != &held
-                && !finalized_upgrade
+                && !newer_finalized_cut
                 && (incoming.statement.previous != Some(held.id().map_err(credential)?)
                     || incoming.statement.sequence
                         != held
@@ -1072,18 +1071,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     };
                     after = key.clone();
                     let mut record: Materialized = decode(fields)?;
-                    if !record.witnessed {
-                        inner
-                            .conn
-                            .execute(
-                                "INSERT OR IGNORE INTO secure_legacy_creations VALUES(?,?)",
-                                bindings(vec![
-                                    SqlValue::Integer(id),
-                                    SqlValue::Blob(record.creation.as_bytes().to_vec()),
-                                ]),
-                            )
-                            .await?;
-                    }
                     let image = if record.deleted {
                         None
                     } else {
@@ -1168,7 +1155,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
             }
-            inner.conn.execute("DELETE FROM secure_stubs WHERE scope=? AND creation=1 AND hash NOT IN (SELECT hash FROM secure_horizon_live_creations WHERE scope=? UNION SELECT hash FROM secure_legacy_creations WHERE scope=?)", [id,id,id]).await?;
+            inner.conn.execute("DELETE FROM secure_stubs WHERE scope=? AND creation=1 AND hash NOT IN (SELECT hash FROM secure_horizon_live_creations WHERE scope=?)", [id,id]).await?;
             let mut after = Vec::new();
             loop {
                 let stubs = collect_rows(inner.conn.query("SELECT hash,clock FROM secure_stubs WHERE scope=? AND creation=1 AND hash>? ORDER BY hash LIMIT ?",bindings(vec![SqlValue::Integer(id), SqlValue::Blob(after.clone()),SqlValue::Integer(checkpoint::STEP_ROWS as i64)])).await?).await?;
@@ -1200,7 +1187,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .ok_or_else(|| denied("checkpoint sequence exhausted"))?;
             statement.previous = Some(previous_signed.id()?);
             inner
-                .capture_checkpoint_witnesses(scope, id, "secure_checkpoint_stubs")
+                .capture_checkpoint_creations(scope, id, "secure_checkpoint_stubs")
                 .await?;
             statement.rows = sets.rows_summary();
             statement.tombstones = 0;

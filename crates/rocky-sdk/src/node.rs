@@ -683,7 +683,7 @@ impl Node {
                 self.wake_sync();
                 Ok(json!({"online": enabled}))
             }
-            "mutate" => self.mutate(client).await,
+
             "mutation_progress" => {
                 let handle: Vec<u8> = serde_json::from_value(request["handle"].clone())?;
                 let handle: [u8; 32] = handle.try_into().map_err(|_| refused("handle"))?;
@@ -2203,12 +2203,6 @@ impl Node {
             Some((true, message)) => Err(Box::new(Deferred(message))),
             Some((false, message)) => Err(refused(message)),
         }
-    }
-
-    async fn mutate(&self, _: &Client) -> Result<Value, Failure> {
-        Err(refused(
-            "legacy register mutations are unsupported; use format-2 SQL transactions",
-        ))
     }
 
     async fn sql_call(

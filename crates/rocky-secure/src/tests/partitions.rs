@@ -16,8 +16,18 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::build(false)
+    }
+    fn constrained() -> Self {
+        Self::build(true)
+    }
+    fn build(constrained: bool) -> Self {
         let publisher = PrivateKey::new();
-        let definition = serde_json::json!({"format":4,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        let mut definition = serde_json::json!({"format":4,"publisher":publisher.public_key().as_bytes().iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"application":"partition-test","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]});
+        if constrained {
+            definition["tables"][0]["columns"].as_array_mut().unwrap().push(serde_json::json!({"name":"title","type":"text","not_null":true,"collation":"nocase"}));
+            definition["tables"][0]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true,"on_conflict":"latest_wins"}]);
+        }
         let mut schema = SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()
@@ -186,19 +196,42 @@ impl Fixture {
     fn write(&self, name: &str, sequence: u32, amount: i64) -> RowWrite {
         let app = self.app();
         let table = app.tables().next().unwrap();
-        let values = vec![
+        let mut values = vec![
             SqlValue::Text(name.into()),
             SqlValue::Text(format!("key{sequence}")),
             SqlValue::Integer(amount),
             SqlValue::Integer(RowIdentity::new(1, sequence).unwrap().integer()),
             SqlValue::Integer(0),
         ];
+        if self
+            .schema
+            .table("items")
+            .unwrap()
+            .column("title")
+            .is_some()
+        {
+            values.insert(3, SqlValue::Text("Milk".into()));
+        }
         RowWrite::changed(RowChange {
             scope: self.scope(name),
             row: app.row_id(self.domain.domain, table, &values).unwrap(),
             before: None,
             after: Some(app.fields(table, &values).unwrap()),
         })
+    }
+    fn titled(&self, name: &str, sequence: u32, author: u32, title: &str) -> RowWrite {
+        let mut write = self.write(name, sequence, 10);
+        let app = self.app();
+        let table = app.tables().next().unwrap();
+        let mut values = app
+            .values(table, write.change.after.as_ref().unwrap())
+            .unwrap();
+        values[1] = SqlValue::Text(format!("key{sequence}-author{author}"));
+        values[3] = SqlValue::Text(title.into());
+        values[4] = SqlValue::Integer(RowIdentity::new(author, sequence).unwrap().integer());
+        write.change.row = app.row_id(self.domain.domain, table, &values).unwrap();
+        write.change.after = Some(app.fields(table, &values).unwrap());
+        write
     }
 }
 fn all() -> Vec<Right> {
@@ -749,4 +782,324 @@ async fn horizon_preserves_identity_sequences_independently_in_each_partition() 
         );
         writer.audit(f.scope(name)).await.unwrap();
     }
+}
+
+async fn constraint_state(
+    replica: &EncryptedReplica<TypedRows>,
+    partition: &str,
+) -> Vec<Vec<SqlValue>> {
+    let inner = replica.inner.lock().await;
+    crate::storage::collect_rows(inner.conn.query(
+        "SELECT c.id,c.rocky_live,c.rocky_stamps,NOT EXISTS(SELECT 1 FROM items i WHERE i.list=c.list AND i.id=c.id) FROM secure_candidates_items c WHERE c.list=? ORDER BY c.id",
+        [partition.to_string()],
+    ).await.unwrap()).await.unwrap()
+}
+
+#[tokio::test]
+async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::constrained();
+    let path = root.path().join("a.sqlite");
+    let node = PrivateKey::new();
+    let a = f
+        .open(
+            &path,
+            node.clone(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    let b = f
+        .open(
+            &root.path().join("b.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 2)),
+        )
+        .await;
+    for replica in [&a, &b] {
+        f.key(replica, "A", [1; 32]).await;
+        f.key(replica, "B", [2; 32]).await;
+    }
+    let early = a
+        .author_bundle(
+            [1; 32],
+            vec![f.titled("A", 1, 1, "Milk"), f.titled("B", 1, 1, "Milk")],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let clock = b
+        .author_bundle(
+            [2; 32],
+            vec![f.titled("A", 1, 2, "other"), f.titled("B", 1, 2, "other")],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let late = b
+        .author_bundle(
+            [3; 32],
+            vec![f.titled("A", 2, 2, "MILK"), f.titled("B", 2, 2, "MILK")],
+            vec![],
+        )
+        .await
+        .unwrap();
+    for frame in clock.iter().chain(late.iter()) {
+        a.receive(frame.clone()).await.unwrap();
+    }
+    for frame in early.iter().rev() {
+        b.receive(frame.clone()).await.unwrap();
+    }
+    assert_eq!(
+        constraint_state(&a, "A").await,
+        constraint_state(&b, "A").await
+    );
+    assert_eq!(
+        constraint_state(&a, "B").await,
+        constraint_state(&b, "B").await
+    );
+    for name in ["A", "B"] {
+        let sql = a
+            .session([f.scope(name)].into())
+            .await
+            .unwrap()
+            .sql(Default::default())
+            .await
+            .unwrap();
+        let visible = sql
+            .run(
+                "SELECT id FROM items WHERE list=? AND title='milk'",
+                vec![SqlValue::Text(name.into())],
+            )
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(
+            visible,
+            vec![vec![SqlValue::Integer(
+                RowIdentity::new(2, 2).unwrap().integer()
+            )]]
+        );
+        let state = constraint_state(&a, name).await;
+        assert_eq!(
+            state
+                .iter()
+                .filter(|row| row[3] == SqlValue::Integer(1))
+                .count(),
+            1,
+            "{name}: {state:?}"
+        );
+    }
+    let before_a = constraint_state(&a, "A").await;
+    let before_b = constraint_state(&a, "B").await;
+    {
+        let mut inner = a.inner.lock().await;
+        transaction!(inner, |inner| inner.clear_typed(f.scope("A")).await).unwrap();
+    }
+    assert!(constraint_state(&a, "A").await.is_empty());
+    assert_eq!(constraint_state(&a, "B").await, before_b);
+    a.rebuild_projection(f.scope("A")).await.unwrap();
+    assert_eq!(constraint_state(&a, "A").await, before_a);
+    assert_eq!(constraint_state(&a, "B").await, before_b);
+    let partial = f
+        .open(
+            &root.path().join("partial.sqlite"),
+            PrivateKey::new(),
+            f.grant(Some(&["A"]), &[Right::Read]),
+            None,
+        )
+        .await;
+    f.key(&partial, "A", [1; 32]).await;
+    for frame in early
+        .iter()
+        .chain(clock.iter())
+        .chain(late.iter())
+        .filter(|frame| frame.scope().unwrap() == f.scope("A"))
+    {
+        partial.receive(frame.clone()).await.unwrap();
+    }
+    assert_eq!(constraint_state(&partial, "A").await, before_a);
+    assert!(constraint_state(&partial, "B").await.is_empty());
+    for frame in early
+        .iter()
+        .filter(|frame| frame.scope().unwrap() == f.scope("B"))
+    {
+        assert!(partial.receive(frame.clone()).await.is_err());
+    }
+    partial.rebuild_projection(f.scope("A")).await.unwrap();
+    assert_eq!(constraint_state(&partial, "A").await, before_a);
+    let (full_node, full_credentials) = {
+        let inner = b.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    a.set_role(crate::RoleConfig {
+        role: crate::ReplicaRole::Partial,
+        full_nodes: [full_node].into(),
+        custody: 1,
+    })
+    .await
+    .unwrap();
+    a.subscribe(f.scope("A")).await.unwrap();
+    a.subscribe(f.scope("B")).await.unwrap();
+    a.acknowledge_frontier(
+        full_node,
+        &full_credentials,
+        &b.frontier(f.scope("A")).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    a.unsubscribe(f.scope("A")).await.unwrap();
+    a.evict(f.scope("A")).await.unwrap();
+    assert!(constraint_state(&a, "A").await.is_empty());
+    assert_eq!(constraint_state(&a, "B").await, before_b);
+    a.rebuild_projection(f.scope("A")).await.unwrap();
+    assert_eq!(constraint_state(&a, "B").await, before_b);
+    drop(a);
+    let reopened = f.open(&path, node, f.grant(None, &all()), None).await;
+    assert_eq!(constraint_state(&reopened, "B").await, before_b);
+    assert!(constraint_state(&reopened, "A").await.is_empty());
+}
+
+#[tokio::test]
+async fn partitioned_equal_stamps_break_ties_by_partition_and_id() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::constrained();
+    let a = f
+        .open(
+            &root.path().join("a.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    for name in ["A", "B"] {
+        f.key(&a, name, [if name == "A" { 1 } else { 2 }; 32]).await;
+    }
+    a.author_bundle(
+        [1; 32],
+        vec![
+            f.titled("A", 1, 1, "milk"),
+            f.titled("A", 2, 1, "MILK"),
+            f.titled("B", 1, 1, "milk"),
+            f.titled("B", 2, 1, "MILK"),
+        ],
+        vec![],
+    )
+    .await
+    .unwrap();
+    for name in ["A", "B"] {
+        let state = constraint_state(&a, name).await;
+        assert_eq!(state.len(), 2);
+        assert_eq!(state[0][3], SqlValue::Integer(1));
+        assert_eq!(state[1][3], SqlValue::Integer(0));
+        a.rebuild_projection(f.scope(name)).await.unwrap();
+        assert_eq!(constraint_state(&a, name).await, state);
+    }
+}
+
+#[tokio::test]
+async fn partitioned_open_refuses_dropped_or_changed_constraint_indexes() {
+    for index in [
+        "items_title",
+        "items_identity",
+        "secure_candidates_items_id",
+        "secure_candidates_items_u0",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a.sqlite");
+        let f = Fixture::constrained();
+        let a = f
+            .open(&path, PrivateKey::new(), f.grant(None, &all()), None)
+            .await;
+        let config = {
+            let inner = a.inner.lock().await;
+            SecureConfig {
+                publisher: inner.config.publisher,
+                manifest: inner.config.manifest.clone(),
+                policy: inner.config.policy.clone(),
+                node: inner.config.node.clone(),
+                credentials: inner.config.credentials.clone(),
+                keys: vec![],
+            }
+        };
+        drop(a);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(&format!("DROP INDEX \"{index}\""), [])
+            .unwrap();
+        drop(conn);
+        let result = EncryptedReplica::open(&path, f.app(), config).await;
+        assert!(
+            matches!(result,Err(Error::Incompatible(message)) if message.contains("constraint index")),
+            "{index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::constrained();
+    let a = f
+        .open(
+            &root.path().join("a.sqlite"),
+            PrivateKey::new(),
+            f.grant(None, &all()),
+            Some((PrivateKey::new(), 1)),
+        )
+        .await;
+    for name in ["A", "B"] {
+        f.key(&a, name, [if name == "A" { 1 } else { 2 }; 32]).await;
+    }
+    let sql = a
+        .session([f.scope("A"), f.scope("B")].into())
+        .await
+        .unwrap()
+        .sql(Default::default())
+        .await
+        .unwrap();
+    sql.run("BEGIN", vec![]).await.unwrap();
+    for name in ["A", "B"] {
+        let id = sql
+            .next_id_partition("items", &[SqlValue::Text(name.into())])
+            .await
+            .unwrap()
+            .integer();
+        sql.run(
+            "INSERT INTO items(list,key,amount,title,id,row_kind) VALUES(?, 'one',10,'milk',?,0)",
+            vec![SqlValue::Text(name.into()), SqlValue::Integer(id)],
+        )
+        .await
+        .unwrap();
+    }
+    sql.commit([1; 32]).await.unwrap();
+    let before_b = constraint_state(&a, "B").await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    let id = sql
+        .next_id_partition("items", &[SqlValue::Text("A".into())])
+        .await
+        .unwrap()
+        .integer();
+    assert!(matches!(
+        sql.run(
+            "INSERT INTO items(list,key,amount,title,id,row_kind) VALUES('A','two',10,'MILK',?,0)",
+            vec![SqlValue::Integer(id)]
+        )
+        .await,
+        Err(Error::Sql(crate::sql::SqlError::Statement {
+            code: 2067,
+            ..
+        }))
+    ));
+    sql.run("ROLLBACK", vec![]).await.unwrap();
+    assert_eq!(constraint_state(&a, "B").await, before_b);
+    sql.run("BEGIN", vec![]).await.unwrap();
+    sql.run("UPDATE items SET title='bread' WHERE list='A'", vec![])
+        .await
+        .unwrap();
+    sql.commit([2; 32]).await.unwrap();
+    assert_eq!(constraint_state(&a, "B").await, before_b);
 }

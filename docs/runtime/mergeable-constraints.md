@@ -49,7 +49,8 @@ Generated statements, compared exactly at installation:
 | `SET NULL` reference columns are nullable and outside the primary key | Yes |
 | Parent and child are mergeable, unpartitioned, in one reader scope (or the parent has an [existence log](#references-across-reader-scopes)) | Yes |
 | `RESTRICT`, `NO ACTION`, `SET DEFAULT`, natural-key references, other table classes | Always |
-| Partitioned table with a policy index or reference; reference to a partitioned parent | Always (roadmap phases 4 and 5) |
+| Partitioned policy index includes every partition column and uses `latest_wins` | Yes |
+| Partitioned `set_null` index, foreign key on a partitioned table, or reference to a partitioned parent | Always (foreign keys wait for roadmap phase 5) |
 
 Policies and delete actions enter the replicated shape and manifest by
 logical names; unconstrained tables keep their manifest items. The SDK puts
@@ -72,7 +73,7 @@ Then, for the merged state alone:
    have equal, non-null indexed values under the columns' collations and the
    other has the later stamp. A row's stamp for an index is the latest register
    stamp of its indexed columns; stamps order by clock, author and sequence; on equal stamps the
-   larger `id` wins.
+   larger `(partition scope, id)` wins; within one partition this is the larger `id`.
 3. A candidate is *visible* unless a row reachable through its `CASCADE`
    references, itself included, is not anchored or loses a `latest_wins` index.
 4. A visible candidate reads NULL in the referencing columns of a `SET NULL`
@@ -85,7 +86,15 @@ re-evaluates the rows that depend on it in the same transaction; rebuild,
 reopen and checkpoint bootstrap evaluate all of them, so cycles converge in any
 arrival order. Each constrained table has a private
 `secure_candidates_<table>` table beside the typed one, derived and never
-replicated. Hidden rows return when the conflicting value changes or a parent
+replicated. Candidates, seeds and resolution caches identify rows by
+`(table, partition scope, id)`; candidate identity indexes include the partition
+columns. A unique index includes all partition columns, so it compares only rows
+of that partition, including SQL-equal spellings under its collations. Rebuilding
+or evicting one partition replaces only its candidates and typed rows and leaves
+other partitions' visible and hidden state unchanged. Resolution reads local
+merged rows and requires no other partition's key.
+
+Hidden rows return when the conflicting value changes or a parent
 becomes live; a re-created parent has a new `id` and revives no old child.
 Hidden rows and orphans are retained until the [horizon](mergeable-horizon.md)
 finalizes them.
@@ -129,8 +138,24 @@ whose count, timing or authorship is sensitive; keep such parents and children
 in one scope or put outside parties in their own domain. Setup, sync and limits
 are in [existence logs](existence-logs.md).
 
+## Persisted constraints and open verification
+
+[Decision 0039](../decisions/0041-partition-constraint-state.md) records the format
+and catalog boundary. The current private support bookkeeping shape is `secure_support(tab, scope, id)`
+with that composite primary key. Puppet and virtual-row lookups use the full
+partition-and-id identity; partitioned support tables and references remain
+refused. There is no migration or alternate encoding. At open, secure constrained
+installations compare the declared typed indexes, private candidate tables and
+indexes, and support bookkeeping table to SQLite's stored SQL. Missing or changed
+identity/policy indexes or an older private table shape fail open before use.
+Reinstall an incompatible installation.
+
 ## Qualification
 
+- `cargo test -p rocky-secure --lib partitioned_`: offline duplicate titles in
+  two partitions, equal ids, A-only readers, equal-stamp ties, local SQL refusal
+  and rollback, actual custody-backed eviction, partition rebuild and reopen,
+  and missing-index refusal.
 - `cargo test -p rocky-secure --lib tests::constraints`: reversed-delivery
   clashes under both policies, loser reappearance, parent deletion concurrent
   with child insertion, repointing, recreated parents, child-before-parent
@@ -155,3 +180,8 @@ are in [existence logs](existence-logs.md).
 - Losing is decided among *anchored* candidates, not visible ones, which keeps
   the rules acyclic; a row hidden through its parent can still make an equal
   row lose.
+
+Partitioned `SetNull` indexes are refused in phase 4: nulling the entire index
+would change its partition identity. Foreign keys and the Kotlin/Room shopping
+shape remain later qualification work. The native portable definition already
+admits partition-complete `LatestWins` indexes.

@@ -639,13 +639,20 @@ impl LogicalTable {
             .filter_map(|index| index.on_conflict.map(|policy| (index, policy)))
     }
     fn installable(&self) -> Result<(), Incompatibility> {
-        // Confirmed rows and constraint resolution use one unpartitioned scope.
+        // Partitioned foreign keys and command control remain unsupported.
         if !self.partition_by.is_empty() {
             if self.class == TableClass::CommandControlled {
                 return Err(Incompatibility::TableClass(self.class));
             }
-            if let Some((index, _)) = self.policy_indexes().next() {
-                return Err(Incompatibility::ConflictPolicy(index.name.clone()));
+            for (index, policy) in self.policy_indexes() {
+                if policy == ConflictPolicy::SetNull
+                    || self
+                        .partition_by
+                        .iter()
+                        .any(|name| !index.columns.iter().any(|column| &column.name == name))
+                {
+                    return Err(Incompatibility::ConflictPolicy(index.name.clone()));
+                }
             }
             if let Some(key) = self.foreign_keys.first() {
                 return Err(Incompatibility::Reference(

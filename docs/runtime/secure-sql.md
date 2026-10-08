@@ -115,7 +115,10 @@ used handle rolls the new transaction back and returns the recorded frames
 when the rows are the same, and conflicts otherwise; this also holds after a
 flush failed once the engine committed.
 
-Unique indexes with a conflict policy and identity foreign keys are in
+Partition-complete `LatestWins` unique indexes resolve per partition, with the
+real index enforcing local writes. Rebuild and eviction preserve other
+partitions' visible and hidden rows. Unique indexes with a conflict policy and
+identity foreign keys are in
 [mergeable constraints](mergeable-constraints.md).
 
 ## Leases and limits

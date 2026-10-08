@@ -7,14 +7,29 @@ use super::*;
 use rocky_core::{ConflictPolicy, DELETE_CASCADE, LogicalSchema};
 use std::collections::BTreeMap;
 
-type DesiredRows = BTreeMap<(usize, Commitment), (Vec<SqlValue>, Option<Vec<SqlValue>>)>;
+type DesiredRows =
+    BTreeMap<(usize, ResourceScope, Commitment), (Vec<SqlValue>, Option<Vec<SqlValue>>)>;
 
 const LIVE: &str = "\"rocky_live\"";
 /// Local bookkeeping of the support rows in typed tables.
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_support(tab TEXT NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(tab,id)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_support(tab TEXT NOT NULL,scope BLOB NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(tab,scope,id)) WITHOUT ROWID",
 ];
 const STAMPS: &str = "\"rocky_stamps\"";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Identity {
+    scope: ResourceScope,
+    id: i64,
+}
+impl Identity {
+    fn unpartitioned(node: &Node, id: i64) -> Self {
+        Self {
+            scope: node.scope,
+            id,
+        }
+    }
+}
 
 struct Unique {
     columns: Vec<usize>,
@@ -53,6 +68,8 @@ pub(super) struct Node {
     /// Position in `Typed::tables`.
     table: usize,
     columns: usize,
+    partition: Vec<usize>,
+    partition_filter: String,
     key: Vec<usize>,
     id: usize,
     uniques: Vec<Unique>,
@@ -82,18 +99,21 @@ impl Node {
         node: usize,
         constraints: &Constraints,
         values: &[SqlValue],
-    ) -> Vec<(usize, i64)> {
+    ) -> Vec<(usize, Identity)> {
         let mut seeds = Vec::new();
         if self.support.is_some()
             && let Some(SqlValue::Integer(id)) = values.get(self.id)
         {
-            seeds.push((node, *id));
+            seeds.push((node, Identity::unpartitioned(self, *id)));
         }
         for reference in &self.references {
             if constraints.nodes[reference.parent].logged
                 && let Some(SqlValue::Integer(id)) = values.get(reference.columns[0])
             {
-                seeds.push((reference.parent, *id));
+                seeds.push((
+                    reference.parent,
+                    Identity::unpartitioned(&constraints.nodes[reference.parent], *id),
+                ));
             }
         }
         seeds
@@ -107,6 +127,7 @@ pub(super) struct Constraints {
 /// One key winner of a constrained table.
 #[derive(Clone, Debug)]
 struct Candidate {
+    scope: ResourceScope,
     values: Vec<SqlValue>,
     /// Whether it was anchored when last resolved; changes propagate.
     live: bool,
@@ -114,9 +135,12 @@ struct Candidate {
     stamps: Vec<Option<Stamp>>,
 }
 impl Candidate {
-    fn id(&self, node: &Node) -> Option<i64> {
+    fn id(&self, node: &Node) -> Option<Identity> {
         match self.values.get(node.id) {
-            Some(SqlValue::Integer(id)) => Some(*id),
+            Some(SqlValue::Integer(id)) => Some(Identity {
+                scope: self.scope,
+                id: *id,
+            }),
             _ => None,
         }
     }
@@ -133,13 +157,13 @@ impl Candidate {
 #[derive(Default)]
 pub(super) struct Seeds {
     /// Candidates whose own state changed: always propagate.
-    forced: BTreeSet<(usize, i64)>,
+    forced: BTreeSet<(usize, Identity)>,
     /// Candidates that may depend on a change.
-    queued: BTreeSet<(usize, i64)>,
+    queued: BTreeSet<(usize, Identity)>,
     /// Natural-key slots whose candidate changed, by row key.
-    slots: BTreeMap<(usize, Commitment), Vec<SqlValue>>,
+    slots: BTreeMap<(usize, ResourceScope, Commitment), Vec<SqlValue>>,
     /// Typed `id`s whose support row may have to appear or go.
-    support: BTreeSet<(usize, i64)>,
+    support: BTreeSet<(usize, Identity)>,
 }
 impl Seeds {
     pub(super) fn is_empty(&self) -> bool {
@@ -214,6 +238,15 @@ impl Constraints {
             };
             let key = projected.table.key.clone();
             let id = position("id")?;
+            let partition = table
+                .partition_by
+                .iter()
+                .map(|name| position(name))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut identity_key = partition.clone();
+            if !identity_key.contains(&id) {
+                identity_key.push(id);
+            }
             let row_kind = position("row_kind")?;
             let supported = schema
                 .support_tables()
@@ -242,7 +275,7 @@ impl Constraints {
                 format!(
                     "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {name}({})",
                     index_name("id"),
-                    columns[id]
+                    list(&identity_key)
                 ),
             ];
             let mut uniques = Vec::new();
@@ -364,12 +397,12 @@ impl Constraints {
                         vec!["?"; columns.len()].join(",")
                     ),
                     delete: format!(
-                        "DELETE FROM {typed_name} WHERE {}=? AND \"row_kind\"<>0",
-                        columns[id]
+                        "DELETE FROM {typed_name} WHERE {} AND \"row_kind\"<>0",
+                        filter(&identity_key)
                     ),
                     kind: format!(
-                        "SELECT \"row_kind\" FROM {typed_name} WHERE {}=?",
-                        columns[id]
+                        "SELECT \"row_kind\" FROM {typed_name} WHERE {}",
+                        filter(&identity_key)
                     ),
                     values,
                     id,
@@ -384,7 +417,9 @@ impl Constraints {
                 support,
                 table: index,
                 columns: columns.len(),
-                select_id: format!("{select_all} WHERE {}=?", columns[id]),
+                partition_filter: filter(&partition),
+                partition,
+                select_id: format!("{select_all} WHERE {}", filter(&identity_key)),
                 select_key: format!("{select_all} WHERE {}", filter(&key)),
                 upsert: format!(
                     "INSERT INTO {name}({},{LIVE},{STAMPS}) VALUES({}) ON CONFLICT({}) DO UPDATE SET {}",
@@ -395,7 +430,7 @@ impl Constraints {
                 ),
                 delete_key: format!("DELETE FROM {name} WHERE {}", filter(&key)),
                 clear: format!("DELETE FROM {name}"),
-                set_live: format!("UPDATE {name} SET {LIVE}=? WHERE {}=?", columns[id]),
+                set_live: format!("UPDATE {name} SET {LIVE}=? WHERE {}", filter(&identity_key)),
                 select_all,
                 statements,
                 key,
@@ -414,7 +449,12 @@ impl Constraints {
         Ok(Some(Self { nodes }))
     }
     pub(super) fn node(&self, scope: ResourceScope) -> Option<usize> {
-        self.nodes.iter().position(|node| node.scope == scope)
+        self.nodes.iter().position(|node| {
+            node.scope == scope
+                || (!node.partition.is_empty()
+                    && node.scope.domain == scope.domain
+                    && node.scope.table == scope.table)
+        })
     }
     pub(super) fn statements(&self) -> impl Iterator<Item = &String> {
         self.nodes.iter().flat_map(|node| &node.statements)
@@ -426,11 +466,11 @@ impl Constraints {
 struct Pass<'a, A> {
     inner: &'a Inner<A>,
     constraints: &'a Constraints,
-    rows: BTreeMap<(usize, i64), Option<Candidate>>,
-    anchored: BTreeMap<(usize, i64), bool>,
-    visible: BTreeMap<(usize, i64), bool>,
-    loses: BTreeMap<(usize, i64, usize), bool>,
-    alive: BTreeMap<(usize, i64), bool>,
+    rows: BTreeMap<(usize, Identity), Option<Candidate>>,
+    anchored: BTreeMap<(usize, Identity), bool>,
+    visible: BTreeMap<(usize, Identity), bool>,
+    loses: BTreeMap<(usize, Identity, usize), bool>,
+    alive: BTreeMap<(usize, Identity), bool>,
 }
 
 impl<'a, A: RowApplication> Pass<'a, A> {
@@ -446,11 +486,11 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         }
     }
     /// What the existence log of a logged table says about `id`.
-    async fn alive(&mut self, node: usize, id: i64) -> Result<bool, Error> {
+    async fn alive(&mut self, node: usize, id: Identity) -> Result<bool, Error> {
         if let Some(alive) = self.alive.get(&(node, id)) {
             return Ok(*alive);
         }
-        let alive = self.inner.alive(self.node(node).scope, id).await?;
+        let alive = self.inner.alive(id.scope, id.id).await?;
         self.alive.insert((node, id), alive);
         Ok(alive)
     }
@@ -481,7 +521,14 @@ impl<'a, A: RowApplication> Pass<'a, A> {
             if row.len() != width {
                 return Err(corrupt("candidate width"));
             }
+            let typed = self
+                .inner
+                .typed
+                .as_ref()
+                .ok_or_else(|| corrupt("typed constraints"))?;
+            let scope = typed.row_scope(&typed.tables[self.node(node).table], &row)?;
             let candidate = Candidate {
+                scope,
                 values: row,
                 live: live != 0,
                 stamps: decode(&stamps)?,
@@ -493,17 +540,51 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         }
         Ok(candidates)
     }
-    async fn get(&mut self, node: usize, id: i64) -> Result<Option<Candidate>, Error> {
+    async fn get(&mut self, node: usize, id: Identity) -> Result<Option<Candidate>, Error> {
         if let Some(found) = self.rows.get(&(node, id)) {
             return Ok(found.clone());
         }
         let sql = self.node(node).select_id.clone();
         let found = self
-            .query(node, &sql, vec![SqlValue::Integer(id)])
+            .query(node, &sql, self.identity_params(node, id)?)
             .await?
             .pop();
         self.rows.insert((node, id), found.clone());
         Ok(found)
+    }
+    fn partition_params(&self, node: usize, scope: ResourceScope) -> Result<Vec<SqlValue>, Error> {
+        let spec = self.node(node);
+        if spec.partition.is_empty() {
+            return Ok(Vec::new());
+        }
+        let typed = self
+            .inner
+            .typed
+            .as_ref()
+            .ok_or_else(|| corrupt("typed constraints"))?;
+        let tuple = self
+            .inner
+            .partitions
+            .get(&scope)
+            .ok_or_else(|| corrupt("missing constraint partition"))?;
+        spec.partition
+            .iter()
+            .map(|index| {
+                tuple
+                    .values()
+                    .get(&typed.tables[spec.table].table.fields[*index])
+                    .ok_or_else(|| corrupt("missing constraint partition column"))?
+                    .value()
+                    .map_err(|error| corrupt(error.to_string()))
+            })
+            .collect()
+    }
+    fn identity_params(&self, node: usize, id: Identity) -> Result<Vec<SqlValue>, Error> {
+        let mut params = self.partition_params(node, id.scope)?;
+        if !self.node(node).partition.contains(&self.node(node).id) {
+            params.push(SqlValue::Integer(id.id));
+        }
+        Ok(params)
     }
     /// The parent a reference names, or None for NULL.
     fn parent(candidate: &Candidate, reference: &Reference) -> Option<Option<i64>> {
@@ -521,8 +602,8 @@ impl<'a, A: RowApplication> Pass<'a, A> {
     async fn ancestors(
         &mut self,
         node: usize,
-        id: i64,
-    ) -> Result<Option<Vec<(usize, i64)>>, Error> {
+        id: Identity,
+    ) -> Result<Option<Vec<(usize, Identity)>>, Error> {
         if self.node(node).logged && !self.alive(node, id).await? {
             return Ok(None);
         }
@@ -540,20 +621,23 @@ impl<'a, A: RowApplication> Pass<'a, A> {
                     None => {}
                     Some(None) => return Ok(None),
                     Some(Some(parent)) if logged => {
+                        let parent = Identity::unpartitioned(self.node(reference.parent), parent);
                         if !self.alive(reference.parent, parent).await? {
                             return Ok(None);
                         }
                     }
-                    Some(Some(parent)) if seen.insert((reference.parent, parent)) => {
-                        order.push((reference.parent, parent));
+                    Some(Some(parent)) => {
+                        let parent = Identity::unpartitioned(self.node(reference.parent), parent);
+                        if seen.insert((reference.parent, parent)) {
+                            order.push((reference.parent, parent));
+                        }
                     }
-                    Some(Some(_)) => {}
                 }
             }
         }
         Ok(Some(order))
     }
-    async fn anchored(&mut self, node: usize, id: i64) -> Result<bool, Error> {
+    async fn anchored(&mut self, node: usize, id: Identity) -> Result<bool, Error> {
         if let Some(anchored) = self.anchored.get(&(node, id)) {
             return Ok(*anchored);
         }
@@ -566,7 +650,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         Ok(reached.is_some())
     }
     /// Whether an anchored candidate with equal values has a later stamp.
-    async fn loses(&mut self, node: usize, id: i64, unique: usize) -> Result<bool, Error> {
+    async fn loses(&mut self, node: usize, id: Identity, unique: usize) -> Result<bool, Error> {
         if let Some(loses) = self.loses.get(&(node, id, unique)) {
             return Ok(*loses);
         }
@@ -582,7 +666,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
                         continue;
                     };
                     // Equal stamps arise when one frame writes different
-                    // columns of two rows; the larger id then wins.
+                    // columns of two rows; partition and id then break the tie.
                     let later = (member.stamp(unique), other) > (candidate.stamp(unique), id);
                     if other != id && later && self.anchored(node, other).await? {
                         loses = true;
@@ -596,7 +680,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
     }
     /// Anchored, and no row its `CASCADE` references reach loses a
     /// `LatestWins` index.
-    async fn visible(&mut self, node: usize, id: i64) -> Result<bool, Error> {
+    async fn visible(&mut self, node: usize, id: Identity) -> Result<bool, Error> {
         if let Some(visible) = self.visible.get(&(node, id)) {
             return Ok(*visible);
         }
@@ -623,7 +707,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         Ok(visible)
     }
     /// The typed row of a candidate, or None while it is hidden.
-    async fn image(&mut self, node: usize, id: i64) -> Result<Option<Vec<SqlValue>>, Error> {
+    async fn image(&mut self, node: usize, id: Identity) -> Result<Option<Vec<SqlValue>>, Error> {
         let Some(candidate) = self.get(node, id).await? else {
             return Ok(None);
         };
@@ -636,9 +720,19 @@ impl<'a, A: RowApplication> Pass<'a, A> {
                 None => true,
                 Some(None) => false,
                 Some(Some(parent)) if self.node(reference.parent).logged => {
-                    self.alive(reference.parent, parent).await?
+                    self.alive(
+                        reference.parent,
+                        Identity::unpartitioned(self.node(reference.parent), parent),
+                    )
+                    .await?
                 }
-                Some(Some(parent)) => self.visible(reference.parent, parent).await?,
+                Some(Some(parent)) => {
+                    self.visible(
+                        reference.parent,
+                        Identity::unpartitioned(self.node(reference.parent), parent),
+                    )
+                    .await?
+                }
             };
             if !shown {
                 for column in &reference.columns {
@@ -662,7 +756,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         &mut self,
         node: usize,
         candidate: &Candidate,
-    ) -> Result<Vec<(usize, i64)>, Error> {
+    ) -> Result<Vec<(usize, Identity)>, Error> {
         let mut found = Vec::new();
         for unique in 0..self.node(node).uniques.len() {
             let rule = &self.node(node).uniques[unique];
@@ -677,7 +771,7 @@ impl<'a, A: RowApplication> Pass<'a, A> {
             for (child, reference) in self.node(node).children.clone() {
                 let select = self.node(child).references[reference].select.clone();
                 for row in self
-                    .query(child, &select, vec![SqlValue::Integer(id)])
+                    .query(child, &select, vec![SqlValue::Integer(id.id)])
                     .await?
                 {
                     found.extend(row.id(self.node(child)).map(|id| (child, id)));
@@ -716,6 +810,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         typed: &Typed,
         node: usize,
+        scope: ResourceScope,
         new: &Materialized,
     ) -> Result<(), Error> {
         let constraints = typed
@@ -725,7 +820,7 @@ impl<A: RowApplication> Inner<A> {
         let spec = &constraints.nodes[node];
         let table = &typed.tables[spec.table];
         let key = new.key.ok_or_else(|| corrupt("missing incarnation key"))?;
-        let winner = self.winner(spec.scope, key).await?;
+        let winner = self.winner(scope, key).await?;
         let mut pass = Pass::new(self, constraints);
         let values = |record: &Materialized| {
             typed
@@ -736,7 +831,10 @@ impl<A: RowApplication> Inner<A> {
         let slot_values = match (&winner, new.deleted, new.identity) {
             (Some(winner), _, _) => Some(values(winner)?),
             (None, false, _) => Some(values(new)?),
-            (None, true, Some(id)) => pass.get(node, id).await?.map(|held| held.values),
+            (None, true, Some(id)) => pass
+                .get(node, Identity { scope, id })
+                .await?
+                .map(|held| held.values),
             (None, true, None) => None,
         };
         let Some(slot_values) = slot_values else {
@@ -761,9 +859,10 @@ impl<A: RowApplication> Inner<A> {
         match &winner {
             Some(winner) => {
                 let candidate = Candidate {
+                    scope,
                     live: previous
                         .as_ref()
-                        .filter(|held| held.id(spec) == winner.identity)
+                        .filter(|held| held.id(spec).map(|id| id.id) == winner.identity)
                         .is_some_and(|held| held.live),
                     values: values(winner)?,
                     stamps: stamps(spec, winner),
@@ -786,7 +885,7 @@ impl<A: RowApplication> Inner<A> {
             .rows
             .row_id(typed.domain.domain, &table.table, &slot_values)
             .map_err(Error::Corrupt)?;
-        seeds.slots.insert((node, row), key_values);
+        seeds.slots.insert((node, scope, row), key_values);
         *self.settling.lock().map_err(|_| corrupt("seeds"))? = seeds;
         Ok(())
     }
@@ -816,7 +915,7 @@ impl<A: RowApplication> Inner<A> {
             .map(|(slot, key)| (slot, (key, None)))
             .collect();
         let mut lives = Vec::new();
-        let mut queue: Vec<((usize, i64), bool)> = seeds
+        let mut queue: Vec<((usize, Identity), bool)> = seeds
             .forced
             .iter()
             .map(|row| (*row, true))
@@ -854,12 +953,12 @@ impl<A: RowApplication> Inner<A> {
                 .rows
                 .row_id(typed.domain.domain, &table.table, &candidate.values)
                 .map_err(Error::Corrupt)?;
-            desired.insert((node, row), (key, image));
+            desired.insert((node, id.scope, row), (key, image));
         }
         // Rows leave before others take their values, so the real unique
         // index holds after every statement; references are checked at commit.
         let mut changes = Vec::new();
-        for ((node, row), (key, image)) in desired {
+        for ((node, scope, row), (key, image)) in desired {
             let spec = &constraints.nodes[node];
             let table = &typed.tables[spec.table];
             let stored = rows_with(&self.conn, &table.select, key.clone())
@@ -874,7 +973,7 @@ impl<A: RowApplication> Inner<A> {
             if stored == image {
                 continue;
             }
-            if written.is_some_and(|written| written.contains(&(spec.scope, row))) {
+            if written.is_some_and(|written| written.contains(&(scope, row))) {
                 return Err(conflict(format!(
                     "a row of {} conflicts with a merged row it has not seen",
                     table.table.sql_name
@@ -902,10 +1001,11 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute(
                     constraints.nodes[node].set_live.clone(),
-                    bindings(vec![
-                        SqlValue::Integer(i64::from(live)),
-                        SqlValue::Integer(id),
-                    ]),
+                    bindings(
+                        std::iter::once(SqlValue::Integer(i64::from(live)))
+                            .chain(pass.identity_params(node, id)?)
+                            .collect(),
+                    ),
                 )
                 .await?;
         }
@@ -919,7 +1019,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         typed: &Typed,
         constraints: &Constraints,
-        mut queue: BTreeSet<(usize, i64)>,
+        mut queue: BTreeSet<(usize, Identity)>,
     ) -> Result<(), Error> {
         let mut pass = Pass::new(self, constraints);
         while let Some((node, id)) = queue.pop_first() {
@@ -927,13 +1027,13 @@ impl<A: RowApplication> Inner<A> {
             let Some(support) = &spec.support else {
                 continue;
             };
-            let kind = rows_with(&self.conn, &support.kind, vec![SqlValue::Integer(id)])
+            let kind = rows_with(&self.conn, &support.kind, pass.identity_params(node, id)?)
                 .await?
                 .pop();
             let real = kind.as_deref() == Some(&[SqlValue::Integer(0)]);
             let needed = if real {
                 false
-            } else if id == 0 {
+            } else if id.id == 0 {
                 let mut needed = false;
                 for (child, reference) in &spec.children {
                     let child = &constraints.nodes[*child];
@@ -941,8 +1041,11 @@ impl<A: RowApplication> Inner<A> {
                         && let Some(owner) = &child.support
                         && !rows_with(
                             &self.conn,
-                            "SELECT 1 FROM secure_support WHERE tab=? LIMIT 1",
-                            vec![SqlValue::Text(owner.name.clone())],
+                            "SELECT 1 FROM secure_support WHERE tab=? AND scope=? LIMIT 1",
+                            vec![
+                                SqlValue::Text(owner.name.clone()),
+                                SqlValue::Blob(encode(&child.scope)?),
+                            ],
                         )
                         .await?
                         .is_empty()
@@ -959,16 +1062,27 @@ impl<A: RowApplication> Inner<A> {
             };
             let had = !rows_with(
                 &self.conn,
-                "SELECT 1 FROM secure_support WHERE tab=? AND id=?",
-                vec![SqlValue::Text(support.name.clone()), SqlValue::Integer(id)],
+                "SELECT 1 FROM secure_support WHERE tab=? AND scope=? AND id=?",
+                vec![
+                    SqlValue::Text(support.name.clone()),
+                    SqlValue::Blob(encode(&id.scope)?),
+                    SqlValue::Integer(id.id),
+                ],
             )
             .await?
             .is_empty();
             match (needed, kind.is_some() && !real) {
                 (true, false) => {
                     let mut values = support.values.clone();
-                    values[support.id] = SqlValue::Integer(id);
-                    values[support.row_kind] = SqlValue::Integer(if id == 0 { 2 } else { 1 });
+                    for (column, value) in spec
+                        .partition
+                        .iter()
+                        .zip(pass.partition_params(node, id.scope)?)
+                    {
+                        values[*column] = value;
+                    }
+                    values[support.id] = SqlValue::Integer(id.id);
+                    values[support.row_kind] = SqlValue::Integer(if id.id == 0 { 2 } else { 1 });
                     self.conn
                         .execute(support.insert.clone(), bindings(values))
                         .await?;
@@ -978,7 +1092,7 @@ impl<A: RowApplication> Inner<A> {
                     self.conn
                         .execute(
                             support.delete.clone(),
-                            bindings(vec![SqlValue::Integer(id)]),
+                            bindings(pass.identity_params(node, id)?),
                         )
                         .await?;
                     self.touch(&support.name);
@@ -987,22 +1101,26 @@ impl<A: RowApplication> Inner<A> {
             }
             if needed != had {
                 let sql = if needed {
-                    "INSERT INTO secure_support VALUES(?,?)"
+                    "INSERT INTO secure_support VALUES(?,?,?)"
                 } else {
-                    "DELETE FROM secure_support WHERE tab=? AND id=?"
+                    "DELETE FROM secure_support WHERE tab=? AND scope=? AND id=?"
                 };
                 self.conn
                     .execute(
                         sql,
                         bindings(vec![
                             SqlValue::Text(support.name.clone()),
-                            SqlValue::Integer(id),
+                            SqlValue::Blob(encode(&id.scope)?),
+                            SqlValue::Integer(id.id),
                         ]),
                     )
                     .await?;
                 // The virtual rows its own references name follow it.
                 for reference in spec.references.iter().filter(|r| r.required) {
-                    queue.insert((reference.parent, 0));
+                    queue.insert((
+                        reference.parent,
+                        Identity::unpartitioned(&constraints.nodes[reference.parent], 0),
+                    ));
                 }
             }
         }
@@ -1014,7 +1132,7 @@ impl<A: RowApplication> Inner<A> {
         typed: &Typed,
         pass: &mut Pass<'_, A>,
         node: usize,
-        id: i64,
+        id: Identity,
     ) -> Result<bool, Error> {
         for (child, reference) in pass.node(node).children.clone() {
             let spec = pass.node(child);
@@ -1022,7 +1140,7 @@ impl<A: RowApplication> Inner<A> {
             let column = rule.columns[0];
             let table = &typed.tables[spec.table];
             for candidate in pass
-                .query(child, &rule.select.clone(), vec![SqlValue::Integer(id)])
+                .query(child, &rule.select.clone(), vec![SqlValue::Integer(id.id)])
                 .await?
             {
                 let key: Vec<SqlValue> = spec
@@ -1033,7 +1151,7 @@ impl<A: RowApplication> Inner<A> {
                 if rows_with(&self.conn, &table.select, key)
                     .await?
                     .first()
-                    .is_some_and(|row| row[column] == SqlValue::Integer(id))
+                    .is_some_and(|row| row[column] == SqlValue::Integer(id.id))
                 {
                     return Ok(true);
                 }
@@ -1051,9 +1169,10 @@ impl<A: RowApplication> Inner<A> {
             .constraints
             .as_ref()
             .ok_or_else(|| corrupt("constraints"))?;
-        let Some(node) = constraints.node(scope) else {
-            return Ok(());
-        };
+        let node = constraints
+            .node(scope)
+            .ok_or_else(|| corrupt("missing existence constraint scope"))?;
+        let id = Identity { scope, id };
         let mut pass = Pass::new(self, constraints);
         let mut seeds = std::mem::take(&mut *self.settling.lock().map_err(|_| corrupt("seeds"))?);
         if pass.get(node, id).await?.is_some() {
@@ -1064,7 +1183,7 @@ impl<A: RowApplication> Inner<A> {
                 .select
                 .clone();
             for row in pass
-                .query(child, &select, vec![SqlValue::Integer(id)])
+                .query(child, &select, vec![SqlValue::Integer(id.id)])
                 .await?
             {
                 seeds
@@ -1076,10 +1195,11 @@ impl<A: RowApplication> Inner<A> {
         *self.settling.lock().map_err(|_| corrupt("seeds"))? = seeds;
         Ok(())
     }
-    /// Rebuilds every constrained table from the stored rows: candidates
-    /// first, then the visible rows. `without` is a scope being evicted.
+    /// Rebuilds the selected partition, or the unpartitioned dependency graph.
+    /// With no target, rebuilds all scopes; `without` is being evicted.
     pub(super) async fn rebuild_constraints(
         &self,
+        target: Option<ResourceScope>,
         without: Option<ResourceScope>,
     ) -> Result<(), Error> {
         let Some(typed) = self.constraints() else {
@@ -1089,22 +1209,76 @@ impl<A: RowApplication> Inner<A> {
             .constraints
             .as_ref()
             .ok_or_else(|| corrupt("constraints"))?;
-        *self.settling.lock().map_err(|_| corrupt("seeds"))? = Seeds::default();
-        for spec in &constraints.nodes {
+        let partition_only = target
+            .and_then(|scope| constraints.node(scope))
+            .is_some_and(|node| !constraints.nodes[node].partition.is_empty());
+        let mut scopes = Vec::new();
+        for (node, spec) in constraints.nodes.iter().enumerate() {
+            if !spec.partition.is_empty() {
+                scopes.extend(
+                    self.partitions
+                        .keys()
+                        .copied()
+                        .filter(|scope| {
+                            scope.domain == spec.scope.domain
+                                && scope.table == spec.scope.table
+                                && target.is_none_or(|target| target == *scope)
+                        })
+                        .map(|scope| (node, scope)),
+                );
+            } else if !partition_only {
+                scopes.push((node, spec.scope));
+            }
+        }
+        let selected: BTreeSet<_> = scopes.iter().copied().collect();
+        {
+            let mut seeds = self.settling.lock().map_err(|_| corrupt("seeds"))?;
+            seeds
+                .forced
+                .retain(|(node, id)| !selected.contains(&(*node, id.scope)));
+            seeds
+                .queued
+                .retain(|(node, id)| !selected.contains(&(*node, id.scope)));
+            seeds
+                .support
+                .retain(|(node, id)| !selected.contains(&(*node, id.scope)));
+            seeds
+                .slots
+                .retain(|(node, scope, _), _| !selected.contains(&(*node, *scope)));
+        }
+        let mut pass = Pass::new(self, constraints);
+        for &(node, scope) in &scopes {
+            let spec = &constraints.nodes[node];
             let table = &typed.tables[spec.table];
+            let params = pass.partition_params(node, scope)?;
+            let filter = if spec.partition.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", spec.partition_filter)
+            };
             self.touch(&table.table.sql_name);
             self.conn
-                .execute(format!("DELETE FROM {}", quoted(&table.table.sql_name)), ())
+                .execute(
+                    format!("DELETE FROM {}{filter}", quoted(&table.table.sql_name)),
+                    bindings(params.clone()),
+                )
                 .await?;
-            self.conn.execute(spec.clear.clone(), ()).await?;
-        }
-        self.conn.execute("DELETE FROM secure_support", ()).await?;
-        for spec in &constraints.nodes {
-            if Some(spec.scope) == without {
+            self.conn
+                .execute(format!("{}{filter}", spec.clear), bindings(params))
+                .await?;
+            self.conn
+                .execute(
+                    "DELETE FROM secure_support WHERE tab=? AND scope=?",
+                    bindings(vec![
+                        SqlValue::Text(table.table.sql_name.clone()),
+                        SqlValue::Blob(encode(&scope)?),
+                    ]),
+                )
+                .await?;
+            if Some(scope) == without {
                 continue;
             }
-            let table = &typed.tables[spec.table];
-            for record in typed::winners(&self.conn, spec.scope).await? {
+            for record in typed::winners(&self.conn, scope).await? {
                 let mut params = typed
                     .rows
                     .values(&table.table, &record.fields)
@@ -1116,16 +1290,21 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        let mut pass = Pass::new(self, constraints);
-        for (node, spec) in constraints.nodes.iter().enumerate() {
+        for &(node, scope) in &scopes {
+            let spec = &constraints.nodes[node];
             let table = &typed.tables[spec.table];
+            let sql = if spec.partition.is_empty() {
+                spec.select_all.clone()
+            } else {
+                format!("{} WHERE {}", spec.select_all, spec.partition_filter)
+            };
             for candidate in pass
-                .query(node, &spec.select_all.clone(), Vec::new())
+                .query(node, &sql, pass.partition_params(node, scope)?)
                 .await?
             {
-                let Some(id) = candidate.id(spec) else {
-                    return Err(corrupt("candidate identity"));
-                };
+                let id = candidate
+                    .id(spec)
+                    .ok_or_else(|| corrupt("candidate identity"))?;
                 if let Some(image) = pass.image(node, id).await? {
                     self.conn
                         .execute(table.upsert.clone(), bindings(image))
@@ -1135,7 +1314,11 @@ impl<A: RowApplication> Inner<A> {
                     self.conn
                         .execute(
                             spec.set_live.clone(),
-                            bindings(vec![SqlValue::Integer(1), SqlValue::Integer(id)]),
+                            bindings(
+                                std::iter::once(SqlValue::Integer(1))
+                                    .chain(pass.identity_params(node, id)?)
+                                    .collect(),
+                            ),
                         )
                         .await?;
                 }
@@ -1143,7 +1326,8 @@ impl<A: RowApplication> Inner<A> {
         }
         // Support rows follow from the real rows, as after every change.
         let mut support = BTreeSet::new();
-        for spec in &constraints.nodes {
+        for &(node, _) in &scopes {
+            let spec = &constraints.nodes[node];
             let name = &typed.tables[spec.table].table.sql_name;
             let table = quoted(name);
             let logical = typed
@@ -1164,7 +1348,10 @@ impl<A: RowApplication> Inner<A> {
                 .await?
                 {
                     if let [SqlValue::Integer(id)] = row.as_slice() {
-                        support.insert((reference.parent, *id));
+                        support.insert((
+                            reference.parent,
+                            Identity::unpartitioned(&constraints.nodes[reference.parent], *id),
+                        ));
                     }
                 }
             }
@@ -1192,11 +1379,12 @@ impl<A: RowApplication> Inner<A> {
             .values(&table.table, after)
             .map_err(Error::Corrupt)?;
         let mut clock = 0;
-        if let Some(winner) = self.winner(spec.scope, change.row).await? {
+        if let Some(winner) = self.winner(change.scope, change.row).await? {
             clock = clock.max(winner.created.map_or(0, |stamp| stamp.clock));
         }
         let mut pass = Pass::new(self, constraints);
         let candidate = Candidate {
+            scope: change.scope,
             values,
             live: false,
             stamps: Vec::new(),
@@ -1238,7 +1426,7 @@ impl<A: RowApplication> Inner<A> {
             return Ok(Vec::new());
         };
         let mut pass = Pass::new(self, constraints);
-        let Some(candidate) = pass.get(node, id).await? else {
+        let Some(candidate) = pass.get(node, Identity { scope, id }).await? else {
             return Ok(Vec::new());
         };
         let mut substituted = Vec::new();

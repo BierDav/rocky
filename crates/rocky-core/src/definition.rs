@@ -845,7 +845,7 @@ mod partition_tests {
         assert!(wrong_index.validate().is_err());
     }
     #[test]
-    fn partitioned_tables_refuse_constraints_and_command_control() {
+    fn partitioned_tables_refuse_incomplete_indexes_references_and_command_control() {
         let reason = |json: &str| match SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -862,7 +862,7 @@ mod partition_tests {
         };
         assert_eq!(
             reason(&items(
-                r#","indexes":[{"name":"items_code","columns":[{"name":"list","descending":false},{"name":"code","descending":false}],"unique":true,"on_conflict":"latest_wins"}]"#
+                r#","indexes":[{"name":"items_code","columns":[{"name":"code","descending":false}],"unique":true,"on_conflict":"latest_wins"}]"#
             )),
             crate::Incompatibility::ConflictPolicy("items_code".into())
         );
@@ -871,6 +871,23 @@ mod partition_tests {
                 r#","foreign_keys":[{"columns":["parent"],"table":"lists","on_delete":"set_null"}]"#
             )),
             crate::Incompatibility::Reference("parent".into())
+        );
+        let complete = items(
+            r#","indexes":[{"name":"items_code","columns":[{"name":"list","descending":false},{"name":"code","descending":false}],"unique":true,"on_conflict":"latest_wins"}]"#,
+        );
+        SchemaDefinition::parse(complete.as_bytes())
+            .unwrap()
+            .build()
+            .unwrap()
+            .supported_on(crate::Profile::Secure)
+            .unwrap();
+        assert_eq!(
+            reason(&complete.replace("latest_wins", "set_null")),
+            crate::Incompatibility::ConflictPolicy("items_code".into())
+        );
+        assert_eq!(
+            reason(&complete.replace(",\"on_conflict\":\"latest_wins\"", "")),
+            crate::Incompatibility::UniqueConstraint
         );
         let mut commanded = definition();
         commanded.tables[0].class = TableClass::CommandControlled;

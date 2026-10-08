@@ -32,8 +32,11 @@ refusal is pinned by `partitioned_tables_refuse_constraints_and_command_control`
 
 ## What exists today
 
-Partitioned scopes, mergeable constraints and existence logs each landed on one side of a boundary that was never
-joined.
+Phase 4 now admits native partition-complete `LatestWins` indexes and resolves
+them with partition-aware identities. Kotlin/Room admission and partitioned
+foreign keys remain later phases. The starting refusals and gaps below explain
+the roadmap boundary; current behavior is in
+[mergeable constraints](../runtime/mergeable-constraints.md).
 
 | Refusal | Where |
 | --- | --- |

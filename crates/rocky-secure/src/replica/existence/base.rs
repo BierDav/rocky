@@ -635,7 +635,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
             inner.archive_existence_bases().await?;
             inner.collect_existence_archives().await?;
-            inner.rebuild_constraints(None).await?;
+            Box::pin(inner.rebuild_constraints(None, None)).await?;
             inner
                 .conn
                 .execute(

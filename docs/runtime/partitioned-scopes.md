@@ -53,8 +53,11 @@ The address binds the domain and group name in slot declaration order.
 [Decision 0037](../decisions/0037-partition-groups.md) pins its encoding.
 
 Table scopes, logs, checkpoints, grants and pseudonyms stay per table; the key
-comes from the [group secret](#group-secrets). Partitioned conflict policies,
-references, existence logs and command control remain refused.
+comes from the [group secret](#group-secrets). Native partition-complete
+`LatestWins` indexes resolve per partition;
+[mergeable constraints](mergeable-constraints.md) describes their identities and
+rebuild boundary. Partitioned `SetNull` indexes, references, existence logs and
+command control remain refused. Kotlin/Room policy admission remains phase 7.
 
 Changing an existing table's group or renaming a group is refused by generation
 admission; a new table may join an existing group. Removing a table remains
@@ -206,6 +209,11 @@ measurement (`cargo test -p rocky-secure --lib measure_200_partitions --locked
 | 200 checkpoints | 4.3 s | 12 s |
 | Reopen with 200 key installations | 1.1 s | 5 s |
 | Empty per-partition metadata | 389 B | 2 KiB |
+
+The [phase 4 qualification](../features_06/04-partition-aware-constraints.md#qualification-on-the-assigned-base)
+reran this probe on 2026-10-09: initialization 7.616 s, catch-up 14.562 s,
+checkpoints 5.285 s, reopen 1.068 s and metadata 409.6 B per partition. All review
+budgets passed. This is a single-table probe, not phase 9's group-sync measurement.
 
 ## Design rationale
 

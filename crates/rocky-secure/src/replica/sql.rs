@@ -819,14 +819,18 @@ impl<A: RowApplication> SecureSql<A> {
                 None => None,
             };
             if let Some(after) = &after {
-                inner.check_references(projected.scope, after).await?;
+                inner
+                    .check_references(typed.row_scope(projected, after)?, after)
+                    .await?;
             }
             let mut before = touched.before;
             // Values a constraint policy shows as NULL stay merged unless the
             // transaction wrote a value; references must name typed rows.
             let mut substituted = Vec::new();
             if let Some(before) = before.as_mut() {
-                substituted = inner.merged_image(projected.scope, before).await?;
+                substituted = inner
+                    .merged_image(typed.row_scope(projected, before)?, before)
+                    .await?;
             }
             let mut after = after;
             if let (Some(after), Some(before), false) =

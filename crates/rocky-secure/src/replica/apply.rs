@@ -208,7 +208,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // A SQL commit settles once every frame of its bundle is stored.
         if !self.strict_projection {
-            self.resolve(None).await?;
+            Box::pin(self.resolve(None)).await?;
         }
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied + 1)
             .await?;

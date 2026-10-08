@@ -350,10 +350,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             drop(inner);
             return self.run_plan().await;
         }
+        verify_constraint_indexes(&inner.conn, &typed).await?;
         let constrained = typed.constraints.is_some();
         inner.typed = Some(Arc::new(typed));
         if constrained {
-            transaction!(inner, |inner| inner.rebuild_constraints(None).await)?;
+            transaction!(inner, |inner| Box::pin(
+                inner.rebuild_constraints(None, None)
+            )
+            .await)?;
         }
         inner.start_events();
         Ok(())
@@ -381,11 +385,9 @@ impl<A: RowApplication> Inner<A> {
         };
         let schema = LogicalSchema::parse(descriptor)
             .map_err(|_| Error::Corrupt("typed table descriptor".into()))?;
-        self.typed = Some(Arc::new(Typed::new(
-            schema,
-            decode(domain)?,
-            &decode(readers)?,
-        )?));
+        let typed = Typed::new(schema, decode(domain)?, &decode(readers)?)?;
+        verify_constraint_indexes(&self.conn, &typed).await?;
+        self.typed = Some(Arc::new(typed));
         self.start_events();
         Ok(())
     }
@@ -411,7 +413,7 @@ impl<A: RowApplication> Inner<A> {
         // Candidates follow every write; `resolve` settles them once the
         // frame or the SQL commit stored all of its rows.
         if let Some(node) = typed.constraints.as_ref().and_then(|c| c.node(scope)) {
-            return self.follow(&typed, node, new).await;
+            return Box::pin(self.follow(&typed, node, scope, new)).await;
         }
         if self.strict_projection {
             return Ok(());
@@ -434,7 +436,7 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .map(|write| (write.change.scope, write.change.row))
             .collect();
-        self.resolve(Some(&written)).await?;
+        Box::pin(self.resolve(Some(&written))).await?;
         let constraints = typed.constraints.as_ref();
         for write in writes {
             let change = &write.change;
@@ -544,6 +546,13 @@ impl<A: RowApplication> Inner<A> {
     /// rows are not evicted with stored rows.
     pub(crate) async fn clear_typed(&self, scope: ResourceScope) -> Result<(), Error> {
         self.restart_plan(scope).await?;
+        if self
+            .typed
+            .as_ref()
+            .is_some_and(|typed| typed.by_scope(scope).is_none())
+        {
+            return Err(Error::Corrupt("missing typed scope for eviction".into()));
+        }
         if let Some(typed) = &self.typed
             && typed
                 .constraints
@@ -552,7 +561,7 @@ impl<A: RowApplication> Inner<A> {
                 .is_some()
         {
             // Children elsewhere lose their parents with it.
-            return self.rebuild_constraints(Some(scope)).await;
+            return Box::pin(self.rebuild_constraints(Some(scope), Some(scope))).await;
         }
         if let Some(table) = self
             .typed
@@ -586,7 +595,7 @@ impl<A: RowApplication> Inner<A> {
             .and_then(|c| c.node(scope))
             .is_some()
         {
-            return self.rebuild_constraints(None).await;
+            return Box::pin(self.rebuild_constraints(Some(scope), None)).await;
         }
         match typed.by_scope(scope) {
             Some(table) if table.confirmed() => self.project_confirmed(scope).await,
@@ -594,7 +603,7 @@ impl<A: RowApplication> Inner<A> {
                 self.touch(&table.table.sql_name);
                 reproject(&self.conn, &typed, table).await
             }
-            None => Ok(()),
+            None => Err(Error::Corrupt("missing typed scope for rebuild".into())),
         }
     }
 }
@@ -755,4 +764,40 @@ async fn stored_winners(
             return Ok(winners.into_values().collect());
         }
     }
+}
+
+/// Refuse a missing or changed index before using persisted projections.
+async fn verify_constraint_indexes(
+    conn: &crate::scoped_connection::ScopedConnection,
+    typed: &Typed,
+) -> Result<(), Error> {
+    let Some(constraints) = &typed.constraints else {
+        return Ok(());
+    };
+    let catalog = rows(conn, "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL").await?;
+    let expected = typed
+        .rows
+        .schema()
+        .tables
+        .iter()
+        .flat_map(|table| table.indexes.iter().map(|index| &index.create_sql))
+        .chain(constraints.statements().filter(|sql| {
+            sql.starts_with("CREATE ")
+                && (sql.contains(" INDEX ") || sql.starts_with("CREATE TABLE "))
+        }));
+    for sql in expected
+        .map(String::as_str)
+        .chain(super::constraints::SCHEMA.iter().copied())
+    {
+        let canonical = sql.replace(" IF NOT EXISTS", "");
+        if !catalog
+            .iter()
+            .any(|row| row == &[SqlValue::Text(canonical.clone())])
+        {
+            return Err(Error::Incompatible(format!(
+                "missing or changed constraint index: {canonical}"
+            )));
+        }
+    }
+    Ok(())
 }

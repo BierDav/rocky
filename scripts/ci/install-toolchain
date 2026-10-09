@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# libsqlite3-sys uses bindgen for its bundled SQLite build.
+if ! ldconfig -p 2>/dev/null | grep -qE 'libclang(-[0-9]+)?\.so'; then
+  if ! command -v apt-get > /dev/null; then
+    echo "install-toolchain: libclang is missing and apt-get is unavailable" >&2
+    exit 1
+  fi
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libclang-dev
+  else
+    sudo apt-get update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libclang-dev
+  fi
+fi
+
 if ! command -v rustup > /dev/null; then
   curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain none

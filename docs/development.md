@@ -139,6 +139,8 @@ the tests and doc tests, without compiling the test binaries again. `slow`,
 archives and peer binary.
 It needs no version-control CLI or repository history, and never invokes Git.
 The repository toolchain file is also the toolchain source of truth in CI.
+The shared CI toolchain setup installs `libclang` for bundled SQLite's bindgen
+build when the runner image does not provide it.
 
 A job that passes records a cache marker keyed by the source tree. A later run
 of the same tree, such as a redescribed or rebased commit with unchanged content

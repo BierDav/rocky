@@ -405,17 +405,7 @@ jobs:
 
       - name: Install the repository toolchain
         working-directory: source
-        run: |
-          set -euo pipefail
-          # Gitea's runner image has no rustup.
-          if ! command -v rustup > /dev/null; then
-            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-            rustup toolchain install
-          fi
-          rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - name: Package and qualify the SDK
         working-directory: source
@@ -518,17 +508,7 @@ jobs:
 
       - name: Install the repository toolchain
         working-directory: source
-        run: |
-          set -euo pipefail
-          # Gitea's runner image has no rustup.
-          if ! command -v rustup > /dev/null; then
-            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-            rustup toolchain install
-          fi
-          rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       # Maven local keeps the development version the toolchain verifies; the
       # staging repository holds the release version.

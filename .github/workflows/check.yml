@@ -76,17 +76,7 @@ jobs:
       - name: Install the repository toolchain
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: |
-          set -euo pipefail
-          # Gitea's runner image has no rustup.
-          if ! command -v rustup > /dev/null; then
-            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-          fi
-          rustup toolchain install
-          rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - name: Install the pinned lint tools
         if: steps.passed.outputs.cache-hit != 'true'
@@ -147,7 +137,7 @@ jobs:
       - name: Install the repository toolchain
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -228,7 +218,7 @@ jobs:
       - name: Install the repository toolchain
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       # Doc tests still compile the workspace libraries.
       - uses: Swatinem/rust-cache@v2
@@ -322,7 +312,7 @@ jobs:
       - name: Install the repository toolchain
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -416,7 +406,7 @@ jobs:
       - name: Install the repository toolchain
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -542,17 +532,7 @@ jobs:
 
       - name: Install the repository toolchain
         working-directory: source
-        run: |
-          set -euo pipefail
-          # Gitea's runner image has no rustup.
-          if ! command -v rustup > /dev/null; then
-            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
-              | sh -s -- -y --profile minimal --default-toolchain none
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            export PATH="$HOME/.cargo/bin:$PATH"
-            rustup toolchain install
-          fi
-          rustup show active-toolchain
+        run: ./scripts/ci/install-toolchain
 
       - name: Build the Android runtime
         working-directory: source

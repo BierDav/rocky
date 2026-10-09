@@ -167,6 +167,7 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
+          export PATH="$RUNNER_TEMP/nextest:$PATH"
           ./scripts/check --build "$RUNNER_TEMP/build"
           # After the archives: the archive without default features replaces the binary.
           cargo build --locked -p rocky-sdk --bin rocky-peer
@@ -257,6 +258,7 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
+          export PATH="$RUNNER_TEMP/nextest:$PATH"
           if [ -d "$RUNNER_TEMP/build" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
@@ -350,6 +352,7 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
+          export PATH="$RUNNER_TEMP/nextest:$PATH"
           if [ -d "$RUNNER_TEMP/build" ]; then
             ./scripts/check --slow --from "$RUNNER_TEMP/build"
           else

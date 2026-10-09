@@ -158,6 +158,8 @@ branch protection. No remotely hosted CI run has been verified by this baseline.
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
 baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
 commit whose completed run of it failed.
+The `slow`, `shopping` and `android` jobs start after `check` passes; the macOS
+jobs restore its Rust build cache.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on

@@ -1,0 +1,3 @@
+# Shared by cargo fmt and jj fix, which pipes files through rustfmt; see docs/linting.md.
+edition = "2024"
+style_edition = "2024"

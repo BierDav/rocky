@@ -1,0 +1,14 @@
+# shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
+# Kotlin formatting and lint rules from .editorconfig.
+tools=ktlint
+patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts'
+
+# ktlint expands the patterns itself.
+# shellcheck disable=SC2086
+check() { (set -f && ktlint --relative $patterns); }
+# shellcheck disable=SC2086
+fix() { (set -f && ktlint --relative --format $patterns); }
+
+# shellcheck disable=SC2016 # jj expands $root and $path
+jj_fix_command='["$root/local/bin/ktlint", "--stdin", "--stdin-path=$root/$path", "--format", "--log-level=none"]'
+jj_fix_patterns="[\"glob:'examples/**/*.{kt,kts}' | glob:'sdks/kotlin/**/*.{kt,kts}'\"]"

@@ -1,0 +1,43 @@
+#!/bin/sh
+# Checks the commits a push would publish, then forwards its arguments to
+# `jj git push`. Jujutsu runs no hooks; this is its pre-push gate. See docs/linting.md.
+#
+#   scripts/jj-push [JJ GIT PUSH ARGS...]   check, then push
+#   scripts/jj-push --check-only [ARGS...]  check only
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+check_only=false
+if [ "${1:-}" = --check-only ]; then
+    check_only=true
+    shift
+fi
+
+# The revisions the push selects, as `jj git push` does; by default it pushes
+# the bookmarks between the remotes and the working copy.
+targets=
+add() { targets="${targets:+$targets | }$1"; }
+quote() { printf '"%s"' "$(printf '%s' "$1" | sed 's/["\\]/\\&/g')"; }
+expect_value=
+for arg in "$@"; do
+    case "$expect_value" in
+    bookmark) add "bookmarks($(quote "$arg"))" ;;
+    revision) add "($arg)" ;;
+    esac
+    [ -n "$expect_value" ] && { expect_value=; continue; }
+    case "$arg" in
+    -b | --bookmark) expect_value=bookmark ;;
+    --bookmark=*) add "bookmarks($(quote "${arg#--bookmark=}"))" ;;
+    -r | --revisions | -c | --change) expect_value=revision ;;
+    --revisions=* | --change=*) add "(${arg#*=})" ;;
+    --all | --tracked) add 'bookmarks()' ;;
+    esac
+done
+unpublished="remote_bookmarks()..(${targets:-@})"
+
+"$repo_root/scripts/commitlint" --jj "$unpublished"
+"$repo_root/scripts/lint"
+
+$check_only && exit 0
+exec jj git push "$@"

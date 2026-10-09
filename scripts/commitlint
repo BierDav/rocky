@@ -1,27 +1,52 @@
 #!/bin/sh
 # Checks commit messages against Conventional Commits; see docs/commits.md.
 #
-#   scripts/commitlint FILE          one message (`-` reads stdin); the commit-msg hook
-#   scripts/commitlint --jj [REVSET] every described commit in REVSET (default: trunk()..@)
+#   scripts/commitlint [--protected] FILE          one message (`-` reads stdin)
+#   scripts/commitlint [--protected] --jj [REVSET] every described commit in REVSET
+#                                                  (default: trunk()..@)
+#
+# --protected also refuses fixup!/squash!/amend! commits, which must not reach main.
 set -eu
 
 types='feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert'
 header="^($types)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [^ ]"
+max_header=100
 # Commits Git and jj produce themselves, which a later squash removes.
-generated='^(Merge |Revert "|(fixup|squash|amend)! )'
+generated='^(Merge |Revert ")'
+autosquash='^(fixup|squash|amend)! '
+
+protected=false
+if [ "${1:-}" = --protected ]; then
+    protected=true
+    shift
+fi
 
 # Prints the problem with the message on stdin, if any.
 problem() {
     message=$(grep -v '^#' | sed -e '/./,$!d')
     first=$(printf '%s\n' "$message" | sed -n 1p)
+    description=${first#*: }
     if [ -z "$first" ]; then
         echo "the message is empty"
+    elif printf '%s\n' "$first" | grep -Eq "$autosquash"; then
+        if $protected; then
+            echo "autosquash commits must be squashed before they reach a protected branch"
+        fi
     elif printf '%s\n' "$first" | grep -Eq "$generated"; then
         :
     elif ! printf '%s\n' "$first" | grep -Eq "$header"; then
         echo "the header is not 'type(scope)!: description' with type one of ${types}"
+    elif [ "${#first}" -gt "$max_header" ]; then
+        echo "the header is ${#first} characters, more than $max_header"
+    elif printf '%s\n' "$description" | grep -Eq '^[A-Z][a-z]'; then
+        echo "the description must start in lower case"
+    elif printf '%s\n' "$first" | grep -Eq '[.[:space:]]$'; then
+        echo "the header must not end with a period or whitespace"
     elif [ -n "$(printf '%s\n' "$message" | sed -n 2p)" ]; then
         echo "the header must be followed by a blank line"
+    elif printf '%s\n' "$message" | sed 1d | grep -Ei '^breaking[ -]changes?[[:space:]]*:' \
+        | grep -Evq '^BREAKING[ -]CHANGE: [^ ]'; then
+        echo "a breaking change footer is 'BREAKING CHANGE: description', in upper case"
     fi
 }
 
@@ -43,7 +68,7 @@ case "${1:-}" in
     exit "$failed"
     ;;
 '' | -h | --help)
-    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 -) report "stdin" ;;

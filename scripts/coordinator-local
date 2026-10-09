@@ -4,7 +4,7 @@
 # Stop it with: kill $(cat DIR/voter-*.pid)
 # See docs/runtime/coordinator-operations.md.
 set -eu
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 dir=${1:?usage: coordinator-local DIR [BASE_PORT]}
 port=${2:-7300}
 

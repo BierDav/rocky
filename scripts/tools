@@ -1,0 +1,71 @@
+#!/bin/sh
+# Installs the checksum-verified tools pinned in scripts/tools.lock into local/bin;
+# see docs/linting.md.
+#
+#   scripts/tools [TOOL...]   install the named tools (default: all) when missing
+#                             or outdated, then print local/bin
+#   scripts/tools --path      print local/bin only
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+bin="$repo_root/local/bin"
+lock="$repo_root/scripts/tools.lock"
+[ "${1:-}" = --path ] && { echo "$bin"; exit 0; }
+
+platform="$(uname -s)-$(uname -m)"
+# Linux reports arm64 or aarch64 depending on the distribution.
+[ "$platform" = Linux-arm64 ] && platform=Linux-aarch64
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
+
+mkdir -p "$bin"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Pinned tool names, in lock-file order.
+tools=$(grep -Ev '^[[:space:]]*(#|$)' "$lock" | awk '!seen[$1]++ { print $1 }')
+[ "$#" -gt 0 ] && tools="$*"
+
+for tool in $tools; do
+    pin=$(grep -Ev '^[[:space:]]*(#|$)' "$lock" | awk -v t="$tool" -v p="$platform" \
+        '$1 == t && ($3 == p || $3 == "any") { print; exit }')
+    [ -n "$pin" ] || {
+        echo "tools: $tool has no pin for $platform in scripts/tools.lock" >&2
+        exit 1
+    }
+    # shellcheck disable=SC2086 # the pin's fields
+    set -- $pin
+    version=$2 expected=$4 url=$5 member=${6:-}
+    # A stamp records the installed pin, so a changed version or hash reinstalls.
+    stamp="$bin/.$tool.version"
+    [ -x "$bin/$tool" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$version $expected" ] && continue
+
+    file="$work/$(basename -- "$url")"
+    curl --fail --silent --show-error --location --retry 3 --output "$file" "$url"
+    actual=$(sha256 "$file")
+    [ "$actual" = "$expected" ] || {
+        echo "tools: $url has SHA-256 $actual, expected $expected" >&2
+        exit 1
+    }
+    if [ -n "$member" ]; then
+        mkdir "$work/$tool"
+        case "$url" in
+        *.tar.gz | *.tgz) tar -xzf "$file" -C "$work/$tool" "$member" ;;
+        *.tar.xz) tar -xJf "$file" -C "$work/$tool" "$member" ;;
+        *.zip) unzip -q "$file" "$member" -d "$work/$tool" ;;
+        *)
+            echo "tools: $url is not a supported archive" >&2
+            exit 1
+            ;;
+        esac
+        file="$work/$tool/$member"
+    fi
+    chmod +x "$file"
+    mv "$file" "$bin/$tool"
+    echo "$version $expected" >"$stamp"
+    echo "installed $tool $version" >&2
+done
+
+echo "$bin"

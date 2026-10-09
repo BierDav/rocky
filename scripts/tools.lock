@@ -1,0 +1,18 @@
+# Pinned lint tools that scripts/tools installs into local/bin; see docs/linting.md.
+# One line per tool and platform (`uname -s`-`uname -m`, or `any`):
+#
+#   tool version platform sha256 url [member]
+#
+# `member` is the executable's path inside a .tar.gz/.tar.xz/.zip archive;
+# without it the download is the executable. Shellcheck publishes no checksums;
+# its hashes are of the release archives, taken when pinning.
+
+ktlint 1.8.0 any a3fd620207d5c40da6ca789b95e7f823c54e854b7fade7f613e91096a3706d75 https://github.com/ktlint/ktlint/releases/download/1.8.0/ktlint
+
+shellcheck 0.11.0 Darwin-arm64 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79 https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.xz shellcheck-v0.11.0/shellcheck
+shellcheck 0.11.0 Linux-aarch64 12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588 https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.aarch64.tar.xz shellcheck-v0.11.0/shellcheck
+shellcheck 0.11.0 Linux-x86_64 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198 https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz shellcheck-v0.11.0/shellcheck
+
+actionlint 1.7.12 Darwin-arm64 aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz actionlint
+actionlint 1.7.12 Linux-aarch64 325e971b6ba9bfa504672e29be93c24981eeb1c07576d730e9f7c8805afff0c6 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_arm64.tar.gz actionlint
+actionlint 1.7.12 Linux-x86_64 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz actionlint

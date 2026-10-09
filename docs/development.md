@@ -32,26 +32,40 @@ jj new
 
 Descriptions follow [Conventional Commits](commits.md); `scripts/commitlint --jj`
 checks them, since Jujutsu runs no Git hooks.
+Run `scripts/setup` once per clone for the `jj fix`, `jj lint` and `jj push`
+configuration and the pinned lint tools ([linting](linting.md)).
 
 Use these commands when intentionally finishing a change and starting another.
 Agents normally leave their edits in the current change for review.
 
 Fetch through `jj git fetch`; publish an explicitly selected bookmark through
-`jj git push --bookmark <name>` only when publication is requested. Do not create
-bookmarks or rewrite shared history as an incidental part of local editing.
+`jj push --bookmark <name>` only when publication is requested. It checks the
+commits it would publish before running `jj git push`. Do not create bookmarks
+or rewrite shared history as an incidental part of local editing.
 
 ## Shared checks
 
 ```sh
+./scripts/lint
 ./scripts/check
 ```
 
-The script resolves the repository from its own location. It runs formatting,
-Clippy for workspace targets with warnings treated as errors, and workspace
-tests, including doc tests. Dependency resolution uses the committed lockfile.
+`scripts/lint` checks Rust and Kotlin formatting, shell scripts and workflows
+without a build; `--fix` formats first. [Linting](linting.md) lists its tools.
+ktlint's standard and experimental rules include unused-import checks; the
+wildcard import allowlist in `.editorconfig` is limited to extension-heavy
+project dependencies.
+
+`scripts/check` resolves the repository from its own location. It runs formatting,
+workspace Clippy with `clippy::all` denied and warnings treated as errors, and
+workspace tests, including doc tests. Dependency resolution uses the committed
+lockfile.
 It uses [cargo-nextest](https://nexte.st) when installed, which runs every test
 binary in parallel, and falls back to `cargo test`. Settings are in
-`.config/nextest.toml`.
+`.config/nextest.toml`: tests that take over 60 seconds are reported as slow;
+the coordinator Raft store probe gets all test threads because parallel tests
+would distort its fsync latency measurement. CI disables fail-fast and
+terminates an individual test after ten 60-second timeout periods.
 
 Soak tests are `#[ignore]`d and named `soak_*`; `./scripts/check --slow` runs
 only those. Keep a short variant of each soak test in the baseline.
@@ -94,6 +108,8 @@ the live file; install it before running that gate.
 Run `./kotlin check qualify -m schema-qualification` for hand/Room definition
 equivalence and native installation, and `./kotlin test -m schema-qualification` to
 regenerate the pinned Room exports and check compound-key scalar DAOs.
+`./kotlin check` runs the Kotlin Toolchain checks and tests; it is not a
+formatter or linter. Kotlin formatting and lint run in `./scripts/lint`.
 Every build prepares SDK-owned native bindings/resources with Cargo, so it needs
 the pinned Rust toolchain. These are separate from the Rust `./scripts/check` gate.
 See [Room on Rocky's file](runtime/room-integration.md).
@@ -110,8 +126,11 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 
 ## CI
 
-The baseline workflow runs on macOS, matching the first desktop target. It
-downloads an archive of the exact event revision and calls `scripts/check`.
+The baseline workflow's `lint` job runs `scripts/tools` and `scripts/lint` on
+Linux; it needs no build and fails within minutes. The `check` job runs on
+macOS, matching the first desktop target. It
+downloads an archive of the exact event revision and calls `scripts/check`, which
+requires `cargo fmt --all -- --check` and strict workspace Clippy before tests.
 It needs no version-control CLI or repository history, and never invokes Git.
 The repository toolchain file is also the toolchain source of truth in CI.
 

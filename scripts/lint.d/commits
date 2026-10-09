@@ -1,0 +1,5 @@
+# shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
+# The commit-message rules' regression tests.
+tools=
+
+check() { scripts/test-commitlint; }

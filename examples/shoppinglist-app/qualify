@@ -2,7 +2,7 @@
 # Multi-process shopping qualification: device JVMs and the packaged rocky-peer
 # custody launcher. Evidence goes to $ROCKY_EVIDENCE (default local/shopping-qualification).
 set -eu
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 # The custody peer is the packaged launcher; the application has no Rust source.
 cargo build --locked -p rocky-sdk --bin rocky-peer

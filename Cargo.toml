@@ -23,6 +23,7 @@ todo-app = { path = "examples/todo-app" }
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "deny"
 

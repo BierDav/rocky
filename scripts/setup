@@ -1,0 +1,44 @@
+#!/bin/sh
+# Prepares a clone for development: pinned lint tools, Jujutsu repository
+# settings and, in a colocated Git repository, Git hooks. See docs/linting.md.
+# Safe to run again; it only sets the keys and links it owns.
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+"$repo_root/scripts/tools" >/dev/null
+
+if [ -d .jj ]; then
+    set_repo() { jj config set --repo "$1" "$2"; }
+    # `jj lint` checks unpublished work; `jj push` checks it, then runs `jj git push`.
+    set_repo aliases.lint "[\"util\", \"exec\", \"--\", \"$repo_root/scripts/jj-push\", \"--check-only\"]"
+    set_repo aliases.push "[\"util\", \"exec\", \"--\", \"$repo_root/scripts/jj-push\"]"
+    # `jj fix` formats every mutable revision with each lint module's formatter.
+    tab=$(printf '\t')
+    "$repo_root/scripts/lint" --jj-fix | while IFS=$tab read -r name command patterns; do
+        set_repo "fix.tools.$name.command" "$command"
+        set_repo "fix.tools.$name.patterns" "$patterns"
+    done
+    echo "configured jj aliases (lint, push) and fix tools ($("$repo_root/scripts/lint" --jj-fix | cut -f1 | tr '\n' ' ' | sed 's/ $//'))"
+fi
+
+if [ -d .git ]; then
+    hooks="$repo_root/.git/hooks"
+    mkdir -p "$hooks"
+    # Drop links to hooks this repository no longer provides.
+    for link in "$hooks"/*; do
+        if [ -L "$link" ] && [ ! -e "$link" ]; then
+            case "$(readlink "$link")" in
+            ../../scripts/hooks/*)
+                rm "$link"
+                echo "removed obsolete $(basename -- "$link") hook"
+                ;;
+            esac
+        fi
+    done
+    for hook in "$repo_root"/scripts/hooks/*; do
+        ln -sf "../../scripts/hooks/$(basename -- "$hook")" "$hooks/$(basename -- "$hook")"
+        echo "installed $(basename -- "$hook") hook"
+    done
+fi

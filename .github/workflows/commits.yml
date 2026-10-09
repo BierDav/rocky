@@ -6,6 +6,8 @@ name: Commit messages
 on:
   push:
   pull_request:
+    # `edited` re-checks a changed title.
+    types: [opened, edited, reopened, synchronize]
 
 permissions:
   contents: read
@@ -17,12 +19,13 @@ jobs:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 5
     steps:
-      - name: Download the exact source revision
+      # A pull request is checked by its base's rules, so it cannot relax them.
+      - name: Download the linter's source revision
         env:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           GH_REPOSITORY: ${{ github.repository }}
-          GH_REVISION: ${{ github.sha }}
+          GH_REVISION: ${{ github.event.pull_request.base.sha || github.sha }}
         run: |
           curl --fail --silent --show-error --location \
             --header "Authorization: Bearer ${GH_TOKEN}" \
@@ -37,9 +40,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
+          PULL_REQUEST_TITLE: ${{ github.event.pull_request.title }}
+          # Autosquash commits must not reach main, directly or by a merge.
+          PROTECTED: ${{ github.ref == 'refs/heads/main' || github.base_ref == 'main' }}
         run: |
           set -euo pipefail
+          set --
+          [ "${PROTECTED}" = true ] && set -- --protected
           if [ -n "${PULL_REQUEST}" ]; then
+            # A squash merge uses the title as the commit header.
+            printf '%s\n' "${PULL_REQUEST_TITLE}" | source/scripts/commitlint "$@" - 2>&1 \
+              | sed "s/^commitlint: stdin/commitlint: pull request title/" || title_failed=1
             # The same endpoint and paging on GitHub and Gitea.
             : > "$RUNNER_TEMP/commits"
             page=1
@@ -56,9 +67,9 @@ jobs:
           else
             jq -r '.commits[] | [.id, (.message | @base64)] | @tsv' "$GITHUB_EVENT_PATH" > "$RUNNER_TEMP/commits"
           fi
-          failed=0
+          failed=${title_failed:-0}
           while IFS="$(printf '\t')" read -r sha message; do
-            printf '%s' "$message" | base64 --decode | source/scripts/commitlint - 2>&1 \
+            printf '%s' "$message" | base64 --decode | source/scripts/commitlint "$@" - 2>&1 \
               | sed "s/^commitlint: stdin/commitlint: ${sha}/" || failed=1
           done < "$RUNNER_TEMP/commits"
           exit "$failed"

@@ -114,6 +114,8 @@ Install Rust through rustup, Jujutsu (`jj`) and ripgrep (`rg`). The repository
 toolchain file selects the Rust release and components automatically.
 
 ```sh
+./scripts/setup   # pinned lint tools, jj fix/push configuration
+./scripts/lint
 ./scripts/check
 ```
 

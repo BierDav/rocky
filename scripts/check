@@ -2,7 +2,7 @@
 # Shared checks. `--slow` runs only the ignored `soak_` tests instead.
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
 # nextest runs every test binary in parallel; cargo test runs them in sequence.

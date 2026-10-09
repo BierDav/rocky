@@ -1,0 +1,13 @@
+# shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
+# Shell scripts, found by their shebang. Vendored wrappers (./kotlin, gradlew),
+# build output and benchmarks keep their upstream style.
+tools=shellcheck
+
+scripts() {
+    find scripts examples sdks \
+        \( -name build -o -name target -o -name local -o -name node_modules -o -name '.*' \) -prune \
+        -o -type f ! -name gradlew -exec grep -lE '^#!(/usr)?/bin/(env )?(ba|da)?sh' {} +
+    ls scripts/lint.d/*
+}
+
+check() { scripts | xargs shellcheck; }

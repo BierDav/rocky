@@ -1,0 +1,70 @@
+#!/bin/sh
+# Formatting and static lint checks that need no build; see docs/linting.md.
+# Each language or file kind is a module in scripts/lint.d.
+#
+#   scripts/lint [MODULE...]         check every module, or the named ones
+#   scripts/lint --fix [MODULE...]   apply each module's formatter first, then check
+#   scripts/lint --list              print the modules
+#   scripts/lint --jj-fix            print `name<TAB>command<TAB>patterns` for jj fix
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+PATH="$repo_root/local/bin:$PATH"
+modules_dir=scripts/lint.d
+
+all_modules() { for m in "$modules_dir"/*; do basename -- "$m"; done; }
+
+mode=check
+case "${1:-}" in
+--fix) mode=fix && shift ;;
+--list) all_modules && exit 0 ;;
+--jj-fix) mode=jj-fix && shift ;;
+-*)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac
+modules=${*:-$(all_modules)}
+
+# Runs one module's step in a subshell, so modules cannot affect each other.
+run() { # module
+    (
+        tools='' jj_fix_command='' jj_fix_patterns=''
+        # shellcheck source=/dev/null
+        . "$modules_dir/$1"
+        for tool in $tools; do
+            command -v "$tool" >/dev/null 2>&1 || {
+                echo "lint: $1 needs $tool; run scripts/tools" >&2
+                exit 1
+            }
+        done
+        case "$mode" in
+        jj-fix)
+            if [ -n "$jj_fix_command" ]; then
+                printf '%s\t%s\t%s\n' "$1" "$jj_fix_command" "$jj_fix_patterns"
+            fi
+            ;;
+        fix)
+            # A module without a formatter only checks.
+            if type fix 2>/dev/null | grep -q function; then fix || true; fi
+            check
+            ;;
+        *) check ;;
+        esac
+    )
+}
+
+failed=
+for module in $modules; do
+    [ -f "$modules_dir/$module" ] || {
+        echo "lint: no module $module in $modules_dir" >&2
+        exit 2
+    }
+    run "$module" || failed="$failed $module"
+done
+
+[ -z "$failed" ] || {
+    echo "lint: failed:$failed" >&2
+    exit 1
+}

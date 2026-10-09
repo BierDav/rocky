@@ -18,7 +18,8 @@
 - Git-backed remote transport is accessed through `jj git fetch` / `jj git push`.
 - Preserve unrelated changes. Do not abandon or restore someone else's work.
 - Describe changes with [Conventional Commits](docs/commits.md); release versions
-  are computed from them. Check with `scripts/commitlint --jj` before pushing.
+  are computed from them. Check with `scripts/commitlint --jj`; push with
+  `jj push` (`scripts/jj-push`), which checks first. See [linting](docs/linting.md).
 - Do not push, rewrite shared history or create bookmarks unless the task calls
   for it. Leave completed edits in the current change unless asked otherwise.
 
@@ -73,7 +74,8 @@
 ## Verification
 
 - During development, use `cargo test -p <package>` and targeted checks.
-- Before finishing workspace changes, run `./scripts/check` from any directory.
+- Before finishing workspace changes, run `./scripts/lint` and `./scripts/check`
+  from any directory. `./scripts/lint --fix` applies formatting.
 - Test meaningful behavior, invariants and regressions, not trivial duplication.
 - Prefer deterministic fault injection over tests dependent on arbitrary sleeps.
 - Check explicitly supported feature combinations; do not blindly use

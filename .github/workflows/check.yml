@@ -24,6 +24,83 @@ env:
   NEXTEST_PROFILE: ci
 
 jobs:
+  lint:
+    # Formatting and static lint checks need no build, so they fail fast; see docs/linting.md.
+    # Any architecture; Gitea has more arm64 runners.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 15
+    steps:
+      - name: Download the exact source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Look for a passing run of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
+
+      # ktlint runs on the JVM.
+      - uses: actions/setup-java@v5
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install the repository toolchain
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # Gitea's runner image has no rustup.
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: Install the pinned lint tools
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/tools
+
+      - name: Run formatting and lint checks
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/lint
+
+      - name: Record the passing tree
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: touch passed
+
+      - uses: actions/cache/save@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          path: passed
+          key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
+
   check:
     runs-on: macos-latest
     timeout-minutes: 30

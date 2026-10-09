@@ -1,0 +1,58 @@
+#!/bin/sh
+# Regression tests for scripts/commitlint; run by scripts/lint.
+set -eu
+
+commitlint="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/commitlint"
+failed=0
+
+# expect accept|reject [flag] message
+expect() {
+    want=$1
+    shift
+    flag=
+    if [ "$1" = --protected ]; then
+        flag=--protected
+        shift
+    fi
+    if printf '%b' "$1" | "$commitlint" $flag - 2>/dev/null; then got=accept; else got=reject; fi
+    if [ "$got" != "$want" ]; then
+        echo "test-commitlint: expected $want${flag:+ ($flag)}: $(printf '%b' "$1" | sed -n 1p)" >&2
+        failed=1
+    fi
+}
+
+long=$(printf 'feat: %095d' 0)
+
+expect accept 'feat: add partition checkpoints'
+expect accept 'fix(rocky-secure): refuse expired grants\n\nBody text.'
+expect accept 'feat(sdk)!: drop the v6 replica format\n\nBREAKING CHANGE: v6 files are refused.'
+expect accept 'refactor(features_06/docs): move the wave graph'
+expect accept 'docs: describe SQLite pragmas'
+expect accept 'chore: tidy\n\nCo-Authored-By: A <a@example.com>'
+expect accept 'Merge branch '\''main'\'' into topic'
+expect accept 'Revert "feat: add x"'
+expect accept 'fixup! feat: add x'
+expect accept '# comment line\n\nfeat: after comments'
+expect accept "${long%0}"
+
+expect reject ''
+expect reject 'add partition checkpoints'
+expect reject 'feature: add x'
+expect reject 'Feat: add x'
+expect reject 'feat(Scope): add x'
+expect reject 'feat(): add x'
+expect reject 'feat:add x'
+expect reject 'feat:  add x'
+expect reject 'feat: Add x'
+expect reject 'feat: add x.'
+expect reject 'feat: add x '
+expect reject 'feat: add x\nbody without a blank line'
+expect reject 'feat: add x\n\nbreaking change: lower case footer'
+expect reject 'feat: add x\n\nBREAKING CHANGES: plural footer'
+expect reject "$long"
+expect reject --protected 'fixup! feat: add x'
+expect reject --protected 'squash! feat: add x'
+expect reject --protected 'amend! feat: add x'
+expect accept --protected 'feat: add x'
+
+exit "$failed"

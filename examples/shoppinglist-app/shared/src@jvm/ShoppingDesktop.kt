@@ -9,7 +9,7 @@ import rocky.room.followRocky
 
 /** Owns the background jobs; close before exiting the desktop process. */
 class ShoppingDesktop private constructor(val runtime: RockyDatabase, val database: ShoppingDatabase) {
-    val repository = ShoppingRepository(database)
+    val repository = ShoppingRepository(database, runtime)
     private val lifetime = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Sync writes reach Room's observers only through this.
     private val invalidation = lifetime.launch { database.followRocky(runtime) }

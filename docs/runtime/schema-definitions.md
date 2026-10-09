@@ -107,7 +107,7 @@ re-declaring a column or index fails.
 | `id` and `row_kind` entity fields | Required as non-null integers; removed from the business columns |
 | `<table>_identity` index on `id` (natural keys) | Required and dropped, since the definition supplies it; partition columns precede `id` under a partition overlay ([Room entities](room-integration.md#entities)) |
 | Unique index | Needs an `onConflict` policy in the overlay |
-| `@ForeignKey` | Must reference `id` with `CASCADE` or `SET NULL` and `NO ACTION` on update |
+| `@ForeignKey` | Must reference the parent's identity, its partition columns then `id`, with `CASCADE` or `SET NULL` and `NO ACTION` on update; the schema checks it against the overlay's `partitionBy` |
 | `@DatabaseView` | One static SELECT, nested views included; other shapes are refused |
 | `CHECK`, generated columns, virtual/FTS tables, partial or expression indexes, `autoGenerate = true` | Refused, naming the entity |
 | Rocky, Room and SQLite bookkeeping tables, `android_metadata` | Excluded |
@@ -144,9 +144,10 @@ so none exist.
 
 - `./kotlin check qualify -m schema-qualification`: compiles the importer
   with `-Werror`; hand-built and imported shopping, market, scalar,
-  partitioned, grouped and `ConstraintDatabase` fixtures have equal canonical bytes and
+  partitioned, grouped, `ConstraintDatabase` and three-table shopping fixtures have equal canonical bytes and
   fingerprints; named refusals (`autoGenerate`, a missing identity field, a
-  missing or misnamed identity index); each schema installs natively and
+  missing or misnamed identity index); each partitioned constraint shape that
+  stays refused, with its message; each schema installs natively and
   reopens with its import.
 - `./kotlin test -m schema-qualification`: regenerates the checked-in exports
   with Room 2.8.4 and checks REAL/BLOB/null values and compound keys through

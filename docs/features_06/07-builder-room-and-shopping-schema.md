@@ -1,6 +1,12 @@
 # 7. Builder, Room import and the shopping schema
 
-Status: not started.
+Status: complete on the assigned base; all completion gates passed on 2026-10-09.
+The builder, Room import, schema qualification, `requiredSchema`, packaged
+consumer and shopping app admit the scope's schema. Sharing a list with an
+enrolled device needed three native fixes: profile grants carry `Any`
+partition selectors, a partitioned table's own scope offers no checkpoint and
+is skipped by a join's bootstrap, and Room's `foreign_key_list` reports each
+reference's action when references share a column.
 Owner: the Kotlin builder, Room import and schema qualification; the shopping
 example. Depends on phases [4](04-partition-aware-constraints.md) and
 [5](05-partitioned-foreign-keys.md). Wave 3.

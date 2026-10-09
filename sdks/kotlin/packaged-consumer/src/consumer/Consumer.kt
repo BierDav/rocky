@@ -49,6 +49,40 @@ private suspend fun credentialPrimitives(root: File) {
     } finally { delegate?.close(); executor?.close(); issuer.close() }
 }
 
+/** The shopping schema's group, title policy and references, declared and installed from the packaged library. */
+private suspend fun groupedLists(root: File) {
+    val shopping = schema("shopping", version = 3) {
+        table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+        table("categories") {
+            integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
+            reference("list", "lists", onDelete = Delete.Cascade)
+        }
+        table("items") {
+            integer("list"); text("key"); text("title"); integer("category", nullable = true)
+            primaryKey("list", "key"); partitionBy("list", group = "list")
+            unique("list", "title", onConflict = Conflict.LatestWins)
+            reference("list", "lists", onDelete = Delete.Cascade)
+            reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
+        }
+    }
+    val db = RockyDatabase.local(root, shopping)
+    try {
+        for (table in listOf("lists", "categories", "items"))
+            db.credentials.installPseudonym(db.credentials.assignPseudonym(db.credentials.pseudonymRequest(table)))
+        val list = db.partitions.next("lists").getValue("id").jsonPrimitive.content.toLong()
+        val category = db.write {
+            check(nextId("lists") == list)
+            execute("INSERT INTO lists(id, title) VALUES(?, ?)", list, "Groceries")
+            nextId("categories", list).also { execute("INSERT INTO categories(id, list, name) VALUES(?, ?, ?)", it, list, "Dairy") }
+        }
+        db.write { execute("INSERT INTO items(id, list, key, title, category) VALUES(?, ?, ?, ?, ?)", nextId("items", list), list, "k1", "Milk", category) }
+        check(runCatching { db.write { execute("INSERT INTO items(id, list, key, title) VALUES(?, ?, ?, ?)", nextId("items", list), list, "k2", "Milk") } }.isFailure)
+        db.write { execute("DELETE FROM categories WHERE list = ? AND id = ?", list, category) }
+        val items = Row.decode(db.read(query("SELECT id, title, category FROM items WHERE list = ?", JsonArray(listOf(buildJsonObject { put("type", "integer"); put("value", list.toString()) })))))
+        check(items.single().isNull("category") && items.single().text("title") == "Milk")
+    } finally { db.close() }
+}
+
 /** Runs with only this consumer, packaged jars and a JVM: no repository, native paths or build tools. */
 fun main(args: Array<String>) = runBlocking {
     val root = File(args.single()).also { it.mkdirs() }
@@ -144,6 +178,7 @@ fun main(args: Array<String>) = runBlocking {
     check(reopened.credentials.status().isIssuer)
     reopened.close()
     credentialPrimitives(File(root, "primitives"))
-    println("Packaged consumer passed: credential primitives, non-issuer executor, local sessions, authority/progress Flow, reconciliation, Kotlin handler/tickets, owned/borrowed networks, fresh restore and generation reopen")
+    groupedLists(File(root, "lists"))
+    println("Packaged consumer passed: grouped partitioned constraints, credential primitives, non-issuer executor, local sessions, authority/progress Flow, reconciliation, Kotlin handler/tickets, owned/borrowed networks, fresh restore and generation reopen")
 }
 

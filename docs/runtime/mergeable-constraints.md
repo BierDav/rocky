@@ -27,11 +27,14 @@ Definition data: index `unique` with `on_conflict` (`latest_wins` or
 `set_null`); table `foreign_keys` with `columns`, parent `table` and
 `on_delete` (`cascade` or `set_null`). `reference` declares an integer column
 if absent, nullable under `Delete.SetNull`, and may name the parent by SQL
-name. `unique` uses Room's default index name or an explicit `name`. After a
+name. A list of columns names a partitioned parent's identity, its partition
+columns first: `reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)`
+([partitioned references](#partitioned-references)). `unique` uses Room's default index name or an explicit `name`. After a
 Room import, add the policy in the overlay:
 `table("items") { onConflict("index_items_code", Conflict.LatestWins) }`. The
-importer reads `@ForeignKey` delete actions; deferred and ordinary Room
-references both become deferred native constraints.
+importer reads `@ForeignKey` delete actions and parent columns, which must be
+the parent's identity; deferred and ordinary Room references both become
+deferred native constraints.
 
 Generated statements, compared exactly at installation:
 
@@ -45,7 +48,7 @@ Generated statements, compared exactly at installation:
 | --- | --- |
 | Index columns exclude `id` and `row_kind` | Yes |
 | `set_null` index columns are nullable and outside the primary key | Yes |
-| Reference columns are INTEGER, not `id`/`row_kind`, one column naming the parent's `id` | Yes |
+| Reference columns are not `id`/`row_kind` and name the parent's identity: the child's partition columns for the parent's, then one INTEGER column for its `id` | Yes |
 | Non-partition `SET NULL` reference columns are nullable and outside the primary key | Yes |
 | Parent and child are mergeable, in one unpartitioned reader scope, or one explicit partition group with all partition columns mapped by position, or the parent is unpartitioned with an [existence log](#references-across-reader-scopes) | Yes |
 | `RESTRICT`, `NO ACTION`, `SET DEFAULT`, natural-key references, other table classes | Always |
@@ -158,8 +161,9 @@ covers eviction, offline rebootstrap and interruption recovery.
 A partitioned child may also reference an
 unpartitioned logged parent; its liveness and puppets use the existing keyless
 log contract. Partitioned existence logs remain deferred. These native shapes
-are tested in `rocky-secure`'s `partition_foreign_keys` module; builder and Room
-admission are phase 7.
+are tested in `rocky-secure`'s `partition_foreign_keys` module. The Kotlin
+builder and the Room import admit exactly these shapes and refuse the others
+before installation, each with its own message.
 
 ## Persisted constraints and open verification
 
@@ -190,6 +194,13 @@ on receipt, projection rebuild and reopen.
   `ConstraintDatabase` fixture with both policies and delete actions imports to
   the hand-built descriptor, installs natively, reopens, and is refused on the
   trusted profile.
+- `./kotlin run -m requiredSchema`: the scope's shopping schema, hand-built and
+  imported from Room with its overlay, has identical bytes and installs
+  natively from either; `ShoppingIntegrationTest` (`./kotlin test -m shared`)
+  covers its DAOs, per-list titles, `SET NULL` categories and cascading lists.
+- `cargo test -p rocky-sdk --test driver room_reads_each`: Room's
+  `foreign_key_list` reads each reference's own delete action when references
+  share a partition column.
 - `RoomConstraintsTest` (`./kotlin test -m room-qualification`): DAO inserts,
   local unique and dangling refusal, parent deletion, `SET NULL`, `CASCADE`
   and reopen through Rocky's driver.
@@ -208,5 +219,5 @@ on receipt, projection rebuild and reopen.
   row lose.
 
 Partitioned `SetNull` indexes are refused in phase 4: nulling the entire index
-would change its partition identity. Native foreign keys admit in-group identities
-and unpartitioned logged parents; Kotlin/Room shopping admission remains phase 7.
+would change its partition identity. Foreign keys admit in-group identities
+and unpartitioned logged parents, natively and in the Kotlin builder and Room import.

@@ -83,3 +83,11 @@ data class GroupItem(val list: Long, val key: String, val title: String, val id:
 @ConstructedBy(GroupDatabaseConstructor::class)
 abstract class GroupDatabase : RoomDatabase()
 expect object GroupDatabaseConstructor : RoomDatabaseConstructor<GroupDatabase> { override fun initialize(): GroupDatabase }
+
+// The single-table shopping entity of the unpartitioned walkthrough; the import refusals edit its export.
+@Entity(tableName = "shopping_items", indices = [Index(value = ["completed", "title"])])
+data class FlatItem(@PrimaryKey val id: Long, val title: String, val completed: Boolean, @ColumnInfo(defaultValue = "''") val searchTitle: String = title.lowercase(), @ColumnInfo(name = "row_kind") val rowKind: Long = 0)
+@Database(entities = [FlatItem::class], version = 2, exportSchema = true)
+@ConstructedBy(FlatDatabaseConstructor::class)
+abstract class FlatDatabase : RoomDatabase()
+expect object FlatDatabaseConstructor : RoomDatabaseConstructor<FlatDatabase> { override fun initialize(): FlatDatabase }

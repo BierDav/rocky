@@ -3,30 +3,21 @@
 Incomplete; audited on 2026-10-08. This is not a release qualification. The [current roadmap](../features_06/README.md)
 schedules the missing partition-aware constraints.
 
-## Required schema fails before installation
+## Required schema installs
 
 ```sh
 ./kotlin run -m requiredSchema
-cargo test -p rocky-core --locked partitioned_tables_refuse_constraints_and_command_control
 ```
 
-The first command, run in `examples/shoppinglist-app`, compiles the Kotlin-only
-[required definition](../../examples/shoppinglist-app/requiredSchema/src/RequiredSchema.kt)
-and attempts to build it. It exits nonzero:
-`items: a partitioned table takes no conflict policy or reference`
-(`SchemaBuilder.kt`). The definition declares lists partitioned by their own
-identity, items by list, a `LatestWins` unique index on `(list, title)` and a
-list foreign key.
-
-The second command is a native refusal regression: its success establishes the
-unsupported boundary. `LogicalTable::installable` refuses conflict policies,
-references and command control on partitioned tables;
-`LogicalSchema::installable` refuses foreign keys to partitioned parents.
-`Constraints::Node` and its dependency seeds identify rows by one unpartitioned
-scope and ID, which does not distinguish duplicate IDs across partitions.
-Removing the builder or native checks would bypass a real correctness
-boundary. Partitioned support rows and existence logs are refused for the same
-reason.
+Since [phase 7](../features_06/07-builder-room-and-shopping-schema.md) the
+Kotlin-only [required definition](../../examples/shoppinglist-app/requiredSchema/src/RequiredSchema.kt)
+builds: `lists`, `categories` and `items` in the `list` group, a `LatestWins`
+unique index on `(list, title)`, a cascading list reference and a nullable
+`(list, category)` reference with `SET NULL`. It equals the import of the app's
+Room export, and the native runtime installs either and reopens with the other.
+`./examples/shoppinglist-app/check` runs it first. Partitioned `SetNull`
+indexes, references across groups, existence logs and command control stay
+refused ([mergeable constraints](mergeable-constraints.md)).
 
 ## Acceptance scenarios
 
@@ -60,16 +51,16 @@ Internet readiness.
 | Scenario | Status |
 | --- | --- |
 | 1 Phones alternate through custody; checkpoint join | Partitioned Room app and multi-process scenario outstanding; one-phone LAN run only |
-| 2 Per-list exclusion and revocation | Partition primitives have regression evidence; app integration outstanding |
-| 3 Offline relink and duplicate title policy | Blocked at schema construction and native installation |
-| 4 Creator loss; second issuer invites and renews | Unpartitioned issuer recovery test exists; app integration outstanding |
+| 2 Per-list exclusion and revocation | The app shares a list with one envelope; JVM tests share, rotate and reshare; per-device exclusion on phones outstanding |
+| 3 Offline relink and duplicate title policy | Schema installs from Room; native per-partition convergence tested in `rocky-secure`; app scenario outstanding |
+| 4 Creator loss; second issuer invites and renews | `IssuerRecoveryTest` runs it on the partitioned app schema on the JVM; devices outstanding |
 | 5 All-device tombstone finalization and rebootstrap | Horizon regressions exist; app scenario outstanding |
 | 6 Market 4,096 commands, DAO stock, keyed read | Secure 4,100-command test exists; packaged scenario outstanding |
 | 7 ERP cross-scope foreign key with 200 partitions | Partition probe and unpartitioned existence tests are separate; combined fixture outstanding |
 
 None of the seven multi-process scenarios is implemented or run in CI. The
-Android phone runs the version-2 unpartitioned Room schema, not the required
-definition, and no device driver is in the tree. A single-phone LAN run cannot
+Android app now builds on the required version-3 definition, but no phone run
+used it, and no device driver is in the tree. A single-phone LAN run cannot
 establish the two-phone custody topology or Internet/NAT/relay readiness.
 
 ## Physical-device run, 2026-10-08

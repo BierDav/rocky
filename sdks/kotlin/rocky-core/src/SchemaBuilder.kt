@@ -35,9 +35,15 @@ data class Index(val name: String, val columns: List<IndexColumn>, val unique: B
         onConflict?.let { put("on_conflict", it.wire) }
     }
 }
-/** A reference to the identity (`id`) of a mergeable parent table. */
-data class ForeignKey(val columns: List<String>, val table: String, val onDelete: Delete) {
-    init { require(columns.isNotEmpty() && columns.all { it.matches(IDENTIFIER) } && table.matches(IDENTIFIER)) { "invalid foreign key to $table" } }
+/**
+ * A reference to the identity of a mergeable parent table: its partition columns, then `id`. [columns] holds one
+ * child column per identity column; [references], when given (as Room declares them), must name that identity.
+ */
+data class ForeignKey(val columns: List<String>, val table: String, val onDelete: Delete, val references: List<String>? = null) {
+    init {
+        require(columns.isNotEmpty() && columns.distinct().size == columns.size && columns.all { it.matches(IDENTIFIER) } && table.matches(IDENTIFIER)) { "invalid foreign key to $table" }
+        require(references == null || references.size == columns.size) { "foreign key to $table: one referenced column per column" }
+    }
     internal fun json(): JsonObject = buildJsonObject {
         put("columns", JsonArray(columns.map(::JsonPrimitive))); put("table", table); put("on_delete", onDelete.wire)
     }
@@ -122,13 +128,17 @@ class TableBuilder internal constructor(val name: String) {
         indexes[index] = old.copy(onConflict = policy)
     }
     /** A reference to [table]'s `id`; declares the integer [column] unless it exists. */
-    fun reference(column: String, table: String, onDelete: Delete) {
-        val declared = columns[column]
-        if (declared == null) integer(column, nullable = onDelete == Delete.SetNull)
-        else require(declared.kind == "integer") { "${this.name}.$column: a reference holds an integer id" }
-        foreignKey(ForeignKey(listOf(column), table, onDelete))
-    }
+    fun reference(column: String, table: String, onDelete: Delete) = reference(listOf(column), table, onDelete)
     fun reference(column: String, table: TableBuilder, onDelete: Delete) = reference(column, table.name, onDelete)
+    /**
+     * A reference to [table]'s identity: one column per partition column of [table], in its `partitionBy` order,
+     * then the one holding its `id`. Declares each absent column as an integer, nullable under [Delete.SetNull].
+     */
+    fun reference(columns: List<String>, table: String, onDelete: Delete) {
+        for (column in columns) if (column !in this.columns) integer(column, nullable = onDelete == Delete.SetNull)
+        foreignKey(ForeignKey(columns, table, onDelete))
+    }
+    fun reference(columns: List<String>, table: TableBuilder, onDelete: Delete) = reference(columns, table.name, onDelete)
     fun foreignKey(key: ForeignKey) {
         require(foreignKeys.none { it.columns == key.columns }) { "$name: duplicate foreign key ${key.columns}" }
         foreignKeys += key
@@ -153,16 +163,27 @@ class TableBuilder internal constructor(val name: String) {
             for (index in indexes.values.filter { it.unique && it.onConflict != null }) {
                 require(tableClass == TableClass.Mergeable && index.columns.all { it.name in columns }) { "$name: conflict policy needs mergeable application columns" }
                 if (index.onConflict == Conflict.SetNull) require(index.columns.all { columns[it.name]?.nullable == true && it.name !in key }) { "$name: SetNull index columns must be nullable and outside the key" }
+                // Rows clash only within one partition; uniqueness across partitions needs a strong command.
+                if (partitions.isNotEmpty()) {
+                    require(index.onConflict == Conflict.LatestWins) { "$name: unique index ${index.name} on a partitioned table takes Conflict.LatestWins; Conflict.SetNull is refused" }
+                    require(partitions.all { column -> index.columns.any { it.name == column } }) { "$name: unique index ${index.name} must include every partition column (${partitions.joinToString()}); uniqueness across partitions is refused" }
+                }
             }
             for (reference in foreignKeys) {
-                require(tableClass == TableClass.Mergeable && reference.columns.size == 1 && reference.columns.all { columns[it]?.kind == "integer" }) { "$name: a reference holds one integer id in a mergeable table" }
-                if (reference.onDelete == Delete.SetNull) require(reference.columns.all { columns[it]?.nullable == true && it !in key }) { "$name: SetNull reference columns must be nullable and outside the key" }
+                require(tableClass == TableClass.Mergeable) { "$name: a reference needs a mergeable table" }
+                for (column in reference.columns) {
+                    require(column in partitions || columns[column]?.kind == "integer") { "$name.$column: a reference holds an integer id unless the column is a partition column" }
+                }
+                if (reference.onDelete == Delete.SetNull) {
+                    val nulled = reference.columns.filterNot { it in partitions }
+                    require(nulled.isNotEmpty()) { "$name: a SetNull reference needs a column outside the partition columns" }
+                    require(nulled.all { columns[it]?.nullable == true && it !in key }) { "$name: SetNull reference columns must be nullable and outside the key" }
+                }
             }
         }
         require(foreignKeys.all { key -> key.columns.all { it in columns } }) { "$name: a foreign key names an absent column" }
         require(partitions.all { it in key && (it == "id" || columns[it]?.let { column -> !column.nullable && !column.localOnly && column.derived == null } == true) }) { "$name: partition columns must be non-null primary-key columns" }
-        // Constraint resolution runs within one unpartitioned scope.
-        require(partitions.isEmpty() || (foreignKeys.isEmpty() && indexes.values.none { it.onConflict != null })) { "$name: a partitioned table takes no conflict policy or reference" }
+        require(partitions.isEmpty() || tableClass != TableClass.CommandControlled) { "$name: a partitioned table cannot be command-controlled" }
         // Puppets copy only the id of a referenced row.
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }

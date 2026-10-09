@@ -8,6 +8,7 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
         require(application.matches(IDENTIFIER) && version > 0 && tables.isNotEmpty() && tables.size <= 64)
         require(tables.map { it.name }.distinct().size == tables.size)
         validatePartitionGroups(tables)
+        validateReferences(tables)
         require(tables.all { it.primaryKey.isNotEmpty() }) { "every table declares a primary key; use the schema builder" }
     }
     /** The definition the runtime installs; equivalent declarations produce equal JSON. */

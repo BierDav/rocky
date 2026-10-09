@@ -12,7 +12,7 @@ import rocky.room.followRocky
 
 /** Room's DAOs on Rocky's file, with keys in the Keystore; Android ends the process and its jobs together. */
 class Shopping(val runtime: RockyDatabase, val database: ShoppingDatabase) {
-    val repository = ShoppingRepository(database)
+    val repository = ShoppingRepository(database, runtime)
 }
 
 class ShoppingApplication : Application() {

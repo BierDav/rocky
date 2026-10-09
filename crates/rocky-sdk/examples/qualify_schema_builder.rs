@@ -22,6 +22,7 @@ async fn main() -> Result<(), Failure> {
         ("partitions-hand", "partitions-import"),
         ("groups-hand", "groups-import"),
         ("existence-hand", "existence-import"),
+        ("lists-hand", "lists-import"),
     ] {
         let hand = descriptor(&directory.join(format!("{hand}.json")))?;
         let imported = descriptor(&directory.join(format!("{imported}.json")))?;
@@ -84,6 +85,7 @@ async fn main() -> Result<(), Failure> {
         ("partitions-hand", "partitions-import"),
         ("groups-hand", "groups-import"),
         ("existence-hand", "existence-import"),
+        ("lists-hand", "lists-import"),
     ] {
         let path = scratch.path().join(hand);
         let handwritten = fs::read_to_string(directory.join(format!("{hand}-wire.json")))?;
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Failure> {
             "shopping_items"
         } else if hand == "constraints-hand" || hand == "existence-hand" {
             "children"
-        } else if hand == "groups-hand" {
+        } else if hand == "groups-hand" || hand == "lists-hand" {
             "items"
         } else if hand == "partitions-hand" {
             "partition_samples"
@@ -137,7 +139,7 @@ async fn main() -> Result<(), Failure> {
         }
     }
     println!(
-        "seven hand/import descriptor and fingerprint pairs passed; all SDK schemas installed and reopened"
+        "eight hand/import descriptor and fingerprint pairs passed; all SDK schemas installed and reopened"
     );
     Ok(())
 }

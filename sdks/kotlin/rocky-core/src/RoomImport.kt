@@ -143,13 +143,16 @@ private fun importEntity(name: String, entity: JsonObject): Table {
     return builder.build(policies = false).copy(roomIdentityIndex = identityIndex ?: key.takeIf { "id" in it })
 }
 
-/** One `@ForeignKey`: it must name the parent's `id` and a delete action Rocky derives. */
+/** One `@ForeignKey`: it names the parent's identity, its partition columns then `id`, and a delete action Rocky derives. */
 private fun importForeignKey(key: JsonObject, sql: RoomSql): ForeignKey {
     require(key.keys.all { it in setOf("table", "onDelete", "onUpdate", "columns", "referencedColumns") }) { "unsupported foreign key feature" }
     val table = key.getValue("table").jsonPrimitive.content
     val columns = key.getValue("columns").jsonArray.map { it.jsonPrimitive.content }
     val referenced = key.getValue("referencedColumns").jsonArray.map { it.jsonPrimitive.content }
-    require(referenced == listOf("id")) { "a foreign key to $table must reference its id; a natural-key reference is refused" }
+    // The parent's partition columns come from the overlay; the schema checks them once every table is declared.
+    require(referenced.lastOrNull() == "id" && referenced.size == columns.size && referenced.distinct().size == referenced.size) {
+        "a foreign key to $table must reference its identity (partition columns, then id); a natural-key reference is refused"
+    }
     val onDelete = key["onDelete"]?.jsonPrimitive?.content ?: "NO ACTION"
     val onUpdate = key["onUpdate"]?.jsonPrimitive?.content ?: "NO ACTION"
     val action = when (onDelete) {
@@ -163,7 +166,7 @@ private fun importForeignKey(key: JsonObject, sql: RoomSql): ForeignKey {
     referenced.forEachIndexed { i, column -> if (i > 0) sql.expect(","); sql.identifier(column) }
     sql.expect(")", "ON", "UPDATE"); sql.action(onUpdate); sql.expect("ON", "DELETE"); sql.action(onDelete)
     if (sql.take("DEFERRABLE")) sql.expect("INITIALLY", "DEFERRED")
-    return ForeignKey(columns, table, action)
+    return ForeignKey(columns, table, action, referenced)
 }
 
 /** A deliberately narrow grammar: unrepresented SQL is refused instead of dropped. */

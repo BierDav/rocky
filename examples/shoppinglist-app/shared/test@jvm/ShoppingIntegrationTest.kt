@@ -200,12 +200,63 @@ class ShoppingIntegrationTest {
         } finally { d?.close(); s?.close(); a.close(); root.deleteRecursively() }
     }
 
-    private val shopper = GrantProfile.Writer(setOf("shopping_items"))
+    private val shopper = GrantProfile.Writer(ShoppingTables.toSet())
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
     @Test fun `the hand-declared schema is the Room export's`() {
-        val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/2.json").readText()
-        assertEquals(schemaFromRoom("shopping", export).definitionJson("09".repeat(32)), ShoppingSchema.definitionJson("09".repeat(32)))
+        val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/3.json").readText()
+        assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
+        assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
+    }
+
+    /** Shares [list] from [owner] with [reader] through one envelope, as the application delivers it. */
+    private suspend fun share(owner: ShoppingRepository, reader: Pair<RockyDatabase, ShoppingRepository>, list: Long) {
+        // A joined device finishes its own bootstrap before it starts a list from a checkpoint.
+        assertEquals(ConnectionState.Connected, reader.first.syncOnce().state)
+        val node = reader.first.session().node
+        val envelopes = owner.share(list, listOf(node))
+        reader.second.accept(list, envelopes.getValue(node))
+    }
+
+    @Test fun `a list shares its categories and items and deleting a category nulls only the reference`() = runBlocking {
+        val root = directory()
+        val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
+        a.installShoppingAuthor()
+        val da = openShoppingDatabase(File(root, "a"), a)
+        val repository = ShoppingRepository(da, a)
+        try {
+            val list = repository.createList("Groceries")
+            val other = repository.createList("Hardware")
+            assertNotEquals(list, other)
+            val dairy = repository.addCategory(list, "Dairy")
+            val milk = repository.add(list, "Milk", category = dairy)
+            val eggs = repository.add(list, "Eggs")
+            repository.categorize(list, eggs, dairy)
+            // Titles are unique per list, not across lists.
+            assertFailsWith<Exception> { repository.add(list, "Milk") }
+            repository.add(other, "Milk")
+            assertEquals(listOf("Eggs", "Milk"), da.items().all(list).map { it.title }.sorted())
+            assertTrue(da.items().all(list).all { it.category == dairy })
+
+            // One call: one envelope per recipient covers the list's every table.
+            val reader = Credentials.prepare(File(root, "reader")).getValue("node").jsonPrimitive.content
+            val shared = repository.share(list, listOf(reader))
+            assertEquals(setOf(reader), shared.keys)
+            val status = a.partitions.status("list", listPartition(list))
+            assertEquals(ShoppingTables.toSet(), status.getValue("tables").jsonArray.map { it.jsonObject.getValue("table").jsonPrimitive.content }.toSet())
+            assertTrue(status.getValue("tables").jsonArray.all { it.jsonObject.getValue("epochs") == status.getValue("epochs") })
+
+            repository.deleteCategory(list, dairy)
+            val items = da.items().all(list)
+            assertEquals(listOf(milk, eggs).sorted(), items.map { it.id }.sorted())
+            assertTrue(items.all { it.category == null && it.list == list })
+            assertTrue(da.categories().all(list).isEmpty())
+
+            repository.deleteList(list)
+            assertTrue(da.items().all(list).isEmpty())
+            assertEquals(listOf("Hardware"), da.lists().all().map { it.title })
+            assertEquals(listOf("Milk"), da.items().all(other).map { it.title })
+        } finally { da.close(); a.close(); root.deleteRecursively() }
     }
 
     @Test fun `offline DAO edits converge with conflicting fields and permanent deletion`() = runBlocking {
@@ -213,7 +264,7 @@ class ShoppingIntegrationTest {
         val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
         a.installShoppingAuthor()
         val da = openShoppingDatabase(File(root, "a"), a)
-        val ra = ShoppingRepository(da)
+        val ra = ShoppingRepository(da, a)
         var b: RockyDatabase? = null
         var db: ShoppingDatabase? = null
         try {
@@ -222,26 +273,29 @@ class ShoppingIntegrationTest {
             b = RockyDatabase.join(File(root, "b"), ShoppingSchema, invitation.uri, local(), automaticSync = false)
             b.installShoppingAuthor(issuer = a)
             db = openShoppingDatabase(File(root, "b"), b)
-            val rb = ShoppingRepository(db)
-            val id = ra.add("Milk")
+            val rb = ShoppingRepository(db, b)
+            val list = ra.createList("Groceries")
+            share(ra, b to rb, list)
+            val id = ra.add(list, "Milk")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(listOf("Milk"), db.items().all().map { it.title })
+            assertEquals(listOf("Groceries"), db.lists().all().map { it.title })
+            assertEquals(listOf("Milk"), db.items().all(list).map { it.title })
             a.setOnline(false); b.setOnline(false)
-            ra.rename(id, "Oat milk")
-            rb.check(id, true)
-            rb.add("Eggs")
-            assertEquals(2, db.items().all().size)
+            ra.rename(list, id, "Oat milk")
+            rb.check(list, id, true)
+            rb.add(list, "Eggs")
+            assertEquals(2, db.items().all(list).size)
             assertEquals(ConnectionState.Offline, b.syncOnce().state)
             a.setOnline(true); b.setOnline(true)
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(da.items().all(), db.items().all())
-            assertEquals(ShoppingItem(id, "Oat milk", completed = true), da.items().all().first { it.id == id })
+            assertEquals(da.items().all(list), db.items().all(list))
+            assertEquals("Oat milk" to true, da.items().all(list).first { it.id == id }.let { it.title to it.completed })
             a.setOnline(false)
-            ra.delete(id)
-            rb.rename(id, "Late rename")
+            ra.delete(list, id)
+            rb.rename(list, id, "Late rename")
             a.setOnline(true); b.syncOnce()
-            assertEquals(listOf("Eggs"), db.items().all().map { it.title })
-            assertEquals(da.items().all(), db.items().all())
+            assertEquals(listOf("Eggs"), db.items().all(list).map { it.title })
+            assertEquals(da.items().all(list), db.items().all(list))
         } finally { db?.close(); b?.close(); da.close(); a.close(); root.deleteRecursively() }
     }
 
@@ -257,16 +311,19 @@ class ShoppingIntegrationTest {
             b = RockyDatabase.join(File(root, "b"), ShoppingSchema, a.pairing(shopper).uri, tcp(), automaticSync = false)
             b.installShoppingAuthor(issuer = a)
             db = openShoppingDatabase(File(root, "b"), b)
-            val repository = ShoppingRepository(db)
+            val repository = ShoppingRepository(db, b)
+            val owner = ShoppingRepository(da, a)
+            val list = owner.createList("Groceries")
+            share(owner, b to repository, list)
             following = launch(Dispatchers.IO) { db.followRocky(b) }
-            val synced = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe("tea", false).first { it.isNotEmpty() } } }
-            val id = ShoppingRepository(da).add("Green Tea")
+            val synced = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe(list, "tea", false).first { it.isNotEmpty() } } }
+            val id = owner.add(list, "Green Tea")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(id, synced.await().single().id)
-            val checked = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe("tea", false).first { it.isEmpty() } } }
-            repository.check(id, true)
+            val checked = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe(list, "tea", false).first { it.isEmpty() } } }
+            repository.check(list, id, true)
             checked.await()
-            assertTrue(repository.observe().first().single().completed)
+            assertTrue(repository.observe(list).first().single().completed)
         } finally {
             following?.cancelAndJoin(); db?.close(); b?.close(); da.close(); a.close(); root.deleteRecursively()
         }

@@ -13,10 +13,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import org.example.examples.shopping.ShoppingRepository
 import org.example.examples.shopping.ShoppingScreen
 
-/** The shared Compose screen. Extras for drivers: `invitation`, `transport` (`tcp` or iroh) and `add`. */
+/** The shared Compose screen. Extras for drivers: `invitation`, `transport` (`tcp` or iroh) and `add`, to the first list. */
 class MainActivity : ComponentActivity() {
     private val app get() = application as ShoppingApplication
     private var log: Job? = null
@@ -47,8 +48,8 @@ class MainActivity : ComponentActivity() {
                 Log.e(TAG, "open failed", error)
                 return@launch
             }
-            repository.observe().collect { rows ->
-                Log.i(TAG, "items " + rows.joinToString(",", "[", "]") { it.title + ":" + it.completed })
+            repository.lists().collect { rows ->
+                Log.i(TAG, "lists " + rows.joinToString(",", "[", "]") { it.id.toString() + ":" + it.title })
             }
         }
         handle(intent)
@@ -66,7 +67,12 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent) {
         val title = intent.getStringExtra("add") ?: return
         app.scope.launch {
-            try { app.shopping().await().repository.add(title) } catch (error: Exception) { failed(error) }
+            try {
+                val repository = app.shopping().await().repository
+                // Drivers add to the first list, which they create on first use.
+                val list = repository.lists().first().firstOrNull()?.id ?: repository.createList("Shopping")
+                repository.add(list, title)
+            } catch (error: Exception) { failed(error) }
         }
     }
 

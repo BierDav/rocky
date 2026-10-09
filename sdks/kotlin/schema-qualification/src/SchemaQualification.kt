@@ -23,8 +23,8 @@ fun main(args: Array<String>) {
     File(args[0]).mkdirs()
     File(args[0], "samples.json").writeText(samples.definitionJson("09".repeat(32)))
     val root = File(args[1])
-    // The shopping entity's key is the id Rocky issues.
-    val shoppingExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/2.json").readText()
+    // The flat shopping entity: its key is the id Rocky issues.
+    val shoppingExport = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.FlatDatabase/2.json").readText()
     val shopping = schemaFromRoom("shopping", shoppingExport) {
         table("shopping_items") { logical = "items"; configureColumn("title") { it.copy(logical = "label") } }
     }
@@ -247,6 +247,37 @@ fun main(args: Array<String>) {
         File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
         File(args[0], "$name-wire.json").writeText(declaration.json())
     }
+    // The scope's shopping schema: lists, categories and items in one group, a per-list title policy,
+    // a cascading list reference and a multi-column SetNull category reference.
+    val shoppingLists = schema("shopping", 3) {
+        table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+        table("categories") {
+            integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
+            reference("list", "lists", onDelete = Delete.Cascade)
+        }
+        table("items") {
+            integer("list"); text("key"); text("title"); boolean("completed"); integer("category", nullable = true)
+            primaryKey("list", "key"); partitionBy("list", group = "list")
+            unique("list", "title", onConflict = Conflict.LatestWins)
+            index("index_items_list_category", "list", "category")
+            reference("list", "lists", onDelete = Delete.Cascade)
+            reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
+        }
+    }
+    val listsExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/3.json").readText()
+    val listsOverlay: SchemaBuilder.() -> Unit = {
+        table("lists") { partitionBy("id", group = "list") }
+        table("categories") { partitionBy("list", group = "list") }
+        table("items") { partitionBy("list", group = "list"); onConflict("index_items_list_title", Conflict.LatestWins) }
+    }
+    val listsImport = schemaFromRoom("shopping", listsExport, listsOverlay)
+    check(shoppingLists.definitionJson("09".repeat(32)) == listsImport.definitionJson("09".repeat(32)))
+    check(shoppingLists.json() == listsImport.json())
+    for ((name, declaration) in listOf("lists-hand" to shoppingLists, "lists-import" to listsImport)) {
+        File(args[0], "$name.json").writeText(declaration.definitionJson("09".repeat(32)))
+        File(args[0], "$name-wire.json").writeText(declaration.json())
+    }
+    refusePartitionedShapes(listsExport, listsOverlay)
     val reversed = schema("market", 2) {
         table("holds") { text("key"); integer("reserved"); primaryKey("key") }
         table("stock") { text("key"); integer("remaining"); primaryKey("key") }
@@ -258,5 +289,39 @@ fun main(args: Array<String>) {
     // Only format-3 tables exist: a register table without a key is refused before the engine sees it.
     check(runCatching { Schema("legacy", tables = listOf(Table("t", listOf(Column.text("x"))))) }.exceptionOrNull()?.message ==
         "every table declares a primary key; use the schema builder")
-    println("schema builder, groups, existence log and shopping/market/scalar Room import qualification passed")
+    println("schema builder, groups, existence log, partitioned constraints and shopping/market/scalar Room import qualification passed")
+}
+
+/** Each partitioned shape that stays refused fails before installation with its own message. */
+private fun refusePartitionedShapes(listsExport: String, listsOverlay: SchemaBuilder.() -> Unit) {
+    fun refused(reason: String, block: SchemaBuilder.() -> Unit) {
+        val message = runCatching { schema("refused", block = block) }.exceptionOrNull()?.message ?: error("accepted: $reason")
+        check(reason in message) { message }
+    }
+    val lists: SchemaBuilder.() -> Unit = { table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") } }
+    fun TableBuilder.item(group: String? = "list") { integer("list"); text("title"); text("note", nullable = true); primaryKey("list", "id"); partitionBy("list", group = group) }
+    // Uniqueness across partitions is a strong command.
+    refused("must include every partition column") { lists(); table("items") { item(); unique("title", onConflict = Conflict.LatestWins) } }
+    refused("takes Conflict.LatestWins; Conflict.SetNull is refused") { lists(); table("items") { item(); unique("note", onConflict = Conflict.SetNull) } }
+    // References between partitioned tables of different groups wait for partitioned existence logs.
+    refused("needs the same explicit partition group") { lists(); table("items") { item(group = null); reference("list", "lists", onDelete = Delete.Cascade) } }
+    refused("needs the same explicit partition group") { lists(); table("notes") { text("text"); integer("list"); primaryKey("id"); reference("list", "lists", onDelete = Delete.Cascade) } }
+    refused("only if it is unpartitioned with an existence log") {
+        table("products") { text("name"); primaryKey("id") }
+        table("lines") { text("customer"); integer("product"); primaryKey("customer", "id"); partitionBy("customer"); reference("product", "products", onDelete = Delete.Cascade) }
+    }
+    refused("one column per identity column (list, id)") { lists(); table("tags") { item() }; table("items") { item(); integer("tag"); reference("tag", "tags", onDelete = Delete.Cascade) } }
+    refused("maps its partition columns by position") { lists(); table("tags") { item() }; table("items") { item(); integer("tag"); reference(listOf("tag", "list"), "tags", onDelete = Delete.Cascade) } }
+    refused("needs a column outside the partition columns") { lists(); table("items") { item(); reference("list", "lists", onDelete = Delete.SetNull) } }
+    refused("cannot be command-controlled") { table("holds") { text("customer"); primaryKey("customer"); partitionBy("customer"); tableClass = TableClass.CommandControlled } }
+    refused("an existence log needs an unpartitioned") { table("lists") { text("title"); primaryKey("id"); partitionBy("id"); existenceLog = true } }
+    refused("names the unknown table") { lists(); table("items") { item(); reference("list", "missing", onDelete = Delete.Cascade) } }
+    // From Room: a reference must name the parent's identity as the overlay partitions it.
+    val natural = listsExport.replace(Regex("(\"referencedColumns\": \\[\\s*)\"list\""), "$1\"name\"")
+        .replace("REFERENCES `categories`(`list`, `id`)", "REFERENCES `categories`(`name`, `id`)")
+    check(natural != listsExport)
+    check(runCatching { schemaFromRoom("shopping", natural, listsOverlay) }.exceptionOrNull()?.message?.contains("must name its identity (list, id)") == true)
+    // The overlay must partition what the Room keys declare: categories are keyed by (list, id).
+    val unpartitioned = runCatching { schemaFromRoom("shopping", listsExport) { table("items") { onConflict("index_items_list_title", Conflict.LatestWins) } } }
+    check(unpartitioned.exceptionOrNull()?.message?.contains("categories: Room identity index must contain partition columns followed by id") == true) { unpartitioned.toString() }
 }

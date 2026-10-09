@@ -26,15 +26,16 @@ Decided 2026-10-08: the shopping app also gains `categories`, partitioned by
 `(list, category) → categories` uses `Delete.SetNull`. It qualifies the
 multi-column in-group reference and `SET NULL`.
 
-Reproduce with `./kotlin run -m requiredSchema`. It fails with
-`items: a partitioned table takes no conflict policy or reference`. The native
-refusal is pinned by `partitioned_tables_refuse_constraints_and_command_control`.
+`./kotlin run -m requiredSchema` installs it, with groups and categories, since
+[phase 7](07-builder-room-and-shopping-schema.md). Before, it failed with
+`items: a partitioned table takes no conflict policy or reference`.
 
 ## What exists today
 
 Native admission accepts partition-complete `LatestWins` indexes and phase 5
 foreign keys within a partition group or to an unpartitioned logged parent.
-Resolution uses partition-aware identities. Kotlin/Room admission remains phase 7. The starting refusals and gaps below explain
+Resolution uses partition-aware identities. The Kotlin builder and Room import
+admit the same shapes since phase 7. The starting refusals and gaps below explain
 the roadmap boundary; current behavior is in
 [mergeable constraints](../runtime/mergeable-constraints.md).
 

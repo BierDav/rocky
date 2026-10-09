@@ -72,6 +72,11 @@ Every entity carries Rocky's identity as two non-null integer fields:
   creates: `@Index(value = ["id"], unique = true, name = "<table>_identity")`.
 - `row_kind`, 0 for application rows; other kinds are reserved.
 
+A `@ForeignKey` names the parent's identity: `parentColumns = ["id"]`, or a
+partitioned parent's partition columns then `id`, such as `["list", "id"]`
+with `childColumns = ["list", "category"]` in the
+[shopping example](../../examples/shoppinglist-app/shared/src/ShoppingDatabase.kt).
+
 `autoGenerate = true` is refused: Room never assigns a row id. Importing the
 export refuses an entity without both fields, with `autoGenerate`, or with a
 missing or misnamed identity index, naming the entity

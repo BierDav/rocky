@@ -78,9 +78,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: taiki-e/install-action@v2
-        if: steps.passed.outputs.cache-hit != 'true'
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
         with:
           tool: cargo-nextest
+
+      # install-action's checksum check fails with the Gitea runner's sha256sum.
+      - name: Install cargo-nextest on Gitea
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+            | tar -xzf - -C "${CARGO_HOME}/bin"
 
       - name: Run shared checks
         if: steps.passed.outputs.cache-hit != 'true'
@@ -153,9 +161,17 @@ jobs:
           save-if: false
 
       - uses: taiki-e/install-action@v2
-        if: steps.passed.outputs.cache-hit != 'true'
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
         with:
           tool: cargo-nextest
+
+      # install-action's checksum check fails with the Gitea runner's sha256sum.
+      - name: Install cargo-nextest on Gitea
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+            | tar -xzf - -C "${CARGO_HOME}/bin"
 
       - name: Run soak tests
         if: steps.passed.outputs.cache-hit != 'true'

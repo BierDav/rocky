@@ -1,45 +1,93 @@
 # 1. Test speed
 
 Status: not started.
-Owner: `scripts/check`, the nextest configuration, CI workflows and the Kotlin
-check tooling. No dependency. Wave 0.
+Owner: `scripts/check`, `.config/nextest.toml`, `.github/workflows`,
+`sdks/native/check`, the root `./kotlin check` and
+`examples/shoppinglist-app/check`. No dependency. Wave 0.
 Follow the [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
 
-Read [development](../development.md), `scripts/check`, `.github/workflows`
-and the check scripts of `sdks/native`, `sdks/kotlin` and the shopping
-example. Checking is the slowest step of every phase, and this roadmap adds an
-iOS matrix and multi-issuer concurrency tests. Make the development loop and
-the full gate measurably faster without removing coverage.
+Read [development](../development.md), `scripts/check`,
+`.config/nextest.toml`, `.github/workflows/check.yml` and `release.yml`, and
+the three check commands in the owner line. Checking is the slowest step of
+every phase, and this roadmap adds an iOS matrix, a market harness and
+multi-issuer concurrency tests. Make the development loop and the full gate
+measurably faster without removing coverage, and leave a workflow layout that
+later phases add jobs to.
+
+## Settled
+
+- The baseline is taken with the staged `scripts/check` (`--build` writes
+  nextest archives, `--from` runs them) landed and described in
+  [development](../development.md#shared-checks). If the CI section there
+  still describes a single `check` job, correct it in slice 1.
+- The baseline host is the developer machine that runs device work, an Apple
+  silicon Mac, named with its model, core count and toolchain. CI times are
+  read from the hosted `macos-latest` runner and the Gitea runner separately.
+- Starting budgets, replaced by measured ones in slice 2 and never loosened
+  beyond these without a stated cause:
+  - targeted loop: the tests of any one package finish within 60 s after an
+    incremental build;
+  - `./scripts/check` with a warm build: 10 minutes;
+  - CI from push to a green `check` job with a restored cache: 30 minutes,
+    and `lint` 5 minutes;
+  - a single test: 60 s, the existing slow-test period.
+- Already done and not candidates: soak tests are ignored and run by
+  `./scripts/check --slow`; CI caches Cargo, the Kotlin toolchain and the
+  Android runtime; the `ci` profile terminates a test after ten 60-second
+  periods.
+- Merging integration tests into fewer binaries and sharing fixtures across
+  tests edits files that phases 2 to 6 also edit. That work finishes before
+  wave 1 starts or is dropped and recorded as dropped.
+- The workflow restructuring lands before phases 17, 18, 19 and 21 add their
+  CI jobs ([hazards](README.md#shared-format-hazards)).
 
 ## Ordered slices
 
-1. Baseline on the qualification host: wall time of `./scripts/check`, of
-   each Kotlin, native and example check, and of each CI job; the twenty
-   slowest tests and test binaries; compile time against run time.
-2. From the baseline, set a budget for the targeted loop
-   (`cargo test -p <package>`), for `./scripts/check` and for CI, and record
-   them in [development](../development.md).
+1. Baseline: wall time of `./scripts/lint`, `./scripts/check`,
+   `./scripts/check --slow`, `./kotlin check`, `./sdks/native/check`,
+   `./examples/shoppinglist-app/check` and `qualify`, and of each CI job; the
+   twenty slowest tests and test binaries; compile and link time against run
+   time; the number of passing tests per command.
+2. Replace the starting budgets with measured ones and record them in
+   [development](../development.md), with the command that checks each.
 3. Meet the budgets. Candidates, in the order the baseline justifies:
-   - tests that wait on timeouts or sleeps move to injected clocks and the
-     in-process hub's faults;
+   - tests that wait on timeouts or sleeps move to Tokio's paused clock and
+     the in-process hub's faults;
    - fixtures built once per binary instead of per test;
-   - fewer, larger integration binaries where link time dominates;
-   - measurement probes and soaks kept out of the default profile;
-   - Kotlin checks that rebuild the native library reuse one build;
-   - CI caches for Cargo, the Kotlin toolchain and the Android runtime.
-4. A check that fails when a single test exceeds a stated duration, so the
-   budget does not erode.
+   - fewer, larger integration binaries where link time dominates, within the
+     wave 0 limit above;
+   - Kotlin and example checks that rebuild the native library reuse one
+     build;
+   - CI jobs that still compile what the `build` job archived.
+4. The per-test limit also applies locally: the default nextest profile
+   terminates a test that exceeds the budget of slice 2, with named overrides
+   for the tests that legitimately need longer.
+5. Workflow layout: one documented place where a later phase adds a job that
+   reuses the build archives and caches, described in
+   [development](../development.md#ci).
 
 ## Completion gate
 
 - Baseline and result are recorded with host, toolchain and commands.
-- The three budgets are met, or each miss names its cause.
-- No test was deleted or ignored to meet a budget without a stated reason.
-- The number of passing tests is not lower than at the baseline.
-- `./scripts/check` and the Kotlin, native and example checks pass.
+- Each budget is met, or the miss names its cause and its largest test.
+- The number of passing tests of each command is not lower than at the
+  baseline; a test deleted, merged or ignored is listed with its reason.
+- A test that sleeps past the per-test limit fails `./scripts/check` locally
+  and in CI, shown once with a deliberate probe that is then removed.
+- `./scripts/lint`, `./scripts/check`, `./scripts/check --slow`,
+  `./kotlin check`, `./sdks/native/check` and the shopping check pass.
 
 ## Not in this phase
 
-Faster production code, a different test framework and remote build caches.
+- Faster production code, changed production timeouts or weaker assertions.
+- A different test framework, remote build caches or new runners.
+- Optimization levels of workspace crates without a measurement that
+  justifies them.
+- The iOS simulator job ([phase 17](17-kotlin-native-binding.md)), the iOS
+  packaged-consumer job
+  ([phase 18](18-ios-packaging-keychain-lifecycle.md)), the market job
+  ([phase 19](19-market-example.md)) and the application simulator job
+  ([phase 21](21-shopping-and-market-on-ios.md)).
+- Provisioning or reconfiguring the Gitea runners.

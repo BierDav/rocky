@@ -2,7 +2,7 @@
 # Container image for the public coordination service's voter binary.
 #
 # The image is built and pushed to GHCR as a private package by the image jobs
-# of `.github/workflows/check.yml`. Its deployment is described in
+# of `.github/workflows/release.yml`. Its deployment is described in
 # `docs/runtime/coordinator-operations.md`; the operator runbook is
 # `docs/runtime/coordinator-operations.md`.
 

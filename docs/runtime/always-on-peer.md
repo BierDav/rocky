@@ -61,9 +61,9 @@ issuer identity, non-custody grants or recorded reader keys are refused before
 opening the runtime. Configuration names no schema creation or issuing mode.
 Credentials still expire: an issuer must be reachable to renew them.
 
-The image jobs of the [baseline workflow](../development.md#ci) build amd64 and
-arm64 on native runners and publish `ghcr.io/bierdav/rocky-db-peer:main` and
-`:sha-<commit>` after a qualifying main push. Pin the manifest digest and handle GHCR visibility as for
+The [release workflow](../releasing.md) builds amd64 and arm64 on native runners
+and publishes `ghcr.io/bierdav/rocky-db-peer` with the version, channel and
+`sha-<commit>` tags. Pin the manifest digest and handle GHCR visibility as for
 the [coordinator image](coordinator-operations.md#container-image-and-deployment-shape).
 
 ## Change-driven sync

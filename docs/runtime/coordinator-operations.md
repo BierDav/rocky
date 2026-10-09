@@ -54,13 +54,13 @@ only, and starts three voter processes. Nothing it writes is a production key.
 
 ## Container image and deployment shape
 
-The image jobs of the [baseline workflow](../development.md#ci) build `rocky-voter` from
+The [release workflow](../releasing.md) builds `rocky-voter` from
 `crates/rocky-coordinator/Dockerfile` for `linux/amd64` and `linux/arm64` on
 native runners, merges them with `docker buildx imagetools create` and pushes
-`ghcr.io/bierdav/rocky-db-coordinator:main` and `:sha-<commit>` on qualifying
-`main` pushes; pull requests only build. The image is the binary as entrypoint
+`ghcr.io/bierdav/rocky-db-coordinator:<version>`, the channel tag (such as
+`:nightly`) and `:sha-<commit>`. The image is the binary as entrypoint
 and carries no keys, configuration or trust bundle. The GHCR package stays
-private; give the cluster a `ghcr-pull` registry secret. Pin the manifest digest (`:main` moves; Argo CD does not roll a
+private; give the cluster a `ghcr-pull` registry secret. Pin the manifest digest (channel tags move; Argo CD does not roll a
 workload when a tag moves), kept current with Renovate.
 
 Run one voter per node as a DaemonSet with host networking and a node-local

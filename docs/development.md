@@ -165,12 +165,13 @@ The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
 baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
 commit whose completed run of it failed.
 
-The image jobs build the coordinator and custody peer images for amd64 and arm64
-on native runners. Pull requests and pushes to `main` build an image when its
-sources changed, judged from the forge's compare endpoint; pull requests do not
-push. On `main`, and for every release, the manifests are published once
-`check` passes. They live in the baseline workflow so the Actions sidebar lists
-only the baseline, commit-message and release workflows.
+A release calls the baseline workflow, so a commit is built once: when `check`
+already passed for its tree, the release's `build` and `check` skip. A job whose
+build artifact is missing, for example after its one-day retention, builds what
+it runs itself; a release of an unchecked tree runs the build and checks.
+
+Only the release workflow builds and publishes the container images, so the
+Actions sidebar lists just the baseline, commit-message and release workflows.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on

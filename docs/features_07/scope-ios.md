@@ -1,6 +1,6 @@
 # Scope: iOS on Kotlin Multiplatform
 
-Status: agreed 2026-10-09. Implemented by phases 13, 14 and 18 of
+Status: agreed 2026-10-09. Implemented by phases 17, 18 and 21 of
 [the roadmap](README.md).
 Owner: `sdks/native`, `sdks/kotlin` and its tooling, the example applications.
 
@@ -10,8 +10,9 @@ The Kotlin SDK reaches the runtime through UniFFI's Kotlin bindings, which
 call the native library with JNA. JNA exists on the JVM and on Android only,
 so `rocky-core`, `rocky-sqlite` and `rocky-room` declare
 `platforms: [jvm, android]` and nothing runs on an iPhone. The application
-code is already portable: the shopping example's `shared` module is Compose
-Multiplatform with Room and holds no Rust source.
+code is close to portable: the shopping example's `shared` module is Compose
+Multiplatform with Room and holds no Rust source, but it and the SDK's public
+openers still use `java.*` types, and every SDK test is a JVM test.
 
 ## What I need
 
@@ -49,14 +50,20 @@ The same Kotlin API on iOS, with the platform pieces
 - **One iPhone and simulators.** Qualification uses the iOS simulator and one
   physical iPhone, driven with `agent-device`; the cross-platform pair is that
   iPhone and one Android phone.
-
-## Left to the phase
-
-- **The binding mechanism.** Generated Kotlin/Native bindings, cinterop over
-  the C scaffolding, or a narrower C surface. [Phase 13](13-kotlin-native-binding.md)
-  chooses with a decision record; the constraint is one contract for all
-  Kotlin targets and no second hand-maintained API.
-- **Whether the JVM and Android keep JNA** or move to the same binding.
+- **The binding is generated, not hand-written.** Preferred: Kotlin/Native
+  bindings generated from the existing UniFFI definition by `rocky-bindgen`.
+  Fallback: a Rocky-owned generator template over cinterop of the C header,
+  with the same package and names. A hand-maintained C surface and a UniFFI
+  downgrade are excluded. [Phase 17](17-kotlin-native-binding.md) records
+  which one held.
+- **The JVM and Android keep JNA.** One bindings task emits both bindings;
+  common code compiling against both is the check that they agree.
+- **Paths are strings.** Public openers take a `String` path on every target;
+  the JVM keeps a `File` overload.
+- **No local-network discovery on iOS in this roadmap.** It needs a multicast
+  entitlement Apple grants on request, or a Bonjour bridge. The transport
+  reports it as unavailable; an iPhone finds peers by contacts and by the
+  discovery topic ([phase 15](15-discovery.md)).
 
 ## Not requested
 
@@ -67,6 +74,7 @@ The same Kotlin API on iOS, with the platform pieces
 - App Store distribution, signing automation and privacy manifests beyond
   what a development build on the attached iPhone needs.
 - iCloud Keychain synchronization of secrets. Items stay on the device.
+- The local-network usage description, prompt and multicast entitlement.
 
 ## Known platform constraints
 
@@ -76,8 +84,8 @@ Verify each against the current SDK before relying on it:
   protocol and command handlers) and async calls are the difficult part of
   the binding.
 - Local-network access needs a usage description and prompts the user; raw
-  multicast needs an entitlement. This bounds the local discovery of
-  [phase 9](09-discovery-and-partner-choice.md) on iOS.
+  multicast needs an entitlement. That is why
+  [phase 15](15-discovery.md) reports local discovery as unavailable on iOS.
 - The simulator shares the host's network; a physical iPhone does not reach
   the host's loopback, so device runs need a LAN route or a relay.
 - iOS builds and checks run only on macOS hosts.

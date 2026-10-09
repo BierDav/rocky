@@ -147,21 +147,188 @@ jobs:
           name: notes
           path: ${{ runner.temp }}/notes
 
-  # The checks also build both images and publish them at the release version
-  # once the checks pass.
   check:
-    name: Checks and images
+    name: Checks
     needs: version
     if: needs.version.outputs.release == 'true'
+    uses: ./.github/workflows/check.yml
+    with:
+      release: true
+
+  image:
+    name: Image ${{ matrix.image }} ${{ matrix.arch }}
+    # After the checks, so an image of a failing commit is never pushed.
+    needs: [version, check]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/check.yml
-    # Gitea's registry takes the PACKAGE_TOKEN secret.
-    secrets: inherit
-    with:
-      version: ${{ needs.version.outputs.version }}
-      channel: ${{ needs.version.outputs.channel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners, not QEMU: a release build of a Rust workspace under
+        # emulation is many times slower than the hosted arm64 runner.
+        # Deployments are described in docs/runtime/coordinator-operations.md
+        # and docs/runtime/always-on-peer.md.
+        include:
+          - image: coordinator
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            package: rocky-db-coordinator
+            dockerfile: crates/rocky-coordinator/Dockerfile
+            title: rocky-voter
+            description: Rocky DB public coordination voter
+          - image: coordinator
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            package: rocky-db-coordinator
+            dockerfile: crates/rocky-coordinator/Dockerfile
+            title: rocky-voter
+            description: Rocky DB public coordination voter
+          - image: peer
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            package: rocky-db-peer
+            dockerfile: crates/rocky-sdk/Dockerfile
+            title: rocky-peer
+            description: Rocky DB keyless custody replica
+          - image: peer
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            package: rocky-db-peer
+            dockerfile: crates/rocky-sdk/Dockerfile
+            title: rocky-peer
+            description: Rocky DB keyless custody replica
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          # Registries require a lowercase repository name; `github.repository_owner`
+          # is `BierDav` on GitHub, which Docker rejects in a tag.
+          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: source
+          file: source/${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          # Gitea's cache server may not serve BuildKit; a cold build still works.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }},ignore-error=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+
+  image-manifest:
+    name: Publish the ${{ matrix.image }} manifest
+    needs: [version, image]
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        # New GHCR packages are private. The coordinator stays private and its
+        # deployment supplies a ghcr-pull registry secret; set the peer package's
+        # visibility to public once, or the cluster cannot pull it anonymously.
+        include:
+          - image: coordinator
+            package: rocky-db-coordinator
+            heading: Coordinator image
+          - image: peer
+            package: rocky-db-peer
+            heading: Custody peer image
+    steps:
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          # Registries require a lowercase repository name; `github.repository_owner`
+          # is `BierDav` on GitHub, which Docker rejects in a tag.
+          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+
+      # Each architecture is a single-platform image, so merge them rather than
+      # pushing another index, tagged with the version and the moving channel tag.
+      # `sha-<commit>`, versions and the reported digest are immutable.
+      - name: Merge the architecture images
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          CHANNEL: ${{ needs.version.outputs.channel }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${CHANNEL}" \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            "${IMAGE}:${GITHUB_SHA}-amd64" \
+            "${IMAGE}:${GITHUB_SHA}-arm64"
+
+      - name: Report the manifest digest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          HEADING: ${{ matrix.heading }}
+        run: |
+          set -euo pipefail
+          tag="${IMAGE}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "${tag}"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${tag}" | tr -d '"')"
+          {
+            echo "### ${HEADING}"
+            echo
+            echo "- \`${IMAGE}:${VERSION}\`"
+            echo "- digest: \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   jvm:
     name: JVM SDK ${{ matrix.platform }}
@@ -390,7 +557,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [version, check, jvm, android]
+    needs: [version, check, image-manifest, jvm, android]
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 20

@@ -1,8 +1,8 @@
 # Scope: an equal-issuer, roster-free mesh
 
-Status: agreed in outline on 2026-10-09; the
-[proposed defaults](#proposed-defaults) await confirmation. Implemented by
-phases 4 to 12, 16 and 17 of [the roadmap](README.md).
+Status: agreed on 2026-10-09, with the open questions
+[decided](#decided-2026-10-09) after a review against the code. Implemented by
+phases 5 to 16 and 20 of [the roadmap](README.md).
 Owner: `rocky-credentials` policy and envelopes; `rocky-secure` sessions,
 frames and key epochs; `rocky-sdk` enrollment, sync and discovery;
 `rocky-iroh`; the Kotlin surface and the shopping example.
@@ -37,9 +37,10 @@ name, kind and node key, and which device received which list.
 
 ### 1. Equal issuers
 
-- **One registry.** Every device's user key, node key, capability ID,
-  profile, partition grants and assigned pseudonyms are replicated to every
-  issuer and to nobody else. An issuer acts on any device from it.
+- **One registry.** Every device's user key, node key, capability ID and
+  expiry, profile, partition grants, assigned pseudonyms and command identity
+  are replicated to every issuer and to nobody else. An issuer acts on any
+  device from it.
 - **Any issuer renews.** A member renews at whichever issuer it reaches.
   `remove_peer` protects no last issuer.
 - **Revocations merge.** The revoked set only grows. A revocation is one
@@ -68,7 +69,7 @@ Grants still bound what is served. A member needs no directory of devices.
 ### 3. Discovery and partner choice
 
 - Peers find each other on the local network and through a topic that only
-  domain members can derive. Routes learned this way are local contacts.
+  unrevoked domain members can derive. Routes learned this way are local contacts.
   They are never written to a replicated table.
 - A sync ranks the peers it knows: local first, then those that serve what
   this device needs, then trusted nodes. A trusted node is required only for
@@ -110,23 +111,25 @@ recipient asks. No replicated table records who received which partition.
 
 - **The whole mesh is in this roadmap**, not only equal issuers.
 - **Strong commands are qualified in the mesh**, through a restored market
-  example ([phase 15](15-market-example.md)), not left to a later roadmap.
+  example ([phase 19](19-market-example.md)), not left to a later roadmap.
 - **No backward compatibility.** Every format here replaces its predecessor.
 
-## Proposed defaults
+The questions the original idea left open, answered after reviewing the code.
+The owning brief repeats each under "Settled" with its consequences.
 
-Proposed on 2026-10-09 from the open questions of the original idea. Confirm
-or change each before the phase named starts.
-
-| Question | Proposal | Phase |
+| Question | Decision | Phase |
 | --- | --- | --- |
-| How a member learns a revocation from a peer it never met | Every handshake compares a digest of the revocation set; the side that lacks statements receives them before any row | 7 |
-| Which earlier frames a device accepts once it learns a revocation | A frame is refused when its author's chain is revoked or expired, and admitted otherwise. Rows of a revoked author that a device did not yet hold arrive by checkpoint, as today | 5 |
-| How long a concurrent second key epoch stays readable | Under the existing rule: until no retained operation was sealed with it ([retaining keys](../runtime/credentials.md#retaining-historical-keys)) | 6 |
-| The writers' tie-break between two concurrent epochs | The epoch whose secret fingerprint is lower. It only settles which epoch writers use meanwhile; epochs sealed under different revocation sets are superseded by a further rotation | 6 |
-| Whether the discovery topic changes on revocation | It derives from a discovery secret delivered with renewal and replaced by every revocation, so a revoked device stops deriving it once others renew | 9 |
-| What a mailbox is | Any admitted peer holding custody for the recipient's partition, bounded per recipient; issuers always | 11 |
-| How a caller finds the executor | It asks the peers it meets for the executor's contact; a peer may also forward the sealed command | 16 |
+| Whether a revoked issuer's statements count | Always. A statement counts when signed under the publisher authority; two issuers revoking each other are both revoked. Any other rule depends on arrival order | [6](06-revocation-set.md) |
+| Which earlier frames a device accepts once it learns a revocation | A frame is refused when its author is in the set or its chain expired; a statement's time never enters admission. Rows of a revoked author that a device did not yet hold arrive by checkpoint, as today | [6](06-revocation-set.md) |
+| How large the set grows | 1,024 live statements. A statement leaves the distributed set once every chain it ends has expired; the registry's tombstone is permanent and stops the user renewing | [6](06-revocation-set.md) |
+| How a member learns a revocation from a peer it never met | Every handshake compares a digest of the set after authenticating the chain; the side that lacks statements receives them before any row, and a revoked device is told why | [9](09-roster-free-admission.md) |
+| How long a concurrent second key epoch stays readable | Under the existing rule: until no retained operation was sealed with it ([retaining keys](../runtime/credentials.md#retaining-historical-keys)). Nothing retires automatically | [8](08-concurrent-rotation.md) |
+| The writers' tie-break between two concurrent epochs | The epoch whose secret hash is lower. It only settles which epoch writers use meanwhile; an epoch sealed without a revocation of one of its readers is superseded by a further rotation | [8](08-concurrent-rotation.md) |
+| What proves a holding | A value derived from any epoch of the partition the answering peer retains; toward a keyless custody peer, knowledge of the partition tuple | [10](10-holdings-after-authentication.md) |
+| What a mailbox is | Any admitted peer with a custody grant, and every issuer, whatever the partition. The sender deposits. The mailbox sees the recipient's node key and neither the group nor the secret; bounded per recipient | [12](12-direct-key-delivery.md) |
+| Whether the discovery topic changes on revocation | Yes. It derives from values that travel with revocation statements inside admitted sessions, never with renewal and never to the revoked device. A device also answers the previous topic for a bounded window | [14](14-contacts-and-partner-choice.md), [15](15-discovery.md) |
+| How a caller finds the executor | It asks the peers it meets for the executor's contact and dials it, through a relay where needed. Nothing is forwarded | [14](14-contacts-and-partner-choice.md), [16](16-strong-commands-in-the-mesh.md) |
+| How many devices a domain holds | 256 in the registry; a horizon still names at most 64 participants | [5](05-issuer-registry.md), [13](13-relayed-horizon.md) |
 
 ## Not requested
 
@@ -143,11 +146,17 @@ or change each before the phase named starts.
 - **Rotating pseudonyms.** The registry stores several per device and table so
   that [rotation](../ideas/pseudonym_rotation.md) needs no format change.
 - **Retraction.** A revoked device keeps what it decrypted.
-- **Multi-hop forwarding of rows** beyond what custody already does.
+- **Multi-hop forwarding of rows** beyond what custody already does, and
+  forwarding of a command or its result through a peer.
+- **A gossip overlay.** Discovery publishes and resolves records; it relays
+  no application data.
+- **Readmission.** A revoked user stays revoked; enrolling it again needs a
+  new user key.
 
 ## Acceptance
 
-1. Two issuers, partitioned, each revoke a different device. After they meet,
+1. Two issuers, partitioned, each revoke a different device; the two devices
+   read different scopes, the same-scope case being item 3. After they meet,
    every device holds both revocations; neither issuer's statement is refused.
 2. Issuer B revokes a device issuer A enrolled, A being offline. Only the
    scopes that device could read rotate; the device opens no later row.
@@ -160,8 +169,9 @@ or change each before the phase named starts.
    custody peer reachable, and converge.
 7. A peer without list L's key or custody grant receives no frontier, offer or
    refusal that distinguishes "L exists" from "L does not".
-8. A member's replica contains no row naming another device, and receives the
-   envelope for a newly shared list.
+8. A member's replica contains no node key, name or kind of another device,
+   and receives the envelope for a newly shared list. Command identities in
+   an application's own rows are not node keys and may remain.
 9. A horizon finalizes on a device that met only the custody peer.
 10. A caller that never met the executor submits a command and reads its
     outcome.

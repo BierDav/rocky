@@ -25,9 +25,9 @@ naturally holds.
 | [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves. 0048 to 0057 are reserved for
+not reused. 0038 is reserved for row moves. 0048 to 0058 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0058.
+unreserved record is 0059.
 
 ## Rationale by topic
 

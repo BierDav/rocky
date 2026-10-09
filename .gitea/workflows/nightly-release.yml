@@ -48,12 +48,6 @@ jobs:
               echo 'release=false' >> "$GITHUB_OUTPUT"
             fi
           fi
-      - name: Install cargo-nextest
-        if: steps.changes.outputs.release == 'true'
-        run: |
-          if ! cargo nextest --version >/dev/null 2>&1; then
-            cargo install cargo-nextest --locked
-          fi
       - name: Prepare version and notes
         if: steps.changes.outputs.release == 'true'
         id: release
@@ -98,6 +92,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-nextest
+        run: |
+          if ! cargo nextest --version >/dev/null 2>&1; then
+            cargo install cargo-nextest --locked
+          fi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
@@ -115,6 +114,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-nextest
+        run: |
+          if ! cargo nextest --version >/dev/null 2>&1; then
+            cargo install cargo-nextest --locked
+          fi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target

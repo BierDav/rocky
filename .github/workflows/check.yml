@@ -151,18 +151,26 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # install-action's checksum check fails with the Gitea runner's sha256sum.
-      # Per job: parallel jobs share the runner's CARGO_HOME.
-      - name: Install cargo-nextest on Gitea
+      - uses: moonrepo/setup-rust@v1
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
+        with:
+          channel: "1.99.0"
+          profile: minimal
+          components: rustfmt, clippy
+          bins: cargo-nextest, cargo-insta@1.28.0
+          cache: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify installed Cargo tools
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: cargo nextest --version && cargo insta --version
 
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
           set -euo pipefail
-          export PATH="$RUNNER_TEMP/nextest:$PATH"
           ./scripts/check --build "$RUNNER_TEMP/build"
           # After the archives: the archive without default features replaces the binary.
           cargo build --locked -p rocky-sdk --bin rocky-peer
@@ -229,11 +237,20 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # install-action's checksum check fails with the Gitea runner's sha256sum.
-      # Per job: parallel jobs share the runner's CARGO_HOME.
-      - name: Install cargo-nextest on Gitea
+      - uses: moonrepo/setup-rust@v1
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
+        with:
+          channel: "1.99.0"
+          profile: minimal
+          components: rustfmt, clippy
+          bins: cargo-nextest, cargo-insta@1.28.0
+          cache: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify installed Cargo tools
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: cargo nextest --version && cargo insta --version
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.
@@ -248,7 +265,6 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
-          export PATH="$RUNNER_TEMP/nextest:$PATH"
           if [ -d "$RUNNER_TEMP/build" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
@@ -318,11 +334,20 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # install-action's checksum check fails with the Gitea runner's sha256sum.
-      # Per job: parallel jobs share the runner's CARGO_HOME.
-      - name: Install cargo-nextest on Gitea
+      - uses: moonrepo/setup-rust@v1
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
+        with:
+          channel: "1.99.0"
+          profile: minimal
+          components: rustfmt, clippy
+          bins: cargo-nextest, cargo-insta@1.28.0
+          cache: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify installed Cargo tools
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: cargo nextest --version && cargo insta --version
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.
@@ -337,7 +362,6 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
-          export PATH="$RUNNER_TEMP/nextest:$PATH"
           if [ -d "$RUNNER_TEMP/build" ]; then
             ./scripts/check --slow --from "$RUNNER_TEMP/build"
           else

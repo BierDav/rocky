@@ -133,8 +133,8 @@ On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-latest-any-arch`.
 The `build` job downloads an archive of the exact
 event revision and runs `scripts/check --build`: strict workspace Clippy, then
 the test binaries as nextest archives, uploaded with the custody peer binary.
-Gitea installs the matching nextest binary for the runner architecture and
-checks it starts before compiling.
+Gitea uses `moonrepo/setup-rust` to install nextest and cargo-insta for the
+runner architecture; GitHub uses `taiki-e/install-action` for nextest.
 `check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
 the tests and doc tests, without compiling the test binaries again. `slow`,
 `shopping` and `android` also start after `build`; the first two run its

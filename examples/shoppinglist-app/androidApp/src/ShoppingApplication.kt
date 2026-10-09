@@ -1,59 +1,53 @@
 package org.example.examples
 
 import android.app.Application
+import android.os.Build
 import android.util.Log
+import androidx.room.Room
 import java.io.File
-import kotlinx.coroutines.*
-import org.example.examples.shopping.*
-import rocky.*
+import org.example.examples.shopping.ShoppingDatabase
+import org.example.examples.shopping.ShoppingGraph
+import org.example.examples.shopping.ShoppingPlatform
+import rocky.PeerTransport
 import rocky.android.KeystoreSecretStore
 import rocky.android.RockyLifecycle
-import rocky.room.followRocky
 
-/** Room's DAOs on Rocky's file, with keys in the Keystore; Android ends the process and its jobs together. */
-class Shopping(val runtime: RockyDatabase, val database: ShoppingDatabase) {
-    val repository = ShoppingRepository(database, runtime)
-}
-
+/** Builds the app's graph once: keys in the Keystore, sync paused while no activity is visible. */
 class ShoppingApplication : Application() {
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private lateinit var lifecycle: RockyLifecycle
-    private var opening: Deferred<Shopping>? = null
+    lateinit var graph: ShoppingGraph
+        private set
 
     override fun onCreate() {
         super.onCreate()
-        lifecycle = RockyLifecycle.register(this)
-    }
-
-    /** `invitation` and `transport` apply only before the first open; later opens resume the same domain. */
-    fun shopping(invitation: String? = null, transport: String? = null): Deferred<Shopping> {
-        opening?.let { return it }
-        val directory = File(filesDir, "shopping")
+        // QRKit's scanner finds the context here; its own application class is replaced in the manifest.
+        qrgenerator.AppContext.set(applicationContext)
+        val lifecycle = RockyLifecycle.register(this)
         val preferences = getSharedPreferences("shopping", MODE_PRIVATE)
-        val secrets = KeystoreSecretStore(this)
-        return scope.async(Dispatchers.IO) {
-            val runtime = if (File(directory, "identity.json").exists()) {
-                RockyDatabase.resume(directory, ShoppingSchema, peers(preferences.getString("transport", null)), secrets)
-            } else {
-                preferences.edit().putString("transport", transport ?: "iroh").commit()
-                (if (invitation != null) RockyDatabase.join(directory, ShoppingSchema, invitation, peers(transport), secrets)
-                else RockyDatabase.create(directory, ShoppingSchema, peers(transport), secrets)).also { created ->
-                    if (created.isIssuer) created.installShoppingAuthor()
+        graph = ShoppingGraph(ShoppingPlatform(
+            directory = File(filesDir, "shopping"),
+            deviceName = Build.MODEL,
+            room = { path -> Room.databaseBuilder<ShoppingDatabase>(this, path) },
+            secrets = KeystoreSecretStore(this),
+            transport = {
+                when (preferences.getString("transport", null)) {
+                    // The phone dials the routes from the invitation. As an issuer it also listens, on its own
+                    // loopback port, since every app on the device would otherwise claim the default one.
+                    "tcp" -> PeerTransport.Tcp(listen = "127.0.0.1:0")
+                    else -> PeerTransport.Iroh()
                 }
-            }
-            val database = openShoppingDatabase(this@ShoppingApplication, directory, runtime)
-            scope.launch(Dispatchers.IO) { database.followRocky(runtime) }
-            lifecycle.follow(runtime) { foreground ->
-                Log.i(MainActivity.TAG, if (foreground) "sync foreground" else "sync background")
-            }
-            Shopping(runtime, database)
-        }.also { opening = it }
+            },
+            opened = { database ->
+                lifecycle.follow(database) { foreground -> Log.i(TAG, if (foreground) "sync foreground" else "sync background") }
+            },
+        ))
     }
 
-    private fun peers(kind: String?): PeerTransport = when (kind) {
-        // The phone dials the routes from the invitation. As an issuer it also listens, on its own
-        // loopback port, since every app on the device would otherwise claim the default one.
-        "tcp" -> PeerTransport.Tcp(listen = "127.0.0.1:0")
-        else -> PeerTransport.Iroh()
+    /** A driver's transport choice; it applies to the first join or create only. */
+    fun chooseTransport(kind: String?) {
+        getSharedPreferences("shopping", MODE_PRIVATE).edit().putString("transport", kind ?: "iroh").commit()
+    }
+
+    companion object {
+        const val TAG = "RockyShopping"
     }
 }

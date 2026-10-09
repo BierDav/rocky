@@ -1,67 +1,113 @@
-# Shopping list: Room example and qualification
+# Shopping: Room, ViewModels and direct device sync
 
-This is a Kotlin-only consumer of the desktop UniFFI SDK whose Room DAOs read
-and write Rocky's own file. Start with the small
-[Room database](shared/src/ShoppingDatabase.kt),
-[repository and schema](shared/src/ShoppingRepository.kt), and
-[desktop composition](shared/src@jvm/ShoppingDesktop.kt).
+A Kotlin-only Compose application for JVM desktop and Android. Room DAOs use
+Rocky's own file; Metro builds the application graph and screen ViewModels.
+Devices sync over iroh, including a phone on cellular. No custody peer is
+required for the app: two devices must be online together to exchange edits.
+The separate [qualification harness](../../docs/runtime/shopping-qualification.md)
+continues to test offline delivery through custody.
 
-A list, its categories and its items form the `list` partition group: each list
-is its own partition with one secret, so one envelope shares all three tables.
-An item title is unique per list, the later write winning; deleting a list hides
-its categories and items, and deleting a category nulls only `items.category`.
+## Run and pair
+
+```sh
+./kotlin run -m desktopApp
+sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
+./kotlin build -m androidApp
+```
+
+The desktop keeps its household in `~/.rocky-shopping`, or
+`ROCKY_SHOPPING_DATA`. Install the Android debug APK with `adb install -r`;
+Android keeps secrets in the Keystore and pauses automatic sync in the
+background. Republish the Android runtime after Rust changes.
+
+For a desktop reached over SSH, the running trusted app can write a one-use
+pairing code to a private file, and the new instance can read that file:
+
+```sh
+./kotlin run -m desktopApp -- --invite-file /private/path/pairing.txt "MacBook Air"
+# Transfer this file privately to the other computer, then launch there:
+./kotlin run -m desktopApp -- --join-file /private/path/pairing.txt
+```
+
+The receiving app joins as a full device. Remove both copies of the file after
+pairing. An already configured receiver opens its existing household.
+
+Start a household on the first device. In **Devices → Add device**, choose a
+name and kind, then scan the QR code on the joining phone or paste the code.
+The invitation works once for ten minutes. A trusted device chooses:
+
+| Kind | What it does |
+| --- | --- |
+| Trusted | Issues credentials, creates lists, adds devices and receives every list; a full replica |
+| Full | Receives every list automatically and edits its items and categories |
+| Partial | Receives only lists shared with it from a trusted device's Devices tab |
+
+In **Devices → Revoke device**, a trusted device can revoke a device it manages.
+The revoked badge persists across restarts. Revocation stops future access and
+rotates list keys; remaining recipients receive new keys automatically. Data
+already decrypted on the removed device stays there.
+
+When the removed device next contacts an issuer, it verifies the signed policy
+and shows **This device was revoked**. **Join network** accepts a fresh pasted
+code or **Scan QR code** on Android. Rejoining archives the old local copy and
+creates a new device identity; it does not undo the old identity's revocation.
+Trusted devices also record their own enrollment. Each recipient's key delivery
+runs independently, so a refused recipient cannot block the remaining devices.
+
+Only trusted devices create, rename and delete lists. Each list, its items
+and categories form the `list` partition group with one secret. Trusted
+nodes seal each list's secret to its recipients in the replicated `keys`
+table; recipients install it and bootstrap from a peer checkpoint. No
+plaintext secret travels in a row. The `devices` table records names and
+kinds. List title conflicts converge per list; deleting a list hides its
+children, and deleting a category clears its items' category. Moving an item
+keeps an offline tick attached to it.
+
+The **Sync** tab shows readiness, connection state, domain and node identity,
+grants, policy epoch, credential expiry, per-table holdings and key epochs.
+Its activity feed shows transfers, checkpoint imports, bootstrap, horizon
+finalization, author installation, enrollment and key delivery. The feed is
+bounded and lasts for the open database's lifetime; see
+[SDK activity](../../docs/runtime/activity.md). The top badge also reflects
+inbound sync on a trusted device that serves the phone.
+
+The current Room schema is version 4. Earlier application schemas are refused;
+there is no migration or fallback. An existing household that cannot open
+shows **Retry** and preserves its data.
+
+## Code and SDK usage
+
+Start at [ShoppingNode](shared/src/ShoppingNode.kt) for platform composition,
+[ShoppingGraph](shared/src/ShoppingGraph.kt) for Metro,
+[ShoppingSession](shared/src/ShoppingSession.kt) for app lifetime,
+[ShoppingRepository](shared/src/ShoppingRepository.kt) for DAO calls and
+[Household](shared/src/Household.kt) for device enrollment and key delivery.
+The [Room entities](shared/src/ShoppingDatabase.kt) and
+[Kotlin schema](shared/src/ShoppingSchema.kt) describe the same tables.
+Screens and their ViewModels are under `shared/src/ui`.
 
 ```kotlin
-val app = ShoppingDesktop.create(dataDirectory)
+val platform = ShoppingPlatform(directory, "Desktop",
+    room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) })
+val node = ShoppingNode.create(platform)
 try {
-    val list = app.repository.createList("Groceries")
-    val dairy = app.repository.addCategory(list, "Dairy")
-    app.repository.add(list, "Milk", category = dairy)
-    app.repository.observe(list, search = "milk", includeCompleted = false)
-        .collect { items -> /* typed ShoppingItem values */ }
+    val list = node.repository.createList("Groceries")
+    val dairy = node.repository.addCategory(list, "Dairy")
+    node.repository.add(list, "Milk", category = dairy)
+    node.repository.observe(list).collect { items -> /* typed rows */ }
 } finally {
-    app.close()
+    node.close()
 }
 ```
 
-Create and join are explicit; the SDK handles native loading, enrollment and
-background sync. Devices connect through iroh unless another
-[transport](../../docs/runtime/sdk-transports.md) is passed:
-
-```kotlin
-val invitation = creator.runtime.pairing(GrantProfile.Writer(ShoppingTables.toSet()))
-val peer = ShoppingDesktop.join(peerDirectory, invitation.uri)
-// A writer that does not issue inserts under authors an issuer assigns it.
-peer.runtime.installShoppingAuthor(issuer = creator.runtime)
-// PairingQrCode(invitation) renders the QRKit painter. For the user's own second
-// device, creator.runtime.pairDevice() pairs an issuer that survives the creator's loss.
-peer.runtime.syncOnce() // the join's own bootstrap finishes first
-val node = peer.runtime.session().node
-peer.repository.accept(list, creator.repository.share(list, listOf(node)).getValue(node))
-peer.repository.check(list, item, completed = true)
-peer.runtime.disconnect() // local edits and Room queries continue
-peer.runtime.connect()
-```
-
-`share` is one call for the whole list and needs an issuer; the application
-delivers each recipient's envelope. The screen's **Share** button shares with
-every other enrolled device and shows a `list:<id>:<envelope>` code per device,
-which **Open** accepts there. A device new to the list starts it from a peer's
-checkpoint ([sharing](../../docs/runtime/partitioned-scopes.md#group-secrets)).
-`ShoppingDesktop.resume(dataDirectory)` opens the persisted domain. Give each
-instance its own directory and close it after use.
-
-The repository calls ordinary DAOs. Each DAO write is one Rocky commit and one
-signed bundle; `followRocky` refreshes Room's observers after sync writes. The
-replicated schema is declared with the Kotlin builder and equals the import of
-the exported Room schema, version 3, with `shoppingRoomOverlay`; Room never
-migrates Rocky's tables. Rocky issues each row's `id`: `createList` prepares the
-new list's secret with `partitions.next("lists")`, and the DAOs reserve ids in
-the transaction that inserts the row. The creator and devices paired with
-`pairDevice()` assign their own authors when they create or join. See
+The SDK installs authors at create/join, so the application does not carry
+pseudonym requests. `buildOnRocky` builds Room and follows committed table
+events; `settledOnRocky` retries transient DAO read failures. Closing the Room
+wrapper leaves Rocky open; `ShoppingNode.close` closes both in order. These
+helpers have no application or Compose dependency; see
 [Room integration](../../docs/runtime/room-integration.md).
 
-From the repository root:
+## Verify
 
 ```sh
 ./examples/shoppinglist-app/check
@@ -69,32 +115,11 @@ From the repository root:
 ./examples/shoppinglist-app/demo
 ```
 
-The SDK's [build plugins](../../sdks/kotlin/README.md#build-tooling) prepare its native
-library and bindings automatically; source builds require Rust. This application
-contains no Rust source, Cargo manifest or Cargo invocation of its own. This project builds
-JVM desktop, with macOS ARM64 tested, and Android through Compose Multiplatform.
-
-`androidApp` shows the shared [`ShoppingScreen`](shared/src/ShoppingScreen.kt) on Room DAOs
-over Rocky's file, with keys in the Android Keystore and sync paused in the background:
-
-```sh
-sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
-./kotlin build -m androidApp
-```
-
-The first command publishes Rocky's [Android runtime](../../sdks/kotlin/android-runtime/README.md)
-once, and again after Rust changes; `androidApp` depends on the SDK's `rocky-runtime-android`
-module, which packages it. The runtime is built for `arm64-v8a` and `x86_64`; the app packages only
-those ABIs. On Android 17 it asks for local-network access, which direct LAN TCP needs.
-The desktop screen remains the starter UI.
-
-The [phase-16 required definition](requiredSchema/src/RequiredSchema.kt) is the same schema.
-`./kotlin run -m requiredSchema`, the first step of `check`, builds it by hand and from the
-Room export to identical bytes and installs either natively.
-
-`repository.move(from, id, to)` moves an item to another list in one commit; a tick made
-offline on another device follows it. Devices that are never online together share lists
-through the packaged [custody peer](../../docs/runtime/always-on-peer.md), which learns each
-list from the devices and reads none. `./examples/shoppinglist-app/qualify` runs the
-[qualification](../../docs/runtime/shopping-qualification.md) with every device in its own
-process, and on two Android devices with `ROCKY_PHONES` ([procedure](../../docs/runtime/shopping-devices.md)).
+`check` compares the hand-written schema with Room's export, installs both,
+runs repository and household tests and compiles desktop. Household tests
+cover automatic full-node key delivery, revocation and delivery of rotated keys, explicit partial sharing, writes by
+joined members, immediate reads after reopen, and retry after a held directory
+lock. `demo` runs a console walkthrough over the same node and repository.
+The multi-process qualification uses manual sync and a keyless custody peer;
+Android device qualification is documented in
+[shopping devices](../../docs/runtime/shopping-devices.md).

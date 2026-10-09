@@ -97,6 +97,17 @@ class RockyDatabase private constructor(
             }
         }
         private suspend fun NativeDatabase.closeAfterFailure() = withContext(NonCancellable) { shutdown() }
+        /** A new installation writes at once: its authors are installed before it is returned. */
+        private suspend fun RockyDatabase.withAuthors(required: Boolean): RockyDatabase {
+            try { installAuthors() }
+            catch (error: Throwable) {
+                // A member whose issuer did not answer asks again on its next sync.
+                if (required || error !is RockyException) { close(); throw error }
+            }
+            return this
+        }
+        /** Whether [directory] holds an installation to `open` or `resume`. */
+        fun exists(directory: File): Boolean = File(directory, "identity.json").exists()
         /** Local composition: no network is started unless supplied. */
         suspend fun local(directory: File, schema: Schema, secrets: SecretStore? = null, commands: CommandRuntime? = null): RockyDatabase =
             make(false) { NativeDatabase.create(directory.absolutePath, schema.json(), secretProvider(secrets), null, composeCommands(commands), null) }
@@ -106,11 +117,18 @@ class RockyDatabase private constructor(
             NativeDatabase.install(directory.absolutePath, schema.json(), supplied.toString(), secretProvider(secrets),
                 transport?.let(::network), composeCommands(commands))
         }
-        /** Starter facade; composes the same database, credentials, commands and optional network. */
+        /** A new domain with this device as its first issuer, with its authors installed. */
         suspend fun create(directory: File, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase =
             make(automaticSync) { NativeDatabase.create(directory.absolutePath, schema.json(), secretProvider(secrets), network(transport), composeCommands(commands), null) }
+                .withAuthors(required = true)
+        /** Enrolls with an invitation and installs the authors of the tables it writes, from its issuer when it does not issue. */
         suspend fun join(directory: File, schema: Schema, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase =
             make(automaticSync) { NativeDatabase.join(directory.absolutePath, schema.json(), invitation, network(transport), secretProvider(secrets), composeCommands(commands)) }
+                .let { it.withAuthors(required = it.isIssuer) }
+        /** Resumes the installation in [directory], or creates a new domain there. */
+        suspend fun openOrCreate(directory: File, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase =
+            if (exists(directory)) resume(directory, schema, transport, secrets, automaticSync, commands)
+            else create(directory, schema, transport, secrets, automaticSync, commands)
         suspend fun open(directory: File, schema: Schema, transport: PeerTransport? = null, secrets: SecretStore? = null, automaticSync: Boolean = false, commands: CommandRuntime? = null): RockyDatabase =
             make(automaticSync) { NativeDatabase.open(directory.absolutePath, schema.json(), secretProvider(secrets), transport?.let(::network), composeCommands(commands)) }
         suspend fun resume(directory: File, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase =

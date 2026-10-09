@@ -55,7 +55,7 @@ continuations refuse. Errors carry stable `code`, `retryable` and a
 diagnostic `message`.
 
 `readiness()` is a cold conflated Flow of committed revision, generation and
-backfill progress, credential epoch/expiry/logout, open-ticket counts, network
+backfill progress, credential epoch/expiry/logout/revocation, open-ticket counts, network
 attachment and [bootstrap/sync state](sdk-bootstrapping.md#readiness), built on
 `status` and `status_next(after = token)` so registration cannot miss a racing
 revision. Authority changes without a revision are seen within one second.

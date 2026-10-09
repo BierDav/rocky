@@ -6,7 +6,7 @@ import kotlinx.coroutines.runBlocking
 import rocky.*
 
 /** The scope's required definition: lists, categories and items in one `list` group. */
-val required = schema("shopping", version = 3) {
+val required = schema("shopping", version = 4) {
     table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
     table("categories") {
         integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
@@ -20,6 +20,8 @@ val required = schema("shopping", version = 3) {
         reference("list", "lists", onDelete = Delete.Cascade)
         reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
     }
+    table("devices") { text("node"); text("name"); text("kind"); primaryKey("node") }
+    table("keys") { text("recipient"); integer("list"); integer("epoch"); blob("envelope"); primaryKey("recipient", "list") }
 }
 
 /**
@@ -28,7 +30,7 @@ val required = schema("shopping", version = 3) {
  */
 fun main() = runBlocking {
     val checkout = generateSequence(File(System.getProperty("user.dir")).absoluteFile) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/3.json").readText()
+    val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/4.json").readText()
     val imported = schemaFromRoom("shopping", export) {
         table("lists") { partitionBy("id", group = "list") }
         table("categories") { partitionBy("list", group = "list") }

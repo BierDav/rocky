@@ -116,11 +116,6 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
         val envelopes = call("share", "list" to list, "recipients" to readers.map { it.node }).jsonObject
         for (reader in readers) reader.call("accept", "list" to list, "envelope" to envelopes.getValue(reader.node))
     }
-    /** An enrolled writer that does not issue gets its authors from [issuer]. */
-    fun authorFrom(issuer: Device) {
-        val assigned = issuer.call("assignPseudonyms", "requests" to call("pseudonymRequests"))
-        call("installPseudonyms", "pseudonyms" to assigned)
-    }
     override fun close() {
         if (process.isAlive) runCatching { call("close") }
         if (!process.waitFor(30, TimeUnit.SECONDS)) process.destroyForcibly()
@@ -178,7 +173,6 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         val b = device("b").open("join", "invitation" to a.call("pairing", "profile" to "writer").jsonPrimitive.content)
         val c = device("c").open("join", "invitation" to a.call("pairing", "profile" to "writer").jsonPrimitive.content)
         for (writer in listOf(b, c)) {
-            writer.authorFrom(a)
             writer.sync()
             a.call("addPeer", "contact" to writer.contact())
         }
@@ -350,7 +344,6 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         expect(a.directory.deleteRecursively()) { "creator directory remains" }
         d.call("revoke", "node" to a.node)
         val e = device("e").open("join", "invitation" to d.call("pairing", "profile" to "writer").jsonPrimitive.content)
-        e.authorFrom(d)
         e.sync()
         d.call("addPeer", "contact" to e.contact())
         d.share(list, e)

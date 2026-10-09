@@ -338,15 +338,16 @@ publishes. `sdks/kotlin/tooling` holds the toolchain plugins that
 build, package and qualify the SDK ([build tooling](../sdks/kotlin/README.md#build-tooling)).
 
 `examples/shoppinglist-app` is a Kotlin-only Compose Multiplatform consumer whose typed Room entities
-and DAOs run on Rocky's file, with a small repository, shared screen and QRKit helper;
+and DAOs run on Rocky's file, with a DAO repository, Metro graph, screen ViewModels, QR pairing and visible
+[background activity](runtime/activity.md);
 `androidApp` is its Android app, and `qualification` the multi-process
 [shopping qualification](runtime/shopping-qualification.md) harness. Its exported Room
 schema qualifies Kotlin import. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
 driver's pinned acceptance fixture and runs the same DAOs on Rocky's file.
 `sdks/kotlin/schema-qualification` supplies Room-generated
 market-shaped and compound-key scalar fixtures and DAO value tests. The SDK supplies all
-native behavior. The walkthrough and tests showcase the API; full UI work is
-paused. See [Room on Rocky's file](runtime/room-integration.md).
+native behavior. The walkthrough and household tests cover direct device pairing, full/partial
+key delivery and immediate received-list reads after reopen. See [Room on Rocky's file](runtime/room-integration.md).
 
 ## Finding details
 

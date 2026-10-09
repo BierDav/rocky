@@ -51,7 +51,27 @@ const MAX_EPOCHS: usize = 256;
 const MAX_MESSAGE: usize = 256 * 1024;
 /// Accepted clock difference between devices.
 const SKEW: u64 = 300;
+/// Prefixes a pseudonym request a member sends an issuer over the renewal
+/// protocol; the answer is the assigned chain.
+pub(crate) const AUTHOR: &[u8] = b"rocky.sdk.author.v1\n";
+pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
 const TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug)]
+pub(crate) struct Revoked(pub SignedPolicy);
+impl std::fmt::Display for Revoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this device has been revoked")
+    }
+}
+impl std::error::Error for Revoked {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Revocation {
+    version: u32,
+    policy: SignedPolicy,
+}
 
 /// The persisted identity of one installation. It holds no secret; keys
 /// are in the `SecretStore` under `installation`.
@@ -484,6 +504,52 @@ fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
 }
 
 impl Settings {
+    pub(crate) fn verify_revocation(&self, policy: &SignedPolicy) -> Result<bool, Failure> {
+        policy.verify(self.publisher, self.domain()?.manifest().hash())?;
+        if policy.statement.epoch < self.policy.statement.epoch {
+            return Err("revocation carries an older policy".into());
+        }
+        for capability in &self.credentials.0 {
+            if policy.statement.revoked.contains(&capability.id()?)
+                || policy
+                    .statement
+                    .revoked
+                    .contains(&revoked_subject(&capability.capability.subject))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn revocation(&self, path: &Path) -> Result<Option<SignedPolicy>, Failure> {
+        let bytes = match std::fs::read(path.with_file_name("revoked.json")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let notice: Revocation = serde_json::from_slice(&bytes)?;
+        if notice.version != 1 || !self.verify_revocation(&notice.policy)? {
+            return Err("invalid device revocation notice".into());
+        }
+        Ok(Some(notice.policy))
+    }
+
+    pub(crate) fn record_revocation(
+        &self,
+        path: &Path,
+        policy: SignedPolicy,
+    ) -> Result<(), Failure> {
+        if !self.verify_revocation(&policy)? {
+            return Err("policy does not revoke this device".into());
+        }
+        write_private(
+            &path.with_file_name("revoked.json"),
+            &serde_json::to_vec(&Revocation { version: 1, policy })?,
+        )?;
+        Ok(())
+    }
+
     /// Loads only the current identity format, without changing the file or keys.
     pub fn load(path: &Path) -> Result<Self, Failure> {
         let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
@@ -1299,6 +1365,10 @@ impl Settings {
             "this device assigns no author numbers; claim an author range first".into()
         })
     }
+    /// The collection a table commitment names, if any.
+    pub fn collection_name(&self, table: Commitment) -> Option<String> {
+        self.collection_of(table).ok()
+    }
     /// The collection whose table `table` names.
     fn collection_of(&self, table: Commitment) -> Result<String, Failure> {
         let domain = self.domain()?;
@@ -1334,6 +1404,81 @@ impl Settings {
             self.pseudonyms.get(collection).cloned(),
             now()?,
         )?)
+    }
+    /// The collections this device writes but holds no current pseudonym
+    /// for, in name order.
+    pub fn missing_authors(&self, domain: &Domain) -> Result<Vec<String>, Failure> {
+        let grants = self.grants();
+        let partitions = self
+            .credentials
+            .0
+            .last()
+            .ok_or("empty device credential chain")?
+            .capability
+            .extended()?
+            .partitions;
+        let manifest = domain.manifest().hash();
+        let time = now()?;
+        let current = |collection: &str| {
+            self.pseudonyms.get(collection).is_some_and(|chain| {
+                chain.0.iter().all(|credential| {
+                    credential.capability.manifest == manifest
+                        && credential.capability.epoch == self.policy.statement.epoch
+                        && credential.capability.expires > time
+                })
+            })
+        };
+        Ok(domain
+            .scopes()
+            .filter(|(_, scope)| {
+                grants.iter().any(|grant| {
+                    grant.scope.domain == scope.domain
+                        && grant.scope.table == scope.table
+                        && [Right::Insert, Right::Update, Right::Delete]
+                            .iter()
+                            .any(|right| grant.rights.contains(right))
+                }) || partitions.iter().any(|grant| {
+                    grant.domain == scope.domain
+                        && grant.table == scope.table
+                        && [Right::Insert, Right::Update, Right::Delete]
+                            .iter()
+                            .any(|right| grant.rights.contains(right))
+                })
+            })
+            .map(|(name, _)| name)
+            .filter(|name| !current(name))
+            .map(str::to_owned)
+            .collect())
+    }
+    /// Asks the issuers this member knows, in turn, to assign the pseudonym
+    /// `request` asks for.
+    pub async fn request_author(
+        &self,
+        transport: &dyn Transport,
+        request: &PseudonymRequest,
+    ) -> Result<CredentialChain, Failure> {
+        let mut failure: Failure = ServiceError::NoRoute {
+            peer: "an issuer",
+            network: transport.kind().into(),
+        }
+        .into();
+        let message = [AUTHOR, &request.to_bytes()?].concat();
+        for issuer in &self.issuers {
+            let addresses = self
+                .enrollment_routes
+                .get(issuer)
+                .or_else(|| self.peers.get(issuer))
+                .map(|contact| contact.addresses(transport.kind()))
+                .unwrap_or_default();
+            if addresses.is_empty() {
+                continue;
+            }
+            match exchange(transport, &addresses, Protocol::Renew, &message).await {
+                Ok(reply) => return Ok(serde_json::from_slice(&reply)?),
+                Err(error) => failure = error,
+            }
+        }
+        Err(failure)
     }
     /// Assigns a pseudonym to the device that sent `request`: its write
     /// grants on the table, an earlier number it held in this device's
@@ -1985,11 +2130,12 @@ impl Settings {
         first: Option<PublicKey>,
     ) -> Result<Renewed, Failure> {
         if self.issuer() {
-            if learn
-                && let Some(transport) = transport
-                && let Ok(renewed) = self.renew_remotely(vault, transport, first).await
-            {
-                return Ok(renewed);
+            if learn && let Some(transport) = transport {
+                match self.renew_remotely(vault, transport, first).await {
+                    Ok(renewed) => return Ok(renewed),
+                    Err(error) if error.is::<Revoked>() => return Err(error),
+                    Err(_) => {}
+                }
             }
             return Ok(Renewed {
                 policy: self.policy.clone(),
@@ -2027,6 +2173,7 @@ impl Settings {
             }
             match self.renew_with(vault, transport, *issuer, &addresses).await {
                 Ok(renewed) => return Ok(renewed),
+                Err(error) if error.is::<Revoked>() => return Err(error),
                 Err(error) => failure = error,
             }
         }
@@ -2043,7 +2190,20 @@ impl Settings {
         let user = PrivateKey::from_bytes(&vault.get("user")?);
         let (request, secret) =
             RenewRequest::sign(&node, issuer, self.credentials.clone(), now()?)?;
-        let reply = exchange(transport, addresses, Protocol::Renew, &request.to_bytes()?).await?;
+        let reply = match exchange(transport, addresses, Protocol::Renew, &request.to_bytes()?)
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                if let Ok(reply) = exchange(transport, addresses, Protocol::Renew, POLICY).await {
+                    let policy: SignedPolicy = serde_json::from_slice(&reply)?;
+                    if self.verify_revocation(&policy)? {
+                        return Err(Box::new(Revoked(policy)));
+                    }
+                }
+                return Err(error);
+            }
+        };
         let renewal = Renewal::from_bytes(&reply)?;
         let sealed = renewal.open(self.publisher, &request, &secret)?;
         let domain = self.domain()?;

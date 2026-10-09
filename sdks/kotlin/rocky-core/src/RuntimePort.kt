@@ -121,8 +121,14 @@ data class SessionStatus(val principal: String, val node: String, val policyEpoc
 /** A device an issuer enrolled or renewed, with the profile its grants amount to. */
 data class Device(val node: String, val user: String, val enrolledAtEpochSeconds: Long, val revoked: Boolean, val profile: GrantProfile)
 
-enum class ConnectionState { Connected, Offline, Unavailable }
-data class ConnectionStatus(val state: ConnectionState, val error: String? = null)
+enum class ConnectionState { Connected, Offline, Unavailable, Revoked }
+/** `Syncing` while a sync pass runs, `Bootstrapping` while a scope restarts from a checkpoint. */
+enum class ReadinessState { Ready, Syncing, Bootstrapping, Unavailable, Revoked }
+/** The database's committed [revision], its state and the authority it acts under. */
+data class Readiness(val state: ReadinessState, val revision: Long, val policyEpoch: Long, val expiresAtEpochSeconds: Long,
+    val profile: GrantProfile, val networkAttached: Boolean)
+/** The last sync: its state, its error, how many [peers] it reached and when it ended. */
+data class ConnectionStatus(val state: ConnectionState, val error: String? = null, val peers: Int = 0, val atEpochMillis: Long? = null)
 
 /** Unique operation identity, not a credential. Persist it with the queued action. */
 fun newMutationHandle(): String = kotlin.random.Random.Default.nextBytes(32)

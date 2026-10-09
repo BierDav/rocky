@@ -932,7 +932,7 @@ async fn run(
                 // Only a subscription's wait stops when its caller goes
                 // away; admitted mutations run to completion.
                 let waits = serde_json::from_slice::<Value>(&bytes).is_ok_and(|call| {
-                    ["next", "status_next", "sync_next"]
+                    ["next", "status_next", "sync_next", "activity_next"]
                         .contains(&call["request"]["type"].as_str().unwrap_or(""))
                 });
                 let client = if waits && ending.load(Ordering::SeqCst) {

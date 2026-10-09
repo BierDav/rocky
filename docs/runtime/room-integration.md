@@ -31,17 +31,13 @@ abstract class ShoppingDatabase : RoomDatabase() { abstract fun items(): Shoppin
 
 val schema = schemaFromRoom("shopping", exportedJson)
 val rocky = RockyDatabase.create(dataDirectory, schema)
-// The creator issues itself the author its inserts are signed under; see Entities.
-rocky.credentials.installPseudonym(rocky.credentials.assignPseudonym(rocky.credentials.pseudonymRequest("shopping_items")))
 val room = Room.databaseBuilder<ShoppingDatabase>(File(dataDirectory, "shopping").path)
-    .setRockyDatabase(rocky)
-    .build()
-val following = scope.launch { room.followRocky(rocky) }
+    .buildOnRocky(rocky)
 
-room.items().add("Milk")
-room.items().observe().collect { items -> /* local and synced rows */ }
+room.room.items().add("Milk")
+room.room.items().observe().settledOnRocky().collect { items -> /* local and synced rows */ }
 
-following.cancelAndJoin(); room.close(); rocky.close()
+room.close(); rocky.close()
 ```
 
 `setRockyDatabase` installs `RockySQLiteDriver` with the `room-2.8.4` profile
@@ -57,7 +53,7 @@ desktop and Android consumer.
 | --- | --- |
 | `sdks/kotlin/rocky-core` | Schemas, the builder and the [Room export importer](schema-definitions.md#import-a-room-export), `RockyDatabase` and the ORM-neutral suspend/Flow API; no Room dependency |
 | `sdks/kotlin/rocky-sqlite` | The `androidx.sqlite` driver; no Room dependency |
-| `sdks/kotlin/rocky-room` | `setRockyDatabase`, `followRocky` and the pinned profile name |
+| `sdks/kotlin/rocky-room` | `buildOnRocky`, `setRockyDatabase`, `followRocky`, `settledOnRocky` and the pinned profile name |
 | `crates/rocky-sdk`, `sdks/native` | Driver connections, the profile's housekeeping answers, capture and table events |
 
 Applications own their entities, DAOs and queries. Nothing in these modules
@@ -97,9 +93,11 @@ Ids are signed under the device's author for the table: a table pseudonym an
 issuer assigns once per device and table (`credentials.pseudonymRequest`,
 `assignPseudonym`, `installPseudonym`, see
 [author pseudonyms](credential-primitives.md#author-pseudonyms));
-reopening restores it. A creator or issuing device assigns its own. A
-non-issuing device needs an issuer to assign it; the SDK has no network
-request for that yet, so the application carries the request.
+reopening restores it. Kotlin `create` and `join` install writable tables'
+authors automatically. An issuer assigns its own; a member asks an issuer
+over the renewal protocol. `installAuthors()` explicitly retries missing or
+expired assignments, and member sync retries them too
+([SDK enrollment](sdk-enrollment.md#author-installation)).
 
 An entity whose table the schema marks
 [command-controlled](confirmed-tables.md) is read-only: its DAO reads the
@@ -134,13 +132,15 @@ rebuilds and authority changes never pass through Room's connections:
 `followRocky` refreshes Room's invalidation tracker after every committed
 [table event](queries-and-observation.md#table-events). Run it for the life of
 the Room database and cancel it before closing Room. Without it, DAO flows
-miss synced rows until the next local write.
+miss synced rows until the next local write. `buildOnRocky` owns this follower
+and cancels it when its `RockyRoom` wrapper closes; Rocky remains open.
 
 Room reads a flow's query inside a read transaction. That transaction fails,
 and the flow ends, when an authority change such as an installed partition
 secret ends its session, while sync applies a bundle that arrived in part
 (`held partition is incomplete`), or while a scope is unavailable. Collect
-such flows with a retry; the [shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
+such flows with `settledOnRocky()`, which uses a bounded backoff for these
+transient read failures and lets other errors end the flow; the [shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
 observes again with a short backoff.
 
 ## Schema and migrations

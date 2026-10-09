@@ -1,4 +1,5 @@
 //! ORM-neutral native SDK. Generated ABI scaffolding is isolated in sdks/native.
+mod activity;
 mod backup;
 mod commands;
 mod connection;

@@ -249,7 +249,7 @@ fun main(args: Array<String>) {
     }
     // The scope's shopping schema: lists, categories and items in one group, a per-list title policy,
     // a cascading list reference and a multi-column SetNull category reference.
-    val shoppingLists = schema("shopping", 3) {
+    val shoppingLists = schema("shopping", 4) {
         table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
         table("categories") {
             integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
@@ -263,8 +263,10 @@ fun main(args: Array<String>) {
             reference("list", "lists", onDelete = Delete.Cascade)
             reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
         }
+        table("devices") { text("node"); text("name"); text("kind"); primaryKey("node") }
+        table("keys") { text("recipient"); integer("list"); integer("epoch"); blob("envelope"); primaryKey("recipient", "list") }
     }
-    val listsExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/3.json").readText()
+    val listsExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/4.json").readText()
     val listsOverlay: SchemaBuilder.() -> Unit = {
         table("lists") { partitionBy("id", group = "list") }
         table("categories") { partitionBy("list", group = "list") }

@@ -10,7 +10,8 @@ import rocky.*
 /** The starter pairing makes a second issuer, which carries the list once the creator device is lost. */
 class IssuerRecoveryTest {
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
-    private val writer = GrantProfile.Writer(ShoppingTables.toSet())
+    /** Room checks every table it declares, so a device reads the household tables too. */
+    private val writer = GrantProfile.Writer(ShoppingTables.toSet() + "devices" + "keys")
     private val rooms = mutableMapOf<RockyDatabase, ShoppingDatabase>()
     private var list = 0L
     private fun RockyDatabase.withRoom(directory: File) = also { rooms[it] = openShoppingDatabase(directory, it) }
@@ -33,7 +34,6 @@ class IssuerRecoveryTest {
         val opened = mutableListOf<RockyDatabase>()
         try {
             val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
-            a.installShoppingAuthor()
             list = a.repository.createList("Groceries")
             val b = join(File(root, "b"), a.pairDevice()).withRoom(File(root, "b")).also { opened += it }.joined()
             assertTrue(b.isIssuer)
@@ -73,8 +73,8 @@ class IssuerRecoveryTest {
             // The held list gains the rotated epoch; renewal's bootstrap then restarts it from a checkpoint.
             b.share(d)
             assertEquals(ConnectionState.Connected, d.syncOnce().state)
-            // The second issuer assigns the authors a device inserts under.
-            d.installShoppingAuthor(issuer = b)
+            // Its authors ended with the revoked epoch: the second issuer assigns new ones over the network.
+            d.installAuthors()
             d.add("Eggs")
             assertEquals(ConnectionState.Connected, d.syncOnce().state)
             assertEquals(ConnectionState.Connected, c.syncOnce().state)
@@ -87,12 +87,12 @@ class IssuerRecoveryTest {
         val opened = mutableListOf<RockyDatabase>()
         try {
             val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
-            a.installShoppingAuthor()
             list = a.repository.createList("Groceries")
             val x = join(File(root, "x"), a.pairDevice(issuing = false)).withRoom(File(root, "x")).also { opened += it }.joined()
             assertFalse(x.isIssuer)
-            assertFailsWith<RockyException> { x.installShoppingAuthor() }
-            x.installShoppingAuthor(issuer = a)
+            // Joining asked the creator for its authors; a non-issuer cannot assign its own.
+            assertEquals(emptyList(), x.installAuthors())
+            assertFailsWith<RockyException> { x.credentials.assignPseudonym(x.credentials.pseudonymRequest("items")) }
             assertEquals(writer, x.session().profile)
             val keys = Credentials.prepare(File(root, "y"))
             assertFailsWith<RockyException> { x.pairDevice() }

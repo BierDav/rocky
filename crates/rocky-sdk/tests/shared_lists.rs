@@ -191,3 +191,218 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     }
     Ok(())
 }
+
+fn kinds(activity: &Value) -> Vec<String> {
+    activity["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|event| event["kind"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arriving()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer =
+        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let invitation = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer =
+        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    // The issuer assigns its own authors; the writer asks the issuer over the network.
+    let installed = |reply: Value| reply["installed"].as_array().map_or(0, Vec::len);
+    assert_eq!(installed(issuer.call(json!({"type":"authors"})).await?), 3);
+    assert_eq!(installed(writer.call(json!({"type":"authors"})).await?), 3);
+    assert_eq!(installed(writer.call(json!({"type":"authors"})).await?), 0);
+
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
+        )
+        .await?;
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    let shared = issuer
+        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+        .await?;
+    writer
+        .call(json!({"type":"partition_install","group":"list","values":values(&list),"envelope":shared["envelopes"][0]["envelope"]}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    writer
+        .call(json!({"type":"partition_bootstrap","group":"list","values":values(&list)}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    // Its own authors let the writer insert into the shared list.
+    writer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Milk')"),
+        )
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer
+            .column(&format!("SELECT title FROM items WHERE list = {list}"))
+            .await?,
+        [json!("Milk")]
+    );
+
+    let served = kinds(&issuer.call(json!({"type":"activity"})).await?);
+    for kind in [
+        "invitation_created",
+        "device_enrolled",
+        "author_installed",
+        "author_assigned",
+        "partition_created",
+        "partition_shared",
+    ] {
+        assert!(
+            served.contains(&kind.to_owned()),
+            "issuer lacks {kind}: {served:?}"
+        );
+    }
+    let activity = writer.call(json!({"type":"activity"})).await?;
+    let seen = kinds(&activity);
+    for kind in [
+        "author_installed",
+        "peer_reached",
+        "partition_key_installed",
+        "partition_bootstrap",
+        "checkpoint_imported",
+        "synced",
+    ] {
+        assert!(
+            seen.contains(&kind.to_owned()),
+            "writer lacks {kind}: {seen:?}"
+        );
+    }
+    let synced = activity["events"]
+        .as_array()
+        .ok_or("events")?
+        .iter()
+        .filter(|event| event["kind"] == "synced")
+        .collect::<Vec<_>>();
+    assert!(
+        synced
+            .iter()
+            .any(|event| event["pushed"].as_u64() > Some(0))
+    );
+    assert!(
+        synced
+            .iter()
+            .any(|event| event["scopes"][0]["table"].is_string())
+    );
+    // A caught-up observer waits for the next event.
+    let token = activity["token"].clone();
+    let waiting = writer.call(json!({"type":"activity_next","after":token}));
+    let (next, _) = tokio::join!(
+        waiting,
+        writer.call(json!({"type":"connection","online":false}))
+    );
+    assert_eq!(kinds(&next?), ["offline"]);
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer =
+        Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let invitation = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"writer","scopes":TABLES}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer =
+        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    issuer.call(json!({"type":"authors"})).await?;
+    writer.call(json!({"type":"authors"})).await?;
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Groceries')",
+        )
+        .await?;
+    issuer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Milk')"),
+        )
+        .await?;
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    let shared = issuer
+        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+        .await?;
+    writer
+        .call(json!({"type":"partition_install","group":"list","values":values(&list),"envelope":shared["envelopes"][0]["envelope"]}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    writer
+        .call(json!({"type":"partition_bootstrap","group":"list","values":values(&list)}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    writer
+        .insert(
+            "items",
+            Some(&list),
+            &format!("INSERT INTO items(id,list,title) VALUES(?,{list},'Eggs')"),
+        )
+        .await?;
+    let titles = format!("SELECT title FROM items WHERE list = {list} ORDER BY title");
+    assert_eq!(
+        writer.column(&titles).await?,
+        [json!("Eggs"), json!("Milk")]
+    );
+
+    // Reopening installs the group keys after the projection is built; the
+    // items' parent list then anchors them again, on both devices.
+    let Peer {
+        database, session, ..
+    } = writer;
+    drop(session);
+    database.close().await?;
+    let reopened = Peer::new(Database::open(open(&root.path().join("b"), &hub, "b"))?.database)?;
+    assert_eq!(
+        reopened.column(&titles).await?,
+        [json!("Eggs"), json!("Milk")]
+    );
+    let Peer {
+        database, session, ..
+    } = issuer;
+    drop(session);
+    database.close().await?;
+    let issuer = Peer::new(Database::open(open(&root.path().join("a"), &hub, "a"))?.database)?;
+    assert_eq!(
+        issuer
+            .column(&format!("SELECT title FROM items WHERE list = {list}"))
+            .await?,
+        [json!("Milk")]
+    );
+    for peer in [reopened, issuer] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}

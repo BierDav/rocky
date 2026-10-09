@@ -70,7 +70,8 @@ new one installs successfully.
 
 The `status` call and Kotlin `readiness()` Flow carry `state`: `bootstrapping`
 while checkpoint-first intent or a staged import remains, `syncing` during an
-ordinary pass, `ready` when idle with valid authority, or `unavailable` after
+ordinary pass, `ready` when idle with valid authority, `revoked` after a verified
+[revocation notice](sdk-enrollment.md#renewal-revocation-and-logout), or `unavailable` after
 logout, expiry or during a generation rebuild. `ready` is true only in the
 `ready` state. Reads during import still see the previous committed projection;
 a new join is not complete until bootstrap finishes. A failed bootstrap remains

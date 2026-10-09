@@ -49,13 +49,33 @@ data class ShoppingItem(
     @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
 )
 
+/** What a trusted device recorded about an enrolled device: its [name] and [kind], see [NodeKind]. */
+@Entity(tableName = "devices", indices = [Index(value = ["id"], unique = true, name = "devices_identity")])
+data class DeviceRow(
+    @PrimaryKey val node: String,
+    val name: String,
+    val kind: String,
+    val id: Long,
+    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
+)
+
+/** A list's secret at [epoch], sealed to [recipient]: only that device can open [envelope]. */
+@Entity(tableName = "keys", primaryKeys = ["recipient", "list"], indices = [Index(value = ["id"], unique = true, name = "keys_identity")])
+class ListKey(
+    val recipient: String,
+    val list: Long,
+    val epoch: Long,
+    val envelope: ByteArray,
+    val id: Long,
+    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
+)
+
 @Dao
 interface ListDao {
     /** The held lists: `row_kind = 0` asks for a partial result, since a device need not hold every list. */
     @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY title, id") fun observe(): Flow<List<ShoppingList>>
-    @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY id") suspend fun all(): List<ShoppingList>
     @Insert suspend fun insert(list: ShoppingList)
-    /** Verifies the id `partitions.next("lists")` prepared, inside the inserting transaction. */
+    /** Verifies the id `partitions.nextId("lists")` prepared, inside the inserting transaction. */
     @SkipQueryVerification @Query("SELECT rocky_next_id('lists')") suspend fun nextId(): Long
     @Transaction suspend fun create(prepared: Long, title: String): ShoppingList {
         val id = nextId()
@@ -69,7 +89,6 @@ interface ListDao {
 @Dao
 interface CategoryDao {
     @Query("SELECT * FROM categories WHERE list = :list ORDER BY name, id") fun observe(list: Long): Flow<List<Category>>
-    @Query("SELECT * FROM categories WHERE list = :list ORDER BY id") suspend fun all(list: Long): List<Category>
     @Insert suspend fun insert(category: Category)
     @SkipQueryVerification @Query("SELECT rocky_next_id('categories', :list)") suspend fun nextId(list: Long): Long
     @Transaction suspend fun add(list: Long, name: String): Category = Category(list, nextId(list), name).also { insert(it) }
@@ -80,7 +99,6 @@ interface CategoryDao {
 interface ShoppingDao {
     @Query("SELECT * FROM items WHERE list = :list AND (:includeCompleted OR completed = 0) AND instr(lower(title), :search) > 0 ORDER BY completed, title, id")
     fun observe(list: Long, search: String = "", includeCompleted: Boolean = true): Flow<List<ShoppingItem>>
-    @Query("SELECT * FROM items WHERE list = :list ORDER BY id") suspend fun all(list: Long): List<ShoppingItem>
     @Insert suspend fun insert(item: ShoppingItem)
     /** Rocky reserves the next id of [list] inside the caller's write transaction; a rollback releases it. */
     @SkipQueryVerification @Query("SELECT rocky_next_id('items', :list)") suspend fun nextId(list: Long): Long
@@ -93,13 +111,38 @@ interface ShoppingDao {
     @Query("DELETE FROM items WHERE list = :list AND id = :id") suspend fun delete(list: Long, id: Long): Int
 }
 
+@Dao
+interface DeviceDao {
+    @Query("SELECT * FROM devices ORDER BY name, node") fun observe(): Flow<List<DeviceRow>>
+    @Insert suspend fun insert(device: DeviceRow)
+    @SkipQueryVerification @Query("SELECT rocky_next_id('devices')") suspend fun nextId(): Long
+    @Query("UPDATE devices SET name = :name, kind = :kind WHERE node = :node") suspend fun update(node: String, name: String, kind: String): Int
+    @Transaction suspend fun record(node: String, name: String, kind: String) {
+        if (update(node, name, kind) == 0) insert(DeviceRow(node, name, kind, nextId()))
+    }
+}
+
+@Dao
+interface KeyDao {
+    @Query("SELECT * FROM keys") fun observe(): Flow<List<ListKey>>
+    @Insert suspend fun insert(key: ListKey)
+    @SkipQueryVerification @Query("SELECT rocky_next_id('keys')") suspend fun nextId(): Long
+    @Query("UPDATE keys SET epoch = :epoch, envelope = :envelope WHERE recipient = :recipient AND list = :list")
+    suspend fun update(recipient: String, list: Long, epoch: Long, envelope: ByteArray): Int
+    @Transaction suspend fun deliver(recipient: String, list: Long, epoch: Long, envelope: ByteArray) {
+        if (update(recipient, list, epoch, envelope) == 0) insert(ListKey(recipient, list, epoch, envelope, nextId()))
+    }
+}
+
 /** Room on Rocky's file: the version is the replicated schema's, [ShoppingSchema], and Room never migrates it. */
-@Database(entities = [ShoppingList::class, Category::class, ShoppingItem::class], version = 3, exportSchema = true)
+@Database(entities = [ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class], version = 4, exportSchema = true)
 @ConstructedBy(ShoppingDatabaseConstructor::class)
 abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun lists(): ListDao
     abstract fun categories(): CategoryDao
     abstract fun items(): ShoppingDao
+    abstract fun devices(): DeviceDao
+    abstract fun keys(): KeyDao
 }
 
 @Suppress("KotlinNoActualForExpect")

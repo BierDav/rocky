@@ -2,10 +2,13 @@ package org.example.examples.shopping.qualification
 
 import java.io.File
 import java.util.Base64
+import androidx.room.Room
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import org.example.examples.shopping.*
 import rocky.*
+import rocky.room.setRockyDatabase
 
 /** Marks a reply line; native logging shares stdout. */
 internal const val REPLY = "@@rocky-device@@ "
@@ -45,7 +48,8 @@ private class DeviceProcess {
     private suspend fun opened(directory: File, open: suspend () -> RockyDatabase): JsonElement {
         val opened = open()
         runtime = opened
-        room = openShoppingDatabase(directory, opened)
+        room = Room.databaseBuilder<ShoppingDatabase>(File(directory, "shopping").absolutePath)
+            .setRockyDatabase(opened).build()
         return buildJsonObject { put("node", opened.session().node); put("issuer", opened.isIssuer) }
     }
 
@@ -55,25 +59,18 @@ private class DeviceProcess {
         val list = { request.long("list") }
         return when (request.text("op")) {
             "create" -> opened(directory()) {
-                RockyDatabase.create(directory(), ShoppingSchema, tcp(), automaticSync = false).also { it.installShoppingAuthor() }
+                RockyDatabase.create(directory(), ShoppingSchema, tcp(), automaticSync = false)
             }
             "join" -> opened(directory()) {
                 RockyDatabase.join(directory(), ShoppingSchema, request.text("invitation"), tcp(), automaticSync = false)
-                    .also { if (it.isIssuer) it.installShoppingAuthor() }
             }
             "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, tcp(), automaticSync = false) }
             "pairing" -> JsonPrimitive(when (val profile = request.text("profile")) {
-                "writer" -> database.pairing(GrantProfile.Writer(ShoppingTables.toSet()))
-                "custody" -> database.pairing(GrantProfile.Custody(ShoppingTables.toSet()))
+                "writer" -> database.pairing(GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()))
+                "custody" -> database.pairing(GrantProfile.Custody(ShoppingSchema.tables.map { it.name }.toSet()))
                 "issuer" -> database.pairDevice()
                 else -> error("unknown profile $profile")
             }.uri)
-            // A writer that does not issue asks an issuer for its authors through the orchestrator.
-            "pseudonymRequests" -> JsonArray(ShoppingTables.map { JsonPrimitive(database.credentials.pseudonymRequest(it)) })
-            "assignPseudonyms" -> JsonArray(request.getValue("requests").jsonArray.map { database.credentials.assignPseudonym(it.jsonPrimitive.content) })
-            "installPseudonyms" -> JsonArray(request.getValue("pseudonyms").jsonArray.map {
-                JsonPrimitive(database.credentials.installPseudonym(it.jsonArray).author)
-            })
             "contact" -> buildJsonObject { val contact = database.contact(); put("uri", contact.uri); put("node", contact.node) }
             "addPeer" -> JsonPrimitive(database.addPeer(request.text("contact")))
             "removePeer" -> { database.removePeer(request.text("node")); JsonNull }
@@ -100,18 +97,18 @@ private class DeviceProcess {
             "shareCodes" -> JsonObject(repository.shareWithDevices(list()).mapValues { JsonPrimitive(it.value) })
             "acceptCode" -> JsonPrimitive(repository.acceptCode(request.text("code")))
             "accept" -> { repository.accept(list(), Base64.getDecoder().decode(request.text("envelope"))); JsonNull }
-            "lists" -> JsonArray(room!!.lists().all().map { JsonPrimitive("${it.id}:${it.title}") })
-            "items" -> JsonArray(room!!.items().all(list()).sortedBy { it.title }.map { item ->
+            "lists" -> JsonArray(room!!.lists().observe().first().map { JsonPrimitive("${it.id}:${it.title}") })
+            "items" -> JsonArray(room!!.items().observe(list()).first().sortedBy { it.title }.map { item ->
                 buildJsonObject {
                     put("id", item.id); put("title", item.title); put("completed", item.completed)
                     item.category?.let { put("category", it) }
                 }
             })
-            "status" -> database.partitions.status("list", listPartition(list()))
+            "status" -> database.partitions.status("list", database.list(list()).values)
             "revoke" -> { database.revoke(request.text("node")); JsonNull }
             "renew" -> JsonPrimitive(database.renew().policyEpoch)
             "horizon" -> {
-                val values = listPartition(list())
+                val values = database.list(list()).values
                 val table = request.text("table")
                 when (val action = request.text("action")) {
                     "declare" -> database.horizons.declare(table,

@@ -31,21 +31,67 @@ pub struct Upstream<'a> {
     pub credentials: CredentialChain,
 }
 
+/// What one scope exchanged with a peer during a sync.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Moved {
+    pub pulled: usize,
+    pub pushed: usize,
+    pub bytes: usize,
+    /// The checkpoint a rebootstrap imported, with the held operations it superseded.
+    pub checkpoint: Option<(rocky_core::Commitment, u64)>,
+    /// The scope's horizon was finalized and pruned.
+    pub finalized: bool,
+}
+impl Moved {
+    pub fn is_empty(&self) -> bool {
+        self.pulled == 0 && self.pushed == 0 && self.checkpoint.is_none() && !self.finalized
+    }
+    fn merge(&mut self, other: Self) {
+        self.pulled += other.pulled;
+        self.pushed += other.pushed;
+        self.bytes += other.bytes;
+        self.checkpoint = other.checkpoint.or(self.checkpoint);
+        self.finalized |= other.finalized;
+    }
+}
+/// What a reconcile did, by scope, in first-change order.
+#[derive(Debug, Default)]
+pub(crate) struct Transfer {
+    pub scopes: Vec<(ResourceScope, Moved)>,
+}
+impl Transfer {
+    pub fn extend(&mut self, other: Self) {
+        for (scope, moved) in other.scopes {
+            self.add(scope, moved);
+        }
+    }
+    fn add(&mut self, scope: ResourceScope, moved: Moved) {
+        if moved.is_empty() {
+            return;
+        }
+        match self.scopes.iter_mut().find(|(known, _)| *known == scope) {
+            Some((_, held)) => held.merge(moved),
+            None => self.scopes.push((scope, moved)),
+        }
+    }
+}
+
 /// Pushes what the peer lacks and pulls what this device lacks, for every
 /// scope, until both hold the same frames. Confirmed command results the
 /// peer holds follow in a session of their own.
-/// Returns whether another generation requires an upgrade and whether results
-/// need another pass. A peer may run a newer definition generation, whose
-/// credentials this device cannot verify: it pulls, and its own changes
-/// wait until it upgrades. See `docs/runtime/generations.md`.
+/// Returns whether another generation requires an upgrade, whether results
+/// need another pass and what moved. A peer may run a newer definition
+/// generation, whose credentials this device cannot verify: it pulls, and
+/// its own changes wait until it upgrades. See `docs/runtime/generations.md`.
 pub(crate) async fn reconcile(
     replica: &EncryptedReplica<TypedCommands>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
     coordinator: Option<&dyn Coordinator>,
     progress: impl Fn(bool),
-) -> Result<(bool, bool), Failure> {
-    let newer = rows(replica, upstream, scopes, progress).await?;
+) -> Result<(bool, bool, Transfer), Failure> {
+    let mut transfer = Transfer::default();
+    let newer = rows(replica, upstream, scopes, progress, &mut transfer).await?;
     // Rows stay in sync while a coordinator is unreachable or a peer holds
     // no results; a ticket then stays `confirmed` until a later sync.
     let retry = match coordinator {
@@ -54,7 +100,7 @@ pub(crate) async fn reconcile(
             .unwrap_or(true),
         None => false,
     };
-    Ok((newer, retry))
+    Ok((newer, retry, transfer))
 }
 /// Checkpoint-first enrollment, resumed from the runtime's staged pages.
 /// `None` when the peer offers no checkpoint, as a keyless custody peer:
@@ -65,6 +111,7 @@ pub(crate) async fn bootstrap(
     scopes: &[ResourceScope],
     marker: &std::path::Path,
     mut expected: Vec<u8>,
+    transfer: &mut Transfer,
 ) -> Result<Option<Vec<u8>>, Failure> {
     let saved: serde_json::Value = serde_json::from_slice(&expected)?;
     let intent = saved.get("intent").unwrap_or(&saved).clone();
@@ -76,16 +123,32 @@ pub(crate) async fn bootstrap(
     for _ in 0..SESSIONS {
         let mut session = session(upstream).await?;
         let scope = scopes.get(next).ok_or("missing bootstrap scope")?;
-        let catch_up = if imported {
-            session.sync_scope(replica, *scope, QUOTA).await?.catch_up
+        let (catch_up, checkpoint) = if imported {
+            (
+                session.sync_scope(replica, *scope, QUOTA).await?.catch_up,
+                None,
+            )
         } else {
             let Some(report) = session.bootstrap_scope(replica, *scope, QUOTA).await? else {
                 session.close().await?;
                 return Ok(None);
             };
             imported = report.rebootstrap.is_some();
-            report.catch_up
+            let checkpoint = report
+                .rebootstrap
+                .as_ref()
+                .map(|imported| (imported.checkpoint, imported.superseded));
+            (report.catch_up, checkpoint)
         };
+        transfer.add(
+            *scope,
+            Moved {
+                pulled: catch_up.frames,
+                bytes: catch_up.bytes,
+                checkpoint,
+                ..Moved::default()
+            },
+        );
         if !catch_up.exhausted {
             replica.flush().await?;
             if std::fs::read(marker)? != expected {
@@ -121,6 +184,7 @@ async fn rows(
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
     progress: impl Fn(bool),
+    transfer: &mut Transfer,
 ) -> Result<bool, Failure> {
     let mut newer = false;
     for _ in 0..SESSIONS {
@@ -130,6 +194,11 @@ async fn rows(
         for scope in &changed {
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session.catch_up(replica, *scope, QUOTA).await?;
+            let mut moved = Moved {
+                pulled: pulled.frames,
+                bytes: pulled.bytes,
+                ..Moved::default()
+            };
             if pulled.behind && !pulled.exhausted {
                 progress(true);
                 let report = session
@@ -137,11 +206,18 @@ async fn rows(
                     .await?
                     .ok_or("the peer offers no checkpoint to restore its retained base")?;
                 pulled = report.catch_up;
+                moved.pulled += pulled.frames;
+                moved.bytes += pulled.bytes;
+                moved.checkpoint = report
+                    .rebootstrap
+                    .as_ref()
+                    .map(|imported| (imported.checkpoint, imported.superseded));
                 if !pulled.exhausted {
                     progress(false);
                 }
             }
             if pulled.exhausted {
+                transfer.add(*scope, moved);
                 exhausted = true;
                 break;
             }
@@ -156,6 +232,8 @@ async fn rows(
             if pushed.behind {
                 return Err("the peer is behind this device's pruning horizon".into());
             }
+            moved.pushed = pushed.frames;
+            transfer.add(*scope, moved);
             if pushed.exhausted {
                 exhausted = true;
                 break;
@@ -178,6 +256,13 @@ async fn rows(
                 {
                     replica.finalize_horizon(*scope).await?;
                     replica.prune(*scope).await?;
+                    transfer.add(
+                        *scope,
+                        Moved {
+                            finalized: true,
+                            ..Moved::default()
+                        },
+                    );
                 }
             }
         }

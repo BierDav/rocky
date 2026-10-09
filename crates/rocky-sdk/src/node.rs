@@ -202,6 +202,8 @@ pub(crate) struct Node {
     automatic: AtomicBool,
     sync_events: watch::Sender<u64>,
     sync_status: watch::Sender<Value>,
+    /// What the node did in the background, for applications to show.
+    pub(crate) activity: crate::activity::Activity,
     backups: Mutex<()>,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
     /// The application's coordinator, when it composed strong commands.
@@ -246,6 +248,7 @@ impl Node {
             automatic: AtomicBool::new(false),
             sync_events: watch::channel(0).0,
             sync_status: watch::channel(json!({"token": "0", "state": "idle", "retry": false})).0,
+            activity: crate::activity::Activity::new(),
             backups: Mutex::new(()),
             reached: std::sync::Mutex::new(BTreeMap::new()),
             coordinator,
@@ -492,12 +495,17 @@ impl Node {
                         .invite(&self.path, &self.vault, transport, profile.clone())
                         .await
                         .map_err(refused)?;
+                    self.activity.record(
+                        "invitation_created",
+                        json!({"profile": profile, "expires": expires.to_string()}),
+                    );
                     Ok(json!({"uri": uri, "expires": expires.to_string(), "profile": profile}))
                 }
                 "renew" => {
                     self.renew(transport, true, None).await?;
                     self.status(client).await
                 }
+                "authors" => self.authors(transport).await,
                 "contact" => {
                     let transport = transport.ok_or(ServiceError::NetworkRequired("contact"))?;
                     let settings = self.settings.lock().await.clone();
@@ -526,7 +534,10 @@ impl Node {
     pub async fn dispatch(&self, client: &Client, request: &Value) -> Result<Value, Failure> {
         let kind = request["type"].as_str().unwrap_or_default();
         if self.ended.lock().await.is_some()
-            && !matches!(kind, "domain" | "network" | "status" | "status_next")
+            && !matches!(
+                kind,
+                "domain" | "network" | "status" | "status_next" | "activity" | "activity_next"
+            )
         {
             return Err(refused("this device logged out of the domain"));
         }
@@ -555,6 +566,14 @@ impl Node {
                 Ok(serde_json::to_value(self.replica.retention_limits().await)?)
             }
             "status" => self.readiness().await,
+            "activity" => Ok(self.activity.after(token(request)?)),
+            "activity_next" => {
+                let mut closing = client.closing.subscribe();
+                self.activity
+                    .next(token(request)?, &mut closing)
+                    .await
+                    .ok_or_else(|| ServiceError::Closed("session").into())
+            }
             "status_next" => {
                 let after = request["after"]
                     .as_str()
@@ -601,7 +620,9 @@ impl Node {
                 }
             }
             "network" => Ok(self.network_status().await),
-            "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
+            "pairing" | "renew" | "sync" | "contact" | "authors" => {
+                self.networked(client, kind, request).await
+            }
             "sql" | "next_id" | "move_row" => self.sql_call(client, kind, request).await,
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "devices" => self.devices().await,
@@ -645,6 +666,8 @@ impl Node {
                 let node = self
                     .configure(|settings| settings.add_peer(&self.vault, contact))
                     .await?;
+                self.activity
+                    .record("peer_added", json!({"peer": node.to_hex()}));
                 self.wake_sync();
                 Ok(json!({"node": node.to_hex()}))
             }
@@ -661,6 +684,8 @@ impl Node {
                 })
                 .await?;
                 self.reached()?.remove(&node);
+                self.activity
+                    .record("peer_removed", json!({"peer": node.to_hex()}));
                 self.wake_sync();
                 Ok(json!({}))
             }
@@ -669,7 +694,10 @@ impl Node {
                     .as_str()
                     .ok_or("node must be a public key")?
                     .parse()?;
-                self.revoke(node).await
+                let revoked = self.revoke(node).await?;
+                self.activity
+                    .record("device_revoked", json!({"node": node.to_hex()}));
+                Ok(revoked)
             }
             "logout" => {
                 self.logout(request["purge"].as_bool().unwrap_or(false))
@@ -679,7 +707,10 @@ impl Node {
                 let enabled = request["online"]
                     .as_bool()
                     .ok_or("online must be boolean")?;
-                self.online.store(enabled, Ordering::SeqCst);
+                if self.online.swap(enabled, Ordering::SeqCst) != enabled {
+                    self.activity
+                        .record(if enabled { "online" } else { "offline" }, json!({}));
+                }
                 self.wake_sync();
                 Ok(json!({"online": enabled}))
             }
@@ -858,7 +889,16 @@ impl Node {
             return Err("a newer policy was learned meanwhile; install again".into());
         }
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let fresh = keys.len();
         self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        self.activity.record(
+            "renewed",
+            json!({
+                "epoch": renewed.policy.statement.epoch.to_string(),
+                "expires": settings.expires().to_string(),
+                "keys": fresh,
+            }),
+        );
         // New grants may make more members of a held group readable.
         for partition in settings.partitions(&self.domain)? {
             self.hold_keys(&settings, &partition).await?;
@@ -1095,6 +1135,7 @@ impl Node {
         let generation = self.generation().await?;
         let settings = self.settings.lock().await.clone();
         let logged_out = self.ended.lock().await.is_some() || settings.logged_out;
+        let revocation = settings.revocation(&self.path)?;
         let expired = settings.expires() <= now()?;
         let mut tickets = BTreeMap::<String, u64>::new();
         for ticket in self.replica.open_tickets(usize::MAX).await? {
@@ -1111,7 +1152,9 @@ impl Node {
             bootstrapping |= self.replica.rebootstrap_progress(*scope).await?.is_some()
                 || self.replica.horizon_rebootstrap_required(*scope).await?;
         }
-        let state = if logged_out || expired || !generation["rebuilding"].is_null() {
+        let state = if revocation.is_some() {
+            "revoked"
+        } else if logged_out || expired || !generation["rebuilding"].is_null() {
             "unavailable"
         } else if bootstrapping {
             "bootstrapping"
@@ -1130,6 +1173,7 @@ impl Node {
                 "expires": settings.expires().to_string(),
                 "expired": expired,
                 "logged_out": logged_out,
+                "revoked": revocation.is_some(),
                 "profile": settings.profile,
             },
             "tickets": tickets,
@@ -1328,9 +1372,28 @@ impl Node {
         first: Option<PublicKey>,
     ) -> Result<(), Failure> {
         let current = self.settings.lock().await.clone();
-        let renewed = current
+        let renewed = match current
             .request_renewal(&self.vault, transport, learn, first)
-            .await?;
+            .await
+        {
+            Ok(renewed) => renewed,
+            Err(error) => {
+                if let Some(revoked) = error.downcast_ref::<crate::enrollment::Revoked>() {
+                    current.record_revocation(&self.path, revoked.0.clone())?;
+                    let node = current
+                        .credentials
+                        .0
+                        .last()
+                        .ok_or("missing device credential")?
+                        .capability
+                        .subject;
+                    self.activity
+                        .record("device_revoked", json!({"node": node.to_hex()}));
+                    self.wake_sync();
+                }
+                return Err(error);
+            }
+        };
         let mut settings = self.settings.lock().await;
         if renewed.policy.statement.epoch < settings.policy.statement.epoch {
             return Err("a newer policy was learned meanwhile; renew again".into());
@@ -1388,6 +1451,111 @@ impl Node {
         }
     }
 
+    /// Installs a pseudonym for every collection this device writes and has
+    /// none for: an issuer assigns its own, a member asks its issuers.
+    async fn authors(&self, transport: Option<&dyn Transport>) -> Result<Value, Failure> {
+        let missing = self.settings.lock().await.missing_authors(&self.domain)?;
+        let mut installed = Vec::new();
+        for collection in missing {
+            let settings = self.settings.lock().await.clone();
+            let request = settings.pseudonym_request(&self.vault, &collection)?;
+            let chain = if settings.issuer() {
+                self.configure(|settings| settings.assign_pseudonym(&self.vault, &request))
+                    .await?
+            } else {
+                let transport = transport.ok_or(ServiceError::NetworkRequired("authors"))?;
+                settings.request_author(transport, &request).await?
+            };
+            let (collection, author) = self
+                .configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
+                .await?;
+            let key = PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{collection}"))?);
+            self.replica.register_row_author(key, chain).await?;
+            self.activity.record(
+                "author_installed",
+                json!({"collection": collection, "author": author}),
+            );
+            installed.push(json!({"collection": collection, "author": author}));
+        }
+        Ok(json!({"installed": installed}))
+    }
+    /// Records a peer's reachability when it changed and what a sync moved.
+    fn record_reach(
+        &self,
+        peer: PublicKey,
+        before: Option<Option<String>>,
+        result: &Result<(bool, bool, sync::Transfer), Failure>,
+    ) {
+        let peer_hex = peer.to_hex();
+        match result {
+            Err(error) => {
+                let error = error.to_string();
+                if before.flatten().as_ref() != Some(&error) {
+                    self.activity.record(
+                        "peer_unreachable",
+                        json!({"peer": peer_hex, "error": error}),
+                    );
+                }
+            }
+            Ok((_, _, transfer)) => {
+                if !matches!(before, Some(None)) {
+                    self.activity
+                        .record("peer_reached", json!({"peer": peer_hex}));
+                }
+                if transfer.scopes.is_empty() {
+                    return;
+                }
+                let scopes: Vec<Value> = transfer
+                    .scopes
+                    .iter()
+                    .map(|(scope, moved)| {
+                        let mut label = self.scope_label(scope);
+                        label["pulled"] = json!(moved.pulled);
+                        label["pushed"] = json!(moved.pushed);
+                        label["bytes"] = json!(moved.bytes);
+                        label
+                    })
+                    .collect();
+                let (pulled, pushed) = transfer
+                    .scopes
+                    .iter()
+                    .fold((0, 0), |(pulled, pushed), (_, moved)| {
+                        (pulled + moved.pulled, pushed + moved.pushed)
+                    });
+                if pulled + pushed > 0 {
+                    self.activity.record(
+                        "synced",
+                        json!({"peer": peer_hex, "pulled": pulled, "pushed": pushed, "scopes": scopes}),
+                    );
+                }
+                for (scope, moved) in &transfer.scopes {
+                    if let Some((checkpoint, superseded)) = moved.checkpoint {
+                        let mut event = self.scope_label(scope);
+                        event["peer"] = json!(peer_hex);
+                        event["checkpoint"] = json!(HEXLOWER.encode(&checkpoint));
+                        event["superseded"] = json!(superseded);
+                        self.activity.record("checkpoint_imported", event);
+                    }
+                    if moved.finalized {
+                        self.activity
+                            .record("horizon_finalized", self.scope_label(scope));
+                    }
+                }
+            }
+        }
+    }
+    /// A scope as events name it: its table, and for a partition its
+    /// encryption commitment, which `partition_address` also reports.
+    fn scope_label(&self, scope: &ResourceScope) -> Value {
+        let own = self
+            .domain
+            .scopes()
+            .find(|(_, own)| own.table == scope.table);
+        json!({
+            "table": own.map(|(name, _)| name),
+            "partition": own.is_some_and(|(_, own)| own != *scope).then(|| HEXLOWER.encode(&scope.encryption)),
+        })
+    }
     fn wake_sync(&self) {
         self.sync_events
             .send_modify(|event| *event = event.wrapping_add(1));
@@ -1430,6 +1598,9 @@ impl Node {
                         status["retry"] = json!(retry);
                         status
                     }
+                    Err(error) if error.is::<crate::enrollment::Revoked>() => {
+                        json!({"state": "revoked", "error": error.to_string(), "retry": false})
+                    }
                     Err(error) => {
                         json!({"state": "unavailable", "error": error.to_string(), "retry": error.downcast_ref::<ServiceError>().is_none_or(ServiceError::retryable)})
                     }
@@ -1471,6 +1642,9 @@ impl Node {
     /// Syncs with every configured peer. One reachable peer is enough;
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
+        if let Some(policy) = self.settings.lock().await.revocation(&self.path)? {
+            return Err(Box::new(crate::enrollment::Revoked(policy)));
+        }
         if !self.online.load(Ordering::SeqCst) {
             return Ok((json!({"state": "offline"}), false));
         }
@@ -1481,11 +1655,26 @@ impl Node {
         let member = !settings.issuer();
         if settings.expires() < now()?.saturating_add(settings.ttl / 2) {
             let renewed = self.renew(Some(transport), false, None).await;
+            if let Err(error) = &renewed {
+                self.activity
+                    .record("renewal_failed", json!({"error": error.to_string()}));
+            }
             if !member {
                 renewed?;
             } else if renewed.is_err() && settings.expires() <= now()? {
                 return Err("credentials expired; an issuer must be reachable to renew".into());
             }
+        }
+        // A member that joined while no issuer answered asks again here.
+        if member
+            && !self
+                .settings
+                .lock()
+                .await
+                .missing_authors(&self.domain)?
+                .is_empty()
+        {
+            let _ = self.authors(Some(transport)).await;
         }
         let targets = self.settings.lock().await.targets();
         let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
@@ -1503,11 +1692,21 @@ impl Node {
                 if self.renew(Some(transport), true, Some(*peer)).await.is_ok() {
                     result = self.reconcile(transport, *peer, contact).await;
                 }
+                if let Some(policy) = self.settings.lock().await.revocation(&self.path)? {
+                    return Err(Box::new(crate::enrollment::Revoked(policy)));
+                }
             }
             let error = result.as_ref().err().map(ToString::to_string);
-            self.reached()?.insert(*peer, Reached { at: now()?, error });
+            let before = self.reached()?.insert(
+                *peer,
+                Reached {
+                    at: now()?,
+                    error: error.clone(),
+                },
+            );
+            self.record_reach(*peer, before.map(|reached| reached.error), &result);
             match result {
-                Ok((behind, pending)) => {
+                Ok((behind, pending, _)) => {
                     connected += 1;
                     newer |= behind;
                     retry |= pending;
@@ -1533,7 +1732,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, bool), Failure> {
+    ) -> Result<(bool, bool, sync::Transfer), Failure> {
         let addresses = contact.addresses(transport.kind());
         if addresses.is_empty() {
             return Err(ServiceError::NoRoute {
@@ -1554,6 +1753,7 @@ impl Node {
             .as_deref()
             .filter(|_| !self.domain.app.commands().is_empty());
         let marker = self.path.with_file_name("bootstrap.json");
+        let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
             self.sync_state.send_replace("bootstrapping");
             let expected = std::fs::read(&marker)?;
@@ -1586,9 +1786,20 @@ impl Node {
                     })
                     .collect()
             };
+            self.activity.record_changed(
+                "bootstrap_started",
+                json!({"peer": peer.to_hex(), "scopes": pending.len()}),
+            );
             // `None`: this peer offers no checkpoint; intent stays for another.
-            if let Some(completed) =
-                sync::bootstrap(&self.replica, &upstream, &pending, &marker, expected).await?
+            if let Some(completed) = sync::bootstrap(
+                &self.replica,
+                &upstream,
+                &pending,
+                &marker,
+                expected,
+                &mut bootstrapped,
+            )
+            .await?
             {
                 self.replica.flush().await?;
                 if std::fs::read(&marker)? != completed {
@@ -1598,10 +1809,12 @@ impl Node {
                 #[cfg(unix)]
                 std::fs::File::open(marker.parent().ok_or("bootstrap marker has no directory")?)?
                     .sync_all()?;
+                self.activity
+                    .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
             }
         }
         self.sync_state.send_replace("syncing");
-        sync::reconcile(
+        let (newer, retry, transfer) = sync::reconcile(
             &self.replica,
             &upstream,
             &self.scopes(),
@@ -1614,7 +1827,9 @@ impl Node {
                 });
             },
         )
-        .await
+        .await?;
+        bootstrapped.extend(transfer);
+        Ok((newer, retry, bootstrapped))
     }
     /// Serves one inbound stream: sync for the peers this device admits,
     /// pairing and renewal on an issuer.
@@ -1648,7 +1863,19 @@ impl Node {
                     if !settings.issuer() {
                         return Err(refused("only an issuer enrolls devices"));
                     }
-                    settings.pair(&self.path, &self.vault, &request)
+                    let reply = settings.pair(&self.path, &self.vault, &request)?;
+                    if let Ok(paired) = rocky_credentials::PairRequest::from_bytes(&request)
+                        && let Some(device) = settings
+                            .authority
+                            .as_ref()
+                            .and_then(|authority| authority.devices.get(&paired.node))
+                    {
+                        self.activity.record(
+                            "device_enrolled",
+                            json!({"node": paired.node.to_hex(), "profile": device.profile}),
+                        );
+                    }
+                    Ok(reply)
                 })
                 .await
             }
@@ -1661,11 +1888,29 @@ impl Node {
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
                     }
+                    if request == crate::enrollment::POLICY {
+                        return Ok(serde_json::to_vec(&settings.policy)?);
+                    }
                     if request == crate::generation::OFFER {
                         if !settings.issuer() {
                             return Err("only an issuer offers the domain's generations".into());
                         }
                         return settings.offer();
+                    }
+                    if let Some(asked) = request.strip_prefix(crate::enrollment::AUTHOR) {
+                        let asked = rocky_credentials::PseudonymRequest::from_bytes(asked)?;
+                        let mut draft = settings.clone();
+                        let chain = draft
+                            .assign_pseudonym(&self.vault, &asked)
+                            .map_err(refused)?;
+                        draft.save(&self.path)?;
+                        *settings = draft;
+                        let collection = settings.collection_name(asked.table).unwrap_or_default();
+                        self.activity.record(
+                            "author_assigned",
+                            json!({"node": asked.node.to_hex(), "collection": collection}),
+                        );
+                        return Ok(serde_json::to_vec(&chain)?);
                     }
                     settings.renew(&self.path, &self.vault, &request)
                 })
@@ -2463,6 +2708,16 @@ impl Node {
 fn secure_handle(handle: &[u8; 32]) -> rocky_core::Commitment {
     commitment("rocky.sdk.mutation.v1", handle)
 }
+/// The `after` token of an activity call; absent starts at the beginning.
+fn token(request: &Value) -> Result<u64, Failure> {
+    match &request["after"] {
+        Value::Null => Ok(0),
+        after => Ok(after
+            .as_str()
+            .ok_or_else(|| refused("after must be an activity token"))?
+            .parse()?),
+    }
+}
 fn subscription(request: &Value) -> Result<u64, Failure> {
     Ok(request["subscription"]
         .as_str()
@@ -2476,7 +2731,9 @@ fn is_authority(error: &Failure) -> bool {
 /// The error object of a failed call: its code and whether retrying the
 /// same call may succeed.
 pub fn error(error: &Failure) -> Value {
-    let (code, retryable) = if error.is::<Refused>() {
+    let (code, retryable) = if error.is::<crate::enrollment::Revoked>() {
+        ("revoked", false)
+    } else if error.is::<Refused>() {
         ("rejected", false)
     } else if error.is::<Deferred>() {
         ("executor_unavailable", true)

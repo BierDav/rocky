@@ -1,30 +1,34 @@
 package org.example.examples.shopping
 
 import java.io.File
+import androidx.room.Room
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
-import rocky.GrantProfile
+import rocky.RockyDatabase
 
-/** A developer walkthrough of a shared list; the Compose screen is in [ShoppingScreen]. */
+/** A developer walkthrough of a shared list; the Compose app uses the same [ShoppingNode]. */
 fun main() = runBlocking {
     val directory = File(requireNotNull(System.getenv("ROCKY_DEMO_DATA")))
     val creatorDirectory = File(directory, "creator")
-    val creator = if (File(creatorDirectory, "identity.json").exists())
-        ShoppingDesktop.resume(creatorDirectory)
-    else ShoppingDesktop.create(creatorDirectory)
-    var peer: ShoppingDesktop? = null
+    fun platform(directory: File, name: String) = ShoppingPlatform(directory, name,
+        room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) })
+    val creatorPlatform = platform(creatorDirectory, "Desktop")
+    val creator = if (RockyDatabase.exists(creatorDirectory)) ShoppingNode.resume(creatorPlatform)
+        else ShoppingNode.create(creatorPlatform)
+    var peer: ShoppingNode? = null
     try {
         val peerDirectory = File(directory, "peer")
-        peer = if (File(peerDirectory, "identity.json").exists())
-            ShoppingDesktop.resume(peerDirectory)
+        val peerPlatform = platform(peerDirectory, "Peer")
+        peer = if (RockyDatabase.exists(peerDirectory))
+            ShoppingNode.resume(peerPlatform)
         else {
-            val invitation = creator.runtime.pairing(GrantProfile.Writer(ShoppingTables.toSet()))
-            println("Transport: ${creator.runtime.session().transport}; QR payload: ${invitation.uri}")
-            ShoppingDesktop.join(peerDirectory, invitation.uri).also { it.runtime.installShoppingAuthor(issuer = creator.runtime) }
+            val code = creator.household.invite(NodeKind.Full, "Peer")
+            println("Transport: ${creator.rocky.session().transport}; QR payload: $code")
+            ShoppingNode.join(peerPlatform, code)
         }
         val list = creator.repository.createList("Groceries")
         // One envelope shares the list with its categories and items.
-        val node = peer.runtime.session().node
+        val node = peer.self
         peer.repository.accept(list, creator.repository.share(list, listOf(node)).getValue(node))
         val dairy = creator.repository.addCategory(list, "Dairy")
         creator.repository.add(list, "Milk", category = dairy)
@@ -33,10 +37,10 @@ fun main() = runBlocking {
         }
         println("Live Room query on peer: $rows")
         val milk = rows.first { it.title == "Milk" && !it.completed }
-        peer.runtime.setOnline(false)
+        peer.rocky.setOnline(false)
         peer.repository.check(list, milk.id, true)
         println("Checked Milk locally while offline")
-        peer.runtime.setOnline(true)
+        peer.rocky.setOnline(true)
         val converged = withTimeout(10_000) {
             creator.repository.observe(list).first { items -> items.any { it.id == milk.id && it.completed } }
         }

@@ -317,6 +317,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     // The revoked reader gets neither the new key nor new rows.
     assert!(c.sync().await.is_err());
     assert!(c.call(json!({"type": "renew"})).await.is_err());
+    assert_eq!(c.ok(json!({"type": "status"})).await["state"], "revoked");
     assert_eq!(secret(root, "c", "reader.items.2")?, None);
     assert!(secrets(root, "c")?.iter().all(|name| !name.ends_with(".2")));
     assert_eq!(identity(root, "c")?["keys"], json!({"items": [1]}));
@@ -329,6 +330,23 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     for device in [&a, &b, &c, &w] {
         device.close().await;
     }
+
+    let reopened = reopen(root, &hub, "c")?;
+    assert_eq!(
+        reopened.ok(json!({"type": "status"})).await["state"],
+        "revoked"
+    );
+    reopened.close().await;
+    // A local file cannot forge a publisher's revocation notice.
+    let notice = root.join("c/revoked.json");
+    let original = std::fs::read(&notice)?;
+    let mut tampered: Value = serde_json::from_slice(&original)?;
+    tampered["policy"]["statement"]["epoch"] = json!(999);
+    std::fs::write(&notice, serde_json::to_vec(&tampered)?)?;
+    let reopened = reopen(root, &hub, "c")?;
+    assert!(reopened.call(json!({"type": "status"})).await.is_err());
+    reopened.close().await;
+    std::fs::write(&notice, original)?;
 
     // A lost key epoch is an error at open, and is not made again.
     let before = secrets(root, "b")?;

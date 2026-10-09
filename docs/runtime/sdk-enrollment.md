@@ -33,6 +33,29 @@ collections, custody-only holder ([always-on peer](always-on-peer.md), no
 reader keys or publishing authority), or issuer. An issuer enrolls, renews
 and revokes; no issuer needs to serve every sync.
 
+## Author installation
+
+Kotlin `RockyDatabase.create` and `join` install the current author pseudonym
+of every writable table before returning when an issuer answers. Issuers
+assign their own authors; members send a signed pseudonym request over the
+renewal lane. `installAuthors()` retries missing or expired assignments and
+returns those newly installed; already-current assignments are unchanged.
+Partition-selector grants use the same installation path without requiring
+collection-wide rights; read-only devices request no authors.
+Member sync retries missing authors. If no issuer answers a member's join,
+the database remains open and assignments retry during sync; inserts requiring
+an author fail until it is installed. Raw local/supplied composition remains
+explicit and can call `installAuthors()` itself.
+
+The `authors` native request returns `installed` entries with `collection`
+and `author`. Assignments and counters are persisted before the issuer
+answers, so a lost reply retries the same device's assignment. The
+`rocky.sdk.author.v1` prefix distinguishes this request from ordinary renewal
+and generation offers; it carries the existing signed `PseudonymRequest`.
+Issuers verify its grants, manifest, epoch and device binding through the same
+[author assignment](credential-primitives.md#author-pseudonyms) boundary.
+There is one current request format and no legacy reader.
+
 ## Secret storage
 
 Keys never enter replicated tables or `identity.json`. They live in a
@@ -120,6 +143,14 @@ intent is saved first; an interruption completes at the next open. Others
 renew on their next sync; the revoked device is refused sync and renewal and
 keeps only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk)
 and [limits](credentials.md#limits).
+
+After a refused renewal, a device requests the issuer's public signed policy
+with `rocky.sdk.policy.v1`. It verifies the pinned publisher, manifest, epoch
+and revocation of its credential chain before reporting `revoked`. A verified
+notice is kept in `revoked.json` (version 1), so readiness remains revoked
+after reopening; sync returns the non-retryable `revoked` error. Earlier
+decrypted data stays readable locally. Offline devices learn this only when
+an issuer becomes reachable. A fresh invitation enrolls a new identity.
 
 `logout()` ends sessions and deletes keys; `logout(purge = true)` also removes
 local data on close. Rejoining needs a new invitation. An issuer that knows no
@@ -211,6 +242,8 @@ enables the native [change-driven worker](always-on-peer.md#change-driven-sync);
 | `install` with `supplied` | Replaces credentials; the new `session` |
 | `devices`, `revoke` with `node` | Known devices with `profile` and `revoked`; the new epoch (issuer) |
 | `renew` | The renewed `session` |
+| `authors` | Newly installed table authors; see [above](#author-installation) |
+| `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `connection` with `online`, `sync` | `offline`, or `connected` with the number of `peers` reached |
 | `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; configured peers with `issuer`, routes, `state`, `checked`, `error` |
@@ -244,7 +277,7 @@ Not covered: publisher key backup, login providers, desktop keychains.
 ## Design rationale
 
 Status: current identity and routing formats supersede their compatibility
-clauses as of 2026-10-08. Identity 8, invitation 4 and contact 2 each have one
+clauses as of 2026-10-08. Identity 9, invitation 4 and contact 2 each have one
 reader; other versions require reinstall.
 
 - Identity is transport-independent: a domain is its definition identity and

@@ -1,0 +1,114 @@
+package org.example.examples.shopping
+
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import rocky.GrantProfile
+import rocky.RockyDatabase
+import rocky.RockyEvent
+import rocky.room.settledOnRocky
+
+/**
+ * The household's devices and how list keys reach them, without a server: a trusted device records each device it
+ * enrolls in `devices` and seals every list's key to trusted and full devices in `keys`, which sync like any row;
+ * each device installs the keys sealed to it. Partial devices receive only lists shared with them by [share].
+ */
+class Household(private val database: ShoppingDatabase, private val rocky: RockyDatabase, val self: String) {
+    private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    /** The invitation awaiting its device, so its enrollment records the chosen kind and name. */
+    private var pending: Pair<NodeKind, String>? = null
+
+    fun devices(): Flow<List<DeviceRow>> = database.devices().observe().settledOnRocky()
+    /** Durable issuer state, refreshed when its device policy changes. */
+    fun revokedDevices(): Flow<Set<String>> = if (!rocky.isIssuer) flowOf(emptySet()) else rocky.activity()
+        .filter { it is RockyEvent.DeviceRevoked || it is RockyEvent.Renewed }
+        .map { Unit }.onStart { emit(Unit) }
+        .map { rocky.devices().filter { it.revoked }.map { it.node }.toSet() }
+        .distinctUntilChanged()
+    /** Which device was sent the key of which list, at which epoch. */
+    fun keys(): Flow<List<ListKey>> = database.keys().observe().settledOnRocky()
+    /** What key delivery did, for the activity log. */
+    val deliveries: SharedFlow<String> = notes.asSharedFlow()
+
+    /** On a trusted device: a single-use code for one new device of [kind], replacing the previous one. */
+    suspend fun invite(kind: NodeKind, name: String): PairingCode {
+        val invitation = rocky.pairing(kind.profile)
+        pending = kind to name
+        return PairingCode(kind, name, invitation.uri)
+    }
+    suspend fun record(node: String, name: String, kind: NodeKind) = database.devices().record(node, name, kind.name.lowercase())
+    /** On a trusted device: seals [list]'s current key to the partial device [node]. */
+    suspend fun share(list: Long, node: String) = deliver(list, listOf(node))
+    /** Revokes future access and rotates the keys this device could read. */
+    suspend fun revoke(node: String) { rocky.revoke(node) }
+
+    /** Runs until cancelled: records enrollments and delivers keys on a trusted device, and installs its own keys. */
+    suspend fun run() = coroutineScope {
+        if (rocky.isIssuer) {
+            launch { recordEnrollments() }
+            launch { deliverEveryList() }
+        }
+        launch { installOwnKeys() }
+    }
+
+    private suspend fun recordEnrollments() {
+        rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
+            val known = devices().first().any { it.node == enrolled.node }
+            val (kind, name) = pending?.also { pending = null }
+                ?: if (known) return@collect
+                // Enrolled while this app was closed: the grants still tell a trusted device apart.
+                else (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
+            if (attempt("record ${name}") { record(enrolled.node, name, kind) } != null) {
+                notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
+            }
+        }
+    }
+
+    @OptIn(FlowPreview::class)
+    private suspend fun deliverEveryList() {
+        combine(database.lists().observe(), devices(), database.keys().observe(), revokedDevices()) { lists, devices, keys, revoked ->
+            Triple(lists, devices.filter { it.node !in revoked }, keys)
+        }
+            .settledOnRocky()
+            .debounce(300)
+            .collectLatest { (lists, devices, keys) ->
+                val recipients = devices.filter { it.node != self && NodeKind.of(it.kind)?.receivesEveryList == true }
+                // A partial device keeps receiving the new epoch of lists it was given.
+                val given = keys.filter { key -> devices.any { it.node == key.recipient && NodeKind.of(it.kind) == NodeKind.Partial } }
+                for (list in lists) {
+                    val epoch = attempt("read ${list.title}") { rocky.list(list.id).status().epochs.maxOrNull() } ?: continue
+                    val stale = (recipients.map { it.node } + given.filter { it.list == list.id }.map { it.recipient })
+                        .filter { node -> keys.none { it.recipient == node && it.list == list.id && it.epoch == epoch } }
+                    for (recipient in stale) attempt("share ${list.title} with ${recipient.take(6)}") {
+                        deliver(list.id, listOf(recipient))
+                        notes.tryEmit("Sealed “${list.title}” to ${devices.firstOrNull { it.node == recipient }?.name ?: recipient.take(6)}")
+                    }
+                }
+            }
+    }
+
+    private suspend fun installOwnKeys() {
+        database.keys().observe().settledOnRocky().map { keys -> keys.filter { it.recipient == self } }.collect { keys ->
+            for (key in keys) {
+                val list = rocky.list(key.list)
+                val held = attempt("read list ${key.list}") { list.status().epochs } ?: continue
+                if (key.epoch in held) continue
+                attempt("install list ${key.list}") {
+                    list.accept(key.envelope)
+                    notes.tryEmit("Installed the key of list ${key.list}, epoch ${key.epoch}")
+                }
+            }
+        }
+    }
+
+    private suspend fun deliver(list: Long, recipients: List<String>) {
+        val epoch = rocky.list(list).status().epochs.maxOrNull() ?: error("no key of list $list is held here")
+        for ((node, envelope) in rocky.list(list).share(recipients)) database.keys().deliver(node, list, epoch, envelope)
+    }
+
+    private suspend fun <T> attempt(what: String, block: suspend () -> T): T? = try { block() }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) { notes.tryEmit("Could not $what: ${error.message}"); null }
+}

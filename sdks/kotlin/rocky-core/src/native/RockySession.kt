@@ -24,6 +24,22 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     val horizons: Horizons get() = client.horizons
     val commands: CommandPort get() = this
     fun readiness(): Flow<JsonObject> = client.readiness()
+    /** [readiness] as typed values, each once it changed. */
+    fun observeReadiness(): Flow<Readiness> = client.readiness().map { status ->
+        val authority = status.getValue("authority").jsonObject
+        Readiness(ReadinessState.valueOf(status.text("state").replaceFirstChar(Char::uppercase)), status.text("revision").toLong(),
+            authority.text("epoch").toLong(), authority.text("expires").toLong(), profile(authority.getValue("profile").jsonObject),
+            status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean)
+    }
+    /** What the database did in the background: the kept events, then each new one. See [RockyEvent]. */
+    fun activity(): Flow<RockyEvent> = client.activity()
+    /**
+     * Installs an author for every table this device writes and has none for: an issuer assigns its own, a member
+     * asks its issuers over the network. `create` and `join` call it; a sync retries what a member still lacks.
+     */
+    suspend fun installAuthors(): List<AuthorPseudonym> = client.call(request("authors")).getValue("installed").jsonArray.map {
+        it.jsonObject.let { installed -> AuthorPseudonym(installed.text("collection"), installed.getValue("author").jsonPrimitive.int) }
+    }
     /** `committed` tells whether a write committed under `handle`. */
     suspend fun reconcile(handle: String): JsonObject = client.recoverMutation(handleBytes(handle))
     /** Persisted pruning policy for one granted collection; at least one other copy is always required. */
@@ -139,9 +155,19 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     suspend fun syncOnce(): ConnectionStatus = connection.withLock {
         try {
             val result = client.call(request("sync"))
-            mutableStatus.value = ConnectionStatus(if (result.getValue("state").jsonPrimitive.content == "offline") ConnectionState.Offline else ConnectionState.Connected)
+            mutableStatus.value = ConnectionStatus(
+                when (result.getValue("state").jsonPrimitive.content) {
+                    "offline" -> ConnectionState.Offline
+                    "revoked" -> ConnectionState.Revoked
+                    else -> ConnectionState.Connected
+                },
+                peers = result["peers"]?.jsonPrimitive?.int ?: 0, atEpochMillis = System.currentTimeMillis())
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { mutableStatus.value = ConnectionStatus(ConnectionState.Unavailable, error.message) }
+        catch (error: Exception) {
+            mutableStatus.value = ConnectionStatus(
+                if (error is RockyException && error.code == "revoked") ConnectionState.Revoked else ConnectionState.Unavailable,
+                error.message, atEpochMillis = System.currentTimeMillis())
+        }
         mutableStatus.value
     }
     /** Enables native change-driven sync; cancellation stops this status observer. */
@@ -151,6 +177,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             mutableStatus.value = ConnectionStatus(when (result["state"]?.jsonPrimitive?.content) {
                 "connected" -> ConnectionState.Connected
                 "offline" -> ConnectionState.Offline
+                "revoked" -> ConnectionState.Revoked
                 else -> ConnectionState.Unavailable
             }, result["error"]?.jsonPrimitive?.contentOrNull)
             result = client.call(request("sync_next") { put("after", result.getValue("token")) })

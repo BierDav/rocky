@@ -3,10 +3,25 @@
 Device runs of the [shopping qualification](shopping-qualification.md). The
 JVM harness proves the scenarios; this page records what ran on Android.
 
+## Device kinds
+
+The current app pairs directly over iroh. A trusted device chooses the new
+device's name and kind in **Devices → Add device**: trusted (issuing and full),
+full (all lists, without issuing) or partial (only explicitly shared lists).
+The [app guide](../../examples/shoppinglist-app/README.md#run-and-pair) describes
+the grants and automatic sealed-key delivery. The Sync tab exposes domain,
+holdings, key epochs and [background activity](activity.md).
+
+The custody procedure below is a separate qualification topology. The
+interactive app needs no custody peer; devices exchange edits whenever they
+are online together. Android driver extras are implemented in
+[Driver](../../examples/shoppinglist-app/androidApp/src/Driver.kt), which also
+accepts raw invitations for the qualification harness.
+
 ## Two-phone procedure
 
 The [Compose app](../../examples/shoppinglist-app/androidApp) takes driver
-extras (see `MainActivity`), so the harness drives it with `adb` and reads the
+extras (see `Driver`), so the harness drives it with `adb` and reads the
 results from logcat. A host issuer enrolls both devices as issuing devices of
 the user and enrolls the packaged custody peer; then the host closes. Both
 devices reach the custody peer through `adb reverse` and never each other.
@@ -21,7 +36,7 @@ ROCKY_PHONES=<serial A>,<serial B> ROCKY_APK=<androidApp APK> \
 The run installs the app, clears its data, then:
 
 1. Phone A creates "Weekly" with Milk and "Weekend" with Eggs and shares both
-   with the Share button's codes; phone B opens the codes.
+   with the driver's envelope codes; phone B opens the codes.
 2. A publishes to custody while B is offline, then B syncs from custody alone.
 3. Offline from A, B ticks Milk and adds Bread. A adds Bread and moves Milk to
    "Weekend". Each publishes while the other is offline.

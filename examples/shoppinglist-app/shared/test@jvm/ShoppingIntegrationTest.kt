@@ -200,11 +200,12 @@ class ShoppingIntegrationTest {
         } finally { d?.close(); s?.close(); a.close(); root.deleteRecursively() }
     }
 
-    private val shopper = GrantProfile.Writer(ShoppingTables.toSet())
+    /** A full device: it edits lists it receives and reads the tables trusted devices write. */
+    private val shopper = NodeKind.Full.profile
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
     @Test fun `the hand-declared schema is the Room export's`() {
-        val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/3.json").readText()
+        val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/4.json").readText()
         assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
     }
@@ -221,7 +222,6 @@ class ShoppingIntegrationTest {
     @Test fun `a list shares its categories and items and deleting a category nulls only the reference`() = runBlocking {
         val root = directory()
         val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
-        a.installShoppingAuthor()
         val da = openShoppingDatabase(File(root, "a"), a)
         val repository = ShoppingRepository(da, a)
         try {
@@ -242,9 +242,9 @@ class ShoppingIntegrationTest {
             val reader = Credentials.prepare(File(root, "reader")).getValue("node").jsonPrimitive.content
             val shared = repository.share(list, listOf(reader))
             assertEquals(setOf(reader), shared.keys)
-            val status = a.partitions.status("list", listPartition(list))
-            assertEquals(ShoppingTables.toSet(), status.getValue("tables").jsonArray.map { it.jsonObject.getValue("table").jsonPrimitive.content }.toSet())
-            assertTrue(status.getValue("tables").jsonArray.all { it.jsonObject.getValue("epochs") == status.getValue("epochs") })
+            val status = a.list(list).status()
+            assertEquals(ShoppingTables.toSet(), status.tables.map { it.table }.toSet())
+            assertTrue(status.tables.all { it.keyEpochs == status.epochs })
 
             repository.deleteCategory(list, dairy)
             val items = da.items().all(list)
@@ -262,7 +262,6 @@ class ShoppingIntegrationTest {
     @Test fun `offline DAO edits converge with conflicting fields and permanent deletion`() = runBlocking {
         val root = directory()
         val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
-        a.installShoppingAuthor()
         val da = openShoppingDatabase(File(root, "a"), a)
         val ra = ShoppingRepository(da, a)
         var b: RockyDatabase? = null
@@ -271,7 +270,8 @@ class ShoppingIntegrationTest {
             val invitation = a.pairing(shopper)
             assertTrue(invitation.uri.startsWith("rocky://join/"))
             b = RockyDatabase.join(File(root, "b"), ShoppingSchema, invitation.uri, local(), automaticSync = false)
-            b.installShoppingAuthor(issuer = a)
+            // Joining installed the authors its issuer assigned over the network.
+            assertEquals(emptyList(), b.installAuthors())
             db = openShoppingDatabase(File(root, "b"), b)
             val rb = ShoppingRepository(db, b)
             val list = ra.createList("Groceries")
@@ -302,14 +302,12 @@ class ShoppingIntegrationTest {
     @Test fun `filtered DAO flows follow local and synced writes`() = runBlocking {
         val root = directory()
         val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false)
-        a.installShoppingAuthor()
         val da = openShoppingDatabase(File(root, "a"), a)
         var b: RockyDatabase? = null
         var db: ShoppingDatabase? = null
         var following: Job? = null
         try {
             b = RockyDatabase.join(File(root, "b"), ShoppingSchema, a.pairing(shopper).uri, tcp(), automaticSync = false)
-            b.installShoppingAuthor(issuer = a)
             db = openShoppingDatabase(File(root, "b"), b)
             val repository = ShoppingRepository(db, b)
             val owner = ShoppingRepository(da, a)
@@ -433,7 +431,7 @@ class ShoppingIntegrationTest {
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(session.policyEpoch + 1, b.session().policyEpoch)
             assertEquals(1, Row.decode(b.read(ItemsSchema.table("items").query())).size)
-            assertEquals(ConnectionState.Unavailable, c.syncOnce().state)
+            assertEquals(ConnectionState.Revoked, c.syncOnce().state)
             assertFailsWith<RockyException> { c.renew() }
             assertTrue(Row.decode(c.read(ItemsSchema.table("items").query())).isEmpty())
 

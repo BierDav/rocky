@@ -308,6 +308,8 @@ impl Node {
             tables.push(json!({
                 "table": member.table,
                 "scope": member.scope,
+                // As activity events name the partition.
+                "partition": data_encoding::HEXLOWER.encode(&member.scope.encryption),
                 "epochs": self.replica.key_epochs(member.scope).await,
                 "holding": holding
                     .get(&member.scope)
@@ -328,10 +330,25 @@ impl Node {
     ) -> Result<Value, Failure> {
         match kind {
             "partition_role" => {
-                self.replica
-                    .set_role(serde_json::from_value(request["role"].clone())?)
-                    .await?;
+                let role: rocky_secure::RoleConfig =
+                    serde_json::from_value(request["role"].clone())?;
+                let partial = role.role == rocky_secure::ReplicaRole::Partial;
+                self.replica.set_role(role).await?;
+                // Partial concerns partitions: every whole unpartitioned table read here stays held.
+                if partial {
+                    let settings = self.settings.lock().await.clone();
+                    for (_, scope) in self.domain.scopes() {
+                        if !self.domain.partitioned_table(&scope)
+                            && settings.reads_whole(&self.domain, &scope)
+                        {
+                            self.replica.subscribe(scope).await?;
+                        }
+                    }
+                }
+                self.activity
+                    .record("role_changed", json!({"partial": partial}));
                 self.forget_readers().await;
+                self.wake_sync();
                 return Ok(json!({}));
             }
             "partition_grant" | "partition_delegate" => {
@@ -367,6 +384,10 @@ impl Node {
                 let mut created = self.create_group(partition).await?;
                 created["id"] = identity.to_string().into();
                 created["scope"] = json!(scope);
+                self.activity.record(
+                    "partition_created",
+                    json!({"table": table, "id": identity.to_string()}),
+                );
                 self.forget_readers().await;
                 self.wake_sync();
                 return Ok(created);
@@ -374,6 +395,7 @@ impl Node {
             _ => {}
         }
         let partition = self.group_partition(request)?;
+        let named = json!({"group": request["group"], "values": request["values"]});
         let omit: BTreeSet<String> = match &request["omit"] {
             Value::Null => BTreeSet::new(),
             omit => serde_json::from_value(omit.clone())?,
@@ -381,7 +403,13 @@ impl Node {
         let result = match kind {
             "partition_create" => self.create_group(partition).await?,
             "partition_install" => self.install_group(partition, request).await?,
-            "partition_share" => return self.share(partition, request).await,
+            "partition_share" => {
+                let shared = self.share(partition, request).await?;
+                let mut event = named.clone();
+                event["recipients"] = json!(shared["envelopes"].as_array().map_or(0, Vec::len));
+                self.activity.record("partition_shared", event);
+                return Ok(shared);
+            }
             "partition_status" => return self.group_status(partition).await,
             "partition_register" => {
                 for member in partition.covered(&omit).map_err(refused)? {
@@ -433,6 +461,18 @@ impl Node {
             }
             _ => return Err(refused("unsupported partition request")),
         };
+        let event = match kind {
+            "partition_create" => Some("partition_created"),
+            "partition_install" => Some("partition_key_installed"),
+            "partition_bootstrap" => Some("partition_bootstrap"),
+            "partition_subscribe" => Some("partition_subscribed"),
+            "partition_unsubscribe" => Some("partition_unsubscribed"),
+            "partition_evict" => Some("partition_evicted"),
+            _ => None,
+        };
+        if let Some(event) = event {
+            self.activity.record(event, named);
+        }
         self.forget_readers().await;
         self.wake_sync();
         Ok(result)

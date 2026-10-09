@@ -1,0 +1,68 @@
+# SDK background activity
+
+`RockyDatabase.activity()` and `RockySession.activity()` expose a
+`Flow<RockyEvent>` describing background work: changed peer reachability,
+nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
+enrollment, renewal, revocation, author assignment and partition key/holding
+changes. Events follow successful local work; they are diagnostic observations,
+not durable receipts or proof that every peer has the latest data.
+
+```kotlin
+scope.launch {
+    database.activity().collect { event ->
+        when (event) {
+            is RockyEvent.Synced -> showTransfer(event.peer, event.pulled, event.pushed)
+            is RockyEvent.CheckpointImported -> showCheckpoint(event.scope, event.checkpoint)
+            is RockyEvent.PartitionChanged -> showPartition(event.action, event.group, event.values)
+            else -> showActivity(event)
+        }
+    }
+}
+```
+
+## Lifetime and bounds
+
+The database retains the latest 512 events in memory, in sequence order.
+A new collector receives retained events before waiting for new ones. Sequence
+numbers start at one per open database; timestamps are local Unix milliseconds.
+Closing or restarting the database discards its feed. Cancelling one collector
+leaves other sessions, observers and networking running.
+
+A slow collector can miss events older than the retained window. Sequence gaps
+expose that loss; there is no persisted audit trail or replay across opens.
+The Kotlin adapter buffers a bounded channel. Idle sync passes produce no
+transfer events; unchanged peer failures and repeated bootstrap starts are
+suppressed. Successful earlier parts of a sync that later fails may not appear
+as transfer events. Current readiness, holdings and network status remain the
+source for the current device state.
+
+A transfer names the table and, for a partition, its encryption commitment.
+`GroupPartition.status()` reports the same per-table partition identifier so an
+application can label events with its own list/customer name. Keys and
+application row payloads are excluded from events.
+
+The [shopping app](../../examples/shoppinglist-app/README.md) combines this feed
+with application key-delivery notes and current
+[network status](sdk-composition.md#network-status). Inbound session counters
+show service activity on a device that serves peers rather than initiating
+outbound sync. Transfers in the feed describe this device's outbound passes.
+
+## SDK requests
+
+The current [SDK envelope](sdk-contract.md) accepts:
+
+| Request | Result |
+| --- | --- |
+| `activity`, optional `after` sequence as a string | Up to 128 `events`, and `token` as a sequence string |
+| `activity_next`, `after` sequence as a string | The next page, waiting until an event exists or the session closes |
+
+Each event carries `sequence`, `at` and `kind` plus its detail fields.
+Times and sequences are decimal strings in the native JSON boundary. Keep the
+returned token for pagination. Activity is shared by sessions on one database.
+
+## Verification
+
+`rocky-sdk` unit tests check ordered paging, bounded retention and suppression
+of duplicate events. `shared_lists` checks author installation through the
+renewal lane and reopening a checkpoint-received list with its child rows
+visible immediately. Kotlin household tests observe installed-key events.

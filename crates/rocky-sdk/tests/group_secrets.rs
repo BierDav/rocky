@@ -713,6 +713,10 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
             .find(|envelope| envelope["recipient"] == device.node.to_hex())
             .unwrap();
         reader.install("A", &envelope["envelope"]).await.unwrap();
+        assert_eq!(
+            reader.ok(json!({"type":"authors"})).await["installed"],
+            json!([])
+        );
         reader.ok(json!({"type":"sync"})).await;
         assert_eq!(rows(reader).await, vec![vec!["before".to_owned()]; 3]);
     }
@@ -745,5 +749,87 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     for (reader, _) in readers {
         reader.database.close().await.unwrap();
     }
+    issuer.database.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = Arc::new(Hub::default());
+    let store = Arc::new(Store::default());
+    let issuer = Peer::new(
+        Database::create(
+            Open {
+                network: Some(Network::Owned(hub.connector("issuer"))),
+                ..open(&root.path().join("issuer"), SCHEMA, &store)
+            },
+            None,
+        )
+        .unwrap()
+        .database,
+        store,
+    );
+    issuer
+        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
+        .await;
+    for table in TABLES {
+        write(&issuer, table, "before").await;
+    }
+    let directory = root.path().join("writer");
+    let (store, device) = prepare(&directory);
+    let mut grants = issuer
+        .grants("A", &TABLES, &["Read", "Insert", "Update", "Delete"])
+        .await;
+    // A writer needs paired field rights as well as rights on its selected rows.
+    let identity: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("issuer/identity.json")).unwrap())
+            .unwrap();
+    let credentials: rocky_sdk::credentials::CredentialChain =
+        serde_json::from_value(identity["credentials"].clone()).unwrap();
+    for grant in grants.as_array_mut().unwrap() {
+        let full = credentials
+            .grants()
+            .iter()
+            .find(|full| json!(full.scope.table) == grant["table"])
+            .unwrap();
+        grant["fields"] = json!(full.fields);
+    }
+    let supplied = issuer.grant(&device, grants).await.unwrap();
+    let writer = install_on(
+        &directory,
+        store,
+        supplied,
+        Some(Network::Owned(hub.connector("writer"))),
+    );
+    introduce(&issuer, &writer).await;
+    let shared = issuer.share("A", &[&device]).await.unwrap();
+    writer
+        .install("A", &shared["envelopes"][0]["envelope"])
+        .await
+        .unwrap();
+    let authors = writer.ok(json!({"type":"authors"})).await;
+    assert_eq!(authors["installed"].as_array().unwrap().len(), TABLES.len());
+    assert_eq!(
+        writer.ok(json!({"type":"authors"})).await["installed"],
+        json!([])
+    );
+    writer.ok(json!({"type":"sync"})).await;
+    writer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
+    let id = writer
+        .ok(json!({"type":"next_id","table":"items","partition_values":values("A")}))
+        .await;
+    writer
+        .ok(
+            json!({"type":"sql","sql":"INSERT INTO items(list,key,id) VALUES('A','writer',?)",
+        "values":[{"type":"integer","value":id["id"]}]}),
+        )
+        .await;
+    writer.ok(json!({"type":"sql","sql":"COMMIT"})).await;
+    writer.ok(json!({"type":"sync"})).await;
+    assert_eq!(
+        rows(&issuer).await,
+        [vec!["before"], vec!["before", "writer"], vec!["before"]]
+    );
+    writer.database.close().await.unwrap();
     issuer.database.close().await.unwrap();
 }

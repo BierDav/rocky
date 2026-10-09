@@ -13,8 +13,11 @@ import org.example.examples.shopping.ShoppingSession
 abstract class NodeViewModel(session: ShoppingSession) : ViewModel() {
     protected val node: Flow<ShoppingNode> = session.node
     private val failures = Channel<String>(Channel.BUFFERED)
-    /** One message per failed action, for a snackbar. */
+    /** One message per failed or refused action, for a snackbar. */
     val messages: Flow<String> = failures.receiveAsFlow()
+
+    /** Shows [message] like a failure, for an outcome that changed nothing. */
+    protected suspend fun tell(message: String) = failures.send(message)
 
     protected fun write(action: suspend ShoppingNode.() -> Unit) {
         viewModelScope.launch {

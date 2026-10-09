@@ -70,6 +70,36 @@ class ListKey(
     @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
 )
 
+/** The command identity [node] reported for itself, so a trusted device can register it with the coordinator. */
+@Entity(tableName = "identities", indices = [Index(value = ["id"], unique = true, name = "identities_identity")])
+data class IdentityRow(
+    @PrimaryKey val node: String,
+    val identity: String,
+    val id: Long,
+    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
+)
+
+/** A confirmed request; only [AskApproval] writes it. [requester] is the asking device's command node. */
+@Entity(tableName = "requests", indices = [Index(value = ["id"], unique = true, name = "requests_identity")])
+data class RequestRow(
+    @PrimaryKey val key: String,
+    val title: String,
+    val note: String,
+    val requester: String,
+    val id: Long,
+    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
+)
+
+/** The decision that stands on request [key]; only [DecideApproval] writes it. */
+@Entity(tableName = "decisions", indices = [Index(value = ["id"], unique = true, name = "decisions_identity")])
+data class DecisionRow(
+    @PrimaryKey val key: String,
+    val approved: Boolean,
+    val decider: String,
+    val id: Long,
+    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
+)
+
 @Dao
 interface ListDao {
     /** The held lists: `row_kind = 0` asks for a partial result, since a device need not hold every list. */
@@ -117,6 +147,11 @@ interface DeviceDao {
     @Insert suspend fun insert(device: DeviceRow)
     @SkipQueryVerification @Query("SELECT rocky_next_id('devices')") suspend fun nextId(): Long
     @Query("UPDATE devices SET name = :name, kind = :kind WHERE node = :node") suspend fun update(node: String, name: String, kind: String): Int
+    @Query("DELETE FROM devices WHERE node = :node") suspend fun delete(node: String): Int
+    @Query("DELETE FROM keys WHERE recipient = :node") suspend fun deleteKeys(node: String): Int
+    @Query("DELETE FROM identities WHERE node = :node") suspend fun deleteIdentity(node: String): Int
+    /** Removes the device's record, the keys sealed to it and its identity in one commit. */
+    @Transaction suspend fun forget(node: String) { delete(node); deleteKeys(node); deleteIdentity(node) }
     @Transaction suspend fun record(node: String, name: String, kind: String) {
         if (update(node, name, kind) == 0) insert(DeviceRow(node, name, kind, nextId()))
     }
@@ -134,8 +169,33 @@ interface KeyDao {
     }
 }
 
-/** Room on Rocky's file: the version is the replicated schema's, [ShoppingSchema], and Room never migrates it. */
-@Database(entities = [ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class], version = 4, exportSchema = true)
+@Dao
+interface IdentityDao {
+    @Query("SELECT * FROM identities") fun observe(): Flow<List<IdentityRow>>
+    @Insert suspend fun insert(row: IdentityRow)
+    @SkipQueryVerification @Query("SELECT rocky_next_id('identities')") suspend fun nextId(): Long
+    @Query("UPDATE identities SET identity = :identity WHERE node = :node") suspend fun update(node: String, identity: String): Int
+    @Transaction suspend fun publish(node: String, identity: String) {
+        if (update(node, identity) == 0) insert(IdentityRow(node, identity, nextId()))
+    }
+}
+
+/** Confirmed rows: these DAOs only read, since SQL refuses every write to a command-controlled table. */
+@Dao
+interface ApprovalDao {
+    @Query("SELECT * FROM requests ORDER BY id") fun requests(): Flow<List<RequestRow>>
+    @Query("SELECT * FROM decisions") fun decisions(): Flow<List<DecisionRow>>
+}
+
+/**
+ * Room on Rocky's file: the version is the replicated schema's, [ShoppingSchema], and Room never migrates it. The
+ * trusted-only tables are not Room's: a member's database does not show them at all; see [TrustedRows].
+ */
+@Database(
+    entities = [ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class, IdentityRow::class,
+        RequestRow::class, DecisionRow::class],
+    version = 5, exportSchema = true,
+)
 @ConstructedBy(ShoppingDatabaseConstructor::class)
 abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun lists(): ListDao
@@ -143,6 +203,8 @@ abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun items(): ShoppingDao
     abstract fun devices(): DeviceDao
     abstract fun keys(): KeyDao
+    abstract fun identities(): IdentityDao
+    abstract fun approvals(): ApprovalDao
 }
 
 @Suppress("KotlinNoActualForExpect")

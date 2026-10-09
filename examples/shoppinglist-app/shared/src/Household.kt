@@ -3,12 +3,21 @@ package org.example.examples.shopping
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import rocky.GrantProfile
 import rocky.RockyDatabase
 import rocky.RockyEvent
 import rocky.room.settledOnRocky
+
+/** A `devices` horizon: devices that have not acknowledged it, the latest time it waits for them, and whether it ended. */
+data class Purge(val waiting: Int, val deadlineEpochSeconds: Long?, val finalized: Boolean)
 
 /**
  * The household's devices and how list keys reach them, without a server: a trusted device records each device it
@@ -17,6 +26,8 @@ import rocky.room.settledOnRocky
  */
 class Household(private val database: ShoppingDatabase, private val rocky: RockyDatabase, val self: String) {
     private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    /** The trusted-only tables; a member never touches them. */
+    internal val trusted = TrustedRows(rocky)
     /** The invitation awaiting its device, so its enrollment records the chosen kind and name. */
     private var pending: Pair<NodeKind, String>? = null
 
@@ -36,13 +47,51 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     suspend fun invite(kind: NodeKind, name: String): PairingCode {
         val invitation = rocky.pairing(kind.profile)
         pending = kind to name
-        return PairingCode(kind, name, invitation.uri)
+        val code = PairingCode(kind, name, invitation.uri)
+        // Other trusted devices list it too; members cannot read `invitations`.
+        attempt("list the invitation") {
+            trusted.openInvitation(self, kind.name.lowercase(), name, code.toString(), invitation.expiresAtEpochSeconds)
+        }
+        return code
     }
+    /** On a trusted device: each trusted device's open invitation, expired ones included. */
+    fun invitations(): Flow<List<InvitationRow>> = if (!rocky.isIssuer) flowOf(emptyList()) else trusted.invitations()
     suspend fun record(node: String, name: String, kind: NodeKind) = database.devices().record(node, name, kind.name.lowercase())
     /** On a trusted device: seals [list]'s current key to the partial device [node]. */
     suspend fun share(list: Long, node: String) = deliver(list, listOf(node))
     /** Revokes future access and rotates the keys this device could read. */
     suspend fun revoke(node: String) { rocky.revoke(node) }
+
+    /**
+     * On a trusted device: removes a revoked device's record, the keys sealed to it and its identity in one commit, so
+     * it disappears everywhere with the next sync. The signed revocation stays: it is what refuses the old identity.
+     * Only the deleted rows' tombstones remain, until a horizon declared with [purge] is finalized.
+     */
+    suspend fun forget(node: String) {
+        check(node in revokedDevices().first()) { "Only a revoked device can be removed" }
+        database.devices().forget(node)
+        runCatching { rocky.removePeer(node) }
+    }
+    /**
+     * Declares horizons on `devices` and `identities` with every live device as participant: once each acknowledged
+     * them, or reached its deadline, sync finalizes them and drops the removed rows' tombstones and history. Until then
+     * both tables refuse writes, so enrollments are recorded afterwards. Fails until this device synced with each one.
+     * Removed `keys` rows keep their history: those envelopes open only key epochs the revoked device already held.
+     */
+    suspend fun purge() {
+        val participants = rocky.devices().filter { !it.revoked && it.node != self && it.profile !is GrantProfile.Custody }.map { it.node }.toSet()
+        for (table in PURGED) rocky.horizons.declare(table, participants)
+    }
+    /** The latest purge, or null when none was declared: the later deadline, and finalized once both tables are. */
+    suspend fun purgeStatus(): Purge? = PURGED.map { rocky.horizons.status(it) }
+        .filter { it["statement"] != null && it["statement"] !is JsonNull }
+        .map { status ->
+            Purge((status["waiting"] as? JsonArray)?.size ?: 0, status["deadline"]?.jsonPrimitive?.longOrNull,
+                status["finalized"]?.jsonPrimitive?.boolean == true)
+        }
+        .reduceOrNull { a, b ->
+            Purge(maxOf(a.waiting, b.waiting), listOfNotNull(a.deadlineEpochSeconds, b.deadlineEpochSeconds).maxOrNull(), a.finalized && b.finalized)
+        }
 
     /** Runs until cancelled: records enrollments and delivers keys on a trusted device, and installs its own keys. */
     suspend fun run() = coroutineScope {
@@ -56,13 +105,15 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     private suspend fun recordEnrollments() {
         rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
             val known = devices().first().any { it.node == enrolled.node }
+            // The enrollment used this device's single invitation: it is no longer open.
+            attempt("close the invitation") { trusted.closeInvitation(self) }
             val (kind, name) = pending?.also { pending = null }
                 ?: if (known) return@collect
                 // Enrolled while this app was closed: the grants still tell a trusted device apart.
                 else (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
-            if (attempt("record ${name}") { record(enrolled.node, name, kind) } != null) {
-                notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
-            }
+            // A pending `devices` horizon refuses the write until it is finalized: keep the enrollment until then.
+            while (attempt("record ${name}") { record(enrolled.node, name, kind) } == null) delay(15_000)
+            notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
         }
     }
 
@@ -106,6 +157,11 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     private suspend fun deliver(list: Long, recipients: List<String>) {
         val epoch = rocky.list(list).status().epochs.maxOrNull() ?: error("no key of list $list is held here")
         for ((node, envelope) in rocky.list(list).share(recipients)) database.keys().deliver(node, list, epoch, envelope)
+    }
+
+    private companion object {
+        /** The tables whose rows removing a device deletes and a purge finalizes. */
+        val PURGED = listOf("devices", "identities")
     }
 
     private suspend fun <T> attempt(what: String, block: suspend () -> T): T? = try { block() }

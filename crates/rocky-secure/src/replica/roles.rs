@@ -429,6 +429,12 @@ impl<A: RowApplication> Inner<A> {
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
         let mut reports = Vec::new();
         for frontier in frontiers {
+            // A partition not learned here has no tuple to resolve the peer's
+            // grant: its report covers nothing yet, and refusing it would end
+            // the session that brings the partition.
+            if self.partitioned(frontier.scope) && !self.partitions.contains_key(&frontier.scope) {
+                continue;
+            }
             let whole = |right: Right| {
                 grants.iter().any(|grant| {
                     grant.scope == frontier.scope
@@ -536,7 +542,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<RangePage, Error> {
         request.validate()?;
         let scope = request.scope;
-        let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
+        self.authorize_peer(peer, credentials, scope)?;
         // A peer of an earlier generation is sent nothing it cannot admit:
         // a log stops at its first newer frame.
         let reach = credentials
@@ -545,13 +551,6 @@ impl<A: RowApplication> Inner<A> {
             .map_or(Ok(self.generation()), |root| {
                 self.generation_of(root.capability.manifest, true)
             })?;
-        if !grants.iter().any(|grant| {
-            grant.scope == scope
-                && grant.rows == RowSelection::All
-                && (grant.rights.contains(&Right::Custody) || grant.rights.contains(&Right::Read))
-        }) {
-            return Err(denied("ciphertext custody denied"));
-        }
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }

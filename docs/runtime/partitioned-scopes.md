@@ -105,6 +105,14 @@ it starts from a peer's checkpoint and needs no earlier epoch or revoked
 author; a device that holds it only installs the new epoch. The
 [shopping example](../../examples/shoppinglist-app/README.md) shares this way.
 
+**A partition the peer has not seen.** Two issuers may each create a
+partition before they next meet. A replica learns a partition's tuple from its
+frames, an envelope or a custody offer; until then it cannot resolve the peer's
+grant for it. It holds nothing of it either, so it skips the peer's frontier
+report for it, answers its range with an empty page and admits pushed frames by
+their authors' grants. Refusing would end the session, and with it the sync
+that carries the envelopes, in both directions.
+
 **Revocation.** One saved intent rotates: each group partition the device could
 read gets one new secret, so its members advance to one epoch together, also
 after an interruption. Affected are partitions whose members its enrollment

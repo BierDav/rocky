@@ -17,6 +17,11 @@ use tokio::{
 
 mod frontiers;
 
+/// Bytes of one checkpoint page. A page carries its scope's strong state
+/// whole, the latest confirmed command with its credential chains included,
+/// so it takes the largest page a frame holds, leaving room for the framing.
+const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
+
 /// The stream a session runs over. The transport adds no security the
 /// session relies on; see `docs/runtime/permissions-and-sync.md`.
 pub use rocky_core::net::SessionStream;
@@ -732,11 +737,10 @@ impl NativeSession {
                 },
             }));
         }
-        let rows = quota.min(MAX_SECURE_FRAME / 2 - 4096);
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };
-        let rebootstrap = self.import_within(replica, signed, rows).await?;
+        let rebootstrap = self.import_within(replica, signed, CHECKPOINT_PAGE).await?;
         let catch_up = if rebootstrap.is_some() {
             self.catch_up(replica, scope, quota).await?
         } else {
@@ -766,9 +770,9 @@ impl NativeSession {
         if catch_up.behind && self.low(MAX_SECURE_FRAME) {
             catch_up.exhausted = true;
         } else if catch_up.behind {
-            // Checkpoint pages leave room for their row encoding.
-            let rows = quota.min(MAX_SECURE_FRAME / 2 - 4096);
-            rebootstrap = self.rebootstrap_within(replica, scope, rows).await?;
+            rebootstrap = self
+                .rebootstrap_within(replica, scope, CHECKPOINT_PAGE)
+                .await?;
             if rebootstrap.is_none() {
                 catch_up.exhausted = true;
                 return Ok(ScopeSync {
@@ -1467,8 +1471,9 @@ impl NativeSession {
                 after,
                 quota,
             } => {
-                // Leave room for canonical envelope and session signature overhead.
-                if quota > MAX_SECURE_FRAME / 2 - 4096 {
+                // The page bounds its encoding, signed frame included, by `quota`;
+                // the remainder covers the envelope and session signature.
+                if quota > CHECKPOINT_PAGE {
                     return Err(denied("native page quota"));
                 }
                 let page = replica

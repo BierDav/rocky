@@ -127,6 +127,10 @@ against their digests, and the replay, in batches under the replica lock.
 - The rebootstrap switch and `rebuild_projection` are one transaction
   proportional to the scope's rows.
 - A checkpoint names at most 256 logs per scope and must fit one 256 KiB frame.
+- Checkpoint pages use the whole frame, less 8 KiB. The first page carries a
+  command table's strong state whole, mostly the latest confirmed command and
+  its two credential chains: about 49 KiB after one command of the shopping
+  example, within the page's budget of a quarter of its bytes.
 - `export_recovery` and recovery custodians need complete mergeable history.
 
 ## Offering an imported checkpoint back to its signer

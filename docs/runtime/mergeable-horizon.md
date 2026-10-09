@@ -22,7 +22,9 @@ is for an author who schedules horizons, syncs across one, or changes the format
    required device becomes behind at the minimum of its credential expiry and
    issue time plus 30 days (`HORIZON_WAIT_SECONDS`); restart preserves the
    deadline. A first acknowledgment after it is refused; rebootstrap is the only
-   way back.
+   way back. The SDK's `horizon` status also reports the statement's `issued`
+   time and `deadline`, the latest deadline of a waiting device: finalization
+   waits no longer than that.
 4. `finalize_horizon(scope)` reproduces every signed row and existence cut, then
    in one transaction drops tombstones, hidden primary-key and unique losers and
    cascade orphans, stores substituted SET NULL values, preserves register

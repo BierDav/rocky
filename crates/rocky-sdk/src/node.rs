@@ -1071,6 +1071,16 @@ impl Node {
             "acknowledged": progress.as_ref().map(|progress| &progress.acknowledged),
             "waiting": progress.as_ref().map(|progress| &progress.waiting),
             "behind": progress.as_ref().map(|progress| &progress.behind),
+            "issued": signed.as_ref().map(|signed| signed.statement.issued),
+            // When finalization stops waiting, at the latest: each waiting
+            // participant becomes behind at its deadline.
+            "deadline": signed.as_ref().zip(progress.as_ref()).and_then(|(signed, progress)| signed
+                .statement
+                .peers
+                .iter()
+                .filter(|peer| progress.waiting.contains(&peer.node))
+                .map(|peer| peer.deadline(signed.statement.issued))
+                .max()),
             "rebootstrap_required": self.replica.horizon_rebootstrap_required(scope).await?,
             "finalized": self.replica.finalized_horizon(scope).await?.as_ref() == signed.as_ref() && signed.is_some(),
             "operations_since_finalization": self.replica.horizon_operations_since_finalization(scope).await?}),

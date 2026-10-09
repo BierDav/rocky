@@ -67,3 +67,16 @@ projection or ledger on the writer thread. Listed under
 [known costs](../runtime/scaling-limits.md#known-costs).
 
 Fix: page them, or serve them from the read connection.
+
+## A command table's checkpoint page carries whole credential chains
+
+`rocky-secure/src/replica/checkpoint/transfer.rs`, `checkpoint_page`: the first
+page holds the scope's `StrongState` whole, and its `latest` confirmed command
+embeds the caller's and the executor's credential chains. In the shopping
+example one command already makes that 49 KiB of the page's 63 KiB budget
+(a quarter of the frame, for nested byte-array encoding). Larger grant sets or
+receipts would exceed it again, and the scope could not bootstrap.
+
+Fix: send the latest command beside the page, or reference it by hash and let
+the peer fetch it with its result, and encode byte strings as CBOR byte strings
+so the budget no longer reserves four bytes per stored byte.

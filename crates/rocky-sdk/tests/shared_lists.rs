@@ -406,3 +406,53 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    let invitation = a
+        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let b =
+        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    let mut lists = Vec::new();
+    for (peer, title) in [(&a, "From a"), (&b, "From b")] {
+        peer.call(json!({"type":"authors"})).await?;
+        peer.call(json!({"type":"partition_next","table":"lists"}))
+            .await?;
+        let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
+        lists.push(peer.insert("lists", None, &sql).await?);
+    }
+    // Each sync offers the peer a partition it has no tuple for; neither
+    // direction may end the session, or no key could ever cross.
+    for peer in [&a, &b] {
+        peer.call(json!({"type":"sync"})).await?;
+    }
+    for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
+        let node = to.call(json!({"type":"session"})).await?["node"].clone();
+        let shared = from
+            .call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[node]}))
+            .await?;
+        to.call(json!({"type":"partition_install","group":"list","values":values(list),"envelope":shared["envelopes"][0]["envelope"]}))
+            .await?;
+        to.call(json!({"type":"partition_bootstrap","group":"list","values":values(list)}))
+            .await?;
+        to.call(json!({"type":"sync"})).await?;
+    }
+    for peer in [&a, &b] {
+        assert_eq!(
+            peer.column("SELECT title FROM lists ORDER BY title")
+                .await?,
+            [json!("From a"), json!("From b")]
+        );
+    }
+    for peer in [a, b] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}

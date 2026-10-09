@@ -29,6 +29,9 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
     /** The open installation, whenever there is one. */
     val node: Flow<ShoppingNode> = state.mapNotNull { (it as? SessionState.Open)?.node }.distinctUntilChanged()
     private var lastOpen: suspend () -> ShoppingNode = { ShoppingNode.resume(platform) }
+    private val mutableOffer = MutableStateFlow<PairingCode?>(null)
+    /** A pairing code that arrived as a link, until the user joins with it or dismisses it. */
+    val offer: StateFlow<PairingCode?> = mutableOffer.asStateFlow()
 
     init {
         if (RockyDatabase.exists(platform.directory)) start { ShoppingNode.resume(platform) } else mutableState.value = SessionState.Setup
@@ -48,6 +51,19 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
             check(platform.directory.renameTo(archive)) { "Could not save the revoked household copy" }
             lastOpen = { ShoppingNode.join(platform, pairing) }
             lastOpen()
+        }
+    }
+    /** Shows a pairing link for confirmation: any app or page may open one, so it never joins on its own. */
+    fun offer(code: PairingCode) { mutableOffer.value = code }
+    fun dismissOffer() { mutableOffer.value = null }
+    /** Joins, or rejoins a revoked device, with the offered code. */
+    fun acceptOffer() {
+        val code = mutableOffer.value ?: return
+        mutableOffer.value = null
+        when (state.value) {
+            SessionState.Setup -> join(code.toString())
+            is SessionState.Revoked -> rejoin(code.toString())
+            else -> {}
         }
     }
     /** Retries an existing installation, or the same interrupted setup. */

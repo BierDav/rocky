@@ -133,6 +133,30 @@ class HouseholdTest {
         }
     }
 
+    @Test fun `lists two trusted devices create apart reach each other`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-trusted").toFile()
+        val opened = mutableListOf<ShoppingNode>()
+        try {
+            val desk = ShoppingNode.create(platform(root, "desk")).also { opened += it }
+            val phone = ShoppingNode.join(platform(root, "phone"), desk.household.invite(NodeKind.Trusted, "Phone")).also { opened += it }
+            // Each holds a list the other has never seen when they next sync: neither direction may refuse it.
+            for (node in opened) node.rocky.setOnline(false)
+            val fromDesk = desk.repository.createList("From desk")
+            desk.repository.add(fromDesk, "Milk")
+            val fromPhone = phone.repository.createList("From phone")
+            phone.repository.add(fromPhone, "Eggs")
+            for (node in opened) node.rocky.setOnline(true)
+            for (node in opened) {
+                node.awaitTitles(fromDesk, "Milk")
+                node.awaitTitles(fromPhone, "Eggs")
+                withTimeout(30_000) { node.repository.lists().first { lists -> lists.map { it.title }.toSet() == setOf("From desk", "From phone") } }
+            }
+        } finally {
+            withContext(NonCancellable) { opened.forEach { it.close() } }
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun `a received list keeps its items when the device reopens`() = runBlocking {
         val root = Files.createTempDirectory("rocky-household").toFile()
         val opened = mutableListOf<ShoppingNode>()

@@ -8,9 +8,10 @@ import dev.zacsweers.metro.binding
 import androidx.lifecycle.ViewModel
 import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.*
 import org.example.examples.shopping.*
+import rocky.Device
 import rocky.NetworkStatus
 import rocky.Peer
 import rocky.SessionStatus
@@ -29,14 +30,25 @@ data class HouseholdDevice(
     val revocable: Boolean = false,
 )
 
+/** A trusted device's pairing code that is still open: unused and not expired. */
+data class OpenInvitation(val code: PairingCode, val issuer: String, val mine: Boolean, val expiresAtEpochSeconds: Long)
+
 data class DevicesState(
     val self: SessionStatus? = null,
+    /** This device, whether or not a trusted device recorded it yet. */
+    val me: HouseholdDevice? = null,
+    /** The other devices that may still sync. */
     val devices: List<HouseholdDevice> = emptyList(),
+    val revoked: List<HouseholdDevice> = emptyList(),
     val network: NetworkStatus? = null,
     val lists: List<ShoppingList> = emptyList(),
     val trusted: Boolean = false,
     /** The code a new device scans, while one is shown. */
     val invitation: PairingCode? = null,
+    /** On a trusted device: every trusted device's open invitation, soonest to expire first. */
+    val invitations: List<OpenInvitation> = emptyList(),
+    /** The latest horizon that purges removed devices' records, on a trusted device. */
+    val purge: Purge? = null,
 )
 
 @Inject
@@ -46,15 +58,19 @@ data class DevicesState(
 class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
     private val invitation = MutableStateFlow<PairingCode?>(null)
     val revoking = MutableStateFlow<Set<String>>(emptySet())
+    private val refresh = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     val state: StateFlow<DevicesState> = node.flatMapLatest { node ->
         val reach = flow {
             while (true) {
-                emit(Triple(node.rocky.session(), node.rocky.network(), if (node.isTrusted) node.rocky.devices() else emptyList()))
-                delay(2_000)
+                emit(Reach(node.rocky.session(), node.rocky.network(), if (node.isTrusted) node.rocky.devices() else emptyList(),
+                    if (node.isTrusted) runCatching { node.household.purgeStatus() }.getOrNull() else null))
+                withTimeoutOrNull(2_000) { refresh.first() }
             }
         }
-        combine(node.household.devices(), node.household.keys(), node.repository.lists(), reach, invitation) { rows, keys, lists, (self, network, enrolled), code ->
+        val recorded = combine(node.household.devices(), node.household.invitations(), ::Pair)
+        combine(recorded, node.household.keys(), node.repository.lists(), reach, invitation) { (rows, opened), keys, lists, reach, code ->
+            val (self, network, enrolled, purge) = reach
             val titles = lists.associate { it.id to it.title }
             val recorded = rows.map { row ->
                 HouseholdDevice(row.node, row.name, NodeKind.of(row.kind), row.node == self.node, network.peers.firstOrNull { it.node == row.node },
@@ -66,9 +82,21 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
             val unrecorded = network.peers.filter { peer -> rows.none { it.node == peer.node } }.map { peer ->
                 HouseholdDevice(peer.node, if (peer.isIssuer) "Trusted device" else "Device", if (peer.isIssuer) NodeKind.Trusted else null, false, peer, emptyList())
             }
-            DevicesState(self, recorded + unrecorded, network, lists, node.isTrusted, code)
+            // Until a trusted device's record of it syncs, this device describes itself from its own grants.
+            val me = recorded.firstOrNull { it.isSelf }
+                ?: HouseholdDevice(self.node, "This device", if (self.isIssuer) NodeKind.Trusted else null, true, null, emptyList())
+            val others = (recorded + unrecorded).filter { !it.isSelf }
+            val now = System.currentTimeMillis() / 1000
+            val invitations = opened.filter { it.expires > now }.mapNotNull { row ->
+                val pairing = runCatching { PairingCode.parse(row.code) }.getOrNull() ?: return@mapNotNull null
+                OpenInvitation(pairing, rows.firstOrNull { it.node == row.issuer }?.name ?: "Device ${row.issuer.take(6)}", row.issuer == self.node, row.expires)
+            }
+            DevicesState(self, me, others.filter { !it.revoked }, others.filter { it.revoked }, network, lists, node.isTrusted, code,
+                invitations, purge)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DevicesState())
+
+    private data class Reach(val self: SessionStatus, val network: NetworkStatus, val enrolled: List<Device>, val purge: Purge?)
 
     /** Shows a code for one new device of [kind]; it replaces the previous code. */
     fun invite(kind: NodeKind, name: String) = write { invitation.value = household.invite(kind, name.ifBlank { "${kind.label} device" }) }
@@ -82,5 +110,15 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
             try { household.revoke(node) }
             finally { revoking.update { it - node } }
         }
+    }
+    /** Removes a revoked device's record now and declares the horizon that purges its trace. */
+    fun forget(node: String) = write {
+        household.forget(node)
+        try { household.purge() }
+        catch (error: Exception) {
+            // The record is gone either way; only the purge waits until this device met every other one.
+            tell("Removed. Purging its trace needs a sync with every device first: ${error.message}")
+        }
+        refresh.tryEmit(Unit)
     }
 }

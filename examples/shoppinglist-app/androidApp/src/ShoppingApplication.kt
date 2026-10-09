@@ -7,7 +7,9 @@ import androidx.room.Room
 import java.io.File
 import org.example.examples.shopping.ShoppingDatabase
 import org.example.examples.shopping.ShoppingGraph
+import org.example.examples.shopping.ShoppingLinks
 import org.example.examples.shopping.ShoppingPlatform
+import org.example.examples.shopping.publicCoordination
 import rocky.PeerTransport
 import rocky.android.KeystoreSecretStore
 import rocky.android.RockyLifecycle
@@ -36,18 +38,20 @@ class ShoppingApplication : Application() {
                     else -> PeerTransport.Iroh()
                 }
             },
+            // The coordination service is reached over iroh only.
+            commands = { if (preferences.getString("transport", null) == "tcp") null else publicCoordination() },
             opened = { database ->
                 lifecycle.follow(database) { foreground -> Log.i(TAG, if (foreground) "sync foreground" else "sync background") }
             },
         ))
     }
 
-    /** A driver's transport choice; it applies to the first join or create only. */
+    /** A driver link's transport choice; it applies to the first join or create only. */
     fun chooseTransport(kind: String?) {
         getSharedPreferences("shopping", MODE_PRIVATE).edit().putString("transport", kind ?: "iroh").commit()
     }
 
     companion object {
-        const val TAG = "RockyShopping"
+        const val TAG = ShoppingLinks.TAG
     }
 }

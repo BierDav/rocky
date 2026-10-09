@@ -14,14 +14,17 @@ holdings, key epochs and [background activity](activity.md).
 
 The custody procedure below is a separate qualification topology. The
 interactive app needs no custody peer; devices exchange edits whenever they
-are online together. Android driver extras are implemented in
-[Driver](../../examples/shoppinglist-app/androidApp/src/Driver.kt), which also
-accepts raw invitations for the qualification harness.
+are online together. Pairing codes are `rocky-shopping://pair?…` links, so a
+phone's camera app opens a scanned code in the app, which asks before joining.
+Debug builds also accept `rocky-shopping://drive?…` links, implemented in
+[ShoppingLinks](../../examples/shoppinglist-app/shared/src@android/ShoppingLinks.kt);
+they accept raw invitations for the qualification harness. Browsers cannot open
+drive links, and release builds ignore them.
 
 ## Two-phone procedure
 
-The [Compose app](../../examples/shoppinglist-app/androidApp) takes driver
-extras (see `Driver`), so the harness drives it with `adb` and reads the
+The [Compose app](../../examples/shoppinglist-app/androidApp) opens drive
+links (see `ShoppingLinks`), so the harness drives it with `adb` and reads the
 results from logcat. A host issuer enrolls both devices as issuing devices of
 the user and enrolls the packaged custody peer; then the host closes. Both
 devices reach the custody peer through `adb reverse` and never each other.

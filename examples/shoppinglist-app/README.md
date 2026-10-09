@@ -33,8 +33,12 @@ The receiving app joins as a full device. Remove both copies of the file after
 pairing. An already configured receiver opens its existing household.
 
 Start a household on the first device. In **Devices → Add device**, choose a
-name and kind, then scan the QR code on the joining phone or paste the code.
-The invitation works once for ten minutes. A trusted device chooses:
+name and kind, then scan the QR code with the joining phone's camera app, scan
+it in the app, or paste the code. The code is a `rocky-shopping://pair?…` link:
+Android opens it in the app, which asks before joining. Each trusted device has
+one open invitation, which works once for ten minutes; a new code replaces it.
+**Devices → Open invitations** lists every trusted device's open code; only
+trusted devices can read them. A trusted device chooses:
 
 | Kind | What it does |
 | --- | --- |
@@ -42,8 +46,11 @@ The invitation works once for ten minutes. A trusted device chooses:
 | Full | Receives every list automatically and edits its items and categories |
 | Partial | Receives only lists shared with it from a trusted device's Devices tab |
 
+The Devices tab starts with **This device**: its name, kind, node and credential
+expiry, also before a trusted device's record of it has synced.
+
 In **Devices → Revoke device**, a trusted device can revoke a device it manages.
-The revoked badge persists across restarts. Revocation stops future access and
+Revoked devices collapse into their own section; the badge persists across restarts. Revocation stops future access and
 rotates list keys; remaining recipients receive new keys automatically. Data
 already decrypted on the removed device stays there.
 
@@ -53,6 +60,40 @@ code or **Scan QR code** on Android. Rejoining archives the old local copy and
 creates a new device identity; it does not undo the old identity's revocation.
 Trusted devices also record their own enrollment. Each recipient's key delivery
 runs independently, so a refused recipient cannot block the remaining devices.
+
+**Remove permanently** on a revoked device deletes its record, identity and
+sealed keys at once; it disappears from every device with the next sync. The
+signed revocation stays, since it is what refuses the old identity. The
+deletions leave tombstones until a [horizon](../../docs/runtime/mergeable-horizon.md)
+on `devices` and `identities` is finalized: every other device must acknowledge
+it, which it does when it next syncs with a trusted device. The Devices tab
+shows how many are outstanding and the deadline, at most 30 days, after which
+a silent device counts as behind and must rebootstrap those tables. Declaring
+needs a prior sync with each device. Meanwhile both tables refuse writes, so a
+device enrolled then is recorded once the horizon is finalized.
+
+## Approvals
+
+The **Approvals** tab shows strong commands. Any device asks to buy something
+with `AskApproval`; a trusted device approves or declines it with
+`DecideApproval`. The [public coordination service](../../docs/runtime/public-coordination.md)
+orders both, so the first decision stands everywhere: when two trusted devices
+decide at once, the second gets a typed rejection naming the standing decision.
+Members hold `Invoke` on `requests` only, so they cannot decide. The
+command-controlled `requests` and `decisions` tables change only through
+confirmed results; see [Approvals](shared/src/Approvals.kt) and
+[Coordination](shared/src/Coordination.kt).
+
+The founding device creates the household's coordination tenant key in the
+`coordination` table, which only trusted devices read. Trusted devices keep the
+domain registered: every live device may invoke and every trusted device may
+execute, and the control is renewed before its 29 days end. Each device
+publishes its command identity in `identities`. The service learns request
+identities and commitments, never titles or decisions. A device opened over
+direct TCP, as in qualification, has no coordinator and shows the tab as
+unavailable. A member's request goes directly to the trusted device the
+coordinator assigned as executor, so that device must be reachable; a request
+that cannot be delivered stays stored and is retried in the background.
 
 Only trusted devices create, rename and delete lists. Each list, its items
 and categories form the `list` partition group with one secret. Trusted
@@ -71,7 +112,7 @@ bounded and lasts for the open database's lifetime; see
 [SDK activity](../../docs/runtime/activity.md). The top badge also reflects
 inbound sync on a trusted device that serves the phone.
 
-The current Room schema is version 4. Earlier application schemas are refused;
+The current Room schema is version 5. Earlier application schemas are refused;
 there is no migration or fallback. An existing household that cannot open
 shows **Retry** and preserves its data.
 
@@ -81,7 +122,10 @@ Start at [ShoppingNode](shared/src/ShoppingNode.kt) for platform composition,
 [ShoppingGraph](shared/src/ShoppingGraph.kt) for Metro,
 [ShoppingSession](shared/src/ShoppingSession.kt) for app lifetime,
 [ShoppingRepository](shared/src/ShoppingRepository.kt) for DAO calls and
-[Household](shared/src/Household.kt) for device enrollment and key delivery.
+[Household](shared/src/Household.kt) for device enrollment and key delivery,
+[TrustedRows](shared/src/TrustedRows.kt) for the tables only trusted devices
+read, which Room does not declare, and
+[ShoppingLinks](shared/src@android/ShoppingLinks.kt) for Android links.
 The [Room entities](shared/src/ShoppingDatabase.kt) and
 [Kotlin schema](shared/src/ShoppingSchema.kt) describe the same tables.
 Screens and their ViewModels are under `shared/src/ui`.
@@ -116,8 +160,9 @@ helpers have no application or Compose dependency; see
 ```
 
 `check` compares the hand-written schema with Room's export, installs both,
-runs repository and household tests and compiles desktop. Household tests
-cover automatic full-node key delivery, revocation and delivery of rotated keys, explicit partial sharing, writes by
+runs repository, household and approval tests and compiles desktop. Approval
+tests use an in-process coordinator in place of the public service. Household tests
+cover automatic full-node key delivery, revocation and delivery of rotated keys, explicit partial sharing, lists two trusted devices create apart, writes by
 joined members, immediate reads after reopen, and retry after a held directory
 lock. `demo` runs a console walkthrough over the same node and repository.
 The multi-process qualification uses manual sync and a keyless custody peer;

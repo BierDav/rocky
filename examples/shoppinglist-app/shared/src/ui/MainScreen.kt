@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,20 +24,22 @@ import rocky.ConnectionState
 import rocky.ReadinessState
 
 private enum class Tab(val label: String, val icon: ImageVector) {
-    Lists("Lists", Icons.AutoMirrored.Filled.List), Devices("Devices", Icons.Filled.Devices), Sync("Sync", Icons.Filled.Sync)
+    Lists("Lists", Icons.AutoMirrored.Filled.List), Approvals("Approvals", Icons.Filled.Gavel), Devices("Devices", Icons.Filled.Devices),
+    Sync("Sync", Icons.Filled.Sync)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     lists: ListsViewModel = metroViewModel(),
+    approvals: ApprovalsViewModel = metroViewModel(),
     devices: DevicesViewModel = metroViewModel(),
     sync: SyncViewModel = metroViewModel(),
 ) {
     var tab by remember { mutableStateOf(Tab.Lists) }
     val snackbar = remember { SnackbarHostState() }
     val syncState by sync.state.collectAsState()
-    LaunchedEffect(Unit) { merge(lists.messages, devices.messages, sync.messages).collect { snackbar.showSnackbar(it) } }
+    LaunchedEffect(Unit) { merge(lists.messages, approvals.messages, devices.messages, sync.messages).collect { snackbar.showSnackbar(it) } }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -56,6 +59,7 @@ fun MainScreen(
         Box(Modifier.padding(padding).fillMaxSize()) {
             when (tab) {
                 Tab.Lists -> ListsScreen(lists)
+                Tab.Approvals -> ApprovalsScreen(approvals)
                 Tab.Devices -> DevicesScreen(devices)
                 Tab.Sync -> SyncScreen(sync)
             }

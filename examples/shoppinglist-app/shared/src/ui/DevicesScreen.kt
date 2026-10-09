@@ -1,6 +1,7 @@
 package org.example.examples.shopping.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -22,6 +23,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import org.example.examples.shopping.NodeKind
 import org.example.examples.shopping.PairingCode
+import org.example.examples.shopping.Purge
+import kotlinx.coroutines.delay
+import rocky.SessionStatus
 
 @Composable
 fun DevicesScreen(model: DevicesViewModel) {
@@ -30,13 +34,33 @@ fun DevicesScreen(model: DevicesViewModel) {
     var adding by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<HouseholdDevice?>(null) }
     var revoking by remember { mutableStateOf<HouseholdDevice?>(null) }
+    var forgetting by remember { mutableStateOf<HouseholdDevice?>(null) }
+    var showRevoked by remember { mutableStateOf(false) }
+    var showing by remember { mutableStateOf<PairingCode?>(null) }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            state.me?.let { me -> item { SectionTitle("This device") }; item { SelfCard(me, state.self) } }
             item { SectionTitle("Household", "Each device holds its own copy and syncs directly with its peers over iroh.") }
+            if (state.devices.isEmpty()) item {
+                Text(if (state.trusted) "No other device yet: add one below." else "No other device is known here yet.",
+                    Modifier.padding(4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             items(state.devices, key = { it.node }) { device ->
                 DeviceCard(device,
-                    canShare = state.trusted && device.kind == NodeKind.Partial && !device.isSelf && !device.revoked,
+                    canShare = state.trusted && device.kind == NodeKind.Partial,
                     busy = device.node in busy, onShare = { sharing = device }, onRevoke = { revoking = device })
+            }
+            if (state.invitations.isNotEmpty()) {
+                item { SectionTitle("Open invitations", "Each trusted device has at most one: a new code replaces its last. A code works once, until it expires.") }
+                items(state.invitations, key = { "invitation-" + it.code.invitation }) { open -> InvitationCard(open, onShow = { showing = open.code }) }
+            }
+            state.purge?.takeIf { !it.finalized }?.let { purge -> item { PurgeCard(purge) } }
+            if (state.revoked.isNotEmpty()) {
+                item { RevokedHeader(state.revoked.size, showRevoked) { showRevoked = !showRevoked } }
+                if (showRevoked) items(state.revoked, key = { "revoked-" + it.node }) { device ->
+                    DeviceCard(device, canShare = false, busy = false, onShare = {}, onRevoke = {},
+                        onForget = if (state.trusted) ({ forgetting = device }) else null)
+                }
             }
             state.network?.let { network ->
                 item {
@@ -52,6 +76,10 @@ fun DevicesScreen(model: DevicesViewModel) {
             modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
         )
     }
+    showing?.let { code ->
+        AlertDialog({ showing = null }, confirmButton = { TextButton({ showing = null }) { Text("Done") } },
+            title = { Text("Scan on ${code.name}") }, text = { Column(Modifier.verticalScroll(rememberScrollState())) { InvitationCode(code) } })
+    }
     if (adding) AddDeviceDialog(state.invitation, onInvite = model::invite, onDismiss = { adding = false; model.dismissInvitation() })
     revoking?.let { device ->
         AlertDialog(onDismissRequest = { revoking = null },
@@ -59,6 +87,19 @@ fun DevicesScreen(model: DevicesViewModel) {
             text = { Text("This device will lose access to future sync and new list keys. Data already stored on it stays there.") },
             confirmButton = { TextButton({ model.revoke(device.node); revoking = null }) { Text("Revoke device") } },
             dismissButton = { TextButton({ revoking = null }) { Text("Cancel") } })
+    }
+    forgetting?.let { device ->
+        AlertDialog(onDismissRequest = { forgetting = null },
+            title = { Text("Remove ${device.name} permanently?") },
+            text = {
+                Text("Its record, its identity and the keys sealed to it are deleted now and disappear from every device with " +
+                    "the next sync. The signed revocation stays: it is what keeps the old identity out.\n\n" +
+                    "Erasing the deletions' traces needs a horizon every other device acknowledges. It finishes once each " +
+                    "of them synced, at the latest 30 days from now or when a device's credentials expire. Until then, new " +
+                    "devices are recorded only after it finishes.")
+            },
+            confirmButton = { TextButton({ model.forget(device.node); forgetting = null }) { Text("Remove") } },
+            dismissButton = { TextButton({ forgetting = null }) { Text("Cancel") } })
     }
     sharing?.let { device ->
         AlertDialog({ sharing = null },
@@ -79,8 +120,64 @@ fun DevicesScreen(model: DevicesViewModel) {
     }
 }
 
+/** This device: who it is to the household and the authority it holds. */
 @Composable
-private fun DeviceCard(device: HouseholdDevice, canShare: Boolean, busy: Boolean, onShare: () -> Unit, onRevoke: () -> Unit) {
+private fun SelfCard(me: HouseholdDevice, self: SessionStatus?) {
+    ElevatedCard(Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.PhoneAndroid, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(12.dp))
+                Text(me.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                me.kind?.let { KindChip(it) }
+            }
+            me.kind?.let { Text(it.summary, style = MaterialTheme.typography.bodySmall) }
+            SelectionContainer {
+                Text("Node ${me.node}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+            }
+            self?.let { session ->
+                Text("${session.transport} · policy epoch ${session.policyEpoch} · credentials until ${date(session.expiresAtEpochSeconds)}",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (me.lists.isNotEmpty()) Text("Keys received: ${me.lists.joinToString()}", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun RevokedHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Filled.Block, null, tint = MaterialTheme.colorScheme.error)
+        Spacer(Modifier.width(8.dp))
+        Text("Revoked devices ($count)", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+        Icon(if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, if (expanded) "Collapse" else "Expand")
+    }
+}
+
+/** A purge in progress: how many devices still have to acknowledge it, and the latest it waits for them. */
+@Composable
+private fun PurgeCard(purge: Purge) {
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.ContentCut, null, tint = Color(0xFF8E24AA))
+                Spacer(Modifier.width(8.dp))
+                Text("Purging removed devices", style = MaterialTheme.typography.titleSmall)
+            }
+            Text(when {
+                purge.waiting == 0 -> "Every device acknowledged: it finishes with the next sync."
+                else -> "Waiting for ${purge.waiting} device(s) to sync. It finishes as soon as they do" +
+                    (purge.deadlineEpochSeconds?.let { ", and at the latest on ${date(it)}, when those devices count as behind." } ?: ".")
+            }, style = MaterialTheme.typography.bodySmall)
+            Text("Meanwhile, newly added devices are recorded once it finishes.", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun DeviceCard(device: HouseholdDevice, canShare: Boolean, busy: Boolean, onShare: () -> Unit, onRevoke: () -> Unit,
+    onForget: (() -> Unit)? = null) {
     val peer = device.peer
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -111,6 +208,7 @@ private fun DeviceCard(device: HouseholdDevice, canShare: Boolean, busy: Boolean
                 if (device.revocable) TextButton(onRevoke, enabled = !busy) {
                     Icon(Icons.Filled.Block, null); Spacer(Modifier.width(6.dp)); Text(if (busy) "Revoking…" else "Revoke device")
                 }
+                onForget?.let { TextButton(it) { Icon(Icons.Filled.DeleteForever, null); Spacer(Modifier.width(6.dp)); Text("Remove permanently") } }
             }
         }
     }
@@ -141,8 +239,6 @@ private fun Status(color: Color, text: String) {
 private fun AddDeviceDialog(invitation: PairingCode?, onInvite: (NodeKind, String) -> Unit, onDismiss: () -> Unit) {
     var kind by remember { mutableStateOf(NodeKind.Full) }
     var name by remember { mutableStateOf("") }
-    @Suppress("DEPRECATION") // LocalClipboard needs a platform ClipEntry.
-    val clipboard = LocalClipboardManager.current
     AlertDialog(onDismiss,
         confirmButton = {
             if (invitation == null) Button({ onInvite(kind, name) }) { Text("Show code") }
@@ -164,16 +260,41 @@ private fun AddDeviceDialog(invitation: PairingCode?, onInvite: (NodeKind, Strin
                             }
                         }
                     }
-                } else {
-                    val code = invitation.toString()
-                    QrCode(code, Modifier.size(280.dp).align(Alignment.CenterHorizontally))
-                    Text("A ${invitation.kind.label.lowercase()} device. The code works once, for 10 minutes; it reaches this device over iroh, also from a cellular network.",
-                        style = MaterialTheme.typography.bodySmall)
-                    SelectionContainer { Text(code.take(48) + "…", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace) }
-                    TextButton({ clipboard.setText(AnnotatedString(code)) }) { Icon(Icons.Filled.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy code") }
-                }
+                } else InvitationCode(invitation)
             }
         })
+}
+
+/** The QR code of [invitation], with what it does and a way to copy it. */
+@Composable
+private fun ColumnScope.InvitationCode(invitation: PairingCode) {
+    @Suppress("DEPRECATION") // LocalClipboard needs a platform ClipEntry.
+    val clipboard = LocalClipboardManager.current
+    val code = invitation.toString()
+    QrCode(code, Modifier.size(280.dp).align(Alignment.CenterHorizontally))
+    Text("A ${invitation.kind.label.lowercase()} device. The code works once, for 10 minutes; it reaches the inviting device over iroh, also from a cellular network. " +
+        "A phone's camera app opens it in Shopping.", style = MaterialTheme.typography.bodySmall)
+    SelectionContainer { Text(code.take(48) + "…", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace) }
+    TextButton({ clipboard.setText(AnnotatedString(code)) }) { Icon(Icons.Filled.ContentCopy, null); Spacer(Modifier.width(6.dp)); Text("Copy code") }
+}
+
+@Composable
+private fun InvitationCard(open: OpenInvitation, onShow: () -> Unit) {
+    var now by remember { mutableStateOf(currentMillis() / 1000) }
+    LaunchedEffect(Unit) { while (true) { delay(1_000); now = currentMillis() / 1000 } }
+    val left = (open.expiresAtEpochSeconds - now).coerceAtLeast(0)
+    OutlinedCard(Modifier.fillMaxWidth().clickable(onClick = onShow)) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.QrCode2, null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(open.code.name, style = MaterialTheme.typography.titleSmall)
+                Text("By ${if (open.mine) "this device" else open.issuer} · expires in ${left / 60}:${(left % 60).toString().padStart(2, '0')}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            KindChip(open.code.kind)
+        }
+    }
 }
 
 @Composable

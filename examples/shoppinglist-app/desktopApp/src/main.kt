@@ -15,6 +15,7 @@ import org.example.examples.shopping.SessionState
 import org.example.examples.shopping.ShoppingDatabase
 import org.example.examples.shopping.ShoppingGraph
 import org.example.examples.shopping.ShoppingPlatform
+import org.example.examples.shopping.publicCoordination
 import org.example.examples.shopping.ui.ShoppingApp
 
 /** The household lives in `ROCKY_SHOPPING_DATA`, else `~/.rocky-shopping`. */
@@ -25,7 +26,8 @@ fun main(args: Array<String>) {
     }
     val directory = File(System.getenv("ROCKY_SHOPPING_DATA") ?: File(System.getProperty("user.home"), ".rocky-shopping").path)
     val name = runCatching { InetAddress.getLocalHost().hostName.substringBefore('.') }.getOrDefault("Desktop")
-    val graph = ShoppingGraph(ShoppingPlatform(directory, name, room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) }))
+    val graph = ShoppingGraph(ShoppingPlatform(directory, name, room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
+        commands = ::publicCoordination))
     application {
         LaunchedEffect(graph) {
             if (args.firstOrNull() == "--join-file" && graph.session.state.value == SessionState.Setup) {

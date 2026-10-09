@@ -12,8 +12,10 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import dev.zacsweers.metrox.viewmodel.LocalMetroViewModelFactory
+import org.example.examples.shopping.PairingCode
 import org.example.examples.shopping.SessionState
 import org.example.examples.shopping.ShoppingGraph
+import org.example.examples.shopping.ShoppingSession
 
 /** The whole app: setup until this device belongs to a household, then its lists, devices and sync. */
 @Composable
@@ -26,13 +28,16 @@ fun ShoppingApp(graph: ShoppingGraph) {
     }
     CompositionLocalProvider(LocalMetroViewModelFactory provides graph.metroViewModelFactory, LocalViewModelStoreOwner provides owner) {
         ShoppingTheme {
+            NetworkPermissions()
             Surface(Modifier.fillMaxSize()) {
-                when (val state = graph.session.state.collectAsState().value) {
+                val state = graph.session.state.collectAsState().value
+                when (state) {
                     SessionState.Opening -> Opening()
                     SessionState.Setup, is SessionState.Failed -> SetupScreen()
                     is SessionState.Open -> MainScreen()
                     is SessionState.Revoked -> RevokedScreen()
                 }
+                graph.session.offer.collectAsState().value?.let { offer -> OfferDialog(offer, state, graph.session) }
             }
         }
     }
@@ -46,6 +51,21 @@ private fun Opening() {
         Text("Opening the household…", style = MaterialTheme.typography.bodyLarge)
         Text("Enrolling, installing authors and starting sync", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+/** A pairing link opened from outside, such as a camera app: the user confirms it before this device joins. */
+@Composable
+private fun OfferDialog(offer: PairingCode, state: SessionState, session: ShoppingSession) {
+    val joinable = state == SessionState.Setup || state is SessionState.Revoked
+    AlertDialog(onDismissRequest = session::dismissOffer,
+        title = { Text(if (joinable) "Join as ${offer.name.ifBlank { "this device" }}?" else "Already in a household") },
+        text = {
+            Text(if (joinable) "A trusted device invited this one as a ${offer.kind.label.lowercase()} device: ${offer.kind.summary.lowercase()}." +
+                (if (state is SessionState.Revoked) " The revoked copy is kept aside and this device gets a new identity." else "")
+            else "This device already belongs to a household. A pairing code only sets up a new or revoked device.")
+        },
+        confirmButton = { if (joinable) Button(session::acceptOffer) { Text("Join") } else TextButton(session::dismissOffer) { Text("OK") } },
+        dismissButton = { if (joinable) TextButton(session::dismissOffer) { Text("Cancel") } })
 }
 
 private val Leaf = Color(0xFF2E7D32)

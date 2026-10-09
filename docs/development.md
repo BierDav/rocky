@@ -149,7 +149,8 @@ CLI toolchain files, and the Cargo registry with the native target directory of
 `sdks/native`. The release workflow's Android job restores both and saves them
 again, keyed by the files that decide their content, so a nightly build does not
 recompile the Android runtime from nothing. The cache keys are identical in both
-workflows; changing them means one cold build.
+workflows; changing them means one cold build. On Gitea, whose runner image has
+no Android SDK, both jobs also cache the Android platform and NDK.
 
 Required status checks are a hosting setting; the workflow file does not configure
 branch protection. No remotely hosted CI run has been verified by this baseline.

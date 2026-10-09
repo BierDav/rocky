@@ -18,9 +18,11 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes a run, but a release's call must not cancel another
+# release's checks, which share the caller's workflow name and ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -399,12 +401,26 @@ jobs:
           packages: ""
 
       # The versions docs/runtime/android.md names.
+      # The NDK download is large and occasionally truncated; GitHub's image has
+      # an SDK already.
+      - name: Cache the Android platform and NDK
+        if: github.server_url != 'https://github.com'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms/android-35
+            ${{ env.ANDROID_HOME }}/ndk/28.2.13676358
+          key: android-sdk-${{ runner.os }}-35-ndk-28.2.13676358
+
       - name: Install the Android platform and NDK
         run: |
           set -euo pipefail
           sdkmanager="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
           yes | "${sdkmanager}" --licenses > /dev/null || true
-          "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358"
+          for attempt in 1 2 3; do
+            "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358" && break
+            [ "${attempt}" -lt 3 ] || exit 1
+          done
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - name: Install the repository toolchain

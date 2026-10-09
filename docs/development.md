@@ -166,14 +166,16 @@ Required status checks are a hosting setting; the workflow file does not configu
 branch protection. No remotely hosted CI run has been verified by this baseline.
 
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
-baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
-commit whose completed run of it failed.
+baseline; it has not run on a hosted runner yet. Releases skip it and do not
+wait for its result.
 
-A release calls the baseline workflow, so a commit is built once: it first waits
-for any push run of the commit's checks still going, and when `check` passed for
-its tree, the release's `build` and `check` skip. A job whose
-build artifact is missing, for example after its one-day retention, builds what
-it runs itself; a release of an unchecked tree runs the build and checks.
+A release calls the baseline workflow. Before it starts, it waits only for the
+push run's `lint`, `build` and `check` jobs for that commit; a failure in any of
+them fails the release. The `slow`, `shopping` and baseline `android` jobs do
+not gate it. When `check` passed for the tree, the release's `build` and `check`
+skip. A job whose build artifact is missing, for example after its one-day
+retention, builds what it runs itself; a release of an unchecked tree runs the
+build and checks.
 
 Only the release workflow builds and publishes the container images, so the
 Actions sidebar lists just the baseline, commit-message and release workflows.

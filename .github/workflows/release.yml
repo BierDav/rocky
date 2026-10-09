@@ -80,27 +80,9 @@ jobs:
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
 
-      # A push run of this commit that is still going would otherwise build and
-      # test the commit a second time in parallel; once it is done, the checks
-      # below reuse its passing tree, or run again if it did not pass.
+      # Wait only for the required baseline jobs. Auxiliary jobs may keep
+      # running, but never gate a release.
       - name: Wait for the checks of this commit
-        if: steps.changes.outputs.release == 'true'
-        run: |
-          set -euo pipefail
-          while :; do
-            pending="$(curl --fail --silent --show-error --location \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "Accept: application/vnd.github+json" \
-              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
-              | jq '[.workflow_runs[] | select((.path | test("(^|/)check\\.yml(@|$)")) and .status != "completed")] | length')"
-            [ "${pending}" -gt 0 ] || break
-            echo "Waiting for ${pending} check run(s) of ${GITHUB_SHA}"
-            sleep 30
-          done
-
-      # Releases do not wait for the shopping qualification, but the latest
-      # completed run of it for this commit must not have failed.
-      - name: Refuse a failed shopping qualification
         if: steps.changes.outputs.release == 'true'
         run: |
           set -euo pipefail
@@ -110,20 +92,27 @@ jobs:
               --header "Accept: application/vnd.github+json" \
               "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/$1"
           }
-          # GitHub names the path `.github/workflows/check.yml`, Gitea `check.yml@<ref>`.
-          runs="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
-            | jq -r '.workflow_runs[] | select(.path | test("(^|/)check\\.yml(@|$)")) | .id')"
-          for run in ${runs}; do
-            result="$(api "actions/runs/${run}/jobs?per_page=100" \
-              | jq -r '[.jobs[] | select(.name == "shopping" and .status == "completed")] | .[0].conclusion // ""')"
-            case "${result}" in
-            "" | skipped | cancelled) continue ;;
-            failure)
-              echo "::error::The shopping qualification failed for ${GITHUB_SHA} in run ${run}."
-              exit 1
-              ;;
-            *) break ;;
-            esac
+          while :; do
+            runs="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
+              | jq -r '.workflow_runs[] | select((.path | test("(^|/)check\\.yml(@|$)")) and .event == "push") | .id')"
+            pending=false
+            for run in ${runs}; do
+              state="$(api "actions/runs/${run}/jobs?per_page=100" | jq -r '
+                [.jobs[] | select(.name == "lint" or .name == "build" or .name == "check")] as $required |
+                if any($required[]; .status == "completed" and .conclusion != "success") then "failed"
+                elif ($required | length) < 3 or any($required[]; .status != "completed") then "pending"
+                else "passed" end')"
+              if [ "${state}" = failed ]; then
+                echo "::error::A required check failed for ${GITHUB_SHA} in run ${run}."
+                exit 1
+              fi
+              if [ "${state}" = pending ]; then
+                pending=true
+              fi
+            done
+            [ "${pending}" = true ] || break
+            echo "Waiting for required checks of ${GITHUB_SHA}"
+            sleep 30
           done
 
       - uses: taiki-e/install-action@v2

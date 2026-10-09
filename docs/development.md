@@ -153,8 +153,8 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   first step points `CARGO_HOME`, `RUSTUP_HOME` and `PATH` at `/Users/gitea-runner`.
   Its Actions cache is stored on `/Volumes/david-mm-linz-ext-1/gitea-runner`.
 - Linux jobs run in the runner image, which lacks rustup and the Android SDK; the
-  jobs install them. Linux jobs use GitHub's labels, `ubuntu-26.04` (x64) and
-  `ubuntu-26.04-arm`, which the Gitea runners must carry. Jobs that need no
+  jobs install them. Linux jobs use GitHub's labels, `ubuntu-latest` (x64) and
+  `ubuntu-24.04-arm`, which the Gitea runners must carry. Jobs that need no
   particular architecture use the arm64 label on Gitea. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
   arm64 Linux host.

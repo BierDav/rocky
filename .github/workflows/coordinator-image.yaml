@@ -71,10 +71,10 @@ jobs:
           # emulation is many times slower than the hosted arm64 runner.
           - arch: amd64
             platform: linux/amd64
-            runner: ubuntu-26.04
+            runner: ubuntu-latest
           - arch: arm64
             platform: linux/arm64
-            runner: ubuntu-26.04-arm
+            runner: ubuntu-24.04-arm
     steps:
       - name: Download the exact source revision
         env:
@@ -132,7 +132,7 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 15
     # The package stays private; deployments supply a ghcr-pull registry secret.
     steps:

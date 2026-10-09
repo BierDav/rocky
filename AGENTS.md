@@ -3,7 +3,7 @@
 ## Start here
 
 - Read [README.md](README.md) for project status and entry points.
-- Read [the current roadmap](docs/features_06/README.md) and its linked architecture
+- Read [the current roadmap](docs/features_07/README.md) and its linked architecture
   before selecting new implementation work. Older phase plans are historical or
   deferred integration references, not competing next-work instructions.
 - Read [docs/modules.md](docs/modules.md) to choose the owning crate.

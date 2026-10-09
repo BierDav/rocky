@@ -3,7 +3,7 @@
 This document maps the current implementation. Future boundaries and phase order
 are governed by [V4](proposals/architecture-proposal-v4.md),
 [design rationale](runtime/coordinator-retention.md#design-rationale) and
-[features_06](features_06/README.md), not by the SDK's current composition choices.
+[features_07](features_07/README.md), not by the SDK's current composition choices.
 
 The target separates reusable credentials, managed database/replication, strong
 commands and optional iroh services. `rocky-sdk` becomes language bindings plus

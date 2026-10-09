@@ -1,9 +1,9 @@
 # features_07: an equal-issuer, roster-free mesh and iOS
 
-Status: drafted on 2026-10-09; not started. It becomes the next-work authority
-when the proposed defaults in [the mesh scope](scope-mesh.md#proposed-defaults)
-are confirmed and the entry points (`AGENTS.md`, the root README and the
-documentation index) are switched to it. Each brief records its own status.
+Status: sequenced on 2026-10-09; not started. This is the next-work authority.
+The [proposed defaults](scope-mesh.md#proposed-defaults) of the mesh scope
+still await confirmation, each before the phase it names starts. Each brief
+records its own status.
 
 Read the two scopes first; every brief links their sections instead of
 repeating them:
@@ -34,8 +34,7 @@ run on an iPhone from the same Kotlin sources as on Android and the desktop.
 - One current version per persisted and wire format
   ([decision 0039](../decisions/0039-single-current-formats.md)). A change
   replaces the format; nothing migrates and existing installations reinstall.
-- Each format change takes the next free
-  [decision record](../decisions/README.md).
+- Each format change takes its [reserved decision record](#reserved-decision-records).
 - The product choices in the scopes are settled once confirmed; internal
   mechanisms are the agent's call inside them.
 
@@ -164,6 +163,23 @@ them, with the limits each brief names.
 
 Each session change replaces `rocky/native-session` with the next name; a
 phase that lands later in the order rebases onto the current one.
+
+## Reserved decision records
+
+| Record | Phase | Topic |
+| --- | --- | --- |
+| 0048 | 4 | Replicated issuer registry |
+| 0049 | 5 | Mergeable revocation set |
+| 0050 | 6 | Key epoch identities and sibling epochs |
+| 0051 | 7 | Roster-free admission and policy exchange in the native session |
+| 0052 | 8 | Credential chains by reference |
+| 0053 | 10 | Holding proofs |
+| 0054 | 11 | Envelope delivery and mailboxes |
+| 0055 | 12 | Relayed horizon statements and acknowledgments |
+| 0056 | 9 | Discovery capability, discovery secret and topic |
+| 0057 | 13 | Kotlin/Native binding |
+
+A phase that needs a further record takes the next unreserved one.
 
 ## Agent execution contract
 

@@ -1,7 +1,7 @@
 # Rocky DB: composable P2P application infrastructure
 
 Status: accepted product and architecture direction, 2026-10-06. Implementation follows the
-[roadmap](../features_06/README.md). This proposal supersedes V3
+[roadmap](../features_07/README.md). This proposal supersedes V3
 for future work; implemented guides continue to describe the code as it exists.
 
 ## Product contract
@@ -191,7 +191,7 @@ provide availability; the coordinator is not the only-copy custodian.
 
 ## Scope and implementation authority
 
-The [phase briefs](../features_06/README.md) are the current implementation path.
+The [phase briefs](../features_07/README.md) are the current implementation path.
 Unfinished Room prerequisites are split into generic work and deferred adapters;
 transparent strong DAO writes, universal ORM compatibility, alternate database
 engines, complete blob/presence services, mobile/web parity and feature parity

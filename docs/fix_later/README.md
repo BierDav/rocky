@@ -2,8 +2,8 @@
 
 Known defects that are not scheduled. Each entry states the scenario, the
 site and a proposed fix. Scheduled work is in
-[the roadmap](../features_06/README.md); local defects with an obvious fix are
-in its [small fixes](../features_06/12-small-fixes.md). Remove an entry when it
+[the roadmap](../features_07/README.md); local defects with an obvious fix are
+in its [small fixes](../features_07/03-small-fixes.md). Remove an entry when it
 is fixed or moved into a phase.
 
 ## Coordinator client writes a cache it cannot reopen

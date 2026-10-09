@@ -50,6 +50,11 @@ name, kind and node key, and which device received which list.
   key epochs. Every reader opens both. Writers converge on one by a
   deterministic rule over data both epochs carry, and the next rotation
   supersedes both.
+- **Concurrent revocations rotate again.** Each of two concurrent rotations
+  was sealed without knowing the other's revocation, so each may have reached
+  the device the other revoked. An issuer that holds an epoch sealed under a
+  smaller revocation set than it now knows rotates once more. Until then the
+  scope is exposed to those devices, and that window is stated.
 - **Precision.** Revoking any device rotates only the collections and group
   partitions its registry record could read, whichever issuer revokes.
 
@@ -118,7 +123,7 @@ or change each before the phase named starts.
 | How a member learns a revocation from a peer it never met | Every handshake compares a digest of the revocation set; the side that lacks statements receives them before any row | 7 |
 | Which earlier frames a device accepts once it learns a revocation | A frame is refused when its author's chain is revoked or expired, and admitted otherwise. Rows of a revoked author that a device did not yet hold arrive by checkpoint, as today | 5 |
 | How long a concurrent second key epoch stays readable | Under the existing rule: until no retained operation was sealed with it ([retaining keys](../runtime/credentials.md#retaining-historical-keys)) | 6 |
-| The writers' tie-break between two concurrent epochs | The epoch whose secret fingerprint is lower | 6 |
+| The writers' tie-break between two concurrent epochs | The epoch whose secret fingerprint is lower. It only settles which epoch writers use meanwhile; epochs sealed under different revocation sets are superseded by a further rotation | 6 |
 | Whether the discovery topic changes on revocation | It derives from a discovery secret delivered with renewal and replaced by every revocation, so a revoked device stops deriving it once others renew | 9 |
 | What a mailbox is | Any admitted peer holding custody for the recipient's partition, bounded per recipient; issuers always | 11 |
 | How a caller finds the executor | It asks the peers it meets for the executor's contact; a peer may also forward the sealed command | 16 |

@@ -41,7 +41,7 @@ checks one message file, or every described commit of a Jujutsu revset:
 
 ```sh
 scripts/commitlint --jj                              # trunk()..@, skipping an undescribed working copy
-scripts/commitlint --protected --jj 'main@origin..'  # as CI checks main
+scripts/commitlint --protected --jj 'trunk()..'      # as CI checks main
 ```
 
 After [`scripts/setup`](linting.md#setup), `jj push` checks the messages it

@@ -1,6 +1,8 @@
 # iOS platform
 
-Status: idea; not scheduled.
+Status: scheduled on 2026-10-09 as Kotlin Multiplatform only, in
+[the iOS scope](../features_07/scope-ios.md), which is the authority. The Swift
+surface stays an idea.
 
 ## Background
 

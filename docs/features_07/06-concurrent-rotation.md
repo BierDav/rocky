@@ -30,15 +30,23 @@ and let writers converge.
    whatever each sealed. A frame under a sibling it lacks waits as pending.
 3. Writers: a device seals under the winning sibling it holds. A device
    holding only the losing one keeps writing under it until it receives the
-   winner; both are readable, so nothing is lost. State the window in which a
-   revoked device could still read: none, since it receives neither sibling.
-4. Rotation by an issuer that sees two siblings starts the next generation
-   from the winner. A group partition's tables stay on one sibling together;
-   an interruption resumes to that.
-5. Retirement: a losing sibling is retired under the existing rule.
+   winner; both are readable, so nothing is lost.
+4. Exposure. Each epoch records the digest of the revocation set it was
+   sealed under. Two issuers revoking different readers of one scope each
+   deliver their sibling to the device the other revoked, at renewal or by
+   envelope, because neither knew. The tie-break does not repair that. An
+   issuer that holds an epoch sealed under a set smaller than the one it now
+   knows starts the next generation, delivered only to devices its merged set
+   admits. Two issuers doing this at once produce siblings sealed under the
+   same set, which the tie-break settles without a further rotation. State
+   the exposure window: from the concurrent revocations until the superseding
+   generation reaches writers.
+5. A group partition's tables stay on one sibling together; an interruption
+   resumes to that.
+6. Retirement: a losing sibling is retired under the existing rule.
    Checkpoints are sealed under the winner; one sealed under the loser is not
    served once the winner is held.
-6. The refusal added by [phase 5](05-mergeable-revocations.md) is removed.
+7. The refusal added by [phase 5](05-mergeable-revocations.md) is removed.
 
 ## Completion gate
 
@@ -46,8 +54,12 @@ and let writers converge.
   a group partition of three tables.
 - Every device computes the same winner from the two siblings alone, whatever
   the order of arrival.
-- A device revoked by either of the two concurrent revocations opens no row
-  sealed under either sibling.
+- Two issuers revoke two different readers of one list at once. After the
+  issuers meet, a superseding generation exists that neither revoked device
+  holds, and neither opens a row written after it reached the writer. The
+  test also shows the rows each could open in between.
+- Two issuers rotating under the same revocation set cause no further
+  rotation; the process terminates.
 - A writer offline through both rotations and a third one converges on the
   third generation after one renewal.
 - A crash at every step leaves every table of a group partition on the same

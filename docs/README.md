@@ -1,7 +1,7 @@
 # Documentation
 
 Start new work with [architecture V4](proposals/architecture-proposal-v4.md) and
-[features_06](features_06/README.md). They define the accepted modular direction,
+[features_07](features_07/README.md). They define the accepted modular direction,
 no-Rust consumer principle and bounded public coordinator. Runtime guides describe
 implemented behavior; proposed capabilities are not implied by current API names.
 Select the guide for your task rather than reading every document.
@@ -67,8 +67,8 @@ Select the guide for your task rather than reading every document.
 | Register identities, delegate Directory rights or delete a user | [Directory registration](applications/directory/registration.md) |
 | Write or reorganize documentation | [Documentation conventions](documentation.md) |
 | Understand the target product and module boundaries | [Architecture V4](proposals/architecture-proposal-v4.md) |
-| Select the next agent implementation task | [Current phases](features_06/README.md) |
-| Read the agreed design behind the current phases | [Partitioned constraints](features_06/scope-partitioned-constraints.md), [row moves](features_06/scope-moving-rows.md) |
+| Select the next agent implementation task | [Current phases](features_07/README.md) |
+| Read the agreed design behind the current phases | [Mesh](features_07/scope-mesh.md), [iOS](features_07/scope-ios.md) |
 | Understand engine selection, buffered commits and the file layout | [Storage engine and durability](runtime/write-concurrency.md#design-rationale) |
 | Record a new architectural decision | [Decision records](decisions/README.md) |
 | Find optimizations deferred until a workload needs them | [Optimizations on demand](optimizations_on_demand/README.md) |

@@ -1,6 +1,7 @@
 # A full mesh with equal trusted nodes
 
-Status: idea, not designed in detail and not scheduled.
+Status: scheduled on 2026-10-09 in [the mesh scope](../features_07/scope-mesh.md),
+which is the authority and answers the open questions below.
 
 ## Background
 

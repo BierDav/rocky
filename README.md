@@ -6,13 +6,14 @@ iroh plumbing, with a provider-operated public metadata coordinator for startup
 without an application backend. Schemas, handlers and payloads stay on app nodes.
 
 The accepted [architecture V4](docs/proposals/architecture-proposal-v4.md) and
-[agent-ready implementation phases](docs/features_06/README.md) are the current
+[agent-ready implementation phases](docs/features_07/README.md) are the current
 path forward. Every capability has a language-neutral integration contract:
 consumers should define schemas and handlers in their own language and use their
 chosen ORM/transport adapters without a Rust project or code. Kotlin/JVM desktop
 is the first complete consumer target; universal adapter availability is not claimed.
 
-Phases 1 to 8 of the roadmap are implemented. [Recoverable generations](docs/runtime/generations.md),
+Phases 1 to 8 of an earlier roadmap are implemented; the current one has not
+started. [Recoverable generations](docs/runtime/generations.md),
 [fresh-device backup/restore](docs/runtime/backup-and-restore.md) and
 [composable packaged Kotlin SDKs](docs/runtime/sdk-packaging.md) provide the bounded
 single-file/JVM desktop profile; [qualification limits](docs/runtime/sdk-packaging.md#build-and-consume-a-package)
@@ -159,6 +160,6 @@ Use [the documentation index](docs/README.md) to select a focused guide.
 - [Agent instructions](AGENTS.md)
 - [Documentation conventions](docs/documentation.md)
 - [Implemented operation semantics](docs/applications/todo/operation-semantics.md)
-- [Current implementation roadmap](docs/features_06/README.md)
+- [Current implementation roadmap](docs/features_07/README.md)
 - [Current architecture proposal](docs/proposals/architecture-proposal-v4.md)
 - [Engine decision](docs/runtime/write-concurrency.md#engine)

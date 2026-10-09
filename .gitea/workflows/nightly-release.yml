@@ -1,157 +1,118 @@
-name: Nightly release
+name: Gitea nightly release
 
 on:
   schedule:
-    - cron: '23 2 * * *'
+    - cron: "23 2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
-env:
-  CARGO_HOME: /Users/gitea-runner/.cargo
-  RUSTUP_HOME: /Users/gitea-runner/.rustup
-  PATH: /Users/gitea-runner/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
-
 concurrency:
   group: gitea-nightly-release
   cancel-in-progress: false
 
+env:
+  GITEA_API_URL: ${{ github.api_url }}
+  GITEA_TOKEN: ${{ github.token }}
+  GITEA_REPOSITORY: ${{ github.repository }}
+  CARGO_HOME: /Users/gitea-runner/.cargo
+  RUSTUP_HOME: /Users/gitea-runner/.rustup
+  PATH: /Users/gitea-runner/.cargo/bin:/Users/gitea-runner/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
 jobs:
-  prepare:
+  release:
+    name: Check and publish nightly
     runs-on: macos-latest
-    timeout-minutes: 30
-    outputs:
-      release: ${{ steps.changes.outputs.release }}
-      version: ${{ steps.release.outputs.version }}
-      notes: ${{ steps.release.outputs.notes }}
+    timeout-minutes: 180
     steps:
+      - name: Require the default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Nightly releases are cut from the default branch."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check for unreleased code
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: check
+
+      - name: Check whether shipped code changed
         id: changes
-        env:
-          GITEA_API_URL: ${{ github.api_url }}
-          GITEA_TOKEN: ${{ github.token }}
-          GITEA_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          releases=$(curl --fail --silent --show-error \
-            --header "Authorization: token $GITEA_TOKEN" \
-            "$GITEA_API_URL/repos/$GITEA_REPOSITORY/releases?limit=50")
-          latest=$(printf '%s' "$releases" | jq -r '[.[] | select(.prerelease == true and .draft == false)] | sort_by(.created_at) | last | .tag_name // empty')
-          if [ -z "$latest" ]; then
-            echo 'release=true' >> "$GITHUB_OUTPUT"
+          latest="$(curl --fail --silent --show-error \
+            --header "Authorization: token ${GITEA_TOKEN}" \
+            "${GITEA_API_URL}/repos/${GITEA_REPOSITORY}/releases?limit=50" \
+            | jq -r '[.[] | select(.draft == false)] | .[0].tag_name // ""')"
+          if [ -z "${latest}" ]; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
           else
-            git fetch --no-tags origin "refs/tags/$latest:refs/tags/$latest"
-            if [ "$(git rev-list --count "$latest..HEAD" -- .)" -eq 0 ]; then
-              echo 'release=false' >> "$GITHUB_OUTPUT"
-            elif git diff --name-only "$latest...HEAD" | grep -vE '(^|/)[^/]+\.md$' | grep -Eq '^(crates/|sdks/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|project\.yaml$|project\.module-template\.yaml$|kotlin$|\.dockerignore$)'; then
-              echo 'release=true' >> "$GITHUB_OUTPUT"
-            else
-              echo 'release=false' >> "$GITHUB_OUTPUT"
+            release="$(scripts/release/code-changed "${latest}" "${GITHUB_SHA}")"
+            echo "release=${release}" >> "$GITHUB_OUTPUT"
+            if [ "${release}" != true ]; then
+              echo "No shipped code changed since ${latest}; no nightly release."
             fi
           fi
-      - name: Install cargo-nextest
+
+      - name: Install git-cliff
         if: steps.changes.outputs.release == 'true'
-        run: |
-          if ! cargo nextest --version >/dev/null 2>&1; then
-            cargo install cargo-nextest --locked
-          fi
-      - name: Prepare version and notes
-        if: steps.changes.outputs.release == 'true'
-        id: release
-        env:
-          GITEA_API_URL: ${{ github.api_url }}
-          GITEA_TOKEN: ${{ github.token }}
-          GITEA_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tags=$(curl --fail --silent --show-error \
-            --header "Authorization: token $GITEA_TOKEN" \
-            "$GITEA_API_URL/repos/$GITEA_REPOSITORY/tags?limit=50" | jq -r '.[].name')
-          while IFS= read -r tag; do
-            [ -z "$tag" ] || git tag "$tag" "$(git rev-parse "$tag^{commit}" 2>/dev/null || printf '%s' "$tag")" 2>/dev/null || true
-          done <<EOF_TAGS
-          $tags
-          EOF_TAGS
-          mkdir -p "$RUNNER_TEMP/git-cliff"
-          curl --fail --silent --show-error --location \
-            https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-aarch64-apple-darwin.tar.gz \
-            --output "$RUNNER_TEMP/git-cliff.tar.gz"
-          checksum=$(shasum -a 256 "$RUNNER_TEMP/git-cliff.tar.gz" | awk '{print $1}')
-          [ "$checksum" = 'a0be97e237d440d34c5e508ec21d070b2c85cbb8be48a46a56f9a4e8bd247f05' ]
-          tar -xzf "$RUNNER_TEMP/git-cliff.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/git-cliff"
-          export PATH="$RUNNER_TEMP/git-cliff:$PATH"
-          version=$(printf '%s\n' "$tags" | ./scripts/release/version nightly)
-          notes=$("$RUNNER_TEMP/git-cliff/git-cliff" --tag "$version" --latest --strip header)
-          delimiter=$(uuidgen)
-          {
-            echo "version=$version"
-            echo "notes<<$delimiter"
-            printf '%s\n' "$notes"
-            echo "$delimiter"
-          } >> "$GITHUB_OUTPUT"
+          archive="$RUNNER_TEMP/git-cliff.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${archive}" \
+            https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-aarch64-apple-darwin.tar.gz
+          echo "a0be97e237d440d34c5e508ec21d070b2c85cbb8be48a46a56f9a4e8bd247f05  ${archive}" | shasum -a 256 -c -
+          mkdir "$RUNNER_TEMP/git-cliff"
+          tar -xzf "${archive}" --strip-components=1 -C "$RUNNER_TEMP/git-cliff"
+          echo "$RUNNER_TEMP/git-cliff" >> "$GITHUB_PATH"
 
-  check:
-    needs: prepare
-    if: needs.prepare.outputs.release == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: check
-      - name: Run checks
+      - name: Compute the version and release notes
+        id: version
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          tags="$(curl --fail --silent --show-error \
+            --header "Authorization: token ${GITEA_TOKEN}" \
+            "${GITEA_API_URL}/repos/${GITEA_REPOSITORY}/tags?limit=50" \
+            | jq -r '.[].name')"
+          version="$(printf '%s\n' "${tags}" | scripts/release/version nightly)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          git-cliff --unreleased --tag "v${version}" --strip all > "$RUNNER_TEMP/release-notes.md"
+          {
+            echo "## v${version}"
+            echo
+            cat "$RUNNER_TEMP/release-notes.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the release checks
+        if: steps.changes.outputs.release == 'true'
         run: ./scripts/check
 
-  slow:
-    needs: prepare
-    if: needs.prepare.outputs.release == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: check
-      - name: Run slow checks
+      - name: Run the slow release checks
+        if: steps.changes.outputs.release == 'true'
         run: ./scripts/check --slow
 
-  publish:
-    needs: [prepare, check, slow]
-    if: needs.prepare.outputs.release == 'true'
-    runs-on: macos-latest
-    timeout-minutes: 10
-    env:
-      GITEA_API_URL: ${{ github.api_url }}
-      GITEA_TOKEN: ${{ github.token }}
-      GITEA_REPOSITORY: ${{ github.repository }}
-      GITHUB_SHA: ${{ github.sha }}
-      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-      RELEASE_NOTES: ${{ needs.prepare.outputs.notes }}
-    steps:
-      - name: Publish Gitea prerelease
+      - name: Publish the Gitea prerelease
+        if: steps.changes.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          payload=$(jq -n \
-            --arg tag "$RELEASE_VERSION" \
-            --arg title "Rocky DB $RELEASE_VERSION" \
-            --arg target "$GITHUB_SHA" \
-            --arg body "$RELEASE_NOTES" \
-            '{tag_name:$tag, name:$title, target_commitish:$target, body:$body, draft:false, prerelease:true}')
+          payload="$(jq -n \
+            --arg tag "v${VERSION}" \
+            --arg target "${GITHUB_SHA}" \
+            --arg title "v${VERSION}" \
+            --rawfile body "$RUNNER_TEMP/release-notes.md" \
+            '{tag_name: $tag, target_commitish: $target, name: $title, body: $body, draft: false, prerelease: true}')"
           curl --fail --silent --show-error --location \
             --request POST \
-            --header "Authorization: token $GITEA_TOKEN" \
+            --header "Authorization: token ${GITEA_TOKEN}" \
             --header 'Content-Type: application/json' \
-            --data "$payload" \
-            "$GITEA_API_URL/repos/$GITEA_REPOSITORY/releases"
+            --data "${payload}" \
+            "${GITEA_API_URL}/repos/${GITEA_REPOSITORY}/releases"

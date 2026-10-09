@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_HOME: /Users/gitea-runner/.cargo
+  RUSTUP_HOME: /Users/gitea-runner/.rustup
+  PATH: /Users/gitea-runner/.cargo/bin:/Users/gitea-runner/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+jobs:
+  check:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: check
+      - name: Run checks
+        run: ./scripts/check
+
+  slow:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: check
+      - name: Run slow checks
+        run: ./scripts/check --slow

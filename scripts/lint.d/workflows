@@ -4,4 +4,10 @@ tools='actionlint shellcheck'
 
 # Explicit paths: CI checks out an archive without .git, where bare actionlint
 # finds no project.
-check() { actionlint .github/workflows/*.yml .github/workflows/*.yaml; }
+check() {
+    set --
+    for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+        [ ! -e "$workflow" ] || set -- "$@" "$workflow"
+    done
+    actionlint "$@"
+}

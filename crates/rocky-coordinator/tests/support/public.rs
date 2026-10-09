@@ -37,8 +37,13 @@ pub struct Tenant {
     pub alternate: PrivateKey,
     pub phone: PrivateKey,
 }
+/// nextest sets the path at run time, remapped when tests run from an archive
+/// built elsewhere; `cargo test` has only the compile-time path.
 pub fn voter() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_rocky-voter"))
+    std::env::var_os("CARGO_BIN_EXE_rocky-voter").map_or_else(
+        || PathBuf::from(env!("CARGO_BIN_EXE_rocky-voter")),
+        PathBuf::from,
+    )
 }
 fn run(arguments: &[&Path]) -> String {
     let output = Command::new(voter()).args(arguments).output().unwrap();

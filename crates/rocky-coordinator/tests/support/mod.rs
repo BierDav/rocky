@@ -202,7 +202,7 @@ impl Cluster {
         let index = id as usize - 1;
         let path = self.dir.path().join(format!("voter-{id}.json"));
         std::fs::write(&path,serde_json::to_vec(&serde_json::json!({"data":self.dir.path().join(format!("voter-{id}")),"genesis":self.dir.path().join("genesis.cbor"),"trusted_root":self.genesis.root,"mesh":self.genesis.genesis.mesh,"node":id,"key":self.keys[index]})).unwrap()).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rocky-voter"));
+        let mut command = Command::new(public::voter());
         command.arg(path);
         command.env(
             "ROCKY_COORDINATOR_FAULT_FILE",

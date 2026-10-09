@@ -8,12 +8,15 @@ on:
   push:
   pull_request:
   # The release workflow gates every release on these checks, without `slow`
-  # and `shopping`.
+  # and `shopping`, and publishes its images from here.
   workflow_call:
     inputs:
-      release:
-        type: boolean
-        default: false
+      version:
+        type: string
+        required: true
+      channel:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -108,7 +111,99 @@ jobs:
           path: passed
           key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
+  build:
+    # Compiles once: clippy, the test binaries as nextest archives and the custody
+    # peer, which `check`, `slow` and `shopping` run instead of building again.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      # The Gitea macOS runner is a service without a login environment.
+      - name: Use the Gitea runner's tools
+        if: github.server_url != 'https://github.com'
+        run: |
+          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
+          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
+
+      - name: Download the exact source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      # A tree whose checks passed needs no build.
+      - name: Look for a passing check of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
+
+      - name: Install the repository toolchain
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          workspaces: source -> target
+          shared-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@v2
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
+        with:
+          tool: cargo-nextest
+
+      # install-action's checksum check fails with the Gitea runner's sha256sum.
+      # Per job: parallel jobs share the runner's CARGO_HOME.
+      - name: Install cargo-nextest on Gitea
+        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/nextest"
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+            | tar -xzf - -C "$RUNNER_TEMP/nextest"
+          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
+
+      - name: Build and archive the tests
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ./scripts/check --build "$RUNNER_TEMP/build"
+          # After the archives: the archive without default features replaces the binary.
+          cargo build --locked -p rocky-sdk --bin rocky-peer
+          cp target/debug/rocky-peer "$RUNNER_TEMP/build/"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+          retention-days: 1
+          # The archives are already compressed.
+          compression-level: 0
+
   check:
+    needs: build
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -154,12 +249,13 @@ jobs:
         working-directory: source
         run: rustup show active-toolchain
 
+      # Doc tests still compile the workspace libraries.
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
         with:
           workspaces: source -> target
           shared-key: check
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
 
       - uses: taiki-e/install-action@v2
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
@@ -177,10 +273,24 @@ jobs:
             | tar -xzf - -C "$RUNNER_TEMP/nextest"
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
+      # Missing when `build` found this tree's checks passed; the job then
+      # builds what it runs.
+      - uses: actions/download-artifact@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+
       - name: Run shared checks
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/check
+        run: |
+          if [ -d "$RUNNER_TEMP/build" ]; then
+            ./scripts/check --from "$RUNNER_TEMP/build"
+          else
+            ./scripts/check
+          fi
 
       - name: Record the passing tree
         if: steps.passed.outputs.cache-hit != 'true'
@@ -194,8 +304,7 @@ jobs:
 
   slow:
     # Soak tests: on pushes to the default branch only; releases do not wait for them.
-    # After `check`, whose Rust cache they restore.
-    needs: check
+    needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 60
@@ -265,10 +374,24 @@ jobs:
             | tar -xzf - -C "$RUNNER_TEMP/nextest"
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
+      # Missing when `build` found this tree's checks passed; the job then
+      # builds what it runs.
+      - uses: actions/download-artifact@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+
       - name: Run soak tests
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/check --slow
+        run: |
+          if [ -d "$RUNNER_TEMP/build" ]; then
+            ./scripts/check --slow --from "$RUNNER_TEMP/build"
+          else
+            ./scripts/check --slow
+          fi
 
       - name: Record the passing tree
         if: steps.passed.outputs.cache-hit != 'true'
@@ -283,9 +406,8 @@ jobs:
   shopping:
     # Multi-process shopping qualification: device JVMs and the packaged custody peer.
     # Releases skip it; the release refuses a commit whose run of it failed.
-    # After `check`, whose Rust cache it restores.
-    needs: check
-    if: ${{ !inputs.release }}
+    needs: build
+    if: ${{ !inputs.version }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -338,10 +460,26 @@ jobs:
           shared-key: check
           save-if: false
 
+      # Missing when `build` found this tree's checks passed; the job then
+      # builds what it runs.
+      - uses: actions/download-artifact@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+
       - name: Run the shopping qualification
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./examples/shoppinglist-app/qualify
+        run: |
+          set -euo pipefail
+          # Artifacts do not keep the executable bit.
+          if [ -f "$RUNNER_TEMP/build/rocky-peer" ]; then
+            chmod +x "$RUNNER_TEMP/build/rocky-peer"
+            export ROCKY_PEER="$RUNNER_TEMP/build/rocky-peer"
+          fi
+          ./examples/shoppinglist-app/qualify
 
       - name: Record the passing tree
         if: steps.passed.outputs.cache-hit != 'true'
@@ -353,14 +491,258 @@ jobs:
           path: passed
           key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
+  image-changes:
+    # Releases build both images; pushes to the default branch and pull requests
+    # those whose sources changed; other branches none.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    timeout-minutes: 5
+    outputs:
+      any: ${{ steps.select.outputs.coordinator == 'true' || steps.select.outputs.peer == 'true' }}
+      coordinator: ${{ steps.select.outputs.coordinator }}
+      peer: ${{ steps.select.outputs.peer }}
+    steps:
+      - name: Select the images to build
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          choose() { printf 'coordinator=%s\npeer=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; exit 0; }
+          [ -z "${VERSION}" ] || choose true true
+          if [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            choose false false
+          fi
+          # A new branch has no base.
+          if [ -z "${BASE}" ] || [ "${BASE}" = 0000000000000000000000000000000000000000 ]; then
+            choose true true
+          fi
+          compare="$(curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/compare/${BASE}...${GITHUB_SHA}")" || choose true true
+          # GitHub lists the comparison's files, at most 300; Gitea each commit's.
+          if jq -e '(.commits | length) < (.total_commits // 0) or ((.files // []) | length) >= 300' \
+            <<< "${compare}" > /dev/null; then
+            choose true true
+          fi
+          files="$(jq -r '[.files[]?.filename, .commits[]?.files[]?.filename] | unique | .[]' <<< "${compare}")"
+          coordinator='^(Cargo\.(toml|lock)|rust-toolchain\.toml|\.dockerignore|\.github/workflows/check\.yml|crates/rocky-(core|credentials|iroh|coordinator)/)'
+          peer="${coordinator}|^crates/rocky-(sdk|secure|storage|runtime)/"
+          changed() { if grep -Eq "$1" <<< "${files}"; then echo true; else echo false; fi; }
+          choose "$(changed "${coordinator}")" "$(changed "${peer}")"
+
+  image:
+    name: Image ${{ matrix.image }} ${{ matrix.arch }}
+    needs: image-changes
+    if: needs.image-changes.outputs.any == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    env:
+      WANTED: ${{ needs.image-changes.outputs[matrix.image] }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native runners, not QEMU: a release build of a Rust workspace under
+        # emulation is many times slower than the hosted arm64 runner.
+        # Deployments are described in docs/runtime/coordinator-operations.md
+        # and docs/runtime/always-on-peer.md.
+        include:
+          - image: coordinator
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            package: rocky-db-coordinator
+            dockerfile: crates/rocky-coordinator/Dockerfile
+            title: rocky-voter
+            description: Rocky DB public coordination voter
+          - image: coordinator
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            package: rocky-db-coordinator
+            dockerfile: crates/rocky-coordinator/Dockerfile
+            title: rocky-voter
+            description: Rocky DB public coordination voter
+          - image: peer
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+            package: rocky-db-peer
+            dockerfile: crates/rocky-sdk/Dockerfile
+            title: rocky-peer
+            description: Rocky DB keyless custody replica
+          - image: peer
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            package: rocky-db-peer
+            dockerfile: crates/rocky-sdk/Dockerfile
+            title: rocky-peer
+            description: Rocky DB keyless custody replica
+    steps:
+      - name: Download the exact source revision
+        if: env.WANTED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        if: env.WANTED == 'true'
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          # Registries require a lowercase repository name; `github.repository_owner`
+          # is `BierDav` on GitHub, which Docker rejects in a tag.
+          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+        if: env.WANTED == 'true'
+
+      - uses: docker/login-action@v3
+        if: env.WANTED == 'true' && github.event_name != 'pull_request'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+
+      # Pull requests only build, to catch a broken Dockerfile before it reaches
+      # main; nothing is pushed.
+      - uses: docker/build-push-action@v6
+        if: env.WANTED == 'true'
+        with:
+          context: source
+          file: source/${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          # Gitea's cache server may not serve BuildKit; a cold build still works.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.arch }},ignore-error=true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+
+  image-manifest:
+    name: Publish the ${{ matrix.image }} manifest
+    # Published only once the checks pass.
+    needs: [image-changes, image, check]
+    if: github.event_name != 'pull_request' && needs.image-changes.outputs.any == 'true'
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      WANTED: ${{ needs.image-changes.outputs[matrix.image] }}
+    strategy:
+      matrix:
+        # New GHCR packages are private. The coordinator stays private and its
+        # deployment supplies a ghcr-pull registry secret; set the peer package's
+        # visibility to public once, or the cluster cannot pull it anonymously.
+        include:
+          - image: coordinator
+            package: rocky-db-coordinator
+            heading: Coordinator image
+          - image: peer
+            package: rocky-db-peer
+            heading: Custody peer image
+    steps:
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        if: env.WANTED == 'true'
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          # Registries require a lowercase repository name; `github.repository_owner`
+          # is `BierDav` on GitHub, which Docker rejects in a tag.
+          echo "IMAGE=${registry}/bierdav/${{ matrix.package }}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+        if: env.WANTED == 'true'
+
+      - uses: docker/login-action@v3
+        if: env.WANTED == 'true'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
+
+      # Each architecture is a single-platform image, so merge them rather than
+      # pushing another index. `main` is the moving tag selfhosted-platform
+      # tracks; a release instead adds its version and moving channel tag.
+      # `sha-<commit>`, versions and the reported digest are immutable.
+      - name: Merge the architecture images
+        if: env.WANTED == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION}" ]; then
+            set -- --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:${CHANNEL}"
+          else
+            set -- --tag "${IMAGE}:main"
+          fi
+          docker buildx imagetools create "$@" \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            "${IMAGE}:${GITHUB_SHA}-amd64" \
+            "${IMAGE}:${GITHUB_SHA}-arm64"
+
+      - name: Report the manifest digest
+        if: env.WANTED == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+          HEADING: ${{ matrix.heading }}
+        run: |
+          set -euo pipefail
+          tag="${IMAGE}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "${tag}"
+          digest="$(docker buildx imagetools inspect --format '{{json .Manifest.Digest}}' "${tag}" | tr -d '"')"
+          {
+            echo "### ${HEADING}"
+            echo
+            echo "- \`${IMAGE}:${VERSION:-main}\`"
+            echo "- digest: \`${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   android:
     # Runs the release workflow's Android build steps to keep its caches warm:
     # Gradle and Kotlin CLI toolchain files, and the Cargo registry with the
     # native target directory. The release restores both and saves them again,
     # so a nightly build does not recompile the Android runtime from nothing.
     # The cache keys must stay identical to the release workflow's Android job.
-    # After `check`, so a failing commit does not spend an Android build.
-    needs: check
+    # After `build`, so a commit that does not compile spends no Android build;
+    # it cannot reuse the macOS build.
+    needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # x64: the Android NDK has no Linux arm64 host build.
     runs-on: ubuntu-latest

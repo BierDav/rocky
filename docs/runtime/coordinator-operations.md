@@ -54,7 +54,7 @@ only, and starts three voter processes. Nothing it writes is a production key.
 
 ## Container image and deployment shape
 
-`.github/workflows/coordinator-image.yaml` builds `rocky-voter` from
+The image jobs of the [baseline workflow](../development.md#ci) build `rocky-voter` from
 `crates/rocky-coordinator/Dockerfile` for `linux/amd64` and `linux/arm64` on
 native runners, merges them with `docker buildx imagetools create` and pushes
 `ghcr.io/bierdav/rocky-db-coordinator:main` and `:sha-<commit>` on qualifying

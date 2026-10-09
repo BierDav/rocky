@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Container image for the always-on custody peer binary.
 #
-# The image is built for GHCR by
-# `.github/workflows/peer-image.yaml`. Its deployment is described in
+# The image is built for GHCR by the image jobs of
+# `.github/workflows/check.yml`. Its deployment is described in
 # `docs/runtime/always-on-peer.md`.
 
 FROM rust:1.99-bookworm AS builder

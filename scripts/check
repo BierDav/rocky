@@ -1,41 +1,94 @@
 #!/bin/sh
-# Shared checks. `--slow` runs only the ignored `soak_` tests instead.
+# Shared checks; see docs/development.md#shared-checks.
+#
+#   scripts/check                   formatting, clippy and every test
+#   scripts/check --slow            only the ignored `soak_` tests
+#   scripts/check --build DIR       clippy, then archive the test binaries in DIR
+#   scripts/check [--slow] --from DIR
+#                                   the same checks with DIR's test binaries,
+#                                   without clippy, which --build ran
+#
+# CI builds once with --build and runs the other jobs --from its archives.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+mode=all
+archives=
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --slow) mode=slow ;;
+    --build) mode=build && archives=${2:-} && shift ;;
+    --from) archives=${2:-} && shift ;;
+    *) usage ;;
+    esac
+    shift
+done
+[ "$mode" != build ] || [ -n "$archives" ] || usage
 
 # nextest runs every test binary in parallel; cargo test runs them in sequence.
 nextest=false
 if cargo nextest --version >/dev/null 2>&1; then
     nextest=true
 fi
+if [ -n "$archives" ] && ! $nextest; then
+    echo "check: archives need cargo-nextest" >&2
+    exit 1
+fi
 profile=${NEXTEST_PROFILE:-default}
 
-if [ "${1:-}" = --slow ]; then
+# The archives --build writes and --from reads; each has its build arguments.
+archive_args() { # name
+    case "$1" in
+    workspace) echo --workspace ;;
+    sdk-without-defaults) echo -p rocky-sdk --no-default-features ;;
+    esac
+}
+
+run_tests() { # archive [nextest run arguments...]
+    name=$1 && shift
+    if [ -n "$archives" ]; then
+        cargo nextest run --profile "$profile" --workspace-remap "$repo_root" \
+            --archive-file "$archives/$name.tar.zst" "$@"
+    elif $nextest; then
+        # shellcheck disable=SC2046 # the build arguments are words
+        cargo nextest run --locked --profile "$profile" $(archive_args "$name") "$@"
+    else
+        # shellcheck disable=SC2046
+        cargo test --locked $(archive_args "$name") -- "$@"
+    fi
+}
+
+case "$mode" in
+slow)
     if $nextest; then
-        cargo nextest run --workspace --locked --profile "$profile" \
-            --run-ignored only -E 'test(/::soak_/)'
+        run_tests workspace --run-ignored only -E 'test(/::soak_/)'
     else
         cargo test --workspace --locked -- --ignored ::soak_
     fi
     exit
-fi
-
-run_tests() {
-    if $nextest; then
-        cargo nextest run --locked --profile "$profile" "$@"
-    else
-        cargo test --locked "$@"
-    fi
-}
+    ;;
+build)
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+    mkdir -p "$archives"
+    for name in workspace sdk-without-defaults; do
+        # shellcheck disable=SC2046
+        cargo nextest archive --locked $(archive_args "$name") \
+            --archive-file "$archives/$name.tar.zst"
+    done
+    exit
+    ;;
+esac
 
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-run_tests --workspace
+[ -n "$archives" ] || cargo clippy --workspace --all-targets --locked -- -D warnings
+run_tests workspace
 # nextest does not run doc tests.
 if $nextest; then
     cargo test --workspace --doc --locked
 fi
 # The database, sessions and other transports must not need iroh.
-run_tests -p rocky-sdk --no-default-features
+run_tests sdk-without-defaults

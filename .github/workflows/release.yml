@@ -147,34 +147,17 @@ jobs:
           name: notes
           path: ${{ runner.temp }}/notes
 
+  # The checks also build both images and publish them at the release version
+  # once the checks pass.
   check:
-    name: Checks
+    name: Checks and images
     needs: version
     if: needs.version.outputs.release == 'true'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/check.yml
-    with:
-      release: true
-
-  coordinator-image:
-    name: Coordinator image
-    needs: [version, check]
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/coordinator-image.yaml
     # Gitea's registry takes the PACKAGE_TOKEN secret.
-    secrets: inherit
-    with:
-      version: ${{ needs.version.outputs.version }}
-      channel: ${{ needs.version.outputs.channel }}
-
-  peer-image:
-    name: Custody peer image
-    needs: [version, check]
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/peer-image.yaml
     secrets: inherit
     with:
       version: ${{ needs.version.outputs.version }}
@@ -407,7 +390,7 @@ jobs:
 
   publish:
     name: Publish
-    needs: [version, check, coordinator-image, peer-image, jvm, android]
+    needs: [version, check, jvm, android]
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 20

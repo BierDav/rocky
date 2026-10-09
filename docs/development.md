@@ -127,10 +127,14 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 ## CI
 
 The baseline workflow's `lint` job runs `scripts/tools` and `scripts/lint` on
-Linux; it needs no build and fails within minutes. The `check` job runs on
-macOS, matching the first desktop target. It
-downloads an archive of the exact event revision and calls `scripts/check`, which
-requires `cargo fmt --all -- --check` and strict workspace Clippy before tests.
+Linux; it needs no build and fails within minutes. The `build` job runs on
+macOS, matching the first desktop target. It downloads an archive of the exact
+event revision and runs `scripts/check --build`: strict workspace Clippy, then
+the test binaries as nextest archives, uploaded with the custody peer binary.
+`check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
+the tests and doc tests, without compiling the test binaries again. `slow`,
+`shopping` and `android` also start after `build`; the first two run its
+archives and peer binary.
 It needs no version-control CLI or repository history, and never invokes Git.
 The repository toolchain file is also the toolchain source of truth in CI.
 
@@ -138,7 +142,9 @@ A job that passes records a cache marker keyed by the source tree. A later run
 of the same tree, such as a redescribed or rebased commit with unchanged content
 or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
-The Rust build cache is saved from `main` and restored on other refs.
+When `build` finds `check` already passed for the tree it builds nothing, and
+the jobs after it build what they still run themselves. The Rust dependency
+cache is saved from `main` and restored on other refs.
 
 The `slow` job runs `./scripts/check --slow` on pushes to `main`; releases do not
 wait for it.
@@ -158,8 +164,13 @@ branch protection. No remotely hosted CI run has been verified by this baseline.
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
 baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
 commit whose completed run of it failed.
-The `slow`, `shopping` and `android` jobs start after `check` passes; the macOS
-jobs restore its Rust build cache.
+
+The image jobs build the coordinator and custody peer images for amd64 and arm64
+on native runners. Pull requests and pushes to `main` build an image when its
+sources changed, judged from the forge's compare endpoint; pull requests do not
+push. On `main`, and for every release, the manifests are published once
+`check` passes. They live in the baseline workflow so the Actions sidebar lists
+only the baseline, commit-message and release workflows.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on

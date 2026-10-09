@@ -61,6 +61,8 @@ pub(crate) struct Transfer {
     /// Scopes the peer and this device did not exchange: one side's
     /// credentials, as the other sees them, grant no whole-scope access.
     pub refused: Vec<ResourceScope>,
+    /// Why the confirmed results pass failed; rows still synced.
+    pub results: Option<String>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
@@ -68,6 +70,9 @@ impl Transfer {
             self.add(scope, moved);
         }
         self.refuse(&other.refused);
+        if other.results.is_some() {
+            self.results = other.results;
+        }
     }
     fn refuse(&mut self, scopes: &[ResourceScope]) {
         for scope in scopes {
@@ -106,9 +111,13 @@ pub(crate) async fn reconcile(
     // Rows stay in sync while a coordinator is unreachable or a peer holds
     // no results; a ticket then stays `confirmed` until a later sync.
     let retry = match coordinator {
-        Some(coordinator) => results(replica, upstream, scopes, coordinator)
-            .await
-            .unwrap_or(true),
+        Some(coordinator) => match results(replica, upstream, scopes, coordinator).await {
+            Ok(retry) => retry,
+            Err(error) => {
+                transfer.results = Some(error.to_string());
+                true
+            }
+        },
         None => false,
     };
     Ok((newer, retry, transfer))

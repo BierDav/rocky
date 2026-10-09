@@ -35,8 +35,6 @@ sealed interface Coordinated {
 class Approvals internal constructor(
     private val database: ShoppingDatabase, private val rocky: RockyDatabase, private val household: Household,
     private val self: String, val coordinated: Boolean,
-    /** Results carry the service's voter-signed evidence, so other devices verify them after their identities retire. */
-    private val evidenced: Boolean,
 ) {
     private val mutableStatus = MutableStateFlow<Coordinated>(if (!coordinated) Coordinated.Unavailable
         else if (rocky.isIssuer) Coordinated.Waiting("Starting") else Coordinated.Member)
@@ -109,9 +107,8 @@ class Approvals internal constructor(
     private suspend fun retryTickets() {
         while (true) {
             val unresolved = attempt { rocky.runCommands() } ?: 1
-            // Settled identities free the coordinator's response slots of this device. Without evidence, a retired
-            // result no longer verifies elsewhere: the coordinator keeps it until its horizon instead.
-            if (unresolved == 0 && evidenced) attempt { rocky.acknowledgeCommands() }
+            // Settled identities free this device's response slots; the runtime retires only those still verifiable.
+            if (unresolved == 0) attempt { rocky.acknowledgeCommands() }
             withTimeoutOrNull(if (unresolved > 0) 10_000L else 60_000L) { wake.first() }
         }
     }

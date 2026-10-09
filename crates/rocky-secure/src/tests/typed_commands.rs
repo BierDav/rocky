@@ -177,6 +177,38 @@ impl Coordinator for Recording {
     }
 }
 
+/// A coordinator whose receipts carry portable evidence, as the network
+/// client's do: a peer verifies a result without the live identity.
+struct Evidenced(Arc<MemoryCoordinator>);
+impl Coordinator for Evidenced {
+    fn head(&self, scope: Scope) -> CoordinationFuture<'_, StrongHead> {
+        Coordinator::head(&*self.0, scope)
+    }
+    fn confirm(&self, proposal: Confirmation) -> CoordinationFuture<'_, StrongReceipt> {
+        Coordinator::confirm(&*self.0, proposal)
+    }
+    fn lookup(&self, scope: Scope, id: RequestId) -> CoordinationFuture<'_, Option<StrongReceipt>> {
+        Coordinator::lookup(&*self.0, scope, id)
+    }
+    fn verify<'a>(&'a self, receipt: &'a StrongReceipt) -> CoordinationFuture<'a, ()> {
+        Coordinator::verify(&*self.0, receipt)
+    }
+    fn retire(
+        &self,
+        scope: Scope,
+        node: rocky_core::NodeId,
+        through: u64,
+    ) -> CoordinationFuture<'_, ()> {
+        Coordinator::retire(&*self.0, scope, node, through)
+    }
+    fn export_evidence<'a>(
+        &'a self,
+        _: &'a StrongReceipt,
+    ) -> CoordinationFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async { Ok(Some(Vec::new())) })
+    }
+}
+
 pub(super) struct Device {
     pub(super) node: PrivateKey,
     user: PrivateKey,
@@ -1492,8 +1524,20 @@ async fn settled_identities_end_tickets_and_acknowledgment_retires_them() {
             .unwrap(),
         rocky_coordinator::Status::Confirmed(_)
     ));
+    // Without evidence, other readers still verify it online.
     executor
         .acknowledge_tickets(&*world.coordinator)
+        .await
+        .unwrap();
+    assert!(matches!(
+        world
+            .coordinator
+            .status(world.domain, restock.request)
+            .unwrap(),
+        rocky_coordinator::Status::Confirmed(_)
+    ));
+    executor
+        .acknowledge_tickets(&Evidenced(world.coordinator.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -1503,4 +1547,38 @@ async fn settled_identities_end_tickets_and_acknowledgment_retires_them() {
             .unwrap(),
         rocky_coordinator::Status::Retired
     );
+}
+
+/// Acknowledging before a reader pulls never leaves that reader a result it
+/// cannot verify: an identity without evidence is not retired.
+#[tokio::test]
+async fn acknowledgment_before_a_reader_pulls_keeps_the_result_verifiable() {
+    let world = World::new();
+    let executor = world.executor().await;
+    world.restock(&executor, 2).await;
+    executor
+        .acknowledge_tickets(&*world.coordinator)
+        .await
+        .unwrap();
+    let reader_device = Device::new();
+    let reader = world
+        .open("reader.db", &reader_device, &[(world.stock, READ)], None)
+        .await;
+    let credentials = reader.inner.lock().await.config.credentials.clone();
+    let result = executor
+        .encrypted_result_for(
+            reader_device.node.public_key(),
+            &credentials,
+            world.domain,
+            1,
+            &[world.stock],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    reader
+        .receive_encrypted_result(result, &*world.coordinator)
+        .await
+        .unwrap();
+    assert_eq!(world.remaining(&reader).await, 2);
 }

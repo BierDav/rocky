@@ -2,7 +2,7 @@
 
 `RockyDatabase.activity()` and `RockySession.activity()` expose a
 `Flow<RockyEvent>` describing background work: changed peer reachability,
-changed sets of scopes a peer refused, nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
+changed sets of scopes a peer refused, failed result pulls, nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
 enrollment, renewal, revocation, author assignment and partition key/holding
 changes. Events follow successful local work; they are diagnostic observations,
 not durable receipts or proof that every peer has the latest data.
@@ -41,6 +41,11 @@ because one side may not hold them, typically a list the peer has not been
 shared yet ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
 It is recorded when that set changes for the peer; an empty list means nothing
 is refused any more.
+
+`ResultsFailed` (`results_failed`) carries a peer and an error when a sync moved
+rows but pulling confirmed command results failed, for instance because the
+coordinator no longer verifies a receipt. The pass is retried with the next
+sync. It is recorded when the error changes, not on every failed pass.
 
 A transfer names the table and, for a partition, its encryption commitment.
 `GroupPartition.status()` reports the same per-table partition identifier so an

@@ -9,7 +9,6 @@ import rocky.PeerTransport
 import rocky.RockyDatabase
 import rocky.ReadinessState
 import rocky.SecretStore
-import rocky.ServiceCoordinator
 import rocky.room.RockyRoom
 import rocky.room.buildOnRocky
 
@@ -34,7 +33,7 @@ class ShoppingNode private constructor(
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
-    val approvals = Approvals(room.room, rocky, household, self, commands != null, commands?.coordinator is ServiceCoordinator)
+    val approvals = Approvals(room.room, rocky, household, self, commands != null)
     val isTrusted: Boolean get() = rocky.isIssuer
     private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         launch { household.run() }

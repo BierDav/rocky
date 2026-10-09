@@ -137,6 +137,10 @@ none; each still needs a verified receipt, from evidence or a live lookup. A
 result stays importable while a sender holds its evidence or the coordinator
 retains it. This lets an executor take over after acknowledgment and a
 custodian recover after a revocation from application-held state alone.
+`acknowledge_tickets` therefore never retires a confirmed identity that has
+neither exportable evidence nor a result already pruned past its required readers
+([retention](coordinator-retention.md#acknowledge-only-durable-knowledge)).
+The SDK records a failed result pull as `results_failed` activity.
 
 ## Native transfer and limits
 

@@ -48,9 +48,15 @@ it. Never acknowledge work whose outcome you still need to recover.
 
 The trusted runtime acknowledges its settled prefix after verified local application
 and configured peer application; peers explicitly behind use checkpoints. A local
-release alone does not acknowledge execution. The secure profile offers
-`acknowledge_tickets` for an explicit caller policy after its ticket states are
-durable. Nothing pins coordinator responses past the horizon: outstanding
+release alone does not acknowledge execution. In the secure profile,
+`acknowledge_tickets` retires only identities whose results other devices can
+still verify. Those are identities with no result, results whose receipt the
+coordinator exports as portable evidence, and results that retention already
+pruned past every required reader. Each scope's prefix stops at the first
+identity that is not yet safe, and later calls resume it. Applications may call it
+at any time ([decision 0047](../decisions/0047-verifiable-identity-retirement.md)).
+With `MemoryCoordinator`, which exports no evidence, unpruned results stay until
+the horizon. Nothing pins coordinator responses past the horizon: outstanding
 responses consume the 32-entry / 64 KiB session window, and abandoned sessions
 expire instead of reserving storage.
 

@@ -39,6 +39,8 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             if (event.scopes.isEmpty()) "Syncing every list with ${device(event.peer)} again"
             else "Not syncing ${event.scopes.size} tables with ${device(event.peer)} until shared",
             event.scopes.joinToString("\n") { scope(it) })
+        is RockyEvent.ResultsFailed -> ActivityEntry(key, event.atEpochMillis, EntryKind.Problem,
+            "Could not pull approval results from ${device(event.peer)}; retrying", event.error)
         is RockyEvent.PeerAdded -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Added ${device(event.peer)} as a peer")
         is RockyEvent.PeerRemoved -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Removed peer ${device(event.peer)}")
         is RockyEvent.Renewed -> ActivityEntry(key, event.atEpochMillis, EntryKind.Credentials,

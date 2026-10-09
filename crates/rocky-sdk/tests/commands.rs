@@ -263,6 +263,32 @@ impl Pair {
     }
 }
 
+/// An executor acknowledging before another device syncs leaves that
+/// device a result it still verifies: nothing surfaces as a failed pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn acknowledging_before_a_reader_syncs_keeps_its_results_verifiable() -> Result<(), Failure> {
+    let pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    pair.b.ok(json!({"type": "sync"})).await;
+    // The reader holds a base; the next result arrives by the results pull.
+    pair.restock(2, 1).await;
+    pair.a.ok(json!({"type": "command_acknowledge"})).await;
+    pair.b.ok(json!({"type": "sync"})).await;
+    let snapshot = pair.b.rows("stock").await;
+    assert_eq!(snapshot["complete"], json!(true), "{snapshot}");
+    assert_eq!(snapshot["rows"][0][1], integer(3), "{snapshot}");
+    let activity = pair.b.ok(json!({"type": "activity"})).await;
+    assert!(
+        activity["events"]
+            .as_array()
+            .ok_or("events")?
+            .iter()
+            .all(|event| event["kind"] != "results_failed"),
+        "{activity}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn competing_callers_get_one_acceptance_over_the_network() -> Result<(), Failure> {
     let pair = Pair::new(None).await?;

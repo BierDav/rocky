@@ -179,6 +179,8 @@ struct Reached {
     error: Option<String>,
     /// Scopes the last successful sync with the peer did not exchange.
     refused: Vec<ResourceScope>,
+    /// Why the last successful sync's results pass failed, if it did.
+    results: Option<String>,
 }
 
 pub(crate) struct Node {
@@ -1499,9 +1501,9 @@ impl Node {
         result: &Result<(bool, bool, sync::Transfer), Failure>,
     ) {
         let peer_hex = peer.to_hex();
-        let (before, refused_before) = match before {
-            Some(reached) => (Some(reached.error), reached.refused),
-            None => (None, Vec::new()),
+        let (before, refused_before, results_before) = match before {
+            Some(reached) => (Some(reached.error), reached.refused, reached.results),
+            None => (None, Vec::new(), None),
         };
         match result {
             Err(error) => {
@@ -1529,6 +1531,13 @@ impl Node {
                         "scopes_refused",
                         json!({"peer": peer_hex, "scopes": scopes}),
                     );
+                }
+                // Rows synced; confirmed results did not. Recorded when the error changes.
+                if let Some(error) = &transfer.results
+                    && transfer.results != results_before
+                {
+                    self.activity
+                        .record("results_failed", json!({"peer": peer_hex, "error": error}));
                 }
                 if transfer.scopes.is_empty() {
                     return;
@@ -1725,9 +1734,9 @@ impl Node {
                 }
             }
             let error = result.as_ref().err().map(ToString::to_string);
-            let refused = match &result {
-                Ok((_, _, transfer)) => transfer.refused.clone(),
-                Err(_) => Vec::new(),
+            let (refused, results) = match &result {
+                Ok((_, _, transfer)) => (transfer.refused.clone(), transfer.results.clone()),
+                Err(_) => (Vec::new(), None),
             };
             let before = self.reached()?.insert(
                 *peer,
@@ -1735,6 +1744,7 @@ impl Node {
                     at: now()?,
                     error: error.clone(),
                     refused,
+                    results,
                 },
             );
             self.record_reach(*peer, before, &result);

@@ -22,9 +22,10 @@ naturally holds.
 | [0044](0044-group-frontier-exchange.md) | Bounded authenticated group frontier exchange |
 | [0045](0045-custody-partition-offers.md) | Custody partition offers in native session v6 |
 | [0046](0046-per-scope-frontier-refusal.md) | Per-scope frontier refusal in native session v7 |
+| [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves; the next unreserved record is 0047.
+not reused. 0038 is reserved for row moves; the next unreserved record is 0048.
 
 ## Rationale by topic
 

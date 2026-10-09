@@ -312,6 +312,29 @@ impl<A: RowCommandApplication> Inner<A> {
         }
         Ok(Some(ticket))
     }
+    /// The receipt of the result retained at `sequence` of `domain`.
+    async fn retained_receipt(
+        &self,
+        domain: Scope,
+        sequence: u64,
+    ) -> Result<Option<StrongReceipt>, Error> {
+        let mut retained = self
+            .conn
+            .query(
+                "SELECT result FROM secure_results WHERE domain=? AND sequence=?",
+                bindings(vec![
+                    SqlValue::Blob(encode(&domain)?),
+                    SqlValue::Integer(sequence as i64),
+                ]),
+            )
+            .await?;
+        match retained.next().await? {
+            Some(row) => Ok(Some(
+                decode::<ConfirmedCommand>(&row.get::<Vec<u8>>(0)?)?.receipt()?,
+            )),
+            None => Ok(None),
+        }
+    }
     /// The parts of a result the command's caller may hold.
     fn for_caller(&self, result: &ConfirmedCommand) -> Result<ConfirmedCommand, Error> {
         let grants = self.verify_chain(&result.command.credentials, result.command.node, now()?)?;
@@ -479,36 +502,37 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
     }
     /// Tells the coordinator that every command this device submitted
     /// through the settled prefix is resolved, so it may retire those
-    /// identities and free their response slots. Readers verify results
-    /// online: call this once the readers that need a result received it.
-    /// Until then the coordinator keeps each response for its horizon.
+    /// identities and free their response slots. A confirmed identity is
+    /// retired only once another device can still verify its result: the
+    /// coordinator exports portable evidence for its receipt, or retention
+    /// pruned the result after its required readers applied it. The prefix
+    /// stops at the first identity that is not yet safe; later calls resume
+    /// it, and the coordinator's horizon bounds what never becomes safe.
+    /// Call it whenever convenient. See `docs/runtime/coordinator-retention.md`.
     pub async fn acknowledge_tickets(&self, coordinator: &dyn Coordinator) -> Result<(), Error> {
-        let (node, prefixes) = {
+        let ((start, settled), node, records) = {
             let mut inner = self.inner.lock().await;
             inner.flush()?;
             // Commands through the cursor are settled for good and not read again.
-            let (mut cursor, settled) = inner.acknowledged.clone();
+            let (cursor, settled) = inner.acknowledged.clone();
             let records = collect_rows(
                 inner
                     .conn
                     .query(
-                        "SELECT c.command,COALESCE(p.state,0),c.sequence,NULL FROM secure_commands c JOIN secure_tickets t ON t.handle=c.handle LEFT JOIN secure_command_progress p ON p.request=t.request WHERE c.sequence>? UNION ALL SELECT NULL,4,sequence,domain FROM secure_pruned_commands WHERE sequence>? AND node=? ORDER BY 3",
+                        "SELECT c.command,COALESCE(p.state,0),c.sequence,NULL,p.sequence FROM secure_commands c JOIN secure_tickets t ON t.handle=c.handle LEFT JOIN secure_command_progress p ON p.request=t.request WHERE c.sequence>? UNION ALL SELECT NULL,4,sequence,domain,NULL FROM secure_pruned_commands WHERE sequence>? AND node=? ORDER BY 3",
                         bindings(vec![SqlValue::Integer(cursor),SqlValue::Integer(cursor),SqlValue::Blob(secure_node_id(inner.config.node.public_key()).0.to_vec())]),
                     )
                     .await?,
             )
             .await?;
-            let mut prefixes: BTreeMap<rocky_core::Scope, (u64, bool)> = settled
-                .iter()
-                .map(|(scope, through)| (*scope, (*through, true)))
-                .collect();
-            let mut settled = Some(settled);
+            let mut settled_records = Vec::with_capacity(records.len());
             for record in records {
                 let [
                     bytes,
                     SqlValue::Integer(state),
                     SqlValue::Integer(sequence),
                     domain,
+                    result,
                 ] = record.as_slice()
                 else {
                     return Err(denied("corrupt ticket"));
@@ -523,26 +547,60 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                     }
                     _ => return Err(denied("corrupt settled ticket")),
                 };
-                let terminal = [CANCELLED, CONFIRMED, RETIRED, EXPIRED].contains(state);
-                let prefix = prefixes.entry(domain).or_insert((0, true));
-                if prefix.1 && terminal {
-                    prefix.0 = request_sequence;
-                } else {
-                    prefix.1 = false;
-                }
-                match settled.as_mut().filter(|_| terminal) {
-                    Some(settled) => {
-                        settled.insert(domain, request_sequence);
-                        cursor = *sequence;
+                // A pruned record's result is behind every required reader.
+                let receipt = match (bytes, *state, result) {
+                    (SqlValue::Blob(_), CONFIRMED, SqlValue::Integer(position)) => {
+                        Some(inner.retained_receipt(domain, *position as u64).await?)
                     }
-                    None => settled = None,
-                }
+                    _ => None,
+                };
+                let terminal = [CANCELLED, CONFIRMED, RETIRED, EXPIRED].contains(state);
+                settled_records.push((*sequence, domain, request_sequence, terminal, receipt));
             }
-            if let Some(settled) = settled {
-                inner.acknowledged = (cursor, settled);
-            }
-            (secure_node_id(inner.config.node.public_key()), prefixes)
+            (
+                (cursor, settled),
+                secure_node_id(inner.config.node.public_key()),
+                settled_records,
+            )
         };
+        // Evidence is checked outside the replica lock.
+        let mut prefixes: BTreeMap<rocky_core::Scope, (u64, bool)> = settled
+            .iter()
+            .map(|(scope, through)| (*scope, (*through, true)))
+            .collect();
+        let (mut cursor, mut advanced) = (start, Some(settled));
+        for (sequence, domain, request_sequence, terminal, receipt) in records {
+            let prefix = prefixes.entry(domain).or_insert((0, true));
+            if !prefix.1 && advanced.is_none() {
+                continue;
+            }
+            let safe = terminal
+                && match receipt {
+                    None => true,
+                    // A result no longer retained here is not known to be safe.
+                    Some(None) => false,
+                    Some(Some(receipt)) => coordinator.export_evidence(&receipt).await?.is_some(),
+                };
+            if prefix.1 && safe {
+                prefix.0 = request_sequence;
+            } else {
+                prefix.1 = false;
+            }
+            match advanced.as_mut().filter(|_| safe) {
+                Some(advanced) => {
+                    advanced.insert(domain, request_sequence);
+                    cursor = sequence;
+                }
+                None => advanced = None,
+            }
+        }
+        if let Some(advanced) = advanced {
+            let mut inner = self.inner.lock().await;
+            // A concurrent acknowledgment may have moved the cursor already.
+            if inner.acknowledged.0 == start {
+                inner.acknowledged = (cursor, advanced);
+            }
+        }
         for (scope, (through, _)) in prefixes {
             if through > 0 {
                 coordinator.retire(scope, node, through).await?;

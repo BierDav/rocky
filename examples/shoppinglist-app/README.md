@@ -95,9 +95,9 @@ unavailable. A member's request goes directly to the trusted device the
 coordinator assigned as executor, so that device must be reachable; a request
 that cannot be delivered stays stored and is retried in the background.
 Once its requests settle, a device lets the service retire their identities.
-Results carry the service's signed evidence, so other devices still verify them
-afterwards. The in-process development coordinator used by tests has no such
-evidence, so devices using it leave retirement to its horizon.
+The runtime retires only identities whose results other devices can still
+verify, so the app acknowledges unconditionally; see
+[coordinator retention](../../docs/runtime/coordinator-retention.md).
 
 Only trusted devices create, rename and delete lists. Each list, its items
 and categories form the `list` partition group with one secret. Trusted

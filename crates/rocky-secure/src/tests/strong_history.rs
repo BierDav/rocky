@@ -283,6 +283,59 @@ async fn cross_commands_with_a_window(total: u32) {
     );
 }
 
+/// Without portable evidence, an acknowledgment retires a confirmed identity
+/// only once retention pruned its result past every required reader.
+#[tokio::test]
+async fn acknowledgment_retires_unevidenced_identities_once_pruned() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let a_key = PrivateKey::new();
+    let b_key = PrivateKey::new();
+    let ac = f.config(&a_key, command_grants(&f), &[f.public, f.private]);
+    let bc = f.config(&b_key, command_grants(&f), &[f.public, f.private]);
+    let c = coordinator(&f, &ac);
+    let a = EncryptedReplica::open(dir.path().join("a.db"), f.app(), ac)
+        .await
+        .unwrap();
+    retain(&f, &a, &[b_key.public_key()], 2).await;
+    let mut requests = Vec::new();
+    for n in 1..=12 {
+        requests.push(command(&f, &a, &c, n).await);
+    }
+    let status = |result: &ConfirmedCommand| {
+        let request = result.strong_package().unwrap().request;
+        c.status(request.scope, request.id).unwrap()
+    };
+    // The required reader has not applied anything: every identity stays.
+    a.acknowledge_tickets(&c).await.unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|result| matches!(status(result), rocky_coordinator::Status::Confirmed(_)))
+    );
+    let last = requests.last().unwrap();
+    a.acknowledge_result(
+        b_key.public_key(),
+        &bc.credentials,
+        last,
+        &[(f.public, true), (f.private, true)],
+    )
+    .await
+    .unwrap();
+    a.inner
+        .lock()
+        .await
+        .prune_strong(f.public.domain)
+        .await
+        .unwrap();
+    a.acknowledge_tickets(&c).await.unwrap();
+    // The pruned prefix retires; retained results stay verifiable online.
+    for (index, result) in requests.iter().enumerate() {
+        let retired = matches!(status(result), rocky_coordinator::Status::Retired);
+        assert_eq!(retired, index < 10, "request {}", index + 1);
+    }
+}
+
 #[tokio::test]
 async fn missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_is_atomic() {
     let f = Fixture::new();

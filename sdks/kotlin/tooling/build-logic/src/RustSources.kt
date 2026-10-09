@@ -10,6 +10,7 @@ val RUST_SOURCES = listOf(
     "Cargo.lock",
     "rust-toolchain.toml",
     "crates",
+    "vendor",
     "sdks/native/Cargo.toml",
     "sdks/native/Cargo.lock",
     "sdks/native/src",

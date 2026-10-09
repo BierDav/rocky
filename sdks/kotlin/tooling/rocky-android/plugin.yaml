@@ -6,6 +6,7 @@ tasks:
         - ${project.rootDir}/Cargo.toml
         - ${project.rootDir}/Cargo.lock
         - ${project.rootDir}/rust-toolchain.toml
+        - ${project.rootDir}/vendor
         - ${project.rootDir}/crates
         - ${project.rootDir}/sdks/native/Cargo.toml
         - ${project.rootDir}/sdks/native/Cargo.lock

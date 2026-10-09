@@ -4,8 +4,9 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteDriver
 import androidx.sqlite.SQLiteException
 import androidx.sqlite.SQLiteStatement
-import java.util.Collections
-import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.atomicfu.atomic
+import kotlinx.atomicfu.locks.ReentrantLock
+import kotlinx.atomicfu.locks.withLock
 
 /**
  * Test tooling, not a write path: records what an ORM sends a driver. Each execution is one step with the
@@ -13,8 +14,10 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class RecordingDriver(private val delegate: SQLiteDriver) : SQLiteDriver {
     data class Step(val connection: Int, val sql: String, val bindings: List<Any?>, val failure: Int?)
-    val trace: MutableList<Step> = Collections.synchronizedList(mutableListOf())
-    private val connections = AtomicInteger()
+    private val lock = ReentrantLock()
+    private val steps = mutableListOf<Step>()
+    val trace: List<Step> get() = lock.withLock { steps.toList() }
+    private val connections = atomic(0)
     override val hasConnectionPool: Boolean get() = delegate.hasConnectionPool
     override fun open(fileName: String): SQLiteConnection = Connection(connections.incrementAndGet(), delegate.open(fileName))
 
@@ -38,7 +41,7 @@ class RecordingDriver(private val delegate: SQLiteDriver) : SQLiteDriver {
     }
 
     private inner class Statement(private val connection: Int, private val sql: String, private val statement: SQLiteStatement) : SQLiteStatement by statement {
-        private val bindings = sortedMapOf<Int, Any?>()
+        private val bindings = mutableMapOf<Int, Any?>()
         private var running = false
         override fun bindBlob(index: Int, value: ByteArray) {
             bindings[index] = value.toList()
@@ -73,9 +76,9 @@ class RecordingDriver(private val delegate: SQLiteDriver) : SQLiteDriver {
             running = true
             val values = (1..(bindings.keys.maxOrNull() ?: 0)).map { bindings[it] }
             return try {
-                statement.step().also { if (first) trace.add(Step(connection, sql, values, null)) }
+                statement.step().also { if (first) lock.withLock { steps.add(Step(connection, sql, values, null)) } }
             } catch (error: SQLiteException) {
-                if (first) trace.add(Step(connection, sql, values, code(error)))
+                if (first) lock.withLock { steps.add(Step(connection, sql, values, code(error))) }
                 throw error
             }
         }

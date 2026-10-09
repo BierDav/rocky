@@ -1,6 +1,6 @@
 product:
   type: kmp/lib
-  platforms: [jvm, android]
+  platforms: [jvm, android, iosArm64, iosSimulatorArm64]
 apply:
   - //project.module-template.yaml
 dependencies:
@@ -10,3 +10,6 @@ dependencies:
 settings:
   android:
     minSdk: 26
+
+aliases:
+  - jna: [jvm, android]

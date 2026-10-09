@@ -6,20 +6,21 @@ import kotlinx.serialization.json.JsonArray
 import rocky.*
 import rocky.room.moveRockyRow
 import rocky.room.setRockyDatabase
-import java.io.File
-import java.nio.file.Files
+import rocky.testing.testRepositoryRoot
 import kotlin.test.*
+import rocky.testing.TestFile as File
+import rocky.testing.TestFiles as Files
 
 class RoomMovesTest {
     @Test fun moveKeepsIdentityAndRoomReadsCommittedDestination() = runBlocking {
-        val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
+        val root = File(testRepositoryRoot())
         val definition = schemaFromRoom(
             "roommoves",
             File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.MoveDatabase/1.json").readText(),
             { table("move_items") { partitionBy("list") } },
         )
         val directory = Files.createTempDirectory("room-moves").toFile()
-        val database = RockyDatabase.local(File(directory, "database"), definition)
+        val database = RockyDatabase.local(File(directory, "database").path, definition)
         try {
             for (partition in listOf("A", "B")) database.partitions.create("move_items", JsonArray(listOf(text(partition))))
             database.credentials.installPseudonym(database.credentials.assignPseudonym(database.credentials.pseudonymRequest("move_items")))

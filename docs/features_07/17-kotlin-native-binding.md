@@ -1,6 +1,12 @@
 # 17. Kotlin/Native binding
 
-Status: not started.
+Status: blocked by the shared coordinator integration budget (XL fallback),
+2026-10-10, on parent `1aa1edae`. JVM and full Kotlin checks pass, including
+both simulator variants. Android host SQLite placement, simulator fixture
+setup and lifetime RSS measurement are repaired. The shared check still
+rejects the coordinator tenant-fairness test at 4.42 s against its 2 s budget.
+See [decision 0058](../decisions/0058-kotlin-native-binding.md) and
+[measured evidence](../runtime/kotlin-native-binding.md#measured-evidence-2026-10-10).
 Owner: `sdks/native`; `sdks/kotlin/rocky-core`, `rocky-sqlite`, `rocky-room`,
 their qualification modules and the `rocky-native` tooling plugin. No
 dependency; slice 3 lands after [phase 2](02-change-driven-sync.md) and
@@ -98,3 +104,19 @@ one contract.
 - Moving the JVM or Android off JNA, or upgrading UniFFI.
 - New exports in `sdks/native`; the surface is bound as it stands.
 - Rewriting JVM-only tests around a new portable process or socket layer.
+
+## Implementation evidence
+
+The released Gobley generator (0.3.7) pins UniFFI 0.29.4, so the settled
+Rocky-owned fallback applies. One plugin task emits the common contract and
+both implementations without changing UniFFI 0.32.2. The common SDK, driver
+and Room qualification now have both iOS targets. JVM-only tests and their
+platform APIs are listed in the [binding guide](../runtime/kotlin-native-binding.md#test-placement).
+
+The pinned Darwin declaration overlay repairs netdev/netwatch compilation
+without changing iroh admission or network behavior. The Room qualification
+helper now assigns table authors in the same order as its IDs; native
+creation-log validation stays strict. Simulator qualification covers endpoint
+reopen, command callbacks, cancellation and the 1,000-cycle handle/RSS gate.
+The macOS CI job follows phase 1's restructured build job. Measured pass/fail
+results remain the completion authority; see the guide's evidence table.

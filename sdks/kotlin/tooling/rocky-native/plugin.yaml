@@ -6,19 +6,71 @@ tasks:
         - ${project.rootDir}/Cargo.toml
         - ${project.rootDir}/Cargo.lock
         - ${project.rootDir}/rust-toolchain.toml
+        - ${project.rootDir}/vendor
         - ${project.rootDir}/crates
         - ${project.rootDir}/sdks/native/Cargo.toml
         - ${project.rootDir}/sdks/native/Cargo.lock
         - ${project.rootDir}/sdks/native/uniffi.toml
         - ${project.rootDir}/sdks/native/src
-      kotlin: ${taskOutputDir}/kotlin
+      common: ${taskOutputDir}/common
+      jna: ${taskOutputDir}/jna
+      ios: ${taskOutputDir}/ios
+      cinterop: ${taskOutputDir}/cinterop
+      simulatorDef: ${taskOutputDir}/rocky-simulator.def
+      deviceDef: ${taskOutputDir}/rocky-device.def
       resources: ${taskOutputDir}/resources
+
+  iosSimulator:
+    action: !rocky.build.buildIosBinding
+      repositoryRoot: ${project.rootDir}
+      target: aarch64-apple-ios-sim
+      definition: ${tasks.bindings.action.simulatorDef}
+      rustSources:
+        - ${project.rootDir}/Cargo.toml
+        - ${project.rootDir}/Cargo.lock
+        - ${project.rootDir}/rust-toolchain.toml
+        - ${project.rootDir}/vendor
+        - ${project.rootDir}/crates
+        - ${project.rootDir}/sdks/native/Cargo.toml
+        - ${project.rootDir}/sdks/native/Cargo.lock
+        - ${project.rootDir}/sdks/native/uniffi.toml
+        - ${project.rootDir}/sdks/native/src
+      defFile: ${taskOutputDir}/rocky.def
+  iosDevice:
+    action: !rocky.build.buildIosBinding
+      repositoryRoot: ${project.rootDir}
+      target: aarch64-apple-ios
+      definition: ${tasks.bindings.action.deviceDef}
+      rustSources:
+        - ${project.rootDir}/Cargo.toml
+        - ${project.rootDir}/Cargo.lock
+        - ${project.rootDir}/rust-toolchain.toml
+        - ${project.rootDir}/vendor
+        - ${project.rootDir}/crates
+        - ${project.rootDir}/sdks/native/Cargo.toml
+        - ${project.rootDir}/sdks/native/Cargo.lock
+        - ${project.rootDir}/sdks/native/uniffi.toml
+        - ${project.rootDir}/sdks/native/src
+      defFile: ${taskOutputDir}/rocky.def
 
 generated:
   sources:
-    - directory: ${tasks.bindings.action.kotlin}
+    - directory: ${tasks.bindings.action.common}
+    - directory: ${tasks.bindings.action.jna}
+      fragment:
+        modifier: "@jna"
+    - directory: ${tasks.bindings.action.ios}
+      fragment:
+        modifier: "@ios"
   resources:
-    # JNA loads the library by OS/CPU resource prefix; Android packages per-ABI libraries instead.
+    # Android unit tests also run JNA on the host JVM.
     - directory: ${tasks.bindings.action.resources}
       fragment:
-        modifier: "@jvm"
+        modifier: "@jna"
+  cinteropDefinitions:
+    - defFile: ${tasks.iosSimulator.action.defFile}
+      fragment:
+        modifier: "@iosSimulatorArm64"
+    - defFile: ${tasks.iosDevice.action.defFile}
+      fragment:
+        modifier: "@iosArm64"

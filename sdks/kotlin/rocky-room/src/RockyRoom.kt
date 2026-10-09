@@ -40,9 +40,13 @@ suspend fun RoomDatabase.followRocky(database: RockyDatabase) {
     // Registered before the first refresh, so no commit falls between them.
     val events = database.driverTableEvents()
     invalidationTracker.refreshAsync()
-    while (currentCoroutineContext().isActive) {
-        events.next()
-        invalidationTracker.refreshAsync()
+    try {
+        while (currentCoroutineContext().isActive) {
+            events.next()
+            invalidationTracker.refreshAsync()
+        }
+    } finally {
+        events.destroy()
     }
 }
 

@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
-import java.security.SecureRandom
+import kotlin.time.Clock
 
 /** One enrolled device's secure database: the native engine, its enrollment and background sync. */
 open class RockySession internal constructor(internal val client: RockyClient, override val domain: String, val isIssuer: Boolean) :
@@ -247,7 +247,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                     else -> ConnectionState.Connected
                 },
                 peers = result["peers"]?.jsonPrimitive?.int ?: 0,
-                atEpochMillis = System.currentTimeMillis(),
+                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -255,7 +255,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             mutableStatus.value = ConnectionStatus(
                 if (error is RockyException && error.code == "revoked") ConnectionState.Revoked else ConnectionState.Unavailable,
                 error.message,
-                atEpochMillis = System.currentTimeMillis(),
+                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
             )
         }
         mutableStatus.value
@@ -280,7 +280,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                 },
                 result["error"]?.jsonPrimitive?.contentOrNull,
                 peers = result["peers"]?.jsonPrimitive?.int ?: 0,
-                atEpochMillis = System.currentTimeMillis(),
+                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
             )
             result = client.call(request("sync_next") { put("after", result.getValue("token")) })
         }
@@ -412,8 +412,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             }
         }
         fun newHandle(): String {
-            val bytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
-            return bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
+            val bytes = secureBytes(32)
+            return bytes.joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
         }
     }
 }

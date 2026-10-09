@@ -426,7 +426,6 @@ jobs:
     # After `build`, so a commit that does not compile spends no Android build;
     # it cannot reuse the shared Linux build.
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # x64: the Android NDK has no Linux arm64 host build.
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -516,6 +515,7 @@ jobs:
       - name: Package the Android SDK
         working-directory: source
         run: |
+          ./kotlin build -p android -m rocky-core -m rocky-sqlite -m rocky-room
           # shellcheck disable=SC1010 # `do` is the toolchain's command
           ./kotlin do packageAndroid -m rocky-runtime-android
 
@@ -535,3 +535,57 @@ jobs:
             ~/.cargo/git
             source/sdks/native/target
           key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+
+  ios:
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Install the repository toolchain and iOS targets
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
+          rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
+          xcrun --sdk iphonesimulator --show-sdk-path
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/sdks/native -> target
+          shared-key: ios
+
+      - name: Qualify the iOS matrix and binding
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir -p local/phase17-evidence
+          ./sdks/native/check-ios 2>&1 | tee local/phase17-evidence/matrix.log
+          ./sdks/native/qualify-ios-binding 2>&1 | tee local/phase17-evidence/callbacks.log
+          ./kotlin build -p iosArm64 -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification
+          ./sdks/native/qualify-ios-sdk 2>&1 | tee local/phase17-evidence/sdk.log
+          ./kotlin test -p jvm -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification
+          ./kotlin check packaged -m packaged-consumer
+
+      - name: Save simulator evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase17-ios-evidence
+          path: source/local/phase17-evidence

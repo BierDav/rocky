@@ -27,6 +27,7 @@ naturally holds.
 | [0049](0049-mergeable-revocation-set.md) | A mergeable revocation set replaces the policy epoch |
 | [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
 | [0051](0051-roster-free-admission.md) | Roster-free admission and the revocation exchange in the native session |
+| [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
@@ -79,4 +80,4 @@ Prefer adding to a guide's rationale section. For a new record, create
 [documentation conventions](../documentation.md) and add the record to the table
 above. The architectural reference is
 [proposal V4](../proposals/architecture-proposal-v4.md); the implementation
-sequence is [the roadmap](../features_06/README.md).
+sequence is [the roadmap](../features_07/README.md).

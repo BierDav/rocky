@@ -10,8 +10,6 @@ import androidx.sqlite.throwSQLiteException
 import rocky.internal.native.NativePage
 import rocky.internal.native.NativeStatement
 import rocky.internal.native.NativeValue
-import java.math.BigDecimal
-import java.math.MathContext
 
 /**
  * One statement. It runs at its first `step` or column query, once its parameters are bound, and then delivers
@@ -62,6 +60,8 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
     override fun close() {
         if (closed) return
         finish()
+        native?.destroy()
+        native = null
         closed = true
     }
 
@@ -138,7 +138,7 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
         /** SQLite's text-to-integer conversion: the leading integer digits, saturating. */
         internal fun integer(text: String): Long {
             val prefix = DIGITS.find(text.trimStart(' ', '\t', '\n', '\r', '\u000c'))?.value ?: return 0
-            return prefix.toBigInteger().coerceIn(Long.MIN_VALUE.toBigInteger(), Long.MAX_VALUE.toBigInteger()).toLong()
+            return prefix.toLongOrNull() ?: if (prefix.startsWith("-")) Long.MIN_VALUE else Long.MAX_VALUE
         }
 
         /** SQLite's real-to-integer conversion: truncation, saturating at the 64-bit bounds. */
@@ -155,17 +155,7 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
             if (value.isNaN()) return ""
             if (value.isInfinite()) return if (value > 0) "Inf" else "-Inf"
             if (value == 0.0) return "0.0"
-            val rounded = BigDecimal(value).round(MathContext(15))
-            val exponent = rounded.precision() - rounded.scale() - 1
-            if (exponent < -4 || exponent >= 15) {
-                val digits = rounded.unscaledValue().abs().toString().trimEnd('0').ifEmpty { "0" }
-                val mantissa = digits.first() + "." + digits.drop(1).ifEmpty { "0" }
-                val sign = if (rounded.signum() < 0) "-" else ""
-                val power = (if (exponent < 0) "-" else "+") + kotlin.math.abs(exponent).toString().padStart(2, '0')
-                return "$sign${mantissa}e$power"
-            }
-            val plain = rounded.stripTrailingZeros().toPlainString()
-            return if ('.' in plain) plain else "$plain.0"
+            return sqliteRealText(value)
         }
         private val DIGITS = Regex("^[+-]?\\d+")
         private val NUMBER = Regex("^[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?")

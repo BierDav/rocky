@@ -145,6 +145,15 @@ Every build prepares SDK-owned native bindings/resources with Cargo, so it needs
 the pinned Rust toolchain. These are separate from the Rust `./scripts/check` gate.
 See [Room on Rocky's file](runtime/room-integration.md).
 
+## iOS bindings
+
+On macOS/Xcode, run `./sdks/native/check-ios` for both arm64 runtime targets
+with and without iroh. `./sdks/native/qualify-ios-binding` generates and tests
+the isolated no-iroh callbacks on the simulator. `./sdks/native/qualify-ios-sdk`
+runs the common SDK/driver/Room tests and the endpoint, command, cancellation
+and lifetime gates with iroh. [The binding guide](runtime/kotlin-native-binding.md)
+records the toolchain, dependency repair, threading contract and evidence.
+
 ## Android
 
 The [Android runtime](../sdks/kotlin/android-runtime/README.md) is a small Gradle build
@@ -161,7 +170,8 @@ The baseline workflow runs for pushes to the default branch and for the release
 workflow's call, not for pull requests. Its `lint` job runs `scripts/tools` and
 `scripts/lint` on Linux; it needs no build and fails within minutes. The
 `build`, `check`, `e2e`
-and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
+and `shopping` jobs also run on Linux. The `ios` job uses an arm64 macOS host
+for the static target matrix and simulator checks.
 On GitHub they use `ubuntu-latest`; on Gitea `build`, `check` and `e2e` use
 `ubuntu-24.04-arm` to exchange architecture-specific nextest archives.
 `shopping` uses the x64 `ubuntu-latest` runner for the Android NDK and builds
@@ -172,9 +182,10 @@ Clippy and the test binaries as nextest archives; it then builds the custody
 peer. It uploads three independent artifacts -- `nextest-workspace`,
 `nextest-sdk` and `rocky-peer` -- so a failure to finalize one cannot also lose
 the others, and each consumer fetches only what it runs.
-Every job installs the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
+Linux jobs install the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
-resolves inside the checkout. Gitea installs the runner-architecture nextest
+resolves inside the checkout. The iOS job reads that file for its official
+rustup toolchain and target installation. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 `check` downloads both test archives and runs `scripts/check --from` them:
 `cargo fmt --all -- --check` and the unit and integration tiers, without
@@ -207,7 +218,7 @@ The tier budgets apply in CI as they do locally, scaled by the runner's load;
 no hosted run has measured them yet. CI retries a failing nextest test once
 (`NEXTEST_RETRIES`).
 
-The `android` job runs only on pushes to `main`. It performs the release
+The `android` job runs on pull requests and pushes. It performs the release
 workflow's Android build steps to keep two caches warm: the Gradle and Kotlin
 CLI toolchain files, and the Cargo registry with the native target directory of
 `sdks/native`. The release workflow's Android job restores both and saves them

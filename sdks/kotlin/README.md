@@ -5,7 +5,7 @@ language-owned schemas/handlers, optional transports and packaged consumption
 without a Rust project. The bounded JVM desktop APIs and packages are implemented; see [packaging](../../docs/runtime/sdk-packaging.md) and its platform evidence.
 
 `rocky-core` provides Kotlin schemas, table actions, typed row access and the
-ORM-neutral suspend/Flow client. JVM `RockyDatabase` owns a bundled UniFFI native
+ORM-neutral suspend/Flow client. `RockyDatabase` owns a bundled UniFFI native
 engine, device [enrollment](../../docs/runtime/sdk-enrollment.md), peers and background
 sync over a selectable [transport](../../docs/runtime/sdk-transports.md), iroh by
 default. A transport can be written in Kotlin, and `RockyEndpoint` is an
@@ -15,7 +15,9 @@ are declared with `Command` and decided by a `Handler` written in Kotlin,
 with a `DevelopmentCoordinator` for one process. `rocky-sqlite` is an `androidx.sqlite`
 driver on Rocky's own file, without a Room dependency ([SQL driver](../../docs/runtime/sql-driver.md)). `rocky-room` runs Room's DAOs on that driver
 and refreshes their observers after sync ([Room](../../docs/runtime/room-integration.md)). The modules build JVM desktop and
-[Android](../../docs/runtime/android.md).
+[Android](../../docs/runtime/android.md), plus arm64 iOS device/simulator
+through the [Kotlin/Native binding](../../docs/runtime/kotlin-native-binding.md).
+iOS consumer packaging, Keychain and lifecycle belong to phase 18.
 
 The application defines its schema in Kotlin. No Rust, native host path or
 application-specific operation codec is needed. Start with the
@@ -50,7 +52,7 @@ in `tooling/`, which share helpers in `tooling/build-logic`. Their output is und
 
 | Plugin | Enabled on | Run with |
 | --- | --- | --- |
-| `rocky-native` | `rocky-core` | Every build: UniFFI bindings and the host's JNA library resource |
+| `rocky-native` | `rocky-core` | Every build: common contract, JNA/cinterop implementations and target library |
 | `rocky-qualification` | `inventory-qualification`, `schema-qualification` | `./kotlin check qualify -m <module>` |
 | `rocky-package` | `packaged-consumer` | `./kotlin do packageSdk`, `./kotlin check packaged`, `./kotlin do qualifyPackageOnLinux` |
 | `rocky-android` | `rocky-runtime-android` | Every build: the [Android runtime](android-runtime/README.md) is current; `./kotlin do packageAndroid` |

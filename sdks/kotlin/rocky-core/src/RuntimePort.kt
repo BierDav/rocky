@@ -93,7 +93,7 @@ sealed interface PeerTransport {
     class Endpoint(val endpoint: AppEndpoint) : PeerTransport
 }
 
-/** An application-owned endpoint; on the JVM, a `RockyEndpoint`. */
+/** An application-owned endpoint backed by `RockyEndpoint`. */
 interface AppEndpoint
 
 /** One reliable ordered byte stream, as chunks. Implementations must not fail `close`. */

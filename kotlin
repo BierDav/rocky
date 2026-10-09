@@ -284,6 +284,11 @@ kotlin_cli_url="$KOTLIN_CLI_DOWNLOAD_ROOT/org/jetbrains/kotlin/kotlin-cli/$kotli
 kotlin_cli_target_dir="$kotlin_cli_cache_dir/kotlin-cli-$kotlin_cli_version"
 download_and_extract "Kotlin Toolchain distribution v$kotlin_cli_version" "$kotlin_cli_url" "$kotlin_cli_sha256" 256 "$kotlin_cli_cache_dir" "$kotlin_cli_target_dir" "true"
 
+# Simulator test processes need absolute paths to the checked-in Room fixtures.
+rocky_fixture_root=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+export ROCKY_TEST_ROOT="$rocky_fixture_root"
+export SIMCTL_CHILD_ROCKY_TEST_ROOT="$rocky_fixture_root"
+
 # ********** Launch the Kotlin CLI **********
 
 launcher_script="$kotlin_cli_target_dir/bin/launcher.sh"

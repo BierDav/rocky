@@ -11,14 +11,15 @@ import androidx.sqlite.SQLiteDriver
 import androidx.sqlite.SQLiteException
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import rocky.RockyDatabase
 import rocky.schemaFromRoom
 import rocky.sqlite.RockySQLiteDriver
-import java.io.File
-import java.nio.file.Files
+import rocky.testing.testEnvironment
+import rocky.testing.testRepositoryRoot
 import kotlin.test.*
+import rocky.testing.TestFile as File
+import rocky.testing.TestFiles as Files
 
 /**
  * The acceptance reference for the pinned Room 2.8.4 / androidx.sqlite 2.6.2: Room's own statements, recorded
@@ -26,13 +27,17 @@ import kotlin.test.*
  * Set ROCKY_RECORD_ROOM=1 to rewrite the fixture after an intended Room upgrade.
  */
 class RoomDriverTest {
-    private val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
+    private val root = File(testRepositoryRoot())
     private val module = File(root, "sdks/kotlin/room-qualification")
     private val exported get() = File(module, "schemas/rocky.room.qualification.ShopDatabase/1.json").readText()
     private val fixture = File(module, "fixtures/room-2.8.4.statements")
 
     /** Room keeps a lock file beside the name, whatever the driver. */
-    private val names = Files.createTempDirectory("room-names").toFile().also { it.deleteOnExit() }
+    private val names = Files.createTempDirectory("room-names").toFile()
+
+    @AfterTest fun removeRoomNames() {
+        names.deleteRecursively()
+    }
     private fun room(driver: SQLiteDriver): ShopDatabase = Room.databaseBuilder<ShopDatabase>(File(names, "shop").path)
         .setDriver(driver).setQueryCoroutineContext(Dispatchers.IO).build()
     private fun item(key: String, title: String, id: Long, list: String = "l1") = ShopItem(key, list, title, price = 1.25, photo = byteArrayOf(1), id = id)
@@ -112,7 +117,7 @@ class RoomDriverTest {
     }
     private fun <T> rocky(block: suspend (RockyDatabase) -> T): T = runBlocking {
         val directory = Files.createTempDirectory("room-rocky").toFile()
-        val database = RockyDatabase.local(directory, schemaFromRoom("shop", exported))
+        val database = RockyDatabase.local(directory.path, schemaFromRoom("shop", exported))
         try {
             assertEquals(mapOf("items" to 1, "lists" to 2), database.installAuthors().associate { it.collection to it.author }, "the authors Ids assumes")
             block(database)
@@ -124,7 +129,7 @@ class RoomDriverTest {
 
     @Test fun roomSendsTheRecordedStatements() {
         val shapes = bundled().recorder.shapes()
-        if (System.getenv("ROCKY_RECORD_ROOM") == "1") fixture.writeText(shapes.joinToString("\n", postfix = "\n"))
+        if (testEnvironment("ROCKY_RECORD_ROOM") == "1") fixture.writeText(shapes.joinToString("\n", postfix = "\n"))
         assertTrue(fixture.isFile, "record the fixture with ROCKY_RECORD_ROOM=1")
         assertEquals(fixture.readLines().filter { it.isNotBlank() }, shapes, "Room's statements changed; requalify before upgrading Room")
     }

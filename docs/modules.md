@@ -323,17 +323,25 @@ foreign transport contract, the foreign command handler, an in-memory
 development coordinator and, with iroh, an endpoint handle that hosts the
 application's protocols next to Rocky's. In-process UniFFI bindings are the
 accepted consumer adapter ([design rationale](runtime/sdk-packaging.md#design-rationale)).
+The ABI crate also owns the [Kotlin/Native generator and simulator
+qualification](runtime/kotlin-native-binding.md). `vendor/apple-libc` supplies
+the pinned Darwin declarations used by vendored netdev/netwatch; it has no
+network implementation or authored unsafe code.
 
 `sdks/kotlin/rocky-core` owns the [definition builder and Room JSON import](runtime/schema-definitions.md#build-in-kotlin), typed commands and their handlers, the ORM-neutral suspend/Flow SDK,
-durable runtime port, transport and secret-store selection, peers, `RockyEndpoint` and JVM native lifecycle. `RockyDatabase` owns independently closable sessions and optional
+durable runtime port, transport and secret-store selection, peers, `RockyEndpoint` and native handle lifecycle. `RockyDatabase` owns independently closable sessions and optional
 network services; `Credentials` and `CommandPort` provide separate capabilities.
 Signed generation lineage, backup archives and packaged resources are covered in
 [SDK packaging](runtime/sdk-packaging.md) and [generations](runtime/generations.md). `sdks/kotlin/rocky-sqlite` is the `androidx.sqlite` driver on Rocky's file, with no Room
 dependency ([SQL driver](runtime/sql-driver.md)). `sdks/kotlin/rocky-room` binds Room to
 it: the pinned Room profile and invalidation from table events.
 Neither depends on shopping-list rules or Compose. The Kotlin toolchain modules build
-JVM desktop and Android. In `rocky-core`, `src/*.kt` is the platform-neutral client; `src/native` binds the
-runtime through JNA on both platforms; `src@android` adds the Android Keystore store
+JVM desktop, Android and arm64 iOS device/simulator. In `rocky-core`, `src`
+is common code, including the runtime adapter under `src/native`; generated
+JNA/cinterop implementations supply the same contract. `src@jna` contains
+Java platform calls and `File` overloads; `src@ios` supplies Foundation and
+Security calls. The test-only `platform-test` module supplies file fixtures.
+`src@android` adds the Android Keystore store
 and lifecycle binding. The `rocky-android` plugin ships the same sources as an AAR for
 [Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` brings Android apps the native
 runtime that the [`android-runtime`](../sdks/kotlin/android-runtime/README.md) Gradle build

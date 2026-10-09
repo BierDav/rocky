@@ -54,7 +54,13 @@ internal class RockySQLiteConnection(private val driver: RockySQLiteDriver) : SQ
     override fun close() {
         if (closed) return
         closed = true
-        connection?.let { native { it.shutdown() } }
+        connection?.let {
+            try {
+                native { it.shutdown() }
+            } finally {
+                it.destroy()
+            }
+        }
         connection = null
     }
 }

@@ -10,13 +10,14 @@ import rocky.*
 import rocky.room.followRocky
 import rocky.room.setRockyDatabase
 import rocky.room.settledOnRocky
-import java.io.File
-import java.nio.file.Files
+import rocky.testing.testRepositoryRoot
 import kotlin.test.*
+import rocky.testing.TestFile as File
+import rocky.testing.TestFiles as Files
 
 /** DAO observers follow every commit of Rocky's tables, sync writes included, with no trigger on Room's side. */
 class RoomInvalidationTest {
-    private val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
+    private val root = File(testRepositoryRoot())
     private val schema = schemaFromRoom(
         "shop",
         File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
@@ -46,13 +47,13 @@ class RoomInvalidationTest {
 
     @Test fun daoObserversFireOnLocalAndSyncWrites() = runBlocking {
         val directory = Files.createTempDirectory("room-invalidation").toFile()
-        val a = RockyDatabase.create(File(directory, "a"), schema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(directory, "a").path, schema, tcp(), automaticSync = false)
         var b: RockyDatabase? = null
         val work = mutableListOf<Job>()
         try {
             a.installRoomAuthors()
             b = RockyDatabase.join(
-                File(directory, "b"),
+                File(directory, "b").path,
                 schema,
                 a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
                 tcp(),

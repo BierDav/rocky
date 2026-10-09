@@ -12,8 +12,9 @@ consumers should define schemas and handlers in their own language and use their
 chosen ORM/transport adapters without a Rust project or code. Kotlin/JVM desktop
 is the first complete consumer target; universal adapter availability is not claimed.
 
-Phases 1 to 8 of an earlier roadmap are implemented; the current one has not
-started. [Recoverable generations](docs/runtime/generations.md),
+Phases 1 to 8 of an earlier roadmap are implemented; the current roadmap
+governs ongoing work. The [arm64 iOS binding](docs/runtime/kotlin-native-binding.md)
+shares the common SDK and Room sources; iOS consumer packaging is phase 18 work. [Recoverable generations](docs/runtime/generations.md),
 [fresh-device backup/restore](docs/runtime/backup-and-restore.md) and
 [composable packaged Kotlin SDKs](docs/runtime/sdk-packaging.md) provide the bounded
 single-file/JVM desktop profile; [qualification limits](docs/runtime/sdk-packaging.md#build-and-consume-a-package)

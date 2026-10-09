@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["cdylib", "staticlib", "lib"]
 
 [[bin]]
 name = "rocky-bindgen"
@@ -14,7 +14,7 @@ required-features = ["bindgen"]
 
 [features]
 default = ["iroh"]
-bindgen = ["uniffi/cli"]
+bindgen = ["uniffi/cli", "dep:uniffi_bindgen", "dep:askama", "dep:anyhow", "dep:camino", "dep:heck", "dep:toml", "dep:uniffi_meta", "dep:textwrap"]
 # The starter's iroh transport and `NativeEndpoint`. Without it the
 # database, sessions and application-supplied transports remain.
 iroh = ["rocky-sdk/iroh", "dep:tokio"]
@@ -30,6 +30,30 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util"], opti
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+textwrap = { version = "0.16", optional = true }
+uniffi_meta = { version = "=0.32.2", optional = true }
+uniffi_bindgen = { version = "=0.32.2", optional = true }
+askama = { version = "0.13", optional = true }
+anyhow = { version = "1", optional = true }
+camino = { version = "1", optional = true }
+heck = { version = "0.5", optional = true }
+toml = { version = "1", optional = true }
+
 [lints.rust]
 # UniFFI-generated scaffolding allows unsafe FFI locally; authored code remains denied.
 unsafe_code = "deny"
+
+[patch.crates-io]
+netdev = { path = "../../vendor/netdev" }
+netwatch = { path = "../../vendor/netwatch" }
+
+# Keep the standalone binding build on the workspace test profile: crypto
+# and SQLite must not run unoptimized in host and simulator integration tests.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.rocky-core]
+opt-level = 1
+
+[profile.dev.package.rocky-credentials]
+opt-level = 1

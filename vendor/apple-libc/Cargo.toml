@@ -1,0 +1,21 @@
+[package]
+name = "rocky-apple-libc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["std"]
+std = ["libc-upstream/std"]
+extra_traits = ["libc-upstream/extra_traits"]
+const-extern-fn = ["libc-upstream/const-extern-fn"]
+align = ["libc-upstream/align"]
+
+use_std = ["std"]
+
+[dependencies]
+libc-upstream = { package = "libc", version = "=0.2.190", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"

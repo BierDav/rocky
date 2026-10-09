@@ -1,0 +1,27 @@
+#!/bin/sh
+# Isolated fallback binding spike; this does not qualify the common SDK or iroh.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+export IPHONEOS_DEPLOYMENT_TARGET=13.0
+cargo build --manifest-path sdks/native/Cargo.toml --features bindgen --bin rocky-bindgen --locked
+cargo build --manifest-path sdks/native/Cargo.toml --lib --target aarch64-apple-ios-sim --no-default-features --locked
+work="$repo_root/local/ios-binding-spike"
+rm -rf "$work/src" "$work/src@ios"
+mkdir -p "$work/src" "$work/src@ios" "$work/cinterop@ios" "$work/generated"
+cp sdks/native/qualification/module.yaml "$work/module.yaml"
+cp -R sdks/native/qualification/test@ios "$work/"
+sdks/native/target/debug/rocky-bindgen generate-native \
+    sdks/native/target/aarch64-apple-ios-sim/debug/librocky_uniffi.dylib "$work/generated"
+cp "$work/generated/RockyTypes.kt" "$work/src/"
+cp "$work/generated/RockyNative.kt" "$work/src@ios/"
+cat > "$work/cinterop@ios/rocky.def" <<DEFINITION
+headers = rocky_uniffiFFI.h
+headerFilter = rocky_uniffiFFI.h
+package = rocky_uniffi.cinterop
+compilerOpts = -I$work/generated
+staticLibraries = librocky_uniffi.a
+libraryPaths = $repo_root/sdks/native/target/aarch64-apple-ios-sim/debug
+linkerOpts = -framework CoreFoundation -liconv
+DEFINITION
+./kotlin test --project-dir "$work" -p iosSimulatorArm64

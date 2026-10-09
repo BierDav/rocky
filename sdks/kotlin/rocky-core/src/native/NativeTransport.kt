@@ -71,6 +71,7 @@ internal class ForeignAdapter(private val transport: StreamTransport) : ForeignT
  * It sees identities and commitments, never commands, arguments or rows.
  */
 class DevelopmentCoordinator : CommandCoordinator {
+    fun close() = native.destroy()
     internal val native = rocky.internal.native.DevelopmentCoordinator()
 
     /** Registers `owner`'s domain with that device as first executor. `executors` may take over; `callers` may invoke. */
@@ -106,10 +107,14 @@ internal fun composeCommands(commands: CommandRuntime?): NativeCommands? = comma
     val dispatcher = runtime.handlers.takeIf { it.isNotEmpty() }?.let(::CommandDispatcher)
     val handler = dispatcher?.let { dispatcher ->
         object : NativeCommandHandler {
-            override fun handle(input: String, reads: NativeHandlerReads): String = dispatcher.handle(
-                input,
-                JsonCommandReads(reads::get) { table, lower, upper, limit -> reads.scan(table, lower, upper, limit.toUInt()) },
-            )
+            override fun handle(input: String, reads: NativeHandlerReads): String = try {
+                dispatcher.handle(
+                    input,
+                    JsonCommandReads(reads::get) { table, lower, upper, limit -> reads.scan(table, lower, upper, limit.toUInt()) },
+                )
+            } finally {
+                reads.destroy()
+            }
         }
     }
     NativeCommands(

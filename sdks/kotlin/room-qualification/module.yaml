@@ -1,12 +1,14 @@
 product:
   type: kmp/lib
-  platforms: [jvm]
+  platforms: [jvm, iosArm64, iosSimulatorArm64]
 apply:
   - //project.module-template.yaml
 dependencies:
+  - org.jetbrains.kotlinx:atomicfu:0.31.0
   - ../rocky-room
 test-dependencies:
   - org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2
+  - ../platform-test
   # The reference engine Room runs on in these tests.
   - androidx.sqlite:sqlite-bundled:2.6.2
 settings:

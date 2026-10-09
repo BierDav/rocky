@@ -65,11 +65,14 @@ class RockyEndpoint private constructor(internal val native: NativeEndpoint) : A
                     name,
                     object : ProtocolHandler {
                         override suspend fun accept(remote: String, stream: NativeByteStream) {
+                            val wrapped = NativeStream(stream)
                             try {
-                                handler(remote, NativeStream(stream))
+                                handler(remote, wrapped)
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
-                            } catch (_: Exception) {}
+                            } catch (_: Exception) {} finally {
+                                (stream as? AutoCloseable)?.close()
+                            }
                         }
                     },
                 )

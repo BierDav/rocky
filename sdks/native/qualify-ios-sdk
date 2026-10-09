@@ -1,0 +1,9 @@
+#!/bin/sh
+# Phase 17's simulator gate, including the shared SDK, driver and Room fixtures.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+export IPHONEOS_DEPLOYMENT_TARGET=13.0
+export ROCKY_TEST_ROOT="$repo_root"
+export SIMCTL_CHILD_ROCKY_TEST_ROOT="$repo_root"
+./kotlin test -p iosSimulatorArm64 -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification

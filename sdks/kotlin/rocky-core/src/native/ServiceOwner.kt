@@ -17,7 +17,7 @@ data class ServiceUsage(val openDomains: Int, val closedDomains: Int, val bytes:
  */
 class ServiceOwner internal constructor(private val session: RockySession, tenant: ByteArray) {
     private val tenant = tenant.also { require(it.size == 32) { "a tenant key is 32 bytes" } }
-        .joinToString("") { "%02x".format(it.toInt() and 255) }
+        .joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }
 
     /**
      * Registers the domain: who may execute and who may invoke. Nothing of the schema or rows is sent. A device that

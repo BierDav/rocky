@@ -80,7 +80,8 @@ class SchemaBuilder internal constructor(private val application: String, privat
     private val views = linkedMapOf<String, String>()
     fun view(name: String, select: String) {
         require(name.matches(IDENTIFIER) && select.trimStart().startsWith("SELECT", ignoreCase = true) && ";" !in select) { "view needs a name and one SELECT" }
-        require(views.putIfAbsent(name, select) == null) { "duplicate view $name" }
+        require(name !in views) { "duplicate view $name" }
+        views[name] = select
     }
     var updatePolicy: UpdatePolicy = UpdatePolicy.Changed
     var commands: CommandSet? = null
@@ -122,7 +123,8 @@ class TableBuilder internal constructor(val name: String) {
     internal var roomIdentityIndex: List<String>? = null
     fun column(column: Column) {
         require(column.name !in setOf("id", "row_kind")) { "id and row_kind are implicit identity columns" }
-        require(columns.putIfAbsent(column.name, column) == null) { "$name: duplicate column ${column.name}" }
+        require(column.name !in columns) { "$name: duplicate column ${column.name}" }
+        columns[column.name] = column
     }
     fun text(name: String, nullable: Boolean = false) = column(Column.text(name, nullable))
     fun integer(name: String, nullable: Boolean = false) = column(Column.integer(name, nullable))
@@ -141,7 +143,8 @@ class TableBuilder internal constructor(val name: String) {
     fun index(name: String, vararg columns: String) = index(name, columns.map { IndexColumn(it) })
     fun index(name: String, columns: List<IndexColumn>) = index(Index(name, columns))
     fun index(index: Index) {
-        require(indexes.putIfAbsent(index.name, index) == null) { "${this.name}: duplicate index ${index.name}" }
+        require(index.name !in indexes) { "${this.name}: duplicate index ${index.name}" }
+        indexes[index.name] = index
     }
 
     /** A unique index of real rows; Room's default name unless [name] is given. */

@@ -57,7 +57,11 @@ fun packageAndroid(
     val repository = recreate(output) / "maven"
     val base = listOf(Android.platformJar()) + dependencies.resolvedFiles
     val core = work / "classes.jar"
-    compile(sources.sourceDirectories.filter { it.exists() } + listOf(androidSources), base, core)
+    val coreSources = (sources.sourceDirectories + listOf(androidSources)).filter {
+        it.exists() && it.name !in setOf("ios", "src@ios")
+    }.distinct()
+    val common = coreSources.filter { it.name == "src" || it.name == "common" }
+    compile(coreSources, base, core, common)
     val aar = work / "rocky-core-android.aar"
     ZipOutputStream(aar.outputStream()).use { archive ->
         archive.put("classes.jar", core.readBytes())
@@ -132,8 +136,22 @@ fun packageAndroid(
     println(output)
 }
 
-private fun compile(sources: List<Path>, classpath: List<Path>, destination: Path) {
-    val compilation = compileKotlin(sources, classpath, destination, listOf("-Werror", "-no-jdk"))
+@OptIn(ExperimentalPathApi::class)
+private fun compile(sources: List<Path>, classpath: List<Path>, destination: Path, common: List<Path> = emptyList()) {
+    fun files(directories: List<Path>) = directories.flatMap { directory ->
+        directory.walk().filter { it.extension == "kt" }.map { it.toAbsolutePath().normalize() }.toList()
+    }
+    val commonFiles = files(common)
+    val multiplatform = if (commonFiles.isEmpty()) {
+        emptyList()
+    } else {
+        listOf(
+            "-Xmulti-platform",
+            "-Xexpect-actual-classes",
+            "-Xcommon-sources=" + commonFiles.joinToString(",") { it.pathString },
+        )
+    }
+    val compilation = compileKotlin(files(sources), classpath, destination, listOf("-Werror", "-no-jdk") + multiplatform)
     print(compilation.messages)
     check(compilation.succeeded) { "compiling $destination failed" }
 }

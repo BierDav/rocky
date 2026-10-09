@@ -163,9 +163,10 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(|error| denied(&error.to_string()))?
                     != id
                 {
-                    return Err(denied(
-                        "insert id must continue the device's own table creation log",
-                    ));
+                    return Err(denied(&format!(
+                        "insert id must continue the device's own table creation log: author {}, highest {}, received {}",
+                        author.number, highest, id
+                    )));
                 }
                 highest = id.sequence();
             }

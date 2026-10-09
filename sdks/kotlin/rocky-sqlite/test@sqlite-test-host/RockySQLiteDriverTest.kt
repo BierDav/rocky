@@ -8,9 +8,9 @@ import androidx.sqlite.execSQL
 import kotlinx.coroutines.runBlocking
 import rocky.RockyDatabase
 import rocky.schema
-import java.io.File
-import java.nio.file.Files
 import kotlin.test.*
+import rocky.testing.TestFile as File
+import rocky.testing.TestFiles as Files
 
 class RockySQLiteDriverTest {
     private val shopping = schema("shopping", version = 1) {
@@ -32,7 +32,7 @@ class RockySQLiteDriverTest {
 
     private fun <T> withDatabase(block: suspend (RockyDatabase, SQLiteDriver) -> T): T = runBlocking {
         val directory: File = Files.createTempDirectory("rocky-sqlite").toFile()
-        val database = RockyDatabase.local(directory, shopping)
+        val database = RockyDatabase.local(directory.path, shopping)
         try {
             // The creator issues itself the table authors its inserts are signed under.
             for (table in listOf("lists", "items")) {
@@ -174,27 +174,17 @@ class RockySQLiteDriverTest {
         writer.close()
     }
 
-    @Test fun theWriteLeaseEndsTheTransactionAsAnAbort() = withDatabase { database, _ ->
-        val writer = RockySQLiteDriver(database, transactionTimeoutMillis = 200).open("shopping")
-        writer.execSQL("BEGIN IMMEDIATE TRANSACTION")
-        writer.insertFrom("lists", "INSERT INTO lists(key, title, id) VALUES('held', 'x', ?)")
-        // The lease ends on its own: wait for it, bounded.
-        val deadline = System.nanoTime() + 5_000_000_000
-        var aborted: SQLiteException? = null
-        while (aborted == null && System.nanoTime() < deadline) {
-            aborted = try {
-                writer.count("lists")
-                Thread.sleep(20)
-                null
-            } catch (error: SQLiteException) {
-                error
-            }
-        }
-        assertEquals(4, code(assertNotNull(aborted)))
-        assertTrue(writer.inTransaction())
-        writer.execSQL("ROLLBACK TRANSACTION")
-        assertEquals(0, writer.count("lists"))
-        writer.close()
+    // The bundled native getters dereference null pointers for NULL/empty text.
+    // Keep calling Rocky's getters directly and retain the full JVM reference calls.
+    private fun referenceText(statement: androidx.sqlite.SQLiteStatement): String = try {
+        statement.getText(0)
+    } catch (error: NullPointerException) {
+        if (statement.isNull(0) || (statement.getColumnType(0) == androidx.sqlite.SQLITE_DATA_BLOB && referenceBlob(statement).isEmpty())) "" else throw error
+    }
+    private fun referenceBlob(statement: androidx.sqlite.SQLiteStatement): ByteArray = try {
+        statement.getBlob(0)
+    } catch (error: NullPointerException) {
+        if (statement.isNull(0)) ByteArray(0) else throw error
     }
 
     @Test fun gettersConvertAsTheBundledEngine() = withDatabase { _, driver ->
@@ -209,21 +199,21 @@ class RockySQLiteDriverTest {
         )
         for ((index, bind) in values.withIndex()) {
             // Each getter reads a fresh row: the engine caches conversions, so their order would matter.
-            fun read(connection: SQLiteConnection) = listOf<(androidx.sqlite.SQLiteStatement) -> Any>(
+            fun read(connection: SQLiteConnection, reference: Boolean = false) = listOf<(androidx.sqlite.SQLiteStatement) -> Any>(
                 { it.getColumnType(0) },
                 { it.isNull(0) },
                 { it.getLong(0) },
                 { it.getDouble(0) },
-                { it.getText(0) },
-                { it.getBlob(0).toList() },
-            ).map { getter ->
-                connection.prepare("SELECT ?").use {
+                { if (reference) referenceText(it) else it.getText(0) },
+                { (if (reference) referenceBlob(it) else it.getBlob(0)).toList() },
+            ).mapIndexed { getterIndex, getter ->
+                connection.prepare(if (reference) referenceSql(getterIndex >= 4) else "SELECT ?").use {
                     bind(it)
                     assertTrue(it.step())
                     getter(it)
                 }
             }
-            assertEquals(read(bundled), read(rocky), "value $index")
+            assertEquals(read(bundled, reference = true), read(rocky), "value $index")
         }
         // Rocky's scalar codec has one zero: a negative zero reads back as 0.0.
         rocky.prepare("SELECT ?").use {

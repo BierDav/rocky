@@ -140,3 +140,12 @@ measured = "2.88s"
 cause = "Interrupted and resumed catch-up applies every operation once; the replay and the verification are the cost."
 expires = 2026-11-30
 
+
+# Accepted over-budget test (Phase 17, shared check). Measured alone on the
+# reference host (2026-10-10). Remove or fix before the expiry date.
+[[exception]]
+test = "rocky-coordinator::public tenants_register_isolated_domains_and_cannot_starve_each_other"
+limit = "5s"
+measured = "4.39s"
+cause = "Three tenants register and are served through real coordinator clients; the registration round trips are the cost."
+expires = 2026-11-30

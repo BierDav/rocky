@@ -37,7 +37,7 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
         }.toString()
     }
     private fun viewsJson(): JsonArray = JsonArray(
-        views.toSortedMap().map { (name, select) ->
+        views.entries.sortedBy { it.key }.map { (name, select) ->
             buildJsonObject {
                 put("name", name)
                 put("create_sql", "CREATE VIEW \"$name\" AS $select")

@@ -142,6 +142,10 @@ The commit-message workflow checks every pushed and pull-request commit
 demand to GitHub Packages; it is the one workflow that clones history, which
 git-cliff needs to compute the version ([releasing](releasing.md)).
 
+The Gitea mirror uses a dedicated macOS runner for its [nightly prerelease](releasing.md).
+Its Actions cache is stored on the attached volume at
+`/Volumes/david-mm-linz-ext-1/gitea-runner`.
+
 ## Code and tests
 
 Use small public APIs and descriptive private modules. Return typed errors for

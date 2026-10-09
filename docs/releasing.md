@@ -3,6 +3,12 @@
 The [Release workflow](../.github/workflows/release.yml) publishes every artifact of one
 commit of `main` under one version, to GitHub Packages and a GitHub release.
 
+The Gitea mirror runs [its own nightly workflow](../.gitea/workflows/nightly-release.yml).
+It checks the full repository on the registered macOS runner and creates a Gitea
+prerelease with the same version and notes policy. Gitea generates source archives
+for that release; the GitHub workflow remains responsible for the published SDK,
+container and Maven packages.
+
 ## Triggers and channels
 
 | Channel | Trigger | Version | GitHub release |

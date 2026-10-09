@@ -1299,8 +1299,31 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(|error| corrupt(error.to_string()))
         };
         let target_address = target.map(address).transpose()?.flatten();
+        let mut connected = BTreeSet::new();
+        if let Some(node) = target.and_then(|scope| constraints.node(scope)) {
+            let mut queue = vec![node];
+            while let Some(node) = queue.pop() {
+                if connected.insert(node) {
+                    queue.extend(
+                        constraints.nodes[node]
+                            .references
+                            .iter()
+                            .map(|reference| reference.parent),
+                    );
+                    queue.extend(
+                        constraints.nodes[node]
+                            .children
+                            .iter()
+                            .map(|(child, _)| *child),
+                    );
+                }
+            }
+        }
         let mut scopes = Vec::new();
         for (node, spec) in constraints.nodes.iter().enumerate() {
+            if target.is_some() && !partition_only && !connected.contains(&node) {
+                continue;
+            }
             if !spec.partition.is_empty() {
                 for scope in self.partitions.keys().copied() {
                     if scope.domain == spec.scope.domain
@@ -1412,7 +1435,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // Support rows follow from the real rows, as after every change.
         let mut support = BTreeSet::new();
-        for &(node, _) in &scopes {
+        for &(node, scope) in &scopes {
             let spec = &constraints.nodes[node];
             let name = &typed.tables[spec.table].table.sql_name;
             let table = quoted(name);
@@ -1428,8 +1451,15 @@ impl<A: RowApplication> Inner<A> {
                 let column = quoted(&logical.columns[reference.columns[0]].sql_name);
                 for row in rows_with(
                     &self.conn,
-                    &format!("SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"),
-                    Vec::new(),
+                    &format!(
+                        "SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL{}",
+                        if spec.partition.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" AND {}", spec.partition_filter)
+                        }
+                    ),
+                    pass.partition_params(node, scope)?,
                 )
                 .await?
                 {

@@ -145,6 +145,11 @@ A checkpoint covers one `ResourceScope`. `SignedCheckpoint` is a
 `CheckpointStatement`, the signer's node key and credential chain, signed under
 `rocky.encrypted-checkpoint.v3`; its identity is the
 `rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 6.
+Partition candidates, support rows and hidden marks are derived locally. A
+partition checkpoint carries only its authenticated tuple, materialized rows and
+identity marks; rebootstrap rebuilds its group partition and leaves other
+partitions unchanged. See [decision 0043](../decisions/0043-partition-horizon-state.md).
+
 Partition, admitted horizon and finalized horizon are independent optional
 fields; an admitted cut is never treated as finalized. Other formats are
 refused before writes.

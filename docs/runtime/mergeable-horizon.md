@@ -50,8 +50,15 @@ identity marks with their signing keys.
   row key, before acknowledging the child.
 - For unlogged same-reader parents, finalize dependent children before the
   parent removes their captured input.
-- Dependencies resolve per installed table scope, not per partition; see
-  [phase 6](../features_06/06-horizon-checkpoints-bootstrap.md).
+- In-group dependencies name the parent's concrete scope in the same partition.
+  Declaration and acknowledgment require that parent partition locally;
+  required peers must be authorized for every related row scope. Devices holding
+  only B never participate in A's horizon.
+- Pending declarations index their affected scopes. Finalization and checkpoint
+  adoption clear the index atomically; unrelated partitions remain writable.
+  Rebootstrap rebuilds candidates and support within the affected group partition.
+  An unpartitioned existence-base import rebuilds its connected constraint graph.
+  See [decision 0043](../decisions/0043-partition-horizon-state.md).
 
 ## Existence bases
 
@@ -95,12 +102,12 @@ reverse a parent's retirement at the same cut.
 | Horizon statement | Format 2, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
 | Checkpoint | Format 6 carries independent optional admitted and finalized declarations and bases; an admitted cut is never treated as finalized |
 | Row frame | 5, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v6` |
+| File identity | `rocky.encrypted-replica.v7` |
 | Native session | `rocky.native-session.v4` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 2, with an explicit existence-base list.
-Checkpoint 6, frame 5 and replica identity v6 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Checkpoint 6, frame 5 and replica identity v7 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.
@@ -123,7 +130,10 @@ SET NULL, unique and parent losers, expiry and forced rebootstrap without parent
 keys, definite drops on plain and logged tables, stale-insert and causal reuse,
 base paging and tampering, and rollback of the final switch.
 `tests::partitions::horizon_preserves_identity_sequences_independently_in_each_partition`
-covers per-partition marks. Kotlin/Room `kotlinHorizonsFinalize…` drives the
+covers per-partition marks. `tests::partition_foreign_keys::horizon` covers
+partition lifecycle finalization, six rollback boundaries with reopen, keyless
+support/base import, custody-backed eviction, offline rebootstrap and unchanged
+unrelated partition state. Kotlin/Room `kotlinHorizonsFinalize…` drives the
 SDK path. The plateau probe:
 
 ```sh

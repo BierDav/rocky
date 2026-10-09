@@ -67,7 +67,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
 }
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v6", manifest, node))
+    encode(&("rocky.encrypted-replica.v7", manifest, node))
 }
 /// A newer definition keeps everything replicas of the older one agree
 /// on: its tables, fields, methods, operations and domains.

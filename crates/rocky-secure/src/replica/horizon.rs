@@ -9,6 +9,8 @@ use rocky_credentials::{
 pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_horizon_bootstrap(scope BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_mergeable_horizon(scope BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_horizon_pending(dependency BLOB NOT NULL,scope BLOB NOT NULL,PRIMARY KEY(dependency,scope)) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_horizon_pending_scope ON secure_horizon_pending(scope)",
     "CREATE TABLE IF NOT EXISTS secure_horizon_credentials(node BLOB PRIMARY KEY,credentials BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_rejoined(scope BLOB NOT NULL,node BLOB NOT NULL,horizon BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_ack(scope BLOB NOT NULL,node BLOB NOT NULL,ack BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
@@ -23,6 +25,14 @@ pub struct HorizonProgress {
 }
 
 impl<A: RowApplication> Inner<A> {
+    #[cfg(test)]
+    fn horizon_fault(&mut self, step: u8) -> Result<(), Error> {
+        if self.fail_horizon_at == Some(step) {
+            self.fail_horizon_at = None;
+            return Err(Error::InjectedFailure);
+        }
+        Ok(())
+    }
     pub(crate) async fn mergeable_horizon(
         &self,
         scope: ResourceScope,
@@ -326,6 +336,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut required = BTreeMap::new();
         for (node, credentials) in peers {
             inner.authorize_peer(*node, credentials, scope)?;
+            for parent in &parents {
+                inner.authorize_peer(*node, credentials, *parent)?;
+            }
             if credentials
                 .0
                 .last()
@@ -432,6 +445,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("missing horizon predecessor"));
             }
             inner.refuse_horizon_ahead(&signed.statement).await?;
+            inner.index_pending_horizon(&signed, true).await?;
             inner.conn.execute("INSERT INTO secure_mergeable_horizon VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET statement=excluded.statement", [encode(&signed.statement.scope)?, signed.to_bytes().map_err(credential)?]).await?;
             inner
                 .conn
@@ -897,31 +911,53 @@ impl<A: RowApplication> Inner<A> {
         peers.remove(&self.config.node.public_key());
         Ok(peers.len())
     }
-    async fn pending_horizons(&self) -> Result<Vec<SignedHorizon>, Error> {
+    pub(crate) async fn index_pending_horizon(
+        &self,
+        signed: &SignedHorizon,
+        pending: bool,
+    ) -> Result<(), Error> {
+        let scope = encode(&signed.statement.scope)?;
+        self.conn
+            .execute(
+                "DELETE FROM secure_horizon_pending WHERE scope=?",
+                [scope.clone()],
+            )
+            .await?;
+        if pending {
+            for dependency in std::iter::once(signed.statement.scope).chain(
+                signed
+                    .statement
+                    .related
+                    .iter()
+                    .chain(&signed.statement.existence)
+                    .map(|cut| cut.scope),
+            ) {
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO secure_horizon_pending VALUES(?,?)",
+                        [encode(&dependency)?, scope.clone()],
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+    async fn pending_horizons(&self, scope: ResourceScope) -> Result<Vec<SignedHorizon>, Error> {
         let mut pending = Vec::new();
-        for row in rows(&self.conn, "SELECT statement FROM secure_mergeable_horizon").await? {
+        for row in collect_rows(self.conn.query(
+            "SELECT h.statement FROM secure_horizon_pending p JOIN secure_mergeable_horizon h ON h.scope=p.scope WHERE p.dependency=?",
+            [encode(&scope)?],
+        ).await?).await? {
             let [SqlValue::Blob(bytes)] = row.as_slice() else {
                 return Err(Error::Corrupt("horizon statement".into()));
             };
-            let signed = SignedHorizon::from_bytes(bytes).map_err(credential)?;
-            if let Some(id) = self.find_scope_id(signed.statement.scope).await?
-                && self
-                    .checkpoint_record(id, true)
-                    .await?
-                    .and_then(|record| record.signed)
-                    .is_some_and(|checkpoint| {
-                        checkpoint.statement.finalized.as_deref() == Some(&signed)
-                    })
-            {
-                continue;
-            }
-            pending.push(signed);
+            pending.push(SignedHorizon::from_bytes(bytes).map_err(credential)?);
         }
         Ok(pending)
     }
     pub(super) async fn ensure_horizon_writable(&self, scope: ResourceScope) -> Result<(), Error> {
         self.ensure_horizon_current(scope).await?;
-        for signed in self.pending_horizons().await? {
+        for signed in self.pending_horizons(scope).await? {
             if signed.statement.scope == scope
                 || signed
                     .statement
@@ -944,7 +980,7 @@ impl<A: RowApplication> Inner<A> {
         sequence: u64,
         existence: bool,
     ) -> Result<bool, Error> {
-        for signed in self.pending_horizons().await? {
+        for signed in self.pending_horizons(scope).await? {
             let logs = if existence {
                 signed
                     .statement
@@ -1078,6 +1114,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 ));
             }
             inner.seal_existence_bases(&signed).await?;
+            #[cfg(test)]
+            inner.horizon_fault(1)?;
             let scope_id = inner.scope_id(scope).await?;
             inner
                 .conn
@@ -1086,6 +1124,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [scope_id],
                 )
                 .await?;
+            #[cfg(test)]
+            inner.horizon_fault(2)?;
             let typed = inner
                 .typed
                 .clone()
@@ -1149,7 +1189,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                                         .rows
                                         .schema()
                                         .table(&table.table.sql_name)
-                                        .is_some_and(|table| table.existence_log)
+                                        .is_some_and(|table| table.column("row_kind").is_some())
                                     {
                                         format!("{} AND row_kind=0", table.select)
                                     } else {
@@ -1212,6 +1252,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
             }
+            #[cfg(test)]
+            inner.horizon_fault(3)?;
             inner.conn.execute("DELETE FROM secure_stubs WHERE scope=? AND creation=1 AND hash NOT IN (SELECT hash FROM secure_horizon_live_creations WHERE scope=?)", [id,id]).await?;
             let mut after = Vec::new();
             loop {
@@ -1235,6 +1277,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             inner.reproject(scope).await?;
+            inner.index_pending_horizon(&signed, false).await?;
+            #[cfg(test)]
+            inner.horizon_fault(4)?;
             let mut statement = previous_signed.statement.clone();
             statement.format = 6;
             statement.finalized = Some(signed.clone());
@@ -1295,6 +1340,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     ]),
                 )
                 .await?;
+            #[cfg(test)]
+            inner.horizon_fault(5)?;
             let applied = inner.scope_state(id).await?.3;
             inner
                 .store_scope_state(id, sets.rows, 0, &sets.digest, applied)

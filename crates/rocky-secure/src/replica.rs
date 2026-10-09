@@ -222,6 +222,8 @@ pub(super) struct Inner<A> {
     #[cfg(test)]
     pub(super) fail_before_commit: usize,
     #[cfg(test)]
+    pub(super) fail_horizon_at: Option<u8>,
+    #[cfg(test)]
     pub(super) retry_before_commit: usize,
     #[cfg(test)]
     pub(super) group_fault: Option<group::GroupFault>,
@@ -368,7 +370,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v6" {
+    if label != "rocky.encrypted-replica.v7" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -541,6 +543,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             stage_exit: false,
             #[cfg(test)]
             fail_before_commit: 0,
+            #[cfg(test)]
+            fail_horizon_at: None,
             #[cfg(test)]
             retry_before_commit: 0,
             #[cfg(test)]

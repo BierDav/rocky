@@ -7,6 +7,8 @@ use rocky_core::{
 use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
 use std::path::Path;
 
+mod horizon;
+
 struct Fixture {
     publisher: PrivateKey,
     schema: rocky_core::LogicalSchema,
@@ -28,10 +30,14 @@ impl Fixture {
             {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
         ]});
+        if !logged {
+            definition["tables"][2]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true,"on_conflict":"latest_wins"}]);
+        }
         if logged {
             definition["tables"] = serde_json::json!([
                 {"name":"products","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"existence_log":true},
-                {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"foreign_keys":[{"columns":["category"],"table":"products","on_delete":"cascade"}]}
+                {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"foreign_keys":[{"columns":["category"],"table":"products","on_delete":"cascade"}]},
+                {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"indexes":[{"name":"categories_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true,"on_conflict":"latest_wins"}]}
             ]);
         }
         let schema = SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())

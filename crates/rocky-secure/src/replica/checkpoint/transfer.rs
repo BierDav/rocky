@@ -637,6 +637,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.check_frontier(id, &signed).await?;
             if let Some(horizon) = &signed.statement.horizon {
                 inner.adopt_checkpoint_horizon(horizon).await?;
+                inner
+                    .index_pending_horizon(
+                        horizon,
+                        signed.statement.finalized.as_ref() != Some(horizon),
+                    )
+                    .await?;
             }
             let mut report = RebootstrapReport {
                 checkpoint: signed.id()?,

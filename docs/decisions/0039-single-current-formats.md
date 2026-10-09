@@ -18,7 +18,7 @@ compatibility clauses in earlier decisions.
   and finalized-horizon fields. Admission never invents a finalized cut.
   Existence records use 2 with optional partition metadata.
 - SQLite files use one application-id tag, `0x524b5901`, checked read-only before
-  locks or initialization writes. Secure identity v6, stored descriptors and
+  locks or initialization writes. Secure identity v7 ([partition horizons](0043-partition-horizon-state.md)), stored descriptors and
   checkpoint tags are likewise checked before an encrypted writer opens.
   Fresh checkpoint metadata belongs to resumable bootstrap, not open-time adoption.
 - Credential extensions and horizons use 2, client evidence caches use 3,

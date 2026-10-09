@@ -150,7 +150,12 @@ and a horizon cannot be declared without the corresponding parent partition.
 Horizon cuts name concrete parent scopes, never their table templates.
 
 Rebuild and eviction re-resolve constrained tables of the same group partition.
-Other partitions remain unchanged. A partitioned child may also reference an
+Other partitions remain unchanged. Horizon finalization drops hidden losers and
+cascade orphans in that scope; checkpoint import rebuilds candidates and support
+in its group partition. An unpartitioned existence-base import rebuilds only its
+connected constraint graph. [Partition horizon evidence](mergeable-horizon.md#evidence)
+covers eviction, offline rebootstrap and interruption recovery.
+A partitioned child may also reference an
 unpartitioned logged parent; its liveness and puppets use the existing keyless
 log contract. Partitioned existence logs remain deferred. These native shapes
 are tested in `rocky-secure`'s `partition_foreign_keys` module; builder and Room

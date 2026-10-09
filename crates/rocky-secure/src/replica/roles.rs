@@ -111,6 +111,30 @@ impl ScopeFrontier {
         Ok(())
     }
 }
+pub(crate) const MAX_FRONTIER_SCOPES: usize = 64;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FrontierState {
+    pub(crate) frontier: ScopeFrontier,
+    pub(crate) signed: Option<Box<rocky_credentials::SignedHorizon>>,
+    pub(crate) behind: bool,
+}
+
+pub(crate) fn validate_frontiers(frontiers: &[ScopeFrontier]) -> Result<(), Error> {
+    if frontiers.is_empty()
+        || frontiers.len() > MAX_FRONTIER_SCOPES
+        || frontiers
+            .iter()
+            .map(|frontier| frontier.scope)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != frontiers.len()
+    {
+        return Err(denied("invalid frontier batch"));
+    }
+    Ok(())
+}
+
 /// Frames a peer lacks, in author and sequence order.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangePage {
@@ -379,12 +403,21 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         frontier: &ScopeFrontier,
     ) -> Result<(), Error> {
-        frontier.validate()?;
+        self.record_frontiers(peer, credentials, std::slice::from_ref(frontier))
+            .await
+    }
+    pub(crate) async fn record_frontiers(
+        &mut self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        frontiers: &[ScopeFrontier],
+    ) -> Result<(), Error> {
+        for frontier in frontiers {
+            frontier.validate()?;
+        }
         if peer == self.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        // A peer of a newer generation cannot be verified here; its report
-        // is not recorded, which only delays pruning.
         if credentials
             .0
             .first()
@@ -392,43 +425,45 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(());
         }
-        let grants = self.peer_grants(peer, credentials)?;
-        let whole = |right: Right| {
-            grants.iter().any(|grant| {
-                grant.scope == frontier.scope
-                    && grant.rows == RowSelection::All
-                    && grant.rights.contains(&right)
-            })
-        };
-        let reads = whole(Right::Read);
-        if !reads && !whole(Right::Custody) {
-            return Err(denied("acknowledgment right denied"));
+        let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+        let grants = self.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
+        let mut reports = Vec::new();
+        for frontier in frontiers {
+            let whole = |right: Right| {
+                grants.iter().any(|grant| {
+                    grant.scope == frontier.scope
+                        && grant.rows == RowSelection::All
+                        && grant.rights.contains(&right)
+                })
+            };
+            let reads = whole(Right::Read);
+            if !reads && !whole(Right::Custody) {
+                return Err(denied("acknowledgment right denied"));
+            }
+            reports.push((encode(&frontier.scope)?, frontier.logs.clone(), reads));
         }
-        let scope = encode(&frontier.scope)?;
-        let logs = frontier.logs.clone();
         transaction!(self, |inner| {
-            for log in &logs {
-                inner
-                    .conn
-                    .execute(
+            for (scope, logs, reads) in &reports {
+                for log in logs {
+                    inner.conn.execute(
                         "INSERT INTO secure_peer_frontiers VALUES(?,?,?,?,?) ON CONFLICT(peer,scope,author) DO UPDATE SET held=MAX(held,excluded.held),applied=MAX(applied,excluded.applied)",
                         bindings(vec![
                             SqlValue::Blob(peer.as_bytes().to_vec()),
                             SqlValue::Blob(scope.clone()),
                             SqlValue::Blob(log.author.as_bytes().to_vec()),
                             SqlValue::Integer(log.held.min(i64::MAX as u64) as i64),
-                            SqlValue::Integer(if reads {
+                            SqlValue::Integer(if *reads {
                                 log.applied.min(i64::MAX as u64) as i64
                             } else {
                                 0
                             }),
                         ]),
-                    )
-                    .await?;
+                    ).await?;
+                }
             }
             Ok(())
         })?;
-        // No flush: a lost report only delays pruning, which commits later.
+        // A lost report only delays pruning, which flushes before publishing.
         Ok(())
     }
     /// What `peer` last reported for one log: (held, applied) next sequences.
@@ -501,7 +536,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<RangePage, Error> {
         request.validate()?;
         let scope = request.scope;
-        let grants = self.peer_grants(peer, credentials)?;
+        let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
         // A peer of an earlier generation is sent nothing it cannot admit:
         // a log stops at its first newer frame.
         let reach = credentials
@@ -906,5 +941,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
             role,
             scopes: status,
         })
+    }
+}
+impl<A: RowApplication> EncryptedReplica<A> {
+    pub(crate) async fn exchange_frontiers(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        frontiers: &[ScopeFrontier],
+    ) -> Result<Vec<FrontierState>, Error> {
+        validate_frontiers(frontiers)?;
+        let mut inner = self.inner.lock().await;
+        // Verify the entire request before publishing any scope's metadata.
+        let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+        inner.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
+        inner.record_frontiers(peer, credentials, frontiers).await?;
+        let mut states = Vec::new();
+        for frontier in frontiers {
+            states.push(FrontierState {
+                frontier: inner.frontier(frontier.scope).await?,
+                signed: inner.mergeable_horizon(frontier.scope).await?,
+                behind: inner.horizon_device_behind(frontier.scope, peer).await?
+                    || inner
+                        .horizon_device_behind(frontier.scope, inner.config.node.public_key())
+                        .await?,
+            });
+        }
+        Ok(states)
     }
 }

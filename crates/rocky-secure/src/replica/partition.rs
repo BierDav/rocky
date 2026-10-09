@@ -30,6 +30,33 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(grants)
     }
+    pub(super) fn resolve_chain_scopes_at(
+        &self,
+        chain: &CredentialChain,
+        manifest: Commitment,
+        key: PublicKey,
+        policy: &PolicyStatement,
+        time: u64,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let (mut grants, selectors) = chain
+            .verify_selectors(self.config.publisher, manifest, key, policy, time)
+            .map_err(credential)?;
+        grants.retain(|grant| scopes.contains(&grant.scope));
+        for scope in scopes {
+            if let Some(tuple) = self.partitions.get(scope) {
+                for selector in &selectors {
+                    if let Some(grant) = selector
+                        .resolve(scope.domain, scope.table, tuple)
+                        .map_err(credential)?
+                    {
+                        grants.push(grant);
+                    }
+                }
+            }
+        }
+        Ok(grants)
+    }
     pub(super) fn resolve_chain(
         &self,
         chain: &CredentialChain,
@@ -422,5 +449,70 @@ impl<A: RowApplication> Inner<A> {
             &typed.rows.schema().views,
         )
         .map_err(|error| Error::Sql(crate::sql::SqlError::Unsupported(error)))
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Packs complete selected group partitions into bounded frontier exchanges.
+    pub(crate) async fn frontier_batches(
+        &self,
+        scopes: &[ResourceScope],
+        limit: usize,
+    ) -> Result<Vec<Vec<ResourceScope>>, Error> {
+        let inner = self.inner.lock().await;
+        let mut groups = BTreeMap::<(rocky_core::Scope, Commitment), Vec<ResourceScope>>::new();
+        for scope in scopes {
+            let address =
+                if let (Some(typed), Some(tuple)) = (&inner.typed, inner.partitions.get(scope)) {
+                    let table = typed
+                        .rows
+                        .table(&scope.table)
+                        .ok_or_else(|| denied("unknown partition table"))?;
+                    let schema = typed.rows.schema();
+                    let logical = schema
+                        .table(&table.sql_name)
+                        .ok_or_else(|| denied("unknown partition table"))?;
+                    let values = logical
+                        .partition_by
+                        .iter()
+                        .map(|name| {
+                            let column = logical
+                                .column(name)
+                                .ok_or_else(|| denied("unknown partition column"))?;
+                            tuple
+                                .values()
+                                .get(&schema.field_id(logical, column))
+                                .ok_or_else(|| denied("missing partition value"))?
+                                .value()
+                                .map_err(|error| denied(&error.to_string()))
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    schema
+                        .group_address(scope.domain, &table.sql_name, &values)
+                        .map_err(|error| denied(&error.to_string()))?
+                        .commitment
+                } else {
+                    rocky_core::commitment("rocky.frontier-single-scope", &encode(scope)?)
+                };
+            groups
+                .entry((scope.domain, address))
+                .or_default()
+                .push(*scope);
+        }
+        let mut batches = Vec::new();
+        let mut batch = Vec::new();
+        for group in groups.into_values() {
+            if group.len() > limit {
+                return Err(denied("partition group exceeds frontier batch limit"));
+            }
+            if batch.len() + group.len() > limit {
+                batches.push(std::mem::take(&mut batch));
+            }
+            batch.extend(group);
+        }
+        if !batch.is_empty() {
+            batches.push(batch);
+        }
+        Ok(batches)
     }
 }

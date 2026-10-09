@@ -18,9 +18,10 @@ naturally holds.
 | [0041](0041-partition-constraint-state.md) | Partition constraint identities, current private state and catalog verification |
 | [0042](0042-bounded-strong-cut.md) | A strong cut named by its checkpoint base |
 | [0043](0043-partition-horizon-state.md) | Partition horizon state and pending dependency index |
+| [0044](0044-group-frontier-exchange.md) | Bounded authenticated group frontier exchange |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves; the next unreserved record is 0044.
+not reused. 0038 is reserved for row moves; the next unreserved record is 0045.
 
 ## Rationale by topic
 

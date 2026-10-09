@@ -213,7 +213,10 @@ measurement (`cargo test -p rocky-secure --lib measure_200_partitions --locked
 The [phase 4 qualification](../features_06/04-partition-aware-constraints.md#qualification-on-the-assigned-base)
 reran this probe on 2026-10-09: initialization 7.616 s, catch-up 14.562 s,
 checkpoints 5.285 s, reopen 1.068 s and metadata 409.6 B per partition. All review
-budgets passed. This is a single-table probe, not phase 9's group-sync measurement.
+budgets passed. This is a single-table probe. The [phase 9 group-sync measurement](../features_06/09-group-sync-measurement.md)
+compares one and four ERP tables, including authenticated idle sync. The SDK
+exchanges group-member frontiers together; keys, logs and checkpoints stay
+per table scope ([Decision 0044](../decisions/0044-group-frontier-exchange.md)).
 
 ## Design rationale
 

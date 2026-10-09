@@ -155,6 +155,21 @@ impl<A: RowApplication> Inner<A> {
         let statement = self.config.policy.statement.clone();
         self.verify_chain_with(chain, key, &statement, time)
     }
+    /// Verifies current authority, resolving selectors only for requested scopes.
+    pub(crate) fn verify_chain_scopes(
+        &self,
+        chain: &CredentialChain,
+        key: PublicKey,
+        time: u64,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let manifest = chain
+            .0
+            .first()
+            .map_or(self.manifest, |root| root.capability.manifest);
+        let policy = self.credential_policy(manifest, &self.config.policy.statement)?;
+        self.resolve_chain_scopes_at(chain, manifest, key, &policy, time, scopes)
+    }
     /// `verify_chain` with a statement of the current generation: the
     /// live policy, or a historical statement of the epoch a credential was
     /// issued at. An earlier generation's chain verifies under its last

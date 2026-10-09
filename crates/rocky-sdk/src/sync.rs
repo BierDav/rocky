@@ -126,7 +126,8 @@ async fn rows(
     for _ in 0..SESSIONS {
         let mut session = session(upstream).await?;
         let mut exhausted = false;
-        for scope in scopes {
+        let changed = session.changed_scopes(replica, scopes).await?;
+        for scope in &changed {
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session.catch_up(replica, *scope, QUOTA).await?;
             if pulled.behind && !pulled.exhausted {

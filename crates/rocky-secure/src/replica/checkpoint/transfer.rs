@@ -55,7 +55,7 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        let grants = self.verify_chain(credentials, peer, now()?)?;
+        let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
         if !grants.iter().any(|grant| {
             grant.scope == scope
                 && grant.rows == RowSelection::All

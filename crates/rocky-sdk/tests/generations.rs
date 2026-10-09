@@ -41,6 +41,31 @@ fn text(value: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn idle_old_member_still_reports_a_newer_peer_generation() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::create(&a_dir, network("a"))?;
+    let b = Device::join(
+        &b_dir,
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    b.sync().await.expect("initial idle sync");
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    assert_eq!(
+        b.sync().await.expect("idle generation sync")["upgrade"],
+        true
+    );
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());

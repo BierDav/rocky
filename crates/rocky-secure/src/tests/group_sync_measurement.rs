@@ -1,0 +1,470 @@
+use super::*;
+use rocky_core::RowApplication;
+use rocky_core::{
+    DomainId, PartitionSelection, PartitionSelector, PartitionTuple, PartitionValue, RowIdentity,
+    SchemaDefinition, SqlValue, TypedRows,
+};
+use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
+use std::path::Path;
+
+use crate::network::NativeSession;
+use std::time::{Duration, Instant};
+
+mod fixture;
+use fixture::Fixture;
+
+async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
+    let inner = replica.inner.lock().await;
+    let rows = crate::storage::rows(&inner.conn, "PRAGMA page_count")
+        .await
+        .unwrap();
+    let SqlValue::Integer(pages) = rows[0][0] else {
+        panic!("page count")
+    };
+    let rows = crate::storage::rows(&inner.conn, "PRAGMA page_size")
+        .await
+        .unwrap();
+    let SqlValue::Integer(size) = rows[0][0] else {
+        panic!("page size")
+    };
+    pages * size
+}
+
+// Same row/existence/horizon sequence as rocky-sdk::sync::rows, over loopback TCP.
+async fn sync(
+    writer: &EncryptedReplica<TypedRows>,
+    reader: &EncryptedReplica<TypedRows>,
+    scopes: &[ResourceScope],
+) -> Vec<ResourceScope> {
+    let (writer_node, writer_credentials) = {
+        let inner = writer.inner.lock().await;
+        (inner.config.node.clone(), inner.config.credentials.clone())
+    };
+    let (reader_node, reader_credentials) = {
+        let inner = reader.inner.lock().await;
+        (inner.config.node.clone(), inner.config.credentials.clone())
+    };
+    let writer_peer = writer_node.public_key();
+    let reader_peer = reader_node.public_key();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut visited = BTreeSet::new();
+    for attempt in 1..=16 {
+        let server = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
+            let mut session = NativeSession::accept(
+                stream,
+                writer_node.clone(),
+                writer_credentials.clone(),
+                |peer| *peer == reader_peer,
+                MAX_SECURE_BYTES,
+            )
+            .await
+            .unwrap();
+            session.serve(writer).await.unwrap();
+        };
+        let client = async {
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.set_nodelay(true).unwrap();
+            let mut session = NativeSession::authenticate(
+                stream,
+                reader_node.clone(),
+                reader_credentials.clone(),
+                writer_peer,
+                MAX_SECURE_BYTES,
+            )
+            .await
+            .unwrap();
+            let changed = session.changed_scopes(reader, scopes).await.unwrap();
+            let mut exhausted = false;
+            for scope in &changed {
+                let pulled = session
+                    .catch_up(reader, *scope, MAX_SECURE_FRAME / 2)
+                    .await
+                    .unwrap();
+                assert!(!pulled.behind);
+                if pulled.exhausted {
+                    exhausted = true;
+                    break;
+                }
+                let pushed = session
+                    .push(reader, *scope, MAX_SECURE_FRAME / 2)
+                    .await
+                    .unwrap();
+                assert!(!pushed.behind);
+                if pushed.exhausted {
+                    exhausted = true;
+                    break;
+                }
+            }
+            if !exhausted {
+                for scope in reader.existence_scopes().await.unwrap() {
+                    session.sync_existence(reader, scope).await.unwrap();
+                }
+                for scope in scopes {
+                    session
+                        .acknowledge_mergeable_horizon(reader, *scope)
+                        .await
+                        .unwrap();
+                }
+            }
+            session.close().await.unwrap();
+            (changed, exhausted)
+        };
+        let (_, (changed, exhausted)) = tokio::join!(server, client);
+        visited.extend(changed);
+        if !exhausted {
+            println!("P09 sync_sessions={attempt}");
+            return scopes
+                .iter()
+                .copied()
+                .filter(|scope| visited.contains(scope))
+                .collect();
+        }
+        println!("P09 session={attempt} exhausted; resuming");
+    }
+    panic!("SDK sync session budget exhausted")
+}
+
+async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], partitions: i64) {
+    let inner = replica.inner.lock().await;
+    for name in names {
+        let rows = crate::storage::rows(
+            &inner.conn,
+            &format!("SELECT count(*) FROM {name} WHERE row_kind=0"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows[0][0], SqlValue::Integer(partitions), "{name}");
+    }
+}
+
+struct Measurement {
+    open: Duration,
+    register: Duration,
+    author: Duration,
+    catch_up: Duration,
+    idle: Duration,
+    checkpoint: Duration,
+    reopen: Duration,
+    metadata: f64,
+}
+
+async fn measure(tables: usize, partitions: i64) -> Measurement {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(tables);
+    let names: Vec<_> = ["customers", "orders", "order_lines", "attachments"]
+        .into_iter()
+        .take(tables)
+        .collect();
+    let path = root.path().join("writer.sqlite");
+    let node = PrivateKey::new();
+    let started = Instant::now();
+    let writer = f
+        .open(
+            &path,
+            node.clone(),
+            f.grants(
+                None,
+                &[
+                    Right::Read,
+                    Right::Insert,
+                    Right::Update,
+                    Right::Delete,
+                    Right::Custody,
+                ],
+            ),
+            Some((PrivateKey::new(), 1)),
+            vec![],
+        )
+        .await;
+    let open = started.elapsed();
+    writer
+        .install_key(KeyMaterial {
+            scope: f.scope("products", 0),
+            generation: 1,
+            key: [8; 32],
+        })
+        .await
+        .unwrap();
+    let empty = database_bytes(&writer).await;
+    let started = Instant::now();
+    for partition in 1..=partitions {
+        f.keys(&writer, partition, &names).await;
+    }
+    let register = started.elapsed();
+    let metadata = (database_bytes(&writer).await - empty) as f64 / partitions as f64;
+    let started = Instant::now();
+    writer
+        .author_bundle([0; 32], vec![f.write("products", 0)], vec![])
+        .await
+        .unwrap();
+    for partition in 1..=partitions {
+        writer
+            .author_bundle(
+                rocky_core::commitment("erp-bundle", &partition.to_be_bytes()),
+                names.iter().map(|name| f.write(name, partition)).collect(),
+                vec![],
+            )
+            .await
+            .unwrap();
+    }
+    writer.flush().await.unwrap();
+    let author = started.elapsed();
+    let reader = f
+        .open(
+            &root.path().join("reader.sqlite"),
+            PrivateKey::new(),
+            f.grants(
+                None,
+                &[
+                    Right::Read,
+                    Right::Insert,
+                    Right::Update,
+                    Right::Delete,
+                    Right::Custody,
+                ],
+            ),
+            None,
+            vec![],
+        )
+        .await;
+    reader
+        .install_key(KeyMaterial {
+            scope: f.scope("products", 0),
+            generation: 1,
+            key: [8; 32],
+        })
+        .await
+        .unwrap();
+    for partition in 1..=partitions {
+        f.keys(&reader, partition, &names).await;
+    }
+    let scopes: Vec<_> = std::iter::once(f.scope("products", 0))
+        .chain(
+            (1..=partitions)
+                .flat_map(|partition| names.iter().map(move |name| (name, partition)))
+                .map(|(name, partition)| f.scope(name, partition)),
+        )
+        .collect();
+    let started = Instant::now();
+    assert_eq!(sync(&writer, &reader, &scopes).await.len(), scopes.len());
+    let catch_up = started.elapsed();
+    let started = Instant::now();
+    assert!(sync(&writer, &reader, &scopes).await.is_empty());
+    let idle = started.elapsed();
+    println!(
+        "P09 sync_stage tables={tables} catch_up_ms={} idle_ms={}",
+        catch_up.as_millis(),
+        idle.as_millis()
+    );
+    assert_rows(&reader, &names, partitions).await;
+    let started = Instant::now();
+    for scope in &scopes {
+        writer.checkpoint(*scope).await.unwrap();
+    }
+    let checkpoint = started.elapsed();
+    drop(writer);
+    let started = Instant::now();
+    let keys = std::iter::once(f.key("products", 0))
+        .chain(
+            (1..=partitions)
+                .flat_map(|partition| names.iter().map(move |name| (name, partition)))
+                .map(|(name, partition)| f.key(name, partition)),
+        )
+        .collect();
+    let reopened = f
+        .open(
+            &path,
+            node,
+            f.grants(
+                None,
+                &[
+                    Right::Read,
+                    Right::Insert,
+                    Right::Update,
+                    Right::Delete,
+                    Right::Custody,
+                ],
+            ),
+            None,
+            keys,
+        )
+        .await;
+    let reopen = started.elapsed();
+    assert_rows(&reopened, &names, partitions).await;
+    for scope in &scopes {
+        reopened.audit(*scope).await.unwrap();
+    }
+    let result = Measurement {
+        open,
+        register,
+        author,
+        catch_up,
+        idle,
+        checkpoint,
+        reopen,
+        metadata,
+    };
+    println!(
+        "P09 partitions={partitions} tables={tables} scopes={} open_ms={} register_ms={} author_ms={} catch_up_ms={} idle_ms={} checkpoint_ms={} reopen_ms={} metadata_bytes_per_partition={metadata:.2}",
+        scopes.len(),
+        open.as_millis(),
+        register.as_millis(),
+        author.as_millis(),
+        catch_up.as_millis(),
+        idle.as_millis(),
+        checkpoint.as_millis(),
+        reopen.as_millis()
+    );
+    result
+}
+
+#[tokio::test]
+async fn erp_group_sync_preserves_all_references_and_reopens() {
+    measure(4, 2).await;
+}
+
+#[tokio::test]
+#[ignore = "phase 9 measurement; run with --ignored --nocapture"]
+async fn measure_200_partition_group_sync() {
+    let one = measure(1, 200).await;
+    let four = measure(4, 200).await;
+    for (name, one, four) in [
+        ("open", one.open, four.open),
+        ("register", one.register, four.register),
+        ("author", one.author, four.author),
+        ("catch_up", one.catch_up, four.catch_up),
+        ("idle", one.idle, four.idle),
+        ("checkpoint", one.checkpoint, four.checkpoint),
+        ("reopen", one.reopen, four.reopen),
+    ] {
+        println!(
+            "P09 additional_table {name}_ms={:.2}",
+            (four.as_secs_f64() - one.as_secs_f64()) * 1000.0 / 3.0
+        );
+    }
+    println!(
+        "P09 additional_table metadata_bytes_per_partition={:.2}",
+        (four.metadata - one.metadata) / 3.0
+    );
+}
+
+#[tokio::test]
+async fn batch_frontiers_preserve_horizons_and_refuse_ungranted_scopes() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new(4);
+    let writer = f
+        .open(
+            &root.path().join("writer.db"),
+            PrivateKey::new(),
+            f.grants(None, &[Right::Read]),
+            None,
+            vec![],
+        )
+        .await;
+    let reader = f
+        .open(
+            &root.path().join("reader.db"),
+            PrivateKey::new(),
+            f.grants(Some(&[1]), &[Right::Read]),
+            None,
+            vec![],
+        )
+        .await;
+    let names = ["customers", "orders", "order_lines", "attachments"];
+    for partition in 1..=2 {
+        f.keys(&writer, partition, &names).await;
+    }
+    f.keys(&reader, 1, &names).await;
+    let both: Vec<_> = (1..=2)
+        .flat_map(|partition| names.iter().map(move |name| (name, partition)))
+        .map(|(name, partition)| f.scope(name, partition))
+        .collect();
+    let batches = writer.frontier_batches(&both, 5).await.unwrap();
+    assert_eq!(batches.len(), 2);
+    assert!(batches.iter().all(|batch| batch.len() == 4
+        && (1..=2).any(|partition| {
+            names
+                .iter()
+                .all(|name| batch.contains(&f.scope(name, partition)))
+        })));
+    assert!(writer.frontier_batches(&both, 3).await.is_err());
+    let scopes: Vec<_> = names.iter().map(|name| f.scope(name, 1)).collect();
+    assert!(sync(&writer, &reader, &scopes).await.is_empty());
+    let signed = rocky_credentials::SignedHorizon::sign(
+        writer.horizon_statement(scopes[0], &[]).await.unwrap(),
+        &f.publisher,
+    )
+    .unwrap();
+    writer.receive_horizon(signed.clone()).await.unwrap();
+    assert_eq!(sync(&writer, &reader, &scopes).await, vec![scopes[0]]);
+    assert_eq!(
+        reader.admitted_horizon(scopes[0]).await.unwrap(),
+        Some(Box::new(signed))
+    );
+    let (peer, credentials) = {
+        let inner = reader.inner.lock().await;
+        (
+            inner.config.node.public_key(),
+            inner.config.credentials.clone(),
+        )
+    };
+    {
+        let inner = writer.inner.lock().await;
+        let time = now().unwrap();
+        let all = inner.verify_chain(&credentials, peer, time).unwrap();
+        for scope in &both {
+            let expected: Vec<_> = all
+                .iter()
+                .filter(|grant| grant.scope == *scope)
+                .cloned()
+                .collect();
+            assert_eq!(
+                inner
+                    .verify_chain_scopes(&credentials, peer, time, &[*scope])
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+    let mut allowed = reader.frontier(scopes[0]).await.unwrap();
+    allowed.logs.push(crate::FrontierLog {
+        author: peer,
+        held: 1,
+        applied: 1,
+    });
+    let denied = reader.frontier(f.scope("customers", 2)).await.unwrap();
+    assert!(
+        writer
+            .exchange_frontiers(peer, &credentials, &[allowed.clone(), denied])
+            .await
+            .is_err()
+    );
+    {
+        let inner = writer.inner.lock().await;
+        let rows = crate::storage::rows(&inner.conn, "SELECT count(*) FROM secure_peer_frontiers")
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0], SqlValue::Integer(0));
+    }
+    assert!(
+        writer
+            .exchange_frontiers(peer, &credentials, &[allowed.clone(), allowed.clone()])
+            .await
+            .is_err()
+    );
+    assert!(
+        writer
+            .exchange_frontiers(peer, &credentials, &[])
+            .await
+            .is_err()
+    );
+    assert!(
+        writer
+            .exchange_frontiers(peer, &credentials, &vec![allowed; 65])
+            .await
+            .is_err()
+    );
+}

@@ -42,7 +42,14 @@ only while its credentials grant whole-scope read.
 
 ### Syncing a scope
 
-`NativeSession` (label `rocky.native-session.v4`) pulls by frontier:
+The SDK exchanges selected group-member frontiers in bounded batches, retaining
+one scope per table and partition. Equal applied frontiers and horizons skip
+empty row transfers; existence logs and horizon acknowledgments still run.
+[Decision 0044](../decisions/0044-group-frontier-exchange.md) defines admission,
+limits and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
+provides the reproducible ERP comparison and its budgets.
+
+`NativeSession` (label `rocky.native-session.v5`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |

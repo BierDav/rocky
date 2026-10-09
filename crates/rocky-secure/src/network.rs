@@ -7,11 +7,15 @@ use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowApplication};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+use crate::replica::roles::FrontierState;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
 };
+
+mod frontiers;
 
 /// The stream a session runs over. The transport adds no security the
 /// session relies on; see `docs/runtime/permissions-and-sync.md`.
@@ -120,6 +124,12 @@ enum Message {
     /// The puller's frontier after a page, as acknowledgment.
     Held {
         frontier: ScopeFrontier,
+    },
+    FrontiersQuery {
+        frontiers: Vec<ScopeFrontier>,
+    },
+    Frontiers {
+        states: Vec<FrontierState>,
     },
     FrontierQuery {
         scope: ResourceScope,
@@ -313,9 +323,8 @@ impl NativeSession {
         }
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
         parts.sort_by_key(|(key, _)| *key);
-        // v3 adds range transfer, frontier acknowledgments and remote reads;
-        // older peers fail here.
-        let binding = signing_bytes("rocky.native-session.v4", &parts)?;
+        // The current wire label refuses every other session format.
+        let binding = signing_bytes("rocky.native-session.v5", &parts)?;
         write_frame(&mut stream, &encode(&local.sign(&binding))?).await?;
         let signature: Signature = decode(&read_frame(&mut stream).await?)?;
         if !peer.node.verify(&binding, &signature) {
@@ -1507,6 +1516,12 @@ impl NativeSession {
                     .acknowledge_frontier(self.peer, &self.credentials, &frontier)
                     .await?;
                 self.send(&Message::Acknowledged).await
+            }
+            Message::FrontiersQuery { frontiers } => {
+                let states = replica
+                    .exchange_frontiers(self.peer, &self.credentials, &frontiers)
+                    .await?;
+                self.send(&Message::Frontiers { states }).await
             }
             Message::FrontierQuery { scope } => {
                 replica

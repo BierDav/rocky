@@ -699,7 +699,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.verify_chain(credentials, node, now()?)?;
+        inner.verify_chain_scopes(credentials, node, now()?, &[])?;
         let bytes = encode(credentials)?;
         let mut rows = inner
             .conn

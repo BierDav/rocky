@@ -123,6 +123,14 @@ The Rust build cache is saved from `main` and restored on other refs.
 
 The `slow` job runs `./scripts/check --slow` on `main` and before releases.
 
+The `android` job runs only on pushes to `main`. It performs the release
+workflow's Android build steps to keep two caches warm: the Gradle and Kotlin
+CLI toolchain files, and the Cargo registry with the native target directory of
+`sdks/native`. The release workflow's Android job restores both and saves them
+again, keyed by the files that decide their content, so a nightly build does not
+recompile the Android runtime from nothing. The cache keys are identical in both
+workflows; changing them means one cold build.
+
 Required status checks are a hosting setting; the workflow file does not configure
 branch protection. No remotely hosted CI run has been verified by this baseline.
 

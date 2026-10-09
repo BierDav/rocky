@@ -202,3 +202,94 @@ jobs:
         with:
           path: passed
           key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
+
+  android:
+    # Runs the release workflow's Android build steps to keep its caches warm:
+    # Gradle and Kotlin CLI toolchain files, and the Cargo registry with the
+    # native target directory. The release restores both and saves them again,
+    # so a nightly build does not recompile the Android runtime from nothing.
+    # The cache keys must stay identical to the release workflow's Android job.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Restore the Android toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle
+            ~/.cache/JetBrains/Kotlin
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          restore-keys: |
+            android-tooling-${{ runner.os }}-
+
+      - name: Restore the Android native cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/sdks/native/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The versions docs/runtime/android.md names.
+      - name: Install the Android platform and NDK
+        run: |
+          set -euo pipefail
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "${sdkmanager}" --licenses > /dev/null || true
+          "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Install the repository toolchain
+        working-directory: source
+        run: rustup show active-toolchain
+
+      - name: Build the Android runtime
+        working-directory: source
+        run: sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
+
+      - name: Package the Android SDK
+        working-directory: source
+        run: |
+          # shellcheck disable=SC1010 # `do` is the toolchain's command
+          ./kotlin do packageAndroid -m rocky-runtime-android
+
+      - name: Save the Android toolchain cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle
+            ~/.cache/JetBrains/Kotlin
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+
+      - name: Save the Android native cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/sdks/native/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}

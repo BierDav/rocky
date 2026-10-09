@@ -192,6 +192,18 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
     Ok(())
 }
 
+/// The scopes of the latest `scopes_refused` event, if any.
+async fn refused(peer: &Peer) -> Result<Option<Vec<Value>>, Failure> {
+    let activity = peer.call(json!({"type":"activity"})).await?;
+    Ok(activity["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|event| event["kind"] == "scopes_refused")
+        .and_then(|event| event["scopes"].as_array().cloned()))
+}
+
 fn kinds(activity: &Value) -> Vec<String> {
     activity["events"]
         .as_array()
@@ -428,10 +440,20 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
         lists.push(peer.insert("lists", None, &sql).await?);
     }
-    // Each sync offers the peer a partition it has no tuple for; neither
-    // direction may end the session, or no key could ever cross.
+    // Each sync offers the peer a partition it has no tuple for. The peer
+    // refuses that list's group members alone; the session goes on.
     for peer in [&a, &b] {
         peer.call(json!({"type":"sync"})).await?;
+        let tables: Vec<_> = refused(peer)
+            .await?
+            .ok_or("no refusal recorded")?
+            .iter()
+            .map(|scope| scope["table"].clone())
+            .collect();
+        assert_eq!(
+            tables,
+            [json!("categories"), json!("items"), json!("lists")]
+        );
     }
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
         let node = to.call(json!({"type":"session"})).await?["node"].clone();
@@ -451,6 +473,8 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
             [json!("From a"), json!("From b")]
         );
     }
+    // Once both hold both lists, nothing is refused any more.
+    assert_eq!(refused(&a).await?, Some(Vec::new()));
     for peer in [a, b] {
         peer.database.close().await?;
     }

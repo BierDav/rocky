@@ -36,7 +36,7 @@ impl Protocol {
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Sync => b"rocky/native-session/6",
+            Self::Sync => b"rocky/native-session/7",
             Self::Renew => b"rocky/sdk-renew/1",
             Self::Command => b"rocky/command/1",
             Self::Coordinate => b"rocky/coordinator/1",

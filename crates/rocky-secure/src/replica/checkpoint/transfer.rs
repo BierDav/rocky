@@ -55,19 +55,8 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<(), Error> {
-        // A partition not learned here has nothing to disclose, and the peer's
-        // grant needs its tuple. Frames the peer carries are admitted by their
-        // authors' grants; refusing would end the session that brings it.
-        if self.partitioned(scope) && !self.partitions.contains_key(&scope) {
-            self.verify_chain(credentials, peer, now()?)?;
-            return Ok(());
-        }
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
-        if !grants.iter().any(|grant| {
-            grant.scope == scope
-                && grant.rows == RowSelection::All
-                && (grant.rights.contains(&Right::Custody) || grant.rights.contains(&Right::Read))
-        }) {
+        if !crate::replica::roles::holds_whole(&grants, scope) {
             return Err(denied("ciphertext custody denied"));
         }
         Ok(())

@@ -119,6 +119,33 @@ pub(crate) struct FrontierState {
     pub(crate) signed: Option<Box<rocky_credentials::SignedHorizon>>,
     pub(crate) behind: bool,
 }
+/// One member's answer in a frontier batch, in request order.
+#[derive(Serialize, Deserialize)]
+pub(crate) enum FrontierReply {
+    Held(FrontierState),
+    /// The asking peer may not hold the whole scope here, including a
+    /// partition whose tuple this replica has not learned. Only this member
+    /// is skipped; the session goes on.
+    Refused(ResourceScope),
+}
+impl FrontierReply {
+    pub(crate) fn scope(&self) -> ResourceScope {
+        match self {
+            Self::Held(state) => state.frontier.scope,
+            Self::Refused(scope) => *scope,
+        }
+    }
+}
+
+/// Whether `grants` let their holder keep the whole scope, by read or custody.
+/// A partition's selector grants resolve only against a learned tuple.
+pub(crate) fn holds_whole(grants: &[rocky_core::ResourceGrant], scope: ResourceScope) -> bool {
+    grants.iter().any(|grant| {
+        grant.scope == scope
+            && grant.rows == RowSelection::All
+            && (grant.rights.contains(&Right::Custody) || grant.rights.contains(&Right::Read))
+    })
+}
 
 pub(crate) fn validate_frontiers(frontiers: &[ScopeFrontier]) -> Result<(), Error> {
     if frontiers.is_empty()
@@ -427,14 +454,18 @@ impl<A: RowApplication> Inner<A> {
         }
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
+        self.store_frontiers(peer, &grants, frontiers).await
+    }
+    /// Records frontiers under already verified `grants`; each member needs
+    /// whole-scope read or custody.
+    async fn store_frontiers(
+        &mut self,
+        peer: PublicKey,
+        grants: &[rocky_core::ResourceGrant],
+        frontiers: &[ScopeFrontier],
+    ) -> Result<(), Error> {
         let mut reports = Vec::new();
         for frontier in frontiers {
-            // A partition not learned here has no tuple to resolve the peer's
-            // grant: its report covers nothing yet, and refusing it would end
-            // the session that brings the partition.
-            if self.partitioned(frontier.scope) && !self.partitions.contains_key(&frontier.scope) {
-                continue;
-            }
             let whole = |right: Right| {
                 grants.iter().any(|grant| {
                     grant.scope == frontier.scope
@@ -948,24 +979,63 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peer: PublicKey,
         credentials: &CredentialChain,
         frontiers: &[ScopeFrontier],
-    ) -> Result<Vec<FrontierState>, Error> {
+    ) -> Result<Vec<FrontierReply>, Error> {
         validate_frontiers(frontiers)?;
+        for frontier in frontiers {
+            frontier.validate()?;
+        }
         let mut inner = self.inner.lock().await;
+        if peer == inner.config.node.public_key() {
+            return Err(denied("a replica cannot acknowledge itself"));
+        }
         // Verify the entire request before publishing any scope's metadata.
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
-        inner.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
-        inner.record_frontiers(peer, credentials, frontiers).await?;
-        let mut states = Vec::new();
+        let grants = inner.verify_chain_scopes(credentials, peer, now()?, &scopes)?;
+        let held: Vec<_> = frontiers
+            .iter()
+            .filter(|frontier| holds_whole(&grants, frontier.scope))
+            .cloned()
+            .collect();
+        inner.store_frontiers(peer, &grants, &held).await?;
+        let mut replies = Vec::new();
         for frontier in frontiers {
-            states.push(FrontierState {
+            if !holds_whole(&grants, frontier.scope) {
+                replies.push(FrontierReply::Refused(frontier.scope));
+                continue;
+            }
+            replies.push(FrontierReply::Held(FrontierState {
                 frontier: inner.frontier(frontier.scope).await?,
                 signed: inner.mergeable_horizon(frontier.scope).await?,
                 behind: inner.horizon_device_behind(frontier.scope, peer).await?
                     || inner
                         .horizon_device_behind(frontier.scope, inner.config.node.public_key())
                         .await?,
-            });
+            }));
         }
-        Ok(states)
+        Ok(replies)
+    }
+    /// The members of `scopes` that `peer` may hold whole, in order, so a
+    /// client discloses no frontier to a peer outside a scope. A chain this
+    /// replica cannot verify, as of a newer generation, is not filtered.
+    pub(crate) async fn peer_holds(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<ResourceScope>, Error> {
+        let inner = self.inner.lock().await;
+        if credentials
+            .0
+            .first()
+            .is_some_and(|root| inner.known(root.capability.manifest).is_err())
+        {
+            return Ok(scopes.to_vec());
+        }
+        let grants = inner.verify_chain_scopes(credentials, peer, now()?, scopes)?;
+        Ok(scopes
+            .iter()
+            .copied()
+            .filter(|scope| holds_whole(&grants, *scope))
+            .collect())
     }
 }

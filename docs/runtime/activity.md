@@ -2,7 +2,7 @@
 
 `RockyDatabase.activity()` and `RockySession.activity()` expose a
 `Flow<RockyEvent>` describing background work: changed peer reachability,
-nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
+changed sets of scopes a peer refused, nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
 enrollment, renewal, revocation, author assignment and partition key/holding
 changes. Events follow successful local work; they are diagnostic observations,
 not durable receipts or proof that every peer has the latest data.
@@ -36,6 +36,12 @@ suppressed. Successful earlier parts of a sync that later fails may not appear
 as transfer events. Current readiness, holdings and network status remain the
 source for the current device state.
 
+`ScopesRefused` (`scopes_refused`) lists the scopes a sync with a peer skipped
+because one side may not hold them, typically a list the peer has not been
+shared yet ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
+It is recorded when that set changes for the peer; an empty list means nothing
+is refused any more.
+
 A transfer names the table and, for a partition, its encryption commitment.
 `GroupPartition.status()` reports the same per-table partition identifier so an
 application can label events with its own list/customer name. Keys and
@@ -64,5 +70,6 @@ returned token for pagination. Activity is shared by sessions on one database.
 
 `rocky-sdk` unit tests check ordered paging, bounded retention and suppression
 of duplicate events. `shared_lists` checks author installation through the
-renewal lane and reopening a checkpoint-received list with its child rows
-visible immediately. Kotlin household tests observe installed-key events.
+renewal lane, reopening a checkpoint-received list with its child rows
+visible immediately, and two issuers refusing each other's unshared list
+until it is shared. Kotlin household tests observe installed-key events.

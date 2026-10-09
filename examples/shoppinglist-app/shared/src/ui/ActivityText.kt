@@ -35,6 +35,10 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             else "Bootstrapping ${event.scopes} scopes from ${device(event.peer)}'s checkpoints")
         is RockyEvent.PeerReached -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Reached ${device(event.peer)}")
         is RockyEvent.PeerUnreachable -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Cannot reach ${device(event.peer)}", event.error)
+        is RockyEvent.ScopesRefused -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network,
+            if (event.scopes.isEmpty()) "Syncing every list with ${device(event.peer)} again"
+            else "Not syncing ${event.scopes.size} tables with ${device(event.peer)} until shared",
+            event.scopes.joinToString("\n") { scope(it) })
         is RockyEvent.PeerAdded -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Added ${device(event.peer)} as a peer")
         is RockyEvent.PeerRemoved -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Removed peer ${device(event.peer)}")
         is RockyEvent.Renewed -> ActivityEntry(key, event.atEpochMillis, EntryKind.Credentials,

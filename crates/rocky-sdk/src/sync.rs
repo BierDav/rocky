@@ -58,11 +58,22 @@ impl Moved {
 #[derive(Debug, Default)]
 pub(crate) struct Transfer {
     pub scopes: Vec<(ResourceScope, Moved)>,
+    /// Scopes the peer and this device did not exchange: one side's
+    /// credentials, as the other sees them, grant no whole-scope access.
+    pub refused: Vec<ResourceScope>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
         for (scope, moved) in other.scopes {
             self.add(scope, moved);
+        }
+        self.refuse(&other.refused);
+    }
+    fn refuse(&mut self, scopes: &[ResourceScope]) {
+        for scope in scopes {
+            if !self.refused.contains(scope) {
+                self.refused.push(*scope);
+            }
         }
     }
     fn add(&mut self, scope: ResourceScope, moved: Moved) {
@@ -190,8 +201,9 @@ async fn rows(
     for _ in 0..SESSIONS {
         let mut session = session(upstream).await?;
         let mut exhausted = false;
-        let changed = session.changed_scopes(replica, scopes).await?;
-        for scope in &changed {
+        let exchange = session.changed_scopes(replica, scopes).await?;
+        transfer.refuse(&exchange.refused);
+        for scope in &exchange.changed {
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session.catch_up(replica, *scope, QUOTA).await?;
             let mut moved = Moved {
@@ -245,9 +257,12 @@ async fn rows(
                 session.sync_existence(replica, scope).await?;
             }
             for scope in scopes {
-                session
-                    .acknowledge_mergeable_horizon(replica, *scope)
-                    .await?;
+                // A refused scope is not exchanged with this peer at all.
+                if !exchange.refused.contains(scope) {
+                    session
+                        .acknowledge_mergeable_horizon(replica, *scope)
+                        .await?;
+                }
                 if let Some(signed) = replica.admitted_horizon(*scope).await?
                     && replica.finalized_horizon(*scope).await?.as_ref() != Some(&signed)
                     && !replica.horizon_rebootstrap_required(*scope).await?

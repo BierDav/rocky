@@ -177,6 +177,8 @@ impl Drop for SyncActivity {
 struct Reached {
     at: u64,
     error: Option<String>,
+    /// Scopes the last successful sync with the peer did not exchange.
+    refused: Vec<ResourceScope>,
 }
 
 pub(crate) struct Node {
@@ -1493,10 +1495,14 @@ impl Node {
     fn record_reach(
         &self,
         peer: PublicKey,
-        before: Option<Option<String>>,
+        before: Option<Reached>,
         result: &Result<(bool, bool, sync::Transfer), Failure>,
     ) {
         let peer_hex = peer.to_hex();
+        let (before, refused_before) = match before {
+            Some(reached) => (Some(reached.error), reached.refused),
+            None => (None, Vec::new()),
+        };
         match result {
             Err(error) => {
                 let error = error.to_string();
@@ -1511,6 +1517,18 @@ impl Node {
                 if !matches!(before, Some(None)) {
                     self.activity
                         .record("peer_reached", json!({"peer": peer_hex}));
+                }
+                // Recorded when the set changes, not on every sync.
+                if transfer.refused != refused_before {
+                    let scopes: Vec<Value> = transfer
+                        .refused
+                        .iter()
+                        .map(|scope| self.scope_label(scope))
+                        .collect();
+                    self.activity.record(
+                        "scopes_refused",
+                        json!({"peer": peer_hex, "scopes": scopes}),
+                    );
                 }
                 if transfer.scopes.is_empty() {
                     return;
@@ -1707,14 +1725,19 @@ impl Node {
                 }
             }
             let error = result.as_ref().err().map(ToString::to_string);
+            let refused = match &result {
+                Ok((_, _, transfer)) => transfer.refused.clone(),
+                Err(_) => Vec::new(),
+            };
             let before = self.reached()?.insert(
                 *peer,
                 Reached {
                     at: now()?,
                     error: error.clone(),
+                    refused,
                 },
             );
-            self.record_reach(*peer, before.map(|reached| reached.error), &result);
+            self.record_reach(*peer, before, &result);
             match result {
                 Ok((behind, pending, _)) => {
                     connected += 1;

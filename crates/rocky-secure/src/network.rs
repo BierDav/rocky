@@ -8,7 +8,7 @@ use rocky_core::{Commitment, ResourceScope, RowApplication};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::replica::roles::FrontierState;
+use crate::replica::roles::FrontierReply;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,6 +16,7 @@ use tokio::{
 };
 
 mod frontiers;
+pub use frontiers::FrontierExchange;
 
 /// Bytes of one checkpoint page. A page carries its scope's strong state
 /// whole, the latest confirmed command with its credential chains included,
@@ -136,7 +137,7 @@ enum Message {
         partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
     },
     Frontiers {
-        states: Vec<FrontierState>,
+        states: Vec<FrontierReply>,
     },
     FrontierQuery {
         scope: ResourceScope,
@@ -331,7 +332,7 @@ impl NativeSession {
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
         parts.sort_by_key(|(key, _)| *key);
         // The current wire label refuses every other session format.
-        let binding = signing_bytes("rocky.native-session.v6", &parts)?;
+        let binding = signing_bytes("rocky.native-session.v7", &parts)?;
         write_frame(&mut stream, &encode(&local.sign(&binding))?).await?;
         let signature: Signature = decode(&read_frame(&mut stream).await?)?;
         if !peer.node.verify(&binding, &signature) {

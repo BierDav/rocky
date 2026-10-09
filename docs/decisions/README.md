@@ -21,9 +21,10 @@ naturally holds.
 | [0043](0043-partition-horizon-state.md) | Partition horizon state and pending dependency index |
 | [0044](0044-group-frontier-exchange.md) | Bounded authenticated group frontier exchange |
 | [0045](0045-custody-partition-offers.md) | Custody partition offers in native session v6 |
+| [0046](0046-per-scope-frontier-refusal.md) | Per-scope frontier refusal in native session v7 |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves; the next unreserved record is 0046.
+not reused. 0038 is reserved for row moves; the next unreserved record is 0047.
 
 ## Rationale by topic
 

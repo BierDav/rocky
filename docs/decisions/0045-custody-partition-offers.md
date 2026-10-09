@@ -15,9 +15,8 @@ unexpected end of file.
 
 ## Decision
 
-The current native session is `rocky.native-session.v6`, with transport name
-`rocky/native-session/6`. Its handshake signature domain refuses all other
-versions. There is no earlier reader, negotiation or fallback.
+This record introduced native session v6;
+[decision 0046](0046-per-scope-frontier-refusal.md) defines the current version.
 
 `FrontiersQuery` carries `partitions`: `(scope, tuple)` pairs for members of the
 batch. A client includes a pair only when the serving peer's verified
@@ -29,7 +28,8 @@ in the batch, its tuple hashes to it, the server's own credentials grant custody
 without read, and the sender's credentials grant read or custody on that
 partition. Accepted pairs are registered in one transaction, under the existing
 4,096-partition bound. A known partition is unchanged. Any other offer refuses
-the request. Frontier exchange then authorizes every member as before.
+the request. Frontier exchange then authorizes each member, refusing only
+those the sender may not hold ([decision 0046](0046-per-scope-frontier-refusal.md)).
 
 ## Consequences
 

@@ -8,6 +8,7 @@ use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
 use std::path::Path;
 
 use crate::network::NativeSession;
+use crate::replica::roles::FrontierReply;
 use std::time::{Duration, Instant};
 
 mod fixture;
@@ -76,7 +77,11 @@ async fn sync(
             )
             .await
             .unwrap();
-            let changed = session.changed_scopes(reader, scopes).await.unwrap();
+            let changed = session
+                .changed_scopes(reader, scopes)
+                .await
+                .unwrap()
+                .changed;
             let mut exhausted = false;
             for scope in &changed {
                 let pulled = session
@@ -436,18 +441,27 @@ async fn batch_frontiers_preserve_horizons_and_refuse_ungranted_scopes() {
         applied: 1,
     });
     let denied = reader.frontier(f.scope("customers", 2)).await.unwrap();
+    // A member outside the peer's grants is refused alone; the rest is recorded.
+    let replies = writer
+        .exchange_frontiers(peer, &credentials, &[allowed.clone(), denied.clone()])
+        .await
+        .unwrap();
     assert!(
-        writer
-            .exchange_frontiers(peer, &credentials, &[allowed.clone(), denied])
-            .await
-            .is_err()
+        matches!(&replies[0], FrontierReply::Held(state) if state.frontier.scope == allowed.scope)
     );
+    assert!(matches!(replies[1], FrontierReply::Refused(scope) if scope == denied.scope));
     {
         let inner = writer.inner.lock().await;
-        let rows = crate::storage::rows(&inner.conn, "SELECT count(*) FROM secure_peer_frontiers")
-            .await
-            .unwrap();
-        assert_eq!(rows[0][0], SqlValue::Integer(0));
+        let rows = crate::storage::rows(
+            &inner.conn,
+            "SELECT DISTINCT scope FROM secure_peer_frontiers",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [[SqlValue::Blob(crate::encode(&allowed.scope).unwrap())]]
+        );
     }
     assert!(
         writer

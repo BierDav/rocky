@@ -96,6 +96,9 @@ and every reference between groups is refused natively and in Kotlin:
 - A keyless custody peer could not hold a list created after it enrolled, and a
   device syncing with it failed its whole batch as an end of file. Devices now
   offer partition tuples to custody ([decision 0045](../decisions/0045-custody-partition-offers.md)).
+- Two issuers that each created a list before meeting ended every session with
+  each other, so neither list could be shared. Each side now refuses only the
+  list it has not learned ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
 - Accepting a second list while a checkpoint-first bootstrap waited for a
   checkpoint peer was refused; it now joins the pending intent.
 - Importing a checkpoint of a list an item had moved out of failed on the

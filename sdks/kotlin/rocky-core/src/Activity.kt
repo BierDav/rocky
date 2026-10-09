@@ -29,6 +29,9 @@ sealed interface RockyEvent {
     data class PeerReached(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
     /** [peer] stopped answering, or failed differently than before. */
     data class PeerUnreachable(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
+    /** A sync with [peer] skipped [scopes]: one side may not hold them, or [peer] has not learned that partition yet. Empty once nothing is refused. */
+    data class ScopesRefused(override val sequence: Long, override val atEpochMillis: Long, val peer: String,
+        val scopes: List<ScopeName>) : RockyEvent
     data class PeerAdded(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
     data class PeerRemoved(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
     /** Credentials were renewed under policy [epoch], with [keys] new reader keys. */
@@ -68,6 +71,8 @@ sealed interface RockyEvent {
                 "bootstrap_finished" -> Bootstrap(sequence, at, text("peer"), null, finished = true)
                 "peer_reached" -> PeerReached(sequence, at, text("peer"))
                 "peer_unreachable" -> PeerUnreachable(sequence, at, text("peer"), text("error"))
+                "scopes_refused" -> ScopesRefused(sequence, at, text("peer"),
+                    event.getValue("scopes").jsonArray.map { ScopeName.of(it.jsonObject) })
                 "peer_added" -> PeerAdded(sequence, at, text("peer"))
                 "peer_removed" -> PeerRemoved(sequence, at, text("peer"))
                 "renewed" -> Renewed(sequence, at, event.long("epoch"), event.long("expires"), int("keys"))

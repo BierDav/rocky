@@ -10,8 +10,8 @@ import rocky.*
 /** The starter pairing makes a second issuer, which carries the list once the creator device is lost. */
 class IssuerRecoveryTest {
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
-    /** Room checks every table it declares, so a device reads the household tables too. */
-    private val writer = GrantProfile.Writer(ShoppingTables.toSet() + "devices" + "keys")
+    /** Room checks every table it declares, so a device reads the household and approval tables too. */
+    private val writer = GrantProfile.Writer(ShoppingTables.toSet() + listOf("devices", "keys", "identities", "requests", "decisions"))
     private val rooms = mutableMapOf<RockyDatabase, ShoppingDatabase>()
     private var list = 0L
     private fun RockyDatabase.withRoom(directory: File) = also { rooms[it] = openShoppingDatabase(directory, it) }
@@ -93,7 +93,8 @@ class IssuerRecoveryTest {
             // Joining asked the creator for its authors; a non-issuer cannot assign its own.
             assertEquals(emptyList(), x.installAuthors())
             assertFailsWith<RockyException> { x.credentials.assignPseudonym(x.credentials.pseudonymRequest("items")) }
-            assertEquals(writer, x.session().profile)
+            // The starter opt-out writes every table, the trusted-only ones included.
+            assertEquals(GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()), x.session().profile)
             val keys = Credentials.prepare(File(root, "y"))
             assertFailsWith<RockyException> { x.pairDevice() }
             assertFailsWith<RockyException> { x.pairing(writer) }

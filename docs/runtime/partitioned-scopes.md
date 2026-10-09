@@ -106,12 +106,15 @@ author; a device that holds it only installs the new epoch. The
 [shopping example](../../examples/shoppinglist-app/README.md) shares this way.
 
 **A partition the peer has not seen.** Two issuers may each create a
-partition before they next meet. A replica learns a partition's tuple from its
-frames, an envelope or a custody offer; until then it cannot resolve the peer's
-grant for it. It holds nothing of it either, so it skips the peer's frontier
-report for it, answers its range with an empty page and admits pushed frames by
-their authors' grants. Refusing would end the session, and with it the sync
-that carries the envelopes, in both directions.
+partition before they next meet. A replica learns a partition's tuple by
+installing its envelope or from a custody offer; until then it cannot resolve
+the peer's grant for it, so it refuses that member of the frontier batch.
+Only that member is skipped: the session goes on for every other scope, and the
+partition is neither pulled, pushed nor horizon-acknowledged with that peer.
+Range, push and checkpoint requests for it stay refused, so the replica never
+holds or serves its ciphertext. The SDK records `scopes_refused`; once the
+partition is shared and installed, the next sync exchanges it
+([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
 
 **Revocation.** One saved intent rotates: each group partition the device could
 read gets one new secret, so its members advance to one epoch together, also

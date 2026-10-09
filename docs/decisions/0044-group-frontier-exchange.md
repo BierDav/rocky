@@ -12,9 +12,8 @@ also repeat credential resolution against all registered partitions.
 
 ## Decision
 
-The current native session is `rocky.native-session.v5`, with transport name
-`rocky/native-session/5`. Its handshake signature domain refuses all other
-versions. There is no earlier reader, negotiation or fallback.
+This record introduced native session v5. The current version and its
+per-member refusal are defined by [decision 0046](0046-per-scope-frontier-refusal.md).
 
 A `FrontiersQuery` carries an ordered vector of scope frontiers. `Frontiers`
 returns the corresponding frontiers, admitted signed horizons and a per-scope
@@ -23,8 +22,10 @@ frame and session byte bounds. The SDK packs selected members of each group
 partition together; a group is never split between batches. Independent groups
 and ordinary scopes can share a batch. Groups larger than the bound are refused.
 
-The server validates the entire request, verifies current credentials and
-requires whole-scope read or custody on every member before exposing metadata.
+The server validates the entire request and verifies current credentials. It
+exposes metadata only for members on which the peer holds whole-scope read or
+custody, and refuses each other member alone
+([decision 0046](0046-per-scope-frontier-refusal.md)).
 Acknowledgments retain their existing per-scope meaning: applied marks count
 only for whole-scope readers. A batch records them atomically in the existing
 peer-frontier table, resolving credentials once for all marks in a batch. The response includes

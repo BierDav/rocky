@@ -45,11 +45,14 @@ only while its credentials grant whole-scope read.
 The SDK exchanges selected group-member frontiers in bounded batches, retaining
 one scope per table and partition. Equal applied frontiers and horizons skip
 empty row transfers; existence logs and horizon acknowledgments still run.
-[Decision 0044](../decisions/0044-group-frontier-exchange.md) defines admission,
-limits and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
+A scope either side may not hold whole, including a partition the server has not
+learned, is refused alone and skipped for that session; the rest of the batch
+proceeds. [Decision 0044](../decisions/0044-group-frontier-exchange.md) defines
+admission and limits, [decision 0046](../decisions/0046-per-scope-frontier-refusal.md)
+refusal and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v6`) pulls by frontier:
+`NativeSession` (label `rocky.native-session.v7`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |

@@ -83,12 +83,15 @@ jobs:
           tool: cargo-nextest
 
       # install-action's checksum check fails with the Gitea runner's sha256sum.
+      # Per job: parallel jobs share the runner's CARGO_HOME.
       - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
         run: |
           set -euo pipefail
+          mkdir "$RUNNER_TEMP/nextest"
           curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
-            | tar -xzf - -C "${CARGO_HOME}/bin"
+            | tar -xzf - -C "$RUNNER_TEMP/nextest"
+          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
       - name: Run shared checks
         if: steps.passed.outputs.cache-hit != 'true'
@@ -166,12 +169,15 @@ jobs:
           tool: cargo-nextest
 
       # install-action's checksum check fails with the Gitea runner's sha256sum.
+      # Per job: parallel jobs share the runner's CARGO_HOME.
       - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
         run: |
           set -euo pipefail
+          mkdir "$RUNNER_TEMP/nextest"
           curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
-            | tar -xzf - -C "${CARGO_HOME}/bin"
+            | tar -xzf - -C "$RUNNER_TEMP/nextest"
+          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
       - name: Run soak tests
         if: steps.passed.outputs.cache-hit != 'true'

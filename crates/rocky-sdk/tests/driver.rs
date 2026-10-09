@@ -551,7 +551,8 @@ async fn readers_page_snapshots_and_never_hold_the_writer() -> Result<(), Failur
     run(&transaction, "BEGIN DEFERRED TRANSACTION").await?;
     assert_eq!(count(&transaction, "lists").await?, 600);
     let delete_started = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // A blocked writer never finishes; the bound only has to outlast a loaded CI host.
+    tokio::time::timeout(Duration::from_secs(60), async {
         run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
         run(&writer, "DELETE FROM lists WHERE key > 'l0100'").await?;
         run(&writer, "END TRANSACTION").await

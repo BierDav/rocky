@@ -870,7 +870,10 @@ mod partition_tests {
             reason(&items(
                 r#","foreign_keys":[{"columns":["parent"],"table":"lists","on_delete":"set_null"}]"#
             )),
-            crate::Incompatibility::Reference("parent".into())
+            crate::Incompatibility::CrossScopeReference(
+                "a partitioned child requires an unpartitioned logged parent outside its group"
+                    .into()
+            )
         );
         let complete = items(
             r#","indexes":[{"name":"items_code","columns":[{"name":"list","descending":false},{"name":"code","descending":false}],"unique":true,"on_conflict":"latest_wins"}]"#,

@@ -101,10 +101,47 @@ impl<A: RowApplication> Inner<A> {
             let current = if name == projected.table.sql_name {
                 scope
             } else {
-                typed
+                let parent = typed
                     .by_name(&name)
-                    .ok_or_else(|| denied("missing horizon scope"))?
-                    .scope
+                    .ok_or_else(|| denied("missing horizon scope"))?;
+                if table.partition_by.is_empty() {
+                    parent.scope
+                } else {
+                    let source = schema
+                        .table(&projected.table.sql_name)
+                        .ok_or_else(|| denied("missing horizon source"))?;
+                    let tuple = self
+                        .partitions
+                        .get(&scope)
+                        .ok_or_else(|| denied("missing horizon partition"))?;
+                    let mut values = vec![SqlValue::Null; table.columns.len()];
+                    for (from, to) in source.partition_by.iter().zip(&table.partition_by) {
+                        let column = source
+                            .column(from)
+                            .ok_or_else(|| denied("missing horizon partition column"))?;
+                        let value = tuple
+                            .values()
+                            .get(&schema.field_id(source, column))
+                            .ok_or_else(|| denied("missing horizon partition value"))?
+                            .value()
+                            .map_err(|error| denied(&error.to_string()))?;
+                        let index = table
+                            .columns
+                            .iter()
+                            .position(|column| column.sql_name.eq_ignore_ascii_case(to))
+                            .ok_or_else(|| denied("missing parent partition column"))?;
+                        values[index] = value;
+                    }
+                    let parent_scope = typed.row_scope(parent, &values)?;
+                    if !self.partitions.contains_key(&parent_scope)
+                        || !self.opening_keys().any(|key| key.scope == parent_scope)
+                    {
+                        return Err(denied(
+                            "hold the parent partition before declaring a horizon",
+                        ));
+                    }
+                    parent_scope
+                }
             };
             if table.existence_log {
                 existence.insert(current);
@@ -202,6 +239,16 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         for cut in &statement.related {
+            if self.typed.as_ref().is_some_and(|typed| {
+                typed
+                    .by_scope(cut.scope)
+                    .is_some_and(|table| typed.partitioned(table))
+            }) && !self.holds(cut.scope).await?
+            {
+                return Err(denied(
+                    "hold the parent partition before acknowledging a horizon",
+                ));
+            }
             if self.horizon_logs(cut.scope).await? != cut.logs
                 || self.horizon_state(cut.scope).await? != cut.state
             {
@@ -308,6 +355,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let previous = inner.mergeable_horizon(scope).await?;
         let mut related = Vec::new();
         for scope in parents {
+            if inner.typed.as_ref().is_some_and(|typed| {
+                typed
+                    .by_scope(scope)
+                    .is_some_and(|table| typed.partitioned(table))
+            }) && !inner.holds(scope).await?
+            {
+                return Err(denied(
+                    "hold the parent partition before declaring a horizon",
+                ));
+            }
             related.push(HorizonCut {
                 scope,
                 logs: inner.horizon_logs(scope).await?,

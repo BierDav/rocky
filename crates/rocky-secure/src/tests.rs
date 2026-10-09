@@ -1425,3 +1425,5 @@ mod typed_commands;
 mod strong_history;
 
 mod formats;
+
+mod partition_foreign_keys;

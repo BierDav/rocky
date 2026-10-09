@@ -40,6 +40,8 @@ struct Unique {
 struct Reference {
     columns: Vec<usize>,
     parent: usize,
+    parent_columns: Vec<usize>,
+    identity: usize,
     cascade: bool,
     /// `NOT NULL`: a support row points it at the parent's virtual row.
     required: bool,
@@ -307,20 +309,36 @@ impl Constraints {
                     .iter()
                     .map(|column| position(column))
                     .collect::<Result<Vec<_>, _>>()?;
-                if positions.len() != 1 {
-                    return Err(incompatible(format!(
-                        "{}: a reference names one identity column",
-                        table.sql_name
-                    )));
-                }
                 let parent = node_of(&key.table).ok_or_else(|| {
                     incompatible(format!("{} is not a constrained table", key.table))
                 })?;
-                // Only an existence log makes liveness readable across scopes.
+                let parent_table = schema
+                    .table(&key.table)
+                    .ok_or_else(|| incompatible("missing parent".into()))?;
+                let parent_columns = key
+                    .references
+                    .iter()
+                    .map(|name| {
+                        parent_table
+                            .columns
+                            .iter()
+                            .position(|column| column.sql_name.eq_ignore_ascii_case(name))
+                            .ok_or_else(|| incompatible("missing parent column".into()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let identity = key
+                    .references
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case("id"))
+                    .ok_or_else(|| {
+                        incompatible("reference must name the incarnation identity".into())
+                    })?;
+                // Group references carry the complete parent partition.
                 let logged = schema
                     .table(&key.table)
                     .is_some_and(|parent| parent.existence_log);
                 if !logged
+                    && parent_table.partition_by.is_empty()
                     && tables[constrained[parent]].scope.encryption != projected.scope.encryption
                 {
                     return Err(incompatible(format!(
@@ -335,7 +353,11 @@ impl Constraints {
                 ));
                 references.push(Reference {
                     select: format!("{select_all} WHERE {}", filter(&positions)),
-                    required: positions.iter().any(|i| table.columns[*i].not_null),
+                    required: positions
+                        .iter()
+                        .any(|i| !partition.contains(i) && table.columns[*i].not_null),
+                    parent_columns,
+                    identity,
                     columns: positions,
                     parent,
                     cascade: key.on_delete == DELETE_CASCADE,
@@ -544,6 +566,9 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         if let Some(found) = self.rows.get(&(node, id)) {
             return Ok(found.clone());
         }
+        if !self.node(node).partition.is_empty() && !self.inner.partitions.contains_key(&id.scope) {
+            return Ok(None);
+        }
         let sql = self.node(node).select_id.clone();
         let found = self
             .query(node, &sql, self.identity_params(node, id)?)
@@ -587,13 +612,33 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         Ok(params)
     }
     /// The parent a reference names, or None for NULL.
-    fn parent(candidate: &Candidate, reference: &Reference) -> Option<Option<i64>> {
-        match &candidate.values[reference.columns[0]] {
-            SqlValue::Null => None,
-            SqlValue::Integer(id) => Some(Some(*id)),
-            // Not an identity: no parent can hold it.
-            _ => Some(None),
+    fn parent(
+        &self,
+        candidate: &Candidate,
+        reference: &Reference,
+    ) -> Result<Option<Identity>, Error> {
+        if candidate.tuple(&reference.columns).is_none() {
+            return Ok(None);
         }
+        let Some(SqlValue::Integer(id)) =
+            candidate.values.get(reference.columns[reference.identity])
+        else {
+            return Err(corrupt("reference identity"));
+        };
+        let parent = self.node(reference.parent);
+        let typed = self
+            .inner
+            .typed
+            .as_ref()
+            .ok_or_else(|| corrupt("typed constraints"))?;
+        let mut values = vec![SqlValue::Null; parent.columns];
+        for (source, target) in reference.columns.iter().zip(&reference.parent_columns) {
+            values[*target] = candidate.values[*source].clone();
+        }
+        Ok(Some(Identity {
+            scope: typed.row_scope(&typed.tables[parent.table], &values)?,
+            id: *id,
+        }))
     }
     /// The candidates `CASCADE` references reach, the row itself first;
     /// None when one of them names a parent that is not a candidate. A
@@ -615,23 +660,32 @@ impl<'a, A: RowApplication> Pass<'a, A> {
             let Some(candidate) = self.get(at, row).await? else {
                 return Ok(None);
             };
+            for reference in &self.node(at).references {
+                if let Some(parent) = self.parent(&candidate, reference)?
+                    && !self.node(reference.parent).partition.is_empty()
+                    && (!self.inner.partitions.contains_key(&parent.scope)
+                        || !self
+                            .inner
+                            .opening_keys()
+                            .any(|key| key.scope == parent.scope)
+                        || !self.inner.holds(parent.scope).await?)
+                {
+                    return Ok(None);
+                }
+            }
             for reference in self.node(at).references.iter().filter(|r| r.cascade) {
                 let logged = self.node(reference.parent).logged;
-                match Self::parent(&candidate, reference) {
+                match self.parent(&candidate, reference)? {
                     None => {}
-                    Some(None) => return Ok(None),
-                    Some(Some(parent)) if logged => {
-                        let parent = Identity::unpartitioned(self.node(reference.parent), parent);
+                    Some(parent) if logged => {
                         if !self.alive(reference.parent, parent).await? {
                             return Ok(None);
                         }
                     }
-                    Some(Some(parent)) => {
-                        let parent = Identity::unpartitioned(self.node(reference.parent), parent);
-                        if seen.insert((reference.parent, parent)) {
-                            order.push((reference.parent, parent));
-                        }
+                    Some(parent) if seen.insert((reference.parent, parent)) => {
+                        order.push((reference.parent, parent));
                     }
+                    Some(_) => {}
                 }
             }
         }
@@ -716,27 +770,18 @@ impl<'a, A: RowApplication> Pass<'a, A> {
         }
         let mut values = candidate.values.clone();
         for reference in self.node(node).references.iter().filter(|r| !r.cascade) {
-            let shown = match Self::parent(&candidate, reference) {
+            let shown = match self.parent(&candidate, reference)? {
                 None => true,
-                Some(None) => false,
-                Some(Some(parent)) if self.node(reference.parent).logged => {
-                    self.alive(
-                        reference.parent,
-                        Identity::unpartitioned(self.node(reference.parent), parent),
-                    )
-                    .await?
+                Some(parent) if self.node(reference.parent).logged => {
+                    self.alive(reference.parent, parent).await?
                 }
-                Some(Some(parent)) => {
-                    self.visible(
-                        reference.parent,
-                        Identity::unpartitioned(self.node(reference.parent), parent),
-                    )
-                    .await?
-                }
+                Some(parent) => self.visible(reference.parent, parent).await?,
             };
             if !shown {
                 for column in &reference.columns {
-                    values[*column] = SqlValue::Null;
+                    if !self.node(node).partition.contains(column) {
+                        values[*column] = SqlValue::Null;
+                    }
                 }
             }
         }
@@ -767,13 +812,16 @@ impl<'a, A: RowApplication> Pass<'a, A> {
                 }
             }
         }
-        if let Some(id) = candidate.id(self.node(node)) {
+        if candidate.id(self.node(node)).is_some() {
             for (child, reference) in self.node(node).children.clone() {
-                let select = self.node(child).references[reference].select.clone();
-                for row in self
-                    .query(child, &select, vec![SqlValue::Integer(id.id)])
-                    .await?
-                {
+                let rule = &self.node(child).references[reference];
+                let select = rule.select.clone();
+                let params = rule
+                    .parent_columns
+                    .iter()
+                    .map(|column| candidate.values[*column].clone())
+                    .collect();
+                for row in self.query(child, &select, params).await? {
                     found.extend(row.id(self.node(child)).map(|id| (child, id)));
                 }
             }
@@ -1212,20 +1260,58 @@ impl<A: RowApplication> Inner<A> {
         let partition_only = target
             .and_then(|scope| constraints.node(scope))
             .is_some_and(|node| !constraints.nodes[node].partition.is_empty());
+        let address = |scope: ResourceScope| -> Result<Option<rocky_core::GroupAddress>, Error> {
+            let Some(table) = typed.by_scope(scope) else {
+                return Ok(None);
+            };
+            let logical = typed
+                .rows
+                .schema()
+                .table(&table.table.sql_name)
+                .ok_or_else(|| corrupt("constraint table"))?;
+            if logical.partition_by.is_empty() {
+                return Ok(None);
+            }
+            let tuple = self
+                .partitions
+                .get(&scope)
+                .ok_or_else(|| corrupt("constraint partition"))?;
+            let values = logical
+                .partition_by
+                .iter()
+                .map(|name| {
+                    let column = logical
+                        .column(name)
+                        .ok_or_else(|| corrupt("partition column"))?;
+                    tuple
+                        .values()
+                        .get(&typed.rows.schema().field_id(logical, column))
+                        .ok_or_else(|| corrupt("partition value"))?
+                        .value()
+                        .map_err(|error| corrupt(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            typed
+                .rows
+                .schema()
+                .group_address(scope.domain, &logical.sql_name, &values)
+                .map(Some)
+                .map_err(|error| corrupt(error.to_string()))
+        };
+        let target_address = target.map(address).transpose()?.flatten();
         let mut scopes = Vec::new();
         for (node, spec) in constraints.nodes.iter().enumerate() {
             if !spec.partition.is_empty() {
-                scopes.extend(
-                    self.partitions
-                        .keys()
-                        .copied()
-                        .filter(|scope| {
-                            scope.domain == spec.scope.domain
-                                && scope.table == spec.scope.table
-                                && target.is_none_or(|target| target == *scope)
-                        })
-                        .map(|scope| (node, scope)),
-                );
+                for scope in self.partitions.keys().copied() {
+                    if scope.domain == spec.scope.domain
+                        && scope.table == spec.scope.table
+                        && (!partition_only
+                            || target == Some(scope)
+                            || target_address.is_some() && address(scope)? == target_address)
+                    {
+                        scopes.push((node, scope));
+                    }
+                }
             } else if !partition_only {
                 scopes.push((node, spec.scope));
             }
@@ -1275,7 +1361,7 @@ impl<A: RowApplication> Inner<A> {
                     ]),
                 )
                 .await?;
-            if Some(scope) == without {
+            if Some(scope) == without || !self.holds(scope).await? {
                 continue;
             }
             for record in typed::winners(&self.conn, scope).await? {
@@ -1455,31 +1541,50 @@ impl<A: RowApplication> Inner<A> {
         let Some(node) = constraints.node(scope) else {
             return Ok(());
         };
+        let mut pass = Pass::new(self, constraints);
+        let candidate = Candidate {
+            scope,
+            values: after.to_vec(),
+            live: false,
+            stamps: Vec::new(),
+        };
         for reference in &constraints.nodes[node].references {
-            let value = &after[reference.columns[0]];
-            if *value == SqlValue::Null {
+            let Some(identity) = pass.parent(&candidate, reference)? else {
                 continue;
-            }
+            };
             let spec = &constraints.nodes[reference.parent];
             let parent = &typed.tables[spec.table];
+            let params = reference
+                .columns
+                .iter()
+                .map(|column| after[*column].clone())
+                .collect::<Vec<_>>();
+            let logical = typed
+                .rows
+                .schema()
+                .table(&parent.table.sql_name)
+                .ok_or_else(|| corrupt("parent table"))?;
+            let filter = reference
+                .parent_columns
+                .iter()
+                .map(|column| format!("{}=?", quoted(&logical.columns[*column].sql_name)))
+                .collect::<Vec<_>>()
+                .join(" AND ");
             // A held row or an alive puppet, never the virtual row; an alive
             // row of an existence log gets its puppet as the commit settles.
             let kinds = if spec.logged { "(0,1)" } else { "(0)" };
             let mut found = !rows_with(
                 &self.conn,
                 &format!(
-                    "SELECT 1 FROM {} WHERE \"id\"=? AND \"row_kind\" IN {kinds}",
+                    "SELECT 1 FROM {} WHERE {filter} AND \"row_kind\" IN {kinds}",
                     quoted(&parent.table.sql_name)
                 ),
-                vec![value.clone()],
+                params,
             )
             .await?
             .is_empty();
-            if !found
-                && spec.logged
-                && let SqlValue::Integer(id) = value
-            {
-                found = self.alive(spec.scope, *id).await?;
+            if !found && spec.logged {
+                found = pass.alive(reference.parent, identity).await?;
             }
             if !found {
                 return Err(Error::Sql(crate::sql::SqlError::Statement {

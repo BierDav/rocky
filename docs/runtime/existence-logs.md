@@ -27,8 +27,9 @@ it into the signed manifest. `LogicalSchema::existence_tables` lists logged
 tables. Enabling or removing a log on a populated table means export and
 reinstall into fresh history, never invented creation evidence.
 
-A foreign key may cross reader scopes only to a logged table; every other
-parent must share the child's scope. Support tables are the logged tables plus,
+A foreign key may cross unrelated reader scopes only to an unpartitioned logged
+table; other parents share the child's unpartitioned scope or its explicit
+partition group with every partition column included in the reference. Support tables are the logged tables plus,
 transitively, the parents of their `NOT NULL` references. Each must be
 mergeable, unpartitioned and keyed by `id` alone; installation otherwise refuses
 with `Incompatibility::SupportRow` naming the conflicting key. The trusted
@@ -43,9 +44,10 @@ signs the CBOR statement under `rocky.existence-record.v1`; the commitment is
 
 | Field | Contract |
 | --- | --- |
-| `version` | 1; 2 adds `partition` (not installable yet). Another value is refused |
+| `version` | 2, the sole current format; any other value is refused |
 | `manifest` | The admitted generation manifest the author's chain names |
 | `scope` | Domain, reader commitment and table |
+| `partition` | None for installed unpartitioned logs; partitioned logs remain deferred |
 | `id` | The incarnation identity (`RowIdentity`), never 0 |
 | `event` | `Created` or `Deleted` |
 | `author`, `credentials` | The pseudonym's author number and credential chain |
@@ -125,8 +127,8 @@ position is wrong. A gap returns `PendingDependencies` and is not stored.
 
 - Logs keep every record until a [mergeable horizon](mergeable-horizon.md)
   seals them into an existence base.
-- Partitioned tables cannot have or reference an existence log yet: constraint
-  resolution still runs per unpartitioned table scope.
+- Partitioned children may reference an unpartitioned logged parent. Partitioned
+  existence logs and references between different partition groups remain deferred.
 - Across a reference to a logged table, a child depends on the parent's log
   only. A parent a holder hides for its own reasons (a unique-index loss, an
   orphaned `CASCADE` parent of its own) does not hide the child; the child's
@@ -142,6 +144,7 @@ position is wrong. A gap returns `PendingDependencies` and is not stored.
   parent therefore does not hide a child.
 - Records carry no values or keys, so the log can be served keyless to any
   device of the domain; an unpartitioned scope adds no routing information.
-- Support tables are keyed by `id` so a puppet is fully determined by the
-  child's reference. Partitioned parents need partition columns a reference does
-  not carry; [phase 5](../features_06/05-partitioned-foreign-keys.md) changes this.
+- Support bookkeeping uses `(table, scope, id)`. A logged parent remains
+  unpartitioned and its puppet is determined by the child's identity reference.
+  In-group partitioned parents use real candidates reached through the complete
+  partition-and-id reference; they do not require a keyless log or puppet.

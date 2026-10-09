@@ -644,7 +644,7 @@ impl LogicalTable {
             .filter_map(|index| index.on_conflict.map(|policy| (index, policy)))
     }
     fn installable(&self) -> Result<(), Incompatibility> {
-        // Partitioned foreign keys and command control remain unsupported.
+        // Partitioned command control remains unsupported.
         if !self.partition_by.is_empty() {
             if self.class == TableClass::CommandControlled {
                 return Err(Incompatibility::TableClass(self.class));
@@ -658,11 +658,6 @@ impl LogicalTable {
                 {
                     return Err(Incompatibility::ConflictPolicy(index.name.clone()));
                 }
-            }
-            if let Some(key) = self.foreign_keys.first() {
-                return Err(Incompatibility::Reference(
-                    key.columns.first().cloned().unwrap_or_default(),
-                ));
             }
         }
         if self.class != TableClass::Mergeable {
@@ -742,8 +737,16 @@ impl LogicalTable {
                         .iter()
                         .any(|reserved| name.eq_ignore_ascii_case(reserved))
                         || self.column(name).is_none_or(|column| {
-                            column.affinity != Affinity::Integer
+                            (column.affinity != Affinity::Integer
+                                && !self
+                                    .partition_by
+                                    .iter()
+                                    .any(|partition| partition.eq_ignore_ascii_case(name)))
                                 || (set_null
+                                    && !self
+                                        .partition_by
+                                        .iter()
+                                        .any(|partition| partition.eq_ignore_ascii_case(name))
                                     && (column.not_null
                                         || self
                                             .primary_key
@@ -751,6 +754,17 @@ impl LogicalTable {
                                             .any(|column| column.eq_ignore_ascii_case(name))))
                         })
                 });
+            if set_null
+                && key.columns.iter().all(|name| {
+                    self.partition_by
+                        .iter()
+                        .any(|partition| partition.eq_ignore_ascii_case(name))
+                })
+            {
+                return Err(Incompatibility::Reference(
+                    "SET NULL requires a non-partition reference column".into(),
+                ));
+            }
             if refused {
                 return Err(Incompatibility::Reference(
                     key.columns.first().cloned().unwrap_or_default(),
@@ -1057,10 +1071,46 @@ impl LogicalSchema {
                         }
                     }
                 }
+                if let Some(target) = target {
+                    let reason = if !target.partition_by.is_empty()
+                        && (table.partition_by.is_empty()
+                            || table.partition_group.is_none()
+                            || table.partition_group != target.partition_group)
+                    {
+                        Some("partitioned references require the same explicit partition group")
+                    } else if !table.partition_by.is_empty()
+                        && target.partition_by.is_empty()
+                        && !target.existence_log
+                    {
+                        Some(
+                            "a partitioned child requires an unpartitioned logged parent outside its group",
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        return incompatible(
+                            &table.sql_name,
+                            Incompatibility::CrossScopeReference(reason.into()),
+                        );
+                    }
+                }
                 // Only the parent's identity names one incarnation.
                 if !target.is_some_and(|target| {
                     mergeable
-                        && target.partition_by.is_empty()
+                        && (target.partition_by.is_empty()
+                            && (table.partition_by.is_empty() || target.existence_log)
+                            || !table.partition_by.is_empty()
+                                && table.partition_group.is_some()
+                                && table.partition_group == target.partition_group
+                                && target.partition_by.iter().zip(&table.partition_by).all(
+                                    |(parent, child)| {
+                                        key.references.iter().zip(&key.columns).any(|(r, c)| {
+                                            r.eq_ignore_ascii_case(parent)
+                                                && c.eq_ignore_ascii_case(child)
+                                        })
+                                    },
+                                ))
                         && target
                             .identity_columns()
                             .iter()

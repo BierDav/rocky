@@ -32,9 +32,9 @@ refusal is pinned by `partitioned_tables_refuse_constraints_and_command_control`
 
 ## What exists today
 
-Phase 4 now admits native partition-complete `LatestWins` indexes and resolves
-them with partition-aware identities. Kotlin/Room admission and partitioned
-foreign keys remain later phases. The starting refusals and gaps below explain
+Native admission accepts partition-complete `LatestWins` indexes and phase 5
+foreign keys within a partition group or to an unpartitioned logged parent.
+Resolution uses partition-aware identities. Kotlin/Room admission remains phase 7. The starting refusals and gaps below explain
 the roadmap boundary; current behavior is in
 [mergeable constraints](../runtime/mergeable-constraints.md).
 

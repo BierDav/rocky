@@ -46,11 +46,11 @@ Generated statements, compared exactly at installation:
 | Index columns exclude `id` and `row_kind` | Yes |
 | `set_null` index columns are nullable and outside the primary key | Yes |
 | Reference columns are INTEGER, not `id`/`row_kind`, one column naming the parent's `id` | Yes |
-| `SET NULL` reference columns are nullable and outside the primary key | Yes |
-| Parent and child are mergeable, unpartitioned, in one reader scope (or the parent has an [existence log](#references-across-reader-scopes)) | Yes |
+| Non-partition `SET NULL` reference columns are nullable and outside the primary key | Yes |
+| Parent and child are mergeable, in one unpartitioned reader scope, or one explicit partition group with all partition columns mapped by position, or the parent is unpartitioned with an [existence log](#references-across-reader-scopes) | Yes |
 | `RESTRICT`, `NO ACTION`, `SET DEFAULT`, natural-key references, other table classes | Always |
 | Partitioned policy index includes every partition column and uses `latest_wins` | Yes |
-| Partitioned `set_null` index, foreign key on a partitioned table, or reference to a partitioned parent | Always (foreign keys wait for roadmap phase 5) |
+| Partitioned `set_null` index, references between different partition groups, or partitioned child to an unlogged parent outside its group | Always |
 
 Policies and delete actions enter the replicated shape and manifest by
 logical names; unconstrained tables keep their manifest items. The SDK puts
@@ -138,13 +138,30 @@ whose count, timing or authorship is sensitive; keep such parents and children
 in one scope or put outside parties in their own domain. Setup, sync and limits
 are in [existence logs](existence-logs.md).
 
+## Partitioned references
+
+An in-group reference names the parent's complete identity: partition columns
+followed by `id`, once each. Child partition columns map to the parent's by group
+slot. `items.list → lists.id` and `(items.list, items.category) → (categories.list,
+categories.id)` therefore resolve only within the list partition. `CASCADE` hides
+children when that parent disappears; `SET NULL` changes only non-partition
+reference columns. A missing or unheld parent partition keeps the child pending,
+and a horizon cannot be declared without the corresponding parent partition.
+Horizon cuts name concrete parent scopes, never their table templates.
+
+Rebuild and eviction re-resolve constrained tables of the same group partition.
+Other partitions remain unchanged. A partitioned child may also reference an
+unpartitioned logged parent; its liveness and puppets use the existing keyless
+log contract. Partitioned existence logs remain deferred. These native shapes
+are tested in `rocky-secure`'s `partition_foreign_keys` module; builder and Room
+admission are phase 7.
+
 ## Persisted constraints and open verification
 
 [Decision 0041](../decisions/0041-partition-constraint-state.md) records the format
 and catalog boundary. The current private support bookkeeping shape is `secure_support(tab, scope, id)`
 with that composite primary key. Puppet and virtual-row lookups use the full
-partition-and-id identity; partitioned support tables and references remain
-refused. There is no migration or alternate encoding. At open, secure constrained
+partition-and-id identity; partitioned support tables remain refused. There is no migration or alternate encoding. At open, secure constrained
 installations compare the declared typed indexes, private candidate tables and
 indexes, and support bookkeeping table to SQLite's stored SQL. Missing or changed
 identity/policy indexes or an older private table shape fail open before use.
@@ -186,6 +203,5 @@ on receipt, projection rebuild and reopen.
   row lose.
 
 Partitioned `SetNull` indexes are refused in phase 4: nulling the entire index
-would change its partition identity. Foreign keys and the Kotlin/Room shopping
-shape remain later qualification work. The native portable definition already
-admits partition-complete `LatestWins` indexes.
+would change its partition identity. Native foreign keys admit in-group identities
+and unpartitioned logged parents; Kotlin/Room shopping admission remains phase 7.

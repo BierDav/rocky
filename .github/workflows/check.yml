@@ -155,12 +155,7 @@ jobs:
       # Per job: parallel jobs share the runner's CARGO_HOME.
       - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
-            | tar -xzf - -C "$RUNNER_TEMP/nextest"
-          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
+        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
@@ -238,12 +233,7 @@ jobs:
       # Per job: parallel jobs share the runner's CARGO_HOME.
       - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
-            | tar -xzf - -C "$RUNNER_TEMP/nextest"
-          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
+        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.
@@ -332,12 +322,7 @@ jobs:
       # Per job: parallel jobs share the runner's CARGO_HOME.
       - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
-            | tar -xzf - -C "$RUNNER_TEMP/nextest"
-          echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
+        run: ./source/scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.

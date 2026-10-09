@@ -12,6 +12,7 @@ mod generation;
 mod groups;
 mod node;
 mod owner;
+mod registry;
 mod scheduling;
 mod schema;
 mod secrets;

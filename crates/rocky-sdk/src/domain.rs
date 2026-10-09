@@ -7,6 +7,10 @@ use rocky_core::{
 use rocky_credentials::Resource;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The reserved collection of issuer records; see
+/// `docs/decisions/0048-replicated-issuer-registry.md`.
+pub(crate) const REGISTRY: &str = "issuer_registry";
+
 pub(crate) struct Domain {
     /// The typed tables and commands. It holds no handler until `hosted`.
     pub app: TypedCommands,
@@ -160,8 +164,31 @@ impl Domain {
             .map(|(name, scope)| (name.clone(), scope.encryption))
             .collect()
     }
-    /// What an issuer can grant: every collection, its scope and columns.
+    /// The registry's resource scope.
+    pub fn registry(&self) -> ResourceScope {
+        self.tables[REGISTRY]
+    }
+    /// The application's collections, without the registry: what sessions
+    /// of the application read and write.
+    pub fn collections(&self) -> impl Iterator<Item = (&str, ResourceScope)> {
+        self.scopes().filter(|(name, _)| *name != REGISTRY)
+    }
+    /// What an issuer can grant: every application collection, its scope
+    /// and columns. The registry is no grantable resource.
     pub fn resources(&self) -> Vec<Resource> {
+        self.all_resources()
+            .into_iter()
+            .filter(|resource| resource.name != REGISTRY)
+            .collect()
+    }
+    /// The registry as a resource, for the grants the SDK adds itself.
+    pub fn registry_resource(&self) -> Vec<Resource> {
+        self.all_resources()
+            .into_iter()
+            .filter(|resource| resource.name == REGISTRY)
+            .collect()
+    }
+    fn all_resources(&self) -> Vec<Resource> {
         let logical = self.logical();
         let manifest = self.manifest();
         let commands = self.app.commands().descriptors();
@@ -189,9 +216,25 @@ impl Domain {
             .collect()
     }
 }
-/// The format-3 typed tables of `schema` under `publisher`.
+/// The format-3 typed tables of `schema` under `publisher`, with the
+/// reserved registry table every SDK domain carries.
 pub(crate) fn logical(schema: &Schema, publisher: [u8; 32]) -> Result<LogicalSchema, Failure> {
-    Ok(schema.definition(publisher)?.build()?)
+    let mut definition = schema.definition(publisher)?;
+    definition.tables.push(registry_table()?);
+    Ok(definition.build()?)
+}
+/// One row per entry of a device's record, keyed by node and entry.
+pub(crate) fn registry_table() -> Result<rocky_core::TableDefinition, Failure> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "name": REGISTRY,
+        "class": "mergeable",
+        "columns": [
+            {"name": "node", "type": "text", "not_null": true},
+            {"name": "entry", "type": "text", "not_null": true},
+            {"name": "value", "type": "text", "not_null": true},
+        ],
+        "primary_key": ["node", "entry"],
+    }))?)
 }
 
 #[cfg(test)]
@@ -250,7 +293,7 @@ mod tests {
         );
         assert_eq!(table.column("raw").ok_or("raw")?.affinity, Affinity::Blob);
         assert!(table.indexes[0].create_sql.contains("\"reading\" DESC"));
-        assert_eq!(logical, &schema.definition([9; 32])?.build()?);
+        assert_eq!(logical, &super::logical(&schema, [9; 32])?);
         logical.supported_on(rocky_core::Profile::Trusted)?;
         logical.supported_on(rocky_core::Profile::Secure)?;
         assert_eq!(schema.names(), ["samples"]);

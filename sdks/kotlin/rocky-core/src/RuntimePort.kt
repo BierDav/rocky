@@ -150,8 +150,21 @@ interface SecretStore {
 /** The authority this device holds. Keys are lowercase hex; `expiresAtEpochSeconds` ends its credentials. `transport` is the attached network's kind. */
 data class SessionStatus(val principal: String, val node: String, val policyEpoch: Long, val expiresAtEpochSeconds: Long, val isIssuer: Boolean, val profile: GrantProfile, val transport: String)
 
-/** A device an issuer enrolled or renewed, with the profile its grants amount to. */
-data class Device(val node: String, val user: String, val enrolledAtEpochSeconds: Long, val revoked: Boolean, val profile: GrantProfile)
+/**
+ * Another device's record in the replicated issuer registry, which every issuer reads: the profile its grants amount
+ * to (empty grants when only partition grants are known), when its latest chain expires, its command identity and an
+ * opaque application [label] of at most 256 bytes.
+ */
+data class Device(
+    val node: String,
+    val user: String,
+    val enrolledAtEpochSeconds: Long,
+    val revoked: Boolean,
+    val profile: GrantProfile,
+    val expiresAtEpochSeconds: Long? = null,
+    val command: String? = null,
+    val label: ByteArray? = null,
+)
 
 enum class ConnectionState { Connected, Offline, Unavailable, Revoked }
 
@@ -166,6 +179,8 @@ data class Readiness(
     val expiresAtEpochSeconds: Long,
     val profile: GrantProfile,
     val networkAttached: Boolean,
+    /** False on a member that can reach no issuer to renew its credentials. */
+    val issuerContact: Boolean = true,
 )
 
 /** The last sync: its state, its error, how many [peers] it reached and when it ended. */

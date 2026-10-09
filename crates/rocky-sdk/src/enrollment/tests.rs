@@ -47,28 +47,35 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         issuer.policy.statement.epoch,
         issuer.validity()?,
     )?;
-    issuer.record_holder(&device, &grants)?;
+    let mut rows = BTreeMap::new();
+    let changes = issuer.holder_changes(&vault, &device, &grants, 1, &Registry::default())?;
+    let registry = Registry::merged(&mut rows, &changes)?;
+    assert_eq!(registry.devices(), 1);
+    assert_eq!(registry.get(&device.node).ok_or("record")?.grants.len(), 1);
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
-    let renew =
-        |issuer: &mut Settings, node: &PrivateKey, path: &str| -> Result<Vec<u8>, Failure> {
-            let chain = device_chain(capability.clone(), &user, node.public_key())?;
-            let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
-            issuer.renew(&directory.path().join(path), &vault, &request.to_bytes()?)
-        };
+    let renew = |issuer: &Settings, node: &PrivateKey| -> Result<Vec<u8>, Failure> {
+        let chain = device_chain(capability.clone(), &user, node.public_key())?;
+        let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
+        Ok(issuer.renew(&vault, &request.to_bytes()?, &registry)?.0)
+    };
     // Before revocation the same request renews, also under a new node key.
-    renew(&mut issuer.clone(), &node, "control.json")?;
-    renew(&mut issuer.clone(), &PrivateKey::new(), "control.json")?;
+    renew(&issuer, &node)?;
+    renew(&issuer, &PrivateKey::new())?;
 
-    issuer.begin_revocation(node.public_key())?;
+    issuer.begin_revocation(node.public_key(), &registry)?;
     issuer.rotate(&vault)?;
-    assert!(issuer.revoked_device(&node.public_key()));
-    assert!(renew(&mut issuer, &node, "identity.json").is_err());
-    assert!(renew(&mut issuer, &PrivateKey::new(), "identity.json").is_err());
+    assert!(issuer.revoked_device(&node.public_key(), &registry));
+    assert!(renew(&issuer, &node).is_err());
+    assert!(renew(&issuer, &PrivateKey::new()).is_err());
     let renamed = DeviceKeys {
         user: user.public_key(),
         node: PrivateKey::new().public_key(),
     };
-    assert!(issuer.record_holder(&renamed, &grants).is_err());
+    assert!(
+        issuer
+            .holder_changes(&vault, &renamed, &grants, 1, &registry)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -121,14 +128,17 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         user: user.public_key(),
         node: node.public_key(),
     };
-    let supplied = issuer.grant(
+    let (supplied, _) = issuer.grant(
         &vault,
         device,
-        Profile::Reader {
-            scopes: ["lists".into()].into(),
-        },
-        Terms::default(),
+        (
+            Profile::Reader {
+                scopes: ["lists".into()].into(),
+            },
+            Terms::default(),
+        ),
         None,
+        &Registry::default(),
     )?;
     let domain = issuer.domain()?;
     let capability = supplied
@@ -157,5 +167,50 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
             .all(|selection| *selection == rocky_core::PartitionSelection::Any)
     );
     assert!(selectors[0].rights.contains(&Right::Read));
+    Ok(())
+}
+
+#[test]
+fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let domain = issuer.domain()?;
+    let registry = domain.registry();
+    let lists: std::collections::BTreeSet<String> = ["lists".into()].into();
+    for (profile, rights) in [
+        (Profile::Issuer, Some(Right::Insert)),
+        (
+            Profile::Custody {
+                scopes: lists.clone(),
+            },
+            Some(Right::Custody),
+        ),
+        (
+            Profile::Writer {
+                scopes: lists.clone(),
+            },
+            None,
+        ),
+        (Profile::Reader { scopes: lists }, None),
+    ] {
+        let grants = grants_of(&profile, &domain)?;
+        let held = grants.iter().find(|grant| grant.scope == registry);
+        assert_eq!(held.is_some(), rights.is_some(), "{profile:?}");
+        if let (Some(held), Some(right)) = (held, rights) {
+            assert!(held.rights.contains(&right));
+            assert_eq!(held.rights.contains(&Right::Read), profile.issues());
+        }
+        // A renewal without a record recognizes the same profile.
+        assert_eq!(profile_of(&grants, &domain), profile);
+    }
+    // No raw grant or profile names the registry itself.
+    let named = Profile::Reader {
+        scopes: [crate::domain::REGISTRY.into()].into(),
+    };
+    assert!(grants_of(&named, &domain).is_err());
+    assert!(issuer.keys.contains_key(crate::domain::REGISTRY));
     Ok(())
 }

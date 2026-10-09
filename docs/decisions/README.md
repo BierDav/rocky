@@ -23,6 +23,7 @@ naturally holds.
 | [0045](0045-custody-partition-offers.md) | Custody partition offers in native session v6 |
 | [0046](0046-per-scope-frontier-refusal.md) | Per-scope frontier refusal in native session v7 |
 | [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
+| [0048](0048-replicated-issuer-registry.md) | Replicated issuer registry |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for

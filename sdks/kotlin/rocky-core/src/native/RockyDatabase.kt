@@ -236,6 +236,7 @@ class Credentials internal constructor(private val session: RockySession) {
     }
     suspend fun revoke(node: String) = session.revoke(node)
     suspend fun devices(): List<Device> = session.devices()
+    suspend fun setDeviceLabel(node: String, label: ByteArray) = session.setDeviceLabel(node, label)
     suspend fun logout(purge: Boolean = false) = session.logout(purge)
 }
 

@@ -292,7 +292,8 @@ Start at `examples/todo-desktop/src/lib.rs`.
 `crates/rocky-sdk` also packages the configuration-only `rocky-peer` custody
 launcher and its container; see [always-on peer](runtime/always-on-peer.md).
 `crates/rocky-sdk` owns the native reactor over `EncryptedReplica`: a schema's
-typed secure tables, enrollment with grant profiles, issuer devices, renewal,
+typed secure tables, enrollment with grant profiles, the replicated
+[issuer registry](runtime/issuer-registry.md), renewal,
 revocation with key rotation, supplied credentials, durable pseudonym assignment
 and per-table signing keys, the `SecretStore` key
 provider, contact records and sync with configured peers

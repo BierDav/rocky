@@ -211,7 +211,10 @@ impl Settings {
                 draft.keys.insert(name.to_owned(), vec![1]);
             }
         }
-        draft.credentials = draft.issue_own(vault, Profile::Issuer.grants(&domain.resources())?)?;
+        draft.credentials = draft.issue_own(
+            vault,
+            crate::enrollment::grants_of(&Profile::Issuer, &domain)?,
+        )?;
         draft.save(path)?;
         *self = draft;
         Ok(())

@@ -293,7 +293,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     // Only the collections the revoked reader could read get a new epoch.
     assert_eq!(
         identity(root, "a")?["keys"],
-        json!({"items": [1, 2], "notes": [1]})
+        json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
     );
     assert!(identity(root, "a")?["authority"]["rotation"].is_null());
     item(&a, 2, "After").await?;
@@ -373,13 +373,25 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     // receiver learned a later one; see docs/runtime/credentials.md.
     synced(&b).await?;
     let c_node = c.node().await;
+    let devices = a.ok(json!({"type": "devices"})).await;
+    let record = devices["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|device| device["node"] == c_node)
+        .cloned()
+        .ok_or("c's record")?;
     for device in [&a, &b, &c] {
         device.close().await;
     }
-    // The intent was saved and the new key made; then the device stopped.
+    // The intent and the record it acts on were saved and the new key
+    // made; then the device stopped.
     let path = root.join("a/identity.json");
     let mut saved = identity(root, "a")?;
-    saved["authority"]["rotation"] = json!({"epoch": 2, "node": c_node});
+    saved["authority"]["rotation"] = json!({"epoch": 2, "node": c_node, "record": {
+        "user": record["user"], "capability": null, "profile": record["profile"],
+        "partitions": [], "pseudonyms": [],
+    }});
     std::fs::write(&path, saved.to_string())?;
     let installation = saved["installation"].as_str().ok_or("installation")?;
     let made = [7; 32];
@@ -394,10 +406,18 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         assert_eq!(session(&a).await["epoch"], "2", "round {round}");
         let saved = identity(root, "a")?;
         assert!(saved["authority"]["rotation"].is_null());
-        assert_eq!(saved["keys"], json!({"items": [1, 2], "notes": [1]}));
         assert_eq!(
-            saved["authority"]["devices"][&c_node]["revoked"],
-            json!(true)
+            saved["keys"],
+            json!({"issuer_registry": [1], "items": [1, 2], "notes": [1]})
+        );
+        let listed = a.ok(json!({"type": "devices"})).await;
+        assert!(
+            listed["devices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|device| device["node"] == c_node && device["revoked"] == true),
+            "{listed}"
         );
         assert_eq!(secret(root, "a", "reader.items.2")?, Some(made));
         if round == 0 {

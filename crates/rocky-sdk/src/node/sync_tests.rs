@@ -47,6 +47,7 @@ async fn enrolled(
     let path = root.join("identity.json");
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;
+        let registry = issuer.registry().await?;
         let (invite, _) = issuer
             .settings
             .lock()
@@ -56,6 +57,7 @@ async fn enrolled(
                 &issuer.vault,
                 &*link.as_ref().ok_or("link")?.transport,
                 profile,
+                &registry,
             )
             .await?;
         let joining = Settings::prepare_join(&path, &invite, &store)?;

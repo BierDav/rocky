@@ -95,11 +95,19 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     c.add(4, "Tea").await;
     assert!(c.sync().await.is_err());
     assert_eq!(b.titles().await, ["Eggs", "Milk"]);
+    // Any issuer renews any device: the last one can be removed, and the
+    // member then reports that it has no issuer contact.
     let creator_node = creators[0]["node"].clone();
-    assert!(
-        b.call(json!({"type": "peer_remove", "node": creator_node}))
-            .await
-            .is_err()
+    assert_eq!(b.ok(json!({"type": "peers"})).await["issuer_contact"], true);
+    b.ok(json!({"type": "peer_remove", "node": creator_node}))
+        .await;
+    assert_eq!(
+        b.ok(json!({"type": "peers"})).await["issuer_contact"],
+        false
+    );
+    assert_eq!(
+        b.ok(json!({"type": "status"})).await["authority"]["issuer_contact"],
+        false
     );
     for device in [b, c, d] {
         device.close().await;
@@ -306,7 +314,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, u32::MAX] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, u32::MAX] {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

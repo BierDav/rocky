@@ -31,7 +31,8 @@ The creating device is the first issuer. Each device is enrolled as a
 [grant profile](credentials.md#grant-profiles): reader or writer of named
 collections, custody-only holder ([always-on peer](always-on-peer.md), no
 reader keys or publishing authority), or issuer. An issuer enrolls, renews
-and revokes; no issuer needs to serve every sync.
+and revokes; no issuer needs to serve every sync. Issuers share one record per
+device in the replicated [issuer registry](issuer-registry.md).
 
 ## Author installation
 
@@ -48,8 +49,9 @@ an author fail until it is installed. Raw local/supplied composition remains
 explicit and can call `installAuthors()` itself.
 
 The `authors` native request returns `installed` entries with `collection`
-and `author`. Assignments and counters are persisted before the issuer
-answers, so a lost reply retries the same device's assignment. The
+and `author`. The counter is saved and the assignment committed to the
+registry before the issuer answers, so a lost reply retried at any issuer
+returns the same number. The
 `rocky.sdk.author.v1` prefix distinguishes this request from ordinary renewal
 and generation offers; it carries the existing signed `PseudonymRequest`.
 Issuers verify its grants, manifest, epoch and device binding through the same
@@ -83,11 +85,13 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 9 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, group partition secrets and issuer grant holders, author ranges and assignment counters, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation, known devices and a pending revocation |
+| `identity.json` | 10 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, and a pending revocation with the record it acts on |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
-Each record accepts only its listed version, independent of routing flags.
+Device records are not in `identity.json`: they are rows of the
+[issuer registry](issuer-registry.md). Each record accepts only its listed
+version, independent of routing flags.
 Other versions are refused before installation writes; identity files and keys
 are never migrated. Reinstall with the current build. Assignment records and counters are saved before a
 credential is returned.
@@ -108,7 +112,8 @@ secret until used.
   answer retries as the same device; nobody else can reuse the invitation.
 - A different schema, or no route of the attached kind, fails without
   consuming the invitation.
-- An issuer knows up to 64 devices.
+- A domain's registry holds up to 256 devices; the 257th enrollment fails
+  with `registry_full` before the invitation is consumed.
 - A joining issuer sends its routes, bound by the token proof, so both issuers
   become peers. The enrollment carries contacts of other issuers, added as
   peers that also renew the joiner.
@@ -131,7 +136,9 @@ Credentials last 30 days by default (`credential_ttl`, a minute to a year). A
 sync renews them past half their lifetime: the device signs a timestamped
 request for one issuer, which answers with the same grants under its current
 policy and the current reader key epochs, sealed to a one-time key. Any issuer
-renews any unrevoked device. An issuer renews itself after asking known issuers
+renews any unrevoked device: it takes the tombstone and profile from the
+device's registry record, or renews the presented chain and records it when the
+record has not reached it yet. An issuer renews itself after asking known issuers
 for a newer policy. Expired credentials cannot open a member until an issuer
 is reachable. Clock skew up to five minutes is accepted.
 
@@ -168,8 +175,9 @@ issuer's; no identity or author log is cloned.
 Enrollments, renewal answers and `grant` bundles carry contacts of the other
 issuers the answering issuer reaches; receivers add them as peers and issuers
 within limits. A device enrolled before the second issuer learns it at its
-next renewal. An issuer that refuses a sync from an unknown device first
-answers the renewal that sync starts, then serves it.
+next renewal. An issuer serves every device its registry records; one that
+refuses a sync from a device whose record has not reached it first answers the
+renewal that sync starts, then serves it.
 
 When the creator is lost, a remaining issuer calls `revoke(node)` with its
 node key: next policy epoch, ended chains, rotated reader keys. Others renew
@@ -179,7 +187,8 @@ Unrecoverable:
 
 - **A revoked issuer's publisher key.** Revocation recovers from loss, not
   theft; a stolen issuer needs a new domain.
-- **The last issuer.** Members sync until credentials expire, then stop for good.
+- **The last issuer.** Members sync until credentials expire, then stop for
+  good. A member that removed every issuer reports `issuer_contact: false`.
 - **A device that knew only the lost issuer** and did not renew since: add a
   remaining issuer's contact with `addPeer`.
 - **Writes under the ended epoch.** Peers that learned the revocation refuse
@@ -200,10 +209,11 @@ A contact is not secret and grants nothing. A route is a hint: whoever answers
 must sign the session with that node key and present a valid chain. Adding a
 contact again replaces the routes of its transport kinds.
 
-- A device serves only peers it configured; an issuer also serves devices it
-  knows and did not revoke, and refuses contacts of revoked ones.
+- A device serves only peers it configured; an issuer also serves devices its
+  registry records without a tombstone, and refuses contacts of revoked ones.
 - Limits: 16 peers, 8 issuers, 4 routes per peer, 2,048-byte addresses.
-- A member cannot remove its last issuer.
+- Any peer can be removed, the last issuer included. `peers` and readiness
+  (`authority.issuer_contact`) report a member left without issuer contact.
 - Nothing is discovered or elected. Custody forwarding of enrollment
   ([issuer availability](always-on-peer.md#issuer-availability)) never
   substitutes custody routes for issuer row-sync routes.
@@ -240,13 +250,13 @@ enables the native [change-driven worker](always-on-peer.md#change-driven-sync);
 | `pairing` with `profile` | `uri`, `expires`, `profile` (issuer) |
 | `grant` / `delegate` with `device` and `grants` or `profile` | `supplied` for `install`; `delegate` narrows this device's grants |
 | `install` with `supplied` | Replaces credentials; the new `session` |
-| `devices`, `revoke` with `node` | Known devices with `profile` and `revoked`; the new epoch (issuer) |
+| `devices`, `device_label`, `revoke` with `node` | [Registry](issuer-registry.md#calls) records; a label set; the new epoch (issuer) |
 | `renew` | The renewed `session` |
 | `authors` | Newly installed table authors; see [above](#author-installation) |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `connection` with `online`, `sync` | `offline`, or `connected` with the number of `peers` reached |
-| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; configured peers with `issuer`, routes, `state`, `checked`, `error` |
+| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; configured peers with `issuer`, routes, `state`, `checked`, `error`, and `issuer_contact` |
 | `network` | See [network status](sdk-composition.md#network-status) |
 | `mutate`, `mutation_progress` | A durable create, set or delete by handle |
 | `read`, `subscribe`, `next`, `unsubscribe` | Pages of a `SELECT` over the collections |
@@ -270,6 +280,22 @@ reaches nobody; unknown identity and invitation versions are refused unchanged.
 `--test custody` covers routed invitations and enrollment-only contacts.
 `--test issuers` destroys the creator after pairing a second issuer, which
 revokes it, invites a third device and renews earlier devices.
+`--test registry`: a device enrolled at A is listed at B after one sync with
+the same profile, partition grants, pseudonyms, chain expiry, command identity
+and label; a member renews at an issuer it never met while the first is gone,
+removes it and keeps syncing (acceptance 4, in-process hub); a member, a
+non-issuing writer and a custody peer hold no registry key or open row while
+the custody peer relays the rows between two issuers; concurrent enrollments
+at two issuers keep disjoint author ranges and both records, and concurrent
+renewals one record; pairing, renewal and `grant` interrupted after the
+registry commit, before and after the answer is written, retry as the same
+device; the 257th device fails with `registry_full` and writes nothing.
+
+Measured on 2026-10-10 on an Apple Silicon Mac in the debug test profile
+(dependencies at `opt-level = 2`), two runs: filling a registry to 256 devices
+with 253 grants took 21.9 s and 26.0 s; a new issuer that had settled its own
+first sync pulled all 256 records in one sync in 16.1 s and 11.6 s, and
+reopened in 2.5 s both times. Release builds were not measured.
 `./examples/shoppinglist-app/check` runs enrollment, direct sync, revocation, a
 Kotlin `SecretStore` and `IssuerRecoveryTest` through Kotlin and Room.
 Not covered: publisher key backup, login providers, desktop keychains.
@@ -277,8 +303,10 @@ Not covered: publisher key backup, login providers, desktop keychains.
 ## Design rationale
 
 Status: current identity and routing formats supersede their compatibility
-clauses as of 2026-10-08. Identity 9, invitation 4 and contact 2 each have one
-reader; other versions require reinstall.
+clauses as of 2026-10-08; identity 10 moves device records to the
+[registry](../decisions/0048-replicated-issuer-registry.md) as of 2026-10-10.
+Identity 10, invitation 4 and contact 2 each have one reader; other versions
+require reinstall.
 
 - Identity is transport-independent: a domain is its definition identity and
   publisher key, a device its node key under a credential chain. Routes are

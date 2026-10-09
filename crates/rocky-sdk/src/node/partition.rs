@@ -103,13 +103,12 @@ impl Node {
     async fn issue_partitions(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
         let device: crate::DeviceKeys = serde_json::from_value(request["device"].clone())?;
         let grants: Vec<PartitionGrant> = serde_json::from_value(request["partitions"].clone())?;
-        let mut settings = self.settings.lock().await;
-        let terms = (
-            request["delegations"].as_u64().unwrap_or(1).try_into()?,
-            None,
-        );
+        let registry = self.registry().await?;
+        let settings = self.settings.lock().await.clone();
+        let delegations: u8 = request["delegations"].as_u64().unwrap_or(1).try_into()?;
+        let terms = (delegations, None);
         let validity = (now()?, settings.ttl, 300);
-        if settings.revoked_device(&device.node) {
+        if settings.revoked_device(&device.node, &registry) {
             return Err(refused("the device was revoked"));
         }
         let chain = if kind == "partition_delegate" {
@@ -143,11 +142,8 @@ impl Node {
             ])
         };
         // An issuer records the holder durably before the chain leaves it.
-        if settings.authority.is_some() {
-            let mut draft = settings.clone();
-            draft.record_holder(&device, &grants).map_err(refused)?;
-            draft.save(&self.path)?;
-            *settings = draft;
+        if settings.issuer() {
+            Box::pin(self.record_holder(&device, &grants, delegations)).await?;
         }
         let supplied = crate::Supplied {
             mesh: settings.mesh,
@@ -243,6 +239,7 @@ impl Node {
     }
     /// One envelope per recipient of the current epoch's group secret.
     async fn share(&self, partition: GroupPartition, request: &Value) -> Result<Value, Failure> {
+        let registry = self.registry().await?;
         let settings = self.settings.lock().await;
         if !settings.issuer() {
             return Err(refused("sharing a group partition requires an issuer"));
@@ -270,7 +267,7 @@ impl Node {
             serde_json::from_value(request["recipients"].clone())?;
         if let Some(revoked) = recipients
             .iter()
-            .find(|recipient| settings.revoked_device(recipient))
+            .find(|recipient| settings.revoked_device(recipient, &registry))
         {
             return Err(refused(format!(
                 "recipient {} was revoked",

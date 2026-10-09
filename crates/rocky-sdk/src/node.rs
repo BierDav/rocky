@@ -2,6 +2,7 @@
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
 mod partition;
+mod registry;
 use crate::{
     Failure,
     domain::Domain,
@@ -53,6 +54,14 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 fn refused(error: impl std::fmt::Display) -> Failure {
     Box::new(Refused(error.to_string()))
+}
+/// A refusal that keeps a named error, such as a full registry.
+fn named(error: Failure) -> Failure {
+    if error.is::<crate::registry::RegistryFull>() {
+        error
+    } else {
+        refused(error)
+    }
 }
 
 /// An executor's refusal that a later run of the same ticket may not meet.
@@ -265,11 +274,21 @@ impl Node {
         self.service = service;
         self
     }
+    /// Every granted scope, the registry's included: what sync covers.
     fn scopes(&self) -> Vec<ResourceScope> {
         self.granted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+    /// The granted scopes the application's sessions open: the registry is
+    /// the SDK's own.
+    fn app_scopes(&self) -> Vec<ResourceScope> {
+        let registry = self.domain.registry();
+        self.scopes()
+            .into_iter()
+            .filter(|scope| *scope != registry)
+            .collect()
     }
 
     fn clients(&self) -> Vec<Arc<Client>> {
@@ -325,7 +344,7 @@ impl Node {
         *cached = None;
         let session = self
             .replica
-            .session(self.scopes().into_iter().collect())
+            .session(self.app_scopes().into_iter().collect())
             .await?;
         let sql = Arc::new(session.sql(SqlOptions::default()).await?);
         let reader = Reader { session, sql };
@@ -342,7 +361,7 @@ impl Node {
         }
         let session = self
             .replica
-            .session(self.scopes().into_iter().collect())
+            .session(self.app_scopes().into_iter().collect())
             .await?;
         let sql = session.sql(options).await?;
         Ok((session, sql))
@@ -494,11 +513,18 @@ impl Node {
                             refused("pairing needs a grant profile: reader, writer or issuer")
                         })?;
                     let transport = transport.ok_or(ServiceError::NetworkRequired("pairing"))?;
+                    let registry = self.registry().await?;
                     let mut settings = self.settings.lock().await;
                     let (uri, expires) = settings
-                        .invite(&self.path, &self.vault, transport, profile.clone())
+                        .invite(
+                            &self.path,
+                            &self.vault,
+                            transport,
+                            profile.clone(),
+                            &registry,
+                        )
                         .await
-                        .map_err(refused)?;
+                        .map_err(named)?;
                     self.activity.record(
                         "invitation_created",
                         json!({"profile": profile, "expires": expires.to_string()}),
@@ -630,10 +656,14 @@ impl Node {
             "sql" | "next_id" | "move_row" => self.sql_call(client, kind, request).await,
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "devices" => self.devices().await,
+            "device_label" => self.label(request).await,
             "grant" | "delegate" => self.grant(request).await,
             kind if kind.starts_with("pseudonym_") => self.pseudonym(kind, request).await,
             "install" => self.install_supplied(client, request).await,
-            "peers" => Ok(json!({"peers": self.peers().await})),
+            "peers" => Ok(json!({
+                "peers": self.peers().await,
+                "issuer_contact": self.settings.lock().await.issuer_contact(),
+            })),
             "enrollment_route" => Ok(json!({"uri": crate::route_enrollment(
                 request["uri"].as_str().ok_or_else(|| refused("uri must be an invitation or issuer contact"))?,
                 request["contact"].as_str().ok_or_else(|| refused("contact must name the custody peer"))?,
@@ -667,8 +697,15 @@ impl Node {
                 let contact = request["contact"]
                     .as_str()
                     .ok_or("contact must be a contact URI")?;
+                let registry = self.registry().await?;
                 let node = self
-                    .configure(|settings| settings.add_peer(&self.vault, contact))
+                    .configure(|settings| {
+                        let node = settings.add_peer(&self.vault, contact)?;
+                        if registry.revoked(&node) {
+                            return Err("the contact names a revoked device".into());
+                        }
+                        Ok(node)
+                    })
                     .await?;
                 self.activity
                     .record("peer_added", json!({"peer": node.to_hex()}));
@@ -773,7 +810,7 @@ impl Node {
     ) -> Result<T, Failure> {
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
-        let result = change(&mut draft).map_err(refused)?;
+        let result = change(&mut draft).map_err(named)?;
         draft.save(&self.path)?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
         *settings = draft;
@@ -799,22 +836,16 @@ impl Node {
             "authors": request["authors"],
         }))
         .map_err(|_| refused("ttl must be seconds, delegations 1 to 7 and authors a count"))?;
-        if request["type"] == "delegate" {
-            let supplied = self
-                .configure(|settings| settings.delegate(&self.vault, device, profile, terms))
-                .await?;
-            return Ok(json!({"supplied": supplied}));
-        }
+        let delegate = request["type"] == "delegate";
         let contact = match self.current() {
-            Some(link) => {
+            Some(link) if !delegate => {
                 let settings = self.settings.lock().await.clone();
                 Some(settings.contact(&self.vault, &*link.transport).await?.0)
             }
-            None => None,
+            _ => None,
         };
-        let supplied = self
-            .configure(|settings| settings.grant(&self.vault, device, profile, terms, contact))
-            .await?;
+        let supplied =
+            Box::pin(self.answer_grant(device, (profile, terms), delegate, contact)).await?;
         Ok(json!({"supplied": supplied}))
     }
     /// Author pseudonyms: request one, assign one, keep one, find whose it
@@ -840,9 +871,7 @@ impl Node {
                     .decode(request["request"].as_str().unwrap_or_default().as_bytes())
                     .map_err(|_| refused("request must be hexadecimal"))?;
                 let asked = rocky_credentials::PseudonymRequest::from_bytes(&bytes)?;
-                let assigned = self
-                    .configure(|settings| settings.assign_pseudonym(&self.vault, &asked))
-                    .await?;
+                let assigned = Box::pin(self.answer_author(&asked)).await?;
                 Ok(json!({"pseudonym": assigned}))
             }
             "pseudonym_install" => {
@@ -1189,6 +1218,7 @@ impl Node {
                 "logged_out": logged_out,
                 "revoked": revocation.is_some(),
                 "profile": settings.profile,
+                "issuer_contact": settings.issuer_contact(),
             },
             "tickets": tickets,
             "network": {"attached": self.current().is_some()},
@@ -1301,33 +1331,14 @@ impl Node {
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
         }))
     }
-    async fn devices(&self) -> Result<Value, Failure> {
-        let settings = self.settings.lock().await;
-        let Some(authority) = &settings.authority else {
-            return Err(refused("only an issuer lists devices"));
-        };
-        let devices: Vec<Value> = authority
-            .devices
-            .iter()
-            .map(|(node, device)| {
-                json!({
-                    "node": node.to_hex(),
-                    "user": device.user.to_hex(),
-                    "enrolled": device.enrolled.to_string(),
-                    "revoked": device.revoked,
-                    "profile": device.profile,
-                })
-            })
-            .collect();
-        Ok(json!({"devices": devices}))
-    }
     /// Revokes a device and rotates the keys it could read. The intent,
     /// the new keys and the identity are saved before the replica learns
     /// them, so an interruption completes at the next open.
     async fn revoke(&self, node: PublicKey) -> Result<Value, Failure> {
+        let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
-        draft.begin_revocation(node).map_err(refused)?;
+        draft.begin_revocation(node, &registry).map_err(refused)?;
         draft.save(&self.path)?;
         *settings = draft.clone();
         let keys = draft.rotate(&self.vault)?;
@@ -1346,6 +1357,8 @@ impl Node {
         }
         drop(settings);
         self.forget_readers().await;
+        // Rotated first: the policy refuses the device even if this fails.
+        Box::pin(self.record_revocation(node)).await?;
         Ok(json!({"epoch": epoch.to_string()}))
     }
     /// Teaches the replica what the identity already records: the policy,
@@ -1428,12 +1441,19 @@ impl Node {
             settings.granted(&self.domain);
         drop(settings);
         self.forget_readers().await;
+        // An issuer's own record names its current capability.
+        if let Err(error) = Box::pin(self.record_self()).await {
+            self.activity
+                .record("registry_failed", json!({"error": error.to_string()}));
+        }
         self.wake_sync();
         Ok(())
     }
     async fn logout(&self, purge: bool) -> Result<Value, Failure> {
+        let registry = self.registry().await?;
+        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let mut settings = self.settings.lock().await;
-        if settings.issuer() && !settings.another_issuer() {
+        if settings.issuer() && !settings.another_issuer(&registry, own) {
             return Err(refused(
                 "this device holds the only known copy of the domain's publisher key and cannot log out",
             ));
@@ -1474,8 +1494,7 @@ impl Node {
             let settings = self.settings.lock().await.clone();
             let request = settings.pseudonym_request(&self.vault, &collection)?;
             let chain = if settings.issuer() {
-                self.configure(|settings| settings.assign_pseudonym(&self.vault, &request))
-                    .await?
+                Box::pin(self.answer_author(&request)).await?
             } else {
                 let transport = transport.ok_or(ServiceError::NetworkRequired("authors"))?;
                 settings.request_author(transport, &request).await?
@@ -1713,7 +1732,8 @@ impl Node {
         {
             let _ = self.authors(Some(transport)).await;
         }
-        let targets = self.settings.lock().await.targets();
+        let registry = Box::pin(self.admission()).await;
+        let targets = self.settings.lock().await.targets(&registry);
         let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
         // A revocation elsewhere raised the policy epoch, or an issuer does
         // not know this device yet: renew once, from that peer if it is an
@@ -1882,9 +1902,10 @@ impl Node {
         }
         match protocol {
             Protocol::Sync => {
+                let registry = Box::pin(self.admission()).await;
                 let settings = self.settings.lock().await.clone();
                 let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-                let admitted = settings.admitted();
+                let admitted = settings.admitted(&registry);
                 let (credentials, coordinator) =
                     (settings.credentials, self.coordinator.as_deref());
                 sync::serve(
@@ -1902,23 +1923,7 @@ impl Node {
                     if let Some(reply) = self.forward_enrollment(Protocol::Pair, &request).await? {
                         return Ok(reply);
                     }
-                    let mut settings = self.settings.lock().await;
-                    if !settings.issuer() {
-                        return Err(refused("only an issuer enrolls devices"));
-                    }
-                    let reply = settings.pair(&self.path, &self.vault, &request)?;
-                    if let Ok(paired) = rocky_credentials::PairRequest::from_bytes(&request)
-                        && let Some(device) = settings
-                            .authority
-                            .as_ref()
-                            .and_then(|authority| authority.devices.get(&paired.node))
-                    {
-                        self.activity.record(
-                            "device_enrolled",
-                            json!({"node": paired.node.to_hex(), "profile": device.profile}),
-                        );
-                    }
-                    Ok(reply)
+                    Box::pin(self.answer_pair(&request)).await
                 })
                 .await
             }
@@ -1927,7 +1932,7 @@ impl Node {
                     if let Some(reply) = self.forward_enrollment(Protocol::Renew, &request).await? {
                         return Ok(reply);
                     }
-                    let mut settings = self.settings.lock().await;
+                    let settings = self.settings.lock().await.clone();
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
                     }
@@ -1935,19 +1940,11 @@ impl Node {
                         return Ok(serde_json::to_vec(&settings.policy)?);
                     }
                     if request == crate::generation::OFFER {
-                        if !settings.issuer() {
-                            return Err("only an issuer offers the domain's generations".into());
-                        }
                         return settings.offer();
                     }
                     if let Some(asked) = request.strip_prefix(crate::enrollment::AUTHOR) {
                         let asked = rocky_credentials::PseudonymRequest::from_bytes(asked)?;
-                        let mut draft = settings.clone();
-                        let chain = draft
-                            .assign_pseudonym(&self.vault, &asked)
-                            .map_err(refused)?;
-                        draft.save(&self.path)?;
-                        *settings = draft;
+                        let chain = Box::pin(self.answer_author(&asked)).await?;
                         let collection = settings.collection_name(asked.table).unwrap_or_default();
                         self.activity.record(
                             "author_assigned",
@@ -1955,7 +1952,7 @@ impl Node {
                         );
                         return Ok(serde_json::to_vec(&chain)?);
                     }
-                    settings.renew(&self.path, &self.vault, &request)
+                    Box::pin(self.answer_renewal(&request)).await
                 })
                 .await
             }
@@ -2776,6 +2773,8 @@ fn is_authority(error: &Failure) -> bool {
 pub fn error(error: &Failure) -> Value {
     let (code, retryable) = if error.is::<crate::enrollment::Revoked>() {
         ("revoked", false)
+    } else if error.is::<crate::registry::RegistryFull>() {
+        ("registry_full", false)
     } else if error.is::<Refused>() {
         ("rejected", false)
     } else if error.is::<Deferred>() {

@@ -1,0 +1,289 @@
+//! The issuer's side of the registry: answers that commit their rows
+//! before they leave, the device list and labels. See
+//! `docs/decisions/0048-replicated-issuer-registry.md`.
+use super::*;
+use crate::{
+    domain::REGISTRY,
+    registry::{self, Changes, Registry},
+};
+
+impl Node {
+    /// Every record this device holds; empty on a non-issuer, which holds
+    /// no registry key.
+    pub(crate) async fn registry(&self) -> Result<Registry, Failure> {
+        if !self.settings.lock().await.issuer() {
+            return Ok(Registry::default());
+        }
+        Box::pin(registry::read(&self.replica, self.domain.registry())).await
+    }
+    /// The records sync admission reads. While the registry cannot be read,
+    /// such as when its rows wait for a rotated key or a checkpoint, the
+    /// configured peers and the policy still decide.
+    pub(super) async fn admission(&self) -> Registry {
+        match self.registry().await {
+            Ok(registry) => registry,
+            Err(error) => {
+                self.activity
+                    .record_changed("registry_failed", json!({"error": error.to_string()}));
+                Registry::default()
+            }
+        }
+    }
+    /// Installs this issuer's registry pseudonym, from its own author
+    /// range, unless it holds a current one.
+    async fn registry_author(&self) -> Result<(), Failure> {
+        let settings = self.settings.lock().await.clone();
+        if !settings.issuer() {
+            return Err(refused("only an issuer writes the registry"));
+        }
+        if settings.holds_author(&self.domain, REGISTRY)? {
+            return Ok(());
+        }
+        let request = settings.pseudonym_request(&self.vault, REGISTRY)?;
+        let (chain, _) = self
+            .configure(|settings| settings.assign_pseudonym(&self.vault, &request, None))
+            .await?;
+        self.configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
+            .await?;
+        let key = PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{REGISTRY}"))?);
+        self.replica.register_row_author(key, chain).await?;
+        Ok(())
+    }
+    /// Commits `changes` with this issuer's own record in one transaction.
+    /// The registry author must be installed.
+    async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
+        let registry = self.registry().await?;
+        let own = self
+            .settings
+            .lock()
+            .await
+            .own_record(&self.vault, &registry)?;
+        changes.extend(own);
+        Box::pin(registry::write(
+            &self.replica,
+            self.domain.registry(),
+            &changes,
+        ))
+        .await
+    }
+    /// Brings this issuer's own record up to date, as after a renewal.
+    pub(super) async fn record_self(&self) -> Result<(), Failure> {
+        if !self.settings.lock().await.issuer() {
+            return Ok(());
+        }
+        self.registry_author().await?;
+        self.commit(Changes::default()).await
+    }
+
+    /// Answers a pairing: the claim is saved, then the record committed,
+    /// then the enrollment returned.
+    pub(super) async fn answer_pair(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer enrolls devices"));
+        }
+        self.registry_author().await?;
+        let registry = self.registry().await?;
+        let (reply, changes) = {
+            let mut settings = self.settings.lock().await;
+            let mut draft = settings.clone();
+            let answer = draft.pair(&self.vault, request, &registry);
+            // Attempts count even when the request is refused.
+            draft.save(&self.path)?;
+            *settings = draft;
+            answer?
+        };
+        self.commit(changes).await?;
+        if let Ok(paired) = rocky_credentials::PairRequest::from_bytes(request) {
+            let profile = self
+                .settings
+                .lock()
+                .await
+                .authority
+                .as_ref()
+                .and_then(|authority| {
+                    authority
+                        .invitation
+                        .as_ref()
+                        .map(|invitation| invitation.profile.clone())
+                });
+            self.activity.record(
+                "device_enrolled",
+                json!({"node": paired.node.to_hex(), "profile": profile}),
+            );
+        }
+        Ok(reply)
+    }
+    /// Answers a renewal of any unrevoked device once its record committed.
+    pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
+        self.registry_author().await?;
+        let registry = self.registry().await?;
+        let settings = self.settings.lock().await.clone();
+        let (reply, changes) = settings.renew(&self.vault, request, &registry)?;
+        self.commit(changes).await?;
+        Ok(reply)
+    }
+    /// Assigns a pseudonym on an issuer: the counter is saved, then the
+    /// assignment committed, then the chain returned. A key the registry
+    /// knows keeps its number, whichever issuer assigned it.
+    pub(super) async fn answer_author(
+        &self,
+        request: &rocky_credentials::PseudonymRequest,
+    ) -> Result<CredentialChain, Failure> {
+        if !self.settings.lock().await.issuer() {
+            return self
+                .configure(|settings| {
+                    settings
+                        .assign_pseudonym(&self.vault, request, None)
+                        .map(|(chain, _)| chain)
+                })
+                .await;
+        }
+        // Its own pseudonyms never leave this issuer: its next commit
+        // records them with its own record.
+        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        if request.node != own {
+            self.registry_author().await?;
+        }
+        let registry = self.registry().await?;
+        let (chain, changes) = self
+            .configure(|settings| settings.assign_pseudonym(&self.vault, request, Some(&registry)))
+            .await?;
+        if request.node != own {
+            self.commit(changes).await?;
+        }
+        Ok(chain)
+    }
+    /// Issues a profile to a prepared device, granted on an issuer or
+    /// delegated: identity saved, record committed, then returned.
+    pub(super) async fn answer_grant(
+        &self,
+        device: crate::DeviceKeys,
+        issued: (Profile, Terms),
+        delegate: bool,
+        contact: Option<String>,
+    ) -> Result<crate::Supplied, Failure> {
+        let issuer = self.settings.lock().await.issuer();
+        if issuer {
+            self.registry_author().await?;
+        }
+        let registry = self.registry().await?;
+        let (supplied, changes) = if delegate {
+            self.configure(|settings| {
+                settings.delegate(&self.vault, device, issued, issuer.then_some(&registry))
+            })
+            .await?
+        } else {
+            self.configure(|settings| {
+                settings.grant(&self.vault, device, issued, contact, &registry)
+            })
+            .await?
+        };
+        if issuer {
+            self.commit(changes).await?;
+        }
+        Ok(supplied)
+    }
+    /// Records partitions granted or delegated on an issuer before the
+    /// chain leaves it.
+    pub(super) async fn record_holder(
+        &self,
+        device: &crate::DeviceKeys,
+        grants: &[rocky_credentials::PartitionGrant],
+        delegations: u8,
+    ) -> Result<(), Failure> {
+        self.registry_author().await?;
+        let registry = self.registry().await?;
+        let changes = self
+            .settings
+            .lock()
+            .await
+            .holder_changes(&self.vault, device, grants, delegations, &registry)
+            .map_err(|error| {
+                if error.is::<registry::RegistryFull>() {
+                    error
+                } else {
+                    refused(error)
+                }
+            })?;
+        self.commit(changes).await
+    }
+    /// Writes the tombstone of a revoked device.
+    pub(super) async fn record_revocation(&self, node: PublicKey) -> Result<(), Failure> {
+        self.registry_author().await?;
+        let mut changes = Changes::default();
+        changes.revoked(&node)?;
+        self.commit(changes).await
+    }
+
+    /// Every other device's record, on an issuer.
+    pub(super) async fn devices(&self) -> Result<Value, Failure> {
+        let settings = self.settings.lock().await.clone();
+        if !settings.issuer() {
+            return Err(refused("only an issuer lists devices"));
+        }
+        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+        let registry = self.registry().await?;
+        let devices: Vec<Value> = registry
+            .records
+            .iter()
+            .filter(|(node, record)| **node != own && record.device.is_some())
+            .map(|(node, record)| {
+                let device = record.device.as_ref();
+                let capability = record.capability();
+                json!({
+                    "node": node.to_hex(),
+                    "user": device.map(|device| device.user.to_hex()),
+                    "kind": device.map(|device| device.kind),
+                    "issuer": device.map(|device| device.issuer.to_hex()),
+                    "enrolled": device.map(|device| device.enrolled.to_string()),
+                    "revoked": record.revoked || settings.revoked_device(node, &registry),
+                    "profile": record.profile(),
+                    "capability": capability.map(|capability| data_encoding::HEXLOWER.encode(&capability.id)),
+                    "expires": capability.map(|capability| capability.expires.to_string()),
+                    "command": device.map(|device| device.command.clone()),
+                    "label": record.label,
+                    "partitions": record.grants.iter().map(|grant| json!({
+                        "grant": grant.grant, "delegations": grant.delegations,
+                    })).collect::<Vec<_>>(),
+                    "pseudonyms": record.pseudonyms.iter().map(|pseudonym| json!({
+                        "collection": settings.collection_name(pseudonym.table),
+                        "key": pseudonym.key.to_hex(),
+                        "author": pseudonym.author,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Ok(json!({"devices": devices}))
+    }
+    /// Sets the opaque application label of a recorded device.
+    pub(super) async fn label(&self, request: &Value) -> Result<Value, Failure> {
+        let node: PublicKey = request["node"]
+            .as_str()
+            .ok_or_else(|| refused("node must be a public key"))?
+            .parse()
+            .map_err(refused)?;
+        let label: Vec<u8> = serde_json::from_value(request["label"].clone())
+            .map_err(|_| refused("label must be bytes"))?;
+        if label.len() > registry::MAX_LABEL {
+            return Err(refused(format!(
+                "a device label holds at most {} bytes",
+                registry::MAX_LABEL
+            )));
+        }
+        if !self.settings.lock().await.issuer() {
+            return Err(refused("only an issuer labels devices"));
+        }
+        self.registry_author().await?;
+        let registry = self.registry().await?;
+        if registry
+            .get(&node)
+            .is_none_or(|record| record.device.is_none())
+        {
+            return Err(refused("the registry holds no such device"));
+        }
+        let mut changes = Changes::default();
+        changes.label(&node, &label)?;
+        self.commit(changes).await?;
+        Ok(json!({}))
+    }
+}

@@ -1,6 +1,15 @@
 # 5. Replicated issuer registry
 
-Status: not started.
+Status: implemented on 2026-10-10; completion gate met by
+`cargo test -p rocky-sdk --test registry` (each gate item, acceptance 4 on the
+in-process hub, the fault sweep and the bound) with
+[decision 0048](../decisions/0048-replicated-issuer-registry.md) and the
+[registry guide](../runtime/issuer-registry.md). Measured in the debug test
+profile: a 256-device registry syncs to a new issuer in 11.6 to 16.1 s and
+reopens in 2.5 s ([enrollment qualification](../runtime/sdk-enrollment.md#qualification)).
+Kotlin `devices()`, `setDeviceLabel` and `Readiness.issuerContact` compile
+with `./kotlin build -m rocky-core`; the shopping example's checks were not
+rerun.
 Owner: `rocky-sdk` enrollment, identity and node; `rocky-credentials` grant
 profiles; `sdks/native` and the Kotlin `devices` surface. No dependency;
 shares `identity.json` with [phase 6](06-revocation-set.md), in either order,

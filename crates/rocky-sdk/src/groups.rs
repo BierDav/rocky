@@ -1,20 +1,18 @@
 //! Group partitions: one secret per group partition and key epoch, every
-//! member table's key derived from it, the issuer's record of partition
-//! holders and the holding rule. See `docs/runtime/partitioned-scopes.md`.
+//! member table's key derived from it and the holding rule. See
+//! `docs/runtime/partitioned-scopes.md`.
 use crate::{Failure, domain::Domain, secrets::Vault};
 use data_encoding::HEXLOWER;
 use rocky_core::{
     Commitment, PartitionGroup, PartitionTuple, PartitionValue, ResourceScope, SqlValue,
 };
-use rocky_credentials::{PartitionGrant, derive_table_key};
-use rocky_secure::{KeyMaterial, PublicKey};
+use rocky_credentials::derive_table_key;
+use rocky_secure::KeyMaterial;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Secret epochs kept per group partition: one per revocation that rotated it.
 pub(crate) const MAX_GROUP_EPOCHS: usize = 256;
-/// Partition grants recorded per holder.
-const MAX_HOLDER_GRANTS: usize = 256;
 
 /// A group partition this installation knows, by its group address.
 #[derive(Clone, Serialize, Deserialize)]
@@ -221,44 +219,6 @@ impl GroupPartition {
                 member.scope.table,
                 epoch,
             )?,
-        })
-    }
-}
-
-/// What an issuer granted one device beyond its enrollment, recorded
-/// before the chain is returned so that revoking it covers those
-/// partitions and its user subject.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Holder {
-    pub user: PublicKey,
-    pub partitions: Vec<PartitionGrant>,
-}
-impl Holder {
-    pub fn record(&mut self, user: PublicKey, grants: &[PartitionGrant]) -> Result<(), Failure> {
-        if user != self.user {
-            return Err("the device holds partitions under another user key".into());
-        }
-        for grant in grants {
-            if !self.partitions.contains(grant) {
-                if self.partitions.len() >= MAX_HOLDER_GRANTS {
-                    return Err("partition grant capacity of this device reached".into());
-                }
-                self.partitions.push(grant.clone());
-            }
-        }
-        Ok(())
-    }
-    /// Whether a recorded grant selects any member of the group partition.
-    pub fn selects(&self, partition: &GroupPartition) -> bool {
-        partition.members.iter().any(|member| {
-            self.partitions.iter().any(|grant| {
-                grant
-                    .resolve(member.scope.domain, member.scope.table, &member.tuple)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
         })
     }
 }

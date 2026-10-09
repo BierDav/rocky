@@ -68,12 +68,14 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
     );
     assert_eq!(identity(root, "a")?, before);
     std::fs::remove_dir(root.join("a/identity.tmp"))?;
+    // The issuer's first registry write takes its own registry author, 1.
     let chain = assign(&a, &asked).await;
-    assert_eq!(author(&chain)?, 1);
-    // A lost first answer is retried without a previous chain.
-    assert_eq!(author(&assign(&a, &asked).await)?, 1);
-    assert_eq!(identity(root, "a")?["minting"]["next"], 2);
-    assert_eq!(install(&w, &chain).await["author"], 1);
+    assert_eq!(author(&chain)?, 2);
+    // A lost first answer is retried without a previous chain: the
+    // registry holds the assignment.
+    assert_eq!(author(&assign(&a, &asked).await)?, 2);
+    assert_eq!(identity(root, "a")?["minting"]["next"], 3);
+    assert_eq!(install(&w, &chain).await["author"], 2);
     assert_eq!(
         a.ok(json!({"type": "pseudonym_owner", "pseudonym": chain}))
             .await["node"],
@@ -96,12 +98,12 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
     );
     a.close().await;
     a = Device::open(&root.join("a"), Some(Network::Owned(hub.connector("a"))))?;
-    assert_eq!(author(&assign(&a, &asked).await)?, 1);
+    assert_eq!(author(&assign(&a, &asked).await)?, 2);
     w.close().await;
     let w = Device::open(&root.join("w"), Some(Network::Owned(hub.connector("w"))))?;
     assert_eq!(
         w.ok(json!({"type": "session"})).await["pseudonyms"]["items"],
-        1
+        2
     );
     // Policy rotation ends the old chain; renewal retains the pseudonym key/number.
     let r = Device::join(
@@ -119,7 +121,7 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
             .is_err()
     );
     let renewed = assign(&a, &request(&w).await).await;
-    assert_eq!(author(&renewed)?, 1);
+    assert_eq!(author(&renewed)?, 2);
     install(&w, &renewed).await;
     assert!(
         a.call(json!({"type": "pseudonym_assign", "request": request(&r).await}))
@@ -150,10 +152,11 @@ async fn issuers_split_ranges_and_delegates_carve_durably() -> Result<(), Failur
         right["first"].as_u64().ok_or("first")?
     );
     assert_eq!(right["last"], MAX_AUTHOR);
+    // Each issuer's first registry write takes the first of its numbers.
     let chain = assign(&b, &request(&a).await).await;
     assert_eq!(
         author(&chain)?,
-        right["first"].as_u64().ok_or("first")? as u32
+        right["first"].as_u64().ok_or("first")? as u32 + 1
     );
     install(&a, &chain).await;
     let keys = Database::device(&root.join("d"), None)?;
@@ -164,7 +167,7 @@ async fn issuers_split_ranges_and_delegates_carve_durably() -> Result<(), Failur
         serde_json::from_value(supplied.clone())?,
     )?)?;
     let held = identity(root, "d")?["minting"]["range"].clone();
-    assert_eq!(held, json!({"first": 1, "last": 2}));
+    assert_eq!(held, json!({"first": 2, "last": 3}));
     let e_keys = Database::device(&root.join("e"), None)?;
     assert!(
         d.call(json!({"type": "delegate", "device": e_keys, "profile": profile, "authors": 3}))
@@ -186,10 +189,10 @@ async fn issuers_split_ranges_and_delegates_carve_durably() -> Result<(), Failur
     );
     let asked = request(&e).await;
     let assigned = assign(&d, &asked).await;
-    assert_eq!(author(&assigned)?, 2);
+    assert_eq!(author(&assigned)?, 3);
     install(&e, &assigned).await;
     let e_chain = assign(&e, &request(&a).await).await;
-    assert_eq!(author(&e_chain)?, 1);
+    assert_eq!(author(&e_chain)?, 2);
     assert_eq!(
         a.ok(json!({"type": "pseudonym_owner", "pseudonym": e_chain}))
             .await["node"],
@@ -200,10 +203,12 @@ async fn issuers_split_ranges_and_delegates_carve_durably() -> Result<(), Failur
             .await
             .is_err()
     );
-    // Reinstalling the same range does not reset the consumed counter.
+    // Reinstalling the same range does not reset the consumed counter. A
+    // non-issuer keeps no assignment record: a retry presenting its
+    // previous chain keeps the number.
     d.ok(json!({"type": "install", "supplied": supplied})).await;
-    assert_eq!(identity(root, "d")?["minting"]["next"], 3);
-    assert_eq!(author(&assign(&d, &asked).await)?, 2);
+    assert_eq!(identity(root, "d")?["minting"]["next"], 4);
+    assert_eq!(author(&assign(&d, &request(&e).await).await)?, 3);
     for device in [&a, &b, &d, &e] {
         device.close().await;
     }

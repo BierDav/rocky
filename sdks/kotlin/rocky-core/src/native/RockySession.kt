@@ -37,6 +37,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             authority.text("expires").toLong(),
             profile(authority.getValue("profile").jsonObject),
             status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean,
+            authority["issuer_contact"]?.jsonPrimitive?.boolean ?: true,
         )
     }
 
@@ -155,9 +156,28 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     /** Replaces this device's credentials with a supplied bundle, such as a renewed delegation. They are verified first. */
     suspend fun install(supplied: JsonObject): SessionStatus = status(client.call(request("install") { put("supplied", supplied) }))
 
-    /** The devices this issuer enrolled or renewed. */
+    /** Every other device the replicated issuer registry records. Only an issuer reads it. */
     suspend fun devices(): List<Device> = client.call(request("devices")).getValue("devices").jsonArray.map { it.jsonObject }.map {
-        Device(it.text("node"), it.text("user"), it.text("enrolled").toLong(), it.getValue("revoked").jsonPrimitive.boolean, profile(it.getValue("profile").jsonObject))
+        Device(
+            it.text("node"),
+            it.text("user"),
+            it.text("enrolled").toLong(),
+            it.getValue("revoked").jsonPrimitive.boolean,
+            (it["profile"] as? JsonObject)?.let(::profile) ?: GrantProfile.Grants(emptyList()),
+            it["expires"]?.jsonPrimitive?.contentOrNull?.toLong(),
+            it["command"]?.jsonPrimitive?.contentOrNull,
+            (it["label"] as? JsonArray)?.map { byte -> byte.jsonPrimitive.int.toByte() }?.toByteArray(),
+        )
+    }
+
+    /** Sets the opaque application label, at most 256 bytes, of a device the registry records. Only an issuer does. */
+    suspend fun setDeviceLabel(node: String, label: ByteArray) {
+        client.call(
+            request("device_label") {
+                put("node", node)
+                put("label", JsonArray(label.map { JsonPrimitive(it.toInt() and 0xff) }))
+            },
+        )
     }
 
     /** This device's contact for another enrolled device to add. Needs an attached network that accepts. */
@@ -177,7 +197,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
      */
     suspend fun addPeer(contact: String): String = client.call(request("peer_add") { put("contact", contact) }).text("node")
 
-    /** Forgets a peer. A member keeps its last issuer, which renews its credentials. */
+    /** Forgets a peer, an issuer included: any issuer renews any device. [Readiness.issuerContact] reports a member left without one. */
     suspend fun removePeer(node: String) {
         client.call(request("peer_remove") { put("node", node) })
     }

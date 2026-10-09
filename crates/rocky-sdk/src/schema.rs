@@ -70,6 +70,19 @@ impl Schema {
             {
                 return Err("definition table or column quota".into());
             }
+            if tables.iter().any(|table| {
+                table.name.eq_ignore_ascii_case(crate::domain::REGISTRY)
+                    || table
+                        .logical
+                        .as_ref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(crate::domain::REGISTRY))
+            }) {
+                return Err(format!(
+                    "{} is reserved for the SDK's issuer registry",
+                    crate::domain::REGISTRY
+                )
+                .into());
+            }
             self.definition([0; 32])?
                 .build()?
                 .supported_on(rocky_core::Profile::Secure)?;

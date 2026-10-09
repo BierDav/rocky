@@ -71,6 +71,9 @@ raw grants wherever a profile is accepted.
 | `writer` | `Read`, `Insert`, `Update`, `Delete`, `Custody` | The named collections' |
 | `issuer` | Writer of every collection, plus the publisher key | All |
 
+In the SDK, an `issuer` also writes and a `custody` peer holds the reserved
+[issuer registry](issuer-registry.md); no other profile or raw grant names it.
+
 Every grant selects whole rows. With [typed commands](typed-commands.md), a
 writer also gets `Invoke` for the commands whose arguments are sealed for a
 collection it writes, and an issuer `Execute` for every command; each is
@@ -139,10 +142,11 @@ device or one that missed intervening epochs.
 
 An issuer's `revoke(node)` saves the intent in `identity.json` first, then:
 
-1. creates the next key epoch of every collection the device could read (every
-   collection if this issuer never saw the device);
-2. signs policy epoch + 1, revoking the device's node and user keys and its
-   capability, which ends every chain issued earlier;
+1. creates the next key epoch of every collection the device could read
+   according to its [registry](issuer-registry.md) record (every collection
+   if the record has no profile);
+2. signs policy epoch + 1, revoking the device's node and user keys, its
+   capability and pseudonyms, which ends every chain issued earlier;
 3. renews its own chain, saves the identity and teaches the replica.
 
 An interruption anywhere completes at the next open with the same keys. Other
@@ -187,11 +191,12 @@ written after the rotation stays sealed from it even when obtained elsewhere.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` (`rocky_sdk` `VERSION`) | 9 | Profile, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation, devices with profiles, partition holders, pending `rotation`), `issuers` by node key, author ranges and pseudonyms; 8 is refused |
-| Invitation URI `rocky://join/` | 3 | Carries the grant profile |
+| `identity.json` (`rocky_sdk` `VERSION`) | 10 | Profile, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation and its claim, pending `rotation` with the revoked record), `issuers` by node key, author range and pseudonyms; device records are in the [registry](issuer-registry.md); 9 is refused |
+| Issuer registry rows | | One row per entry of a device's record ([decision 0048](../decisions/0048-replicated-issuer-registry.md)) |
+| Invitation URI `rocky://join/` | 4 | Carries the grant profile and an explicit `via_custody` flag |
 | Pair request | 2 | Labels `rocky.credentials.pair-*.v2`; the enrollment carries profile, key epochs and, for an issuer, the publisher key and an author range; optional `routes` are bound by the proof when present |
 | Renewal | 2 | Request signed by the node, bound to an issuer audience and a one-time X25519 key; publisher-signed answer sealing `{keys, issuers}` to that key |
-| Contact URI | 1 | Optional `issuer` flag, written only by issuers |
+| Contact URI | 2 | `issuer` and `enrollment_only` flags; `issuer` written only by issuers |
 | Revoked subject | | `revoked_subject(key)` under `rocky.credentials.revoked-subject.v1`, in the policy's `revoked` set beside capability IDs |
 
 `secure_keys` holds the current key fingerprint per scope and

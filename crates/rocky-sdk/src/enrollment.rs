@@ -6,7 +6,8 @@
 use crate::{
     Failure,
     domain::Domain,
-    groups::{GroupPartition, GroupRecord, Holder, Member, secret_role},
+    groups::{GroupPartition, GroupRecord, Member, secret_role},
+    registry::{self, Changes, Registry, RegistryFull},
     schema::Schema,
     secrets::{Vault, write_private},
     service::ServiceError,
@@ -32,8 +33,8 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Current `identity.json` format, including group secrets.
-pub const VERSION: u32 = 9;
+/// Current `identity.json` format: issuer records live in the registry.
+pub const VERSION: u32 = 10;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -45,7 +46,6 @@ const MAX_ADDRESS: usize = 2048;
 /// Default lifetime of issued credentials.
 pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 const INVITATION_TTL: u64 = 600;
-const MAX_DEVICES: usize = 64;
 /// Key epochs kept per collection: one per revocation that rotated it.
 const MAX_EPOCHS: usize = 256;
 const MAX_MESSAGE: usize = 256 * 1024;
@@ -114,20 +114,10 @@ pub struct Settings {
     pub minting: Option<Minting>,
     /// This device's pseudonym chain for each collection it writes.
     pub pseudonyms: BTreeMap<String, CredentialChain>,
-    /// Assignments survive lost answers and retries of the same key.
-    pub author_assignments: BTreeMap<PublicKey, AssignedAuthor>,
     /// Retained across removal/replacement of a supplied author range.
     pub author_high_water: u32,
     /// An issuer's assignment key, separate from every node/user identity.
     pub author_issuer: Option<PublicKey>,
-}
-/// An assigned signing key's stable author and authenticated device/table.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AssignedAuthor {
-    pub node: PublicKey,
-    pub table: Commitment,
-    pub author: u32,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -172,24 +162,77 @@ impl Minting {
         Some(upper)
     }
 }
-/// What an issuer keeps: its invitation, the devices it knows and a
-/// revocation it has begun.
+/// What an issuer keeps besides the registry: its invitation, the device
+/// that claimed it and a revocation it has begun.
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Issuing {
     pub invitation: Option<Invitation>,
-    pub devices: BTreeMap<PublicKey, Device>,
+    /// The device that consumed the invitation, so its retry is answered
+    /// alike. Replaced with the invitation.
+    pub claimed: Option<Claim>,
     /// Saved before the rotation's keys are made, so an interrupted
     /// revocation completes at the next open.
     pub rotation: Option<Rotation>,
-    /// Devices granted partitions here, by node key.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub holders: BTreeMap<PublicKey, Holder>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Claim {
+    pub node: PublicKey,
+    pub user: PublicKey,
+    /// The author numbers handed to an issuer profile.
+    pub authors: Option<AuthorRange>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rotation {
     /// The policy and key epoch the revocation creates.
     pub epoch: u64,
     pub node: PublicKey,
+    /// What the registry recorded of the device when the revocation began.
+    pub record: Option<Revoking>,
+}
+/// The registry record a revocation acts on, kept with its intent so it
+/// completes before the replica opens.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revoking {
+    pub user: Option<PublicKey>,
+    pub capability: Option<Commitment>,
+    /// Absent when the device may have read anything.
+    pub profile: Option<Profile>,
+    pub partitions: Vec<rocky_credentials::PartitionGrant>,
+    pub pseudonyms: Vec<PublicKey>,
+}
+impl Revoking {
+    fn of(record: &registry::Record) -> Self {
+        Self {
+            user: record.device.as_ref().map(|device| device.user),
+            capability: record.capability().map(|capability| capability.id),
+            profile: record.profile().cloned(),
+            partitions: record
+                .grants
+                .iter()
+                .map(|grant| grant.grant.clone())
+                .collect(),
+            pseudonyms: record
+                .pseudonyms
+                .iter()
+                .map(|pseudonym| pseudonym.key)
+                .collect(),
+        }
+    }
+    fn selects(&self, partition: &GroupPartition) -> bool {
+        partition.members.iter().any(|member| {
+            self.partitions.iter().any(|grant| {
+                grant
+                    .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+        })
+    }
 }
 /// One way to reach a node: an address in a transport kind's format. A
 /// hint only; whoever answers must still prove the node key.
@@ -268,21 +311,6 @@ impl ContactRecord {
         }
         Ok(record)
     }
-}
-/// A device an issuer enrolled or renewed.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Device {
-    pub user: PublicKey,
-    /// The pairing nonce, empty for a device first seen at a renewal.
-    pub nonce: String,
-    pub enrolled: u64,
-    /// The last user capability issued to it.
-    pub capability: Commitment,
-    pub revoked: bool,
-    pub profile: Profile,
-    /// The author numbers handed to it, kept for a retried enrollment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authors: Option<AuthorRange>,
 }
 /// What an invitation URI carries.
 #[derive(Serialize, Deserialize)]
@@ -498,9 +526,45 @@ fn reads(grants: &[ResourceGrant], scope: rocky_core::ResourceScope) -> bool {
             && grant.rights.contains(&Right::Read)
     })
 }
-/// The profile a set of grants amounts to: a reader or writer, or raw grants.
+/// The profile a set of grants amounts to: an issuer, whose grants alone
+/// write the registry, a reader, writer or custody, or raw grants. The
+/// registry grant the SDK adds is not part of the others.
 fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
-    Profile::of(grants, &domain.resources())
+    let registry = domain.registry();
+    if grants
+        .iter()
+        .any(|grant| grant.scope == registry && grant.rights.contains(&Right::Insert))
+    {
+        return Profile::Issuer;
+    }
+    let named: Vec<ResourceGrant> = grants
+        .iter()
+        .filter(|grant| grant.scope != registry)
+        .cloned()
+        .collect();
+    Profile::of(&named, &domain.resources())
+}
+/// The signed grants of `profile`: its grants over the application's
+/// collections, and the registry's for an issuer (read and write) or a
+/// custody peer (ciphertext only). No other profile names the registry.
+pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
+    let mut grants = profile.grants(&domain.resources())?;
+    let registry = domain.registry_resource();
+    match profile {
+        Profile::Issuer => grants.extend(Profile::Issuer.grants(&registry)?),
+        Profile::Custody { .. } => grants.extend(
+            Profile::Custody {
+                scopes: [crate::domain::REGISTRY.to_owned()].into(),
+            }
+            .grants(&registry)?,
+        ),
+        _ => {}
+    }
+    Ok(grants)
+}
+/// The command identity a registry record names for `node`.
+pub(crate) fn command_identity(node: PublicKey) -> String {
+    HEXLOWER.encode(&rocky_secure::secure_node_id(node).0)
 }
 
 impl Settings {
@@ -688,15 +752,15 @@ impl Settings {
             .collect()
     }
     /// The node keys whose sync sessions this device serves: its
-    /// configured peers and, on an issuer, the devices it knows and did
-    /// not revoke. Each request is still authorized by credentials.
-    pub fn admitted(&self) -> Vec<PublicKey> {
+    /// configured peers and, on an issuer, the devices the registry holds
+    /// and did not revoke. Each request is still authorized by credentials.
+    pub fn admitted(&self, registry: &Registry) -> Vec<PublicKey> {
         let mut admitted: BTreeSet<PublicKey> = self.peers.keys().copied().collect();
-        if let Some(authority) = &self.authority {
-            for (node, device) in &authority.devices {
-                if device.revoked {
+        if self.issuer() {
+            for (node, record) in &registry.records {
+                if record.revoked {
                     admitted.remove(node);
-                } else {
+                } else if record.device.is_some() {
                     admitted.insert(*node);
                 }
             }
@@ -704,8 +768,8 @@ impl Settings {
         admitted.into_iter().collect()
     }
     /// The peers to sync with, issuers first.
-    pub fn targets(&self) -> Vec<(PublicKey, Contact)> {
-        let admitted = self.admitted();
+    pub fn targets(&self, registry: &Registry) -> Vec<(PublicKey, Contact)> {
+        let admitted = self.admitted(registry);
         let mut targets: Vec<_> = self
             .peers
             .iter()
@@ -752,13 +816,7 @@ impl Settings {
             return Err("the contact names this device".into());
         }
         let learned = Contact::checked(record.routes)?;
-        let revoked = self.authority.as_ref().is_some_and(|authority| {
-            authority
-                .devices
-                .get(&record.node)
-                .is_some_and(|device| device.revoked)
-        });
-        if revoked {
+        if self.revoked(&record.node) {
             return Err("the contact names a revoked device".into());
         }
         if !self.peers.contains_key(&record.node) && self.peers.len() >= MAX_PEERS {
@@ -784,13 +842,9 @@ impl Settings {
         }
         Ok(record.node)
     }
-    /// Forgets a peer. A member keeps its last issuer, which renews it.
+    /// Forgets a peer, an issuer included: any issuer renews any device,
+    /// and a member left without issuer contact reports it.
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
-        if !self.issuer() && self.issuers == [node] {
-            return Err(
-                "the last issuer stays configured; add another issuer's contact first".into(),
-            );
-        }
         self.peers.remove(&node).ok_or("unknown peer")?;
         self.issuers.retain(|issuer| *issuer != node);
         self.enrollment_routes.remove(&node);
@@ -867,14 +921,22 @@ impl Settings {
     pub fn transport_key(vault: &Vault) -> Result<[u8; 32], Failure> {
         Ok(vault.get("transport")?)
     }
+    /// Whether this device can reach an issuer to renew: it is one, or a
+    /// configured issuer has routes.
+    pub fn issuer_contact(&self) -> bool {
+        self.issuer()
+            || self.issuers.iter().any(|issuer| {
+                self.peers
+                    .get(issuer)
+                    .is_some_and(|contact| !contact.routes.is_empty())
+                    || self.enrollment_routes.contains_key(issuer)
+            })
+    }
     /// Whether another holder of the publisher key is known.
-    pub fn another_issuer(&self) -> bool {
+    pub fn another_issuer(&self, registry: &Registry, own: PublicKey) -> bool {
         !self.issuers.is_empty()
-            || self.authority.as_ref().is_some_and(|authority| {
-                authority
-                    .devices
-                    .values()
-                    .any(|device| device.profile.issues() && !device.revoked)
+            || registry.records.iter().any(|(node, record)| {
+                *node != own && !record.revoked && record.profile().is_some_and(Profile::issues)
             })
     }
 
@@ -890,13 +952,14 @@ impl Settings {
         let user = PrivateKey::from_bytes(&vault.create("user")?);
         let node = PrivateKey::from_bytes(&vault.create("node")?);
         vault.create("transport")?;
+        let (mesh, domain) = (MeshId(random()), DomainId(random()));
+        let bound = Domain::new(schema, *publisher.public_key().as_bytes(), mesh, domain)?;
+        // The registry's key is made like any collection's.
         let mut keys = BTreeMap::new();
-        for name in schema.names() {
+        for (name, _) in bound.scopes() {
             vault.create(&key_role(name, 1))?;
             keys.insert(name.to_owned(), vec![1]);
         }
-        let (mesh, domain) = (MeshId(random()), DomainId(random()));
-        let bound = Domain::new(schema, *publisher.public_key().as_bytes(), mesh, domain)?;
         let manifest = SignedManifest::sign(&bound.manifest(), &publisher)?;
         let policy = SignedPolicy::sign(
             PolicyStatement {
@@ -928,12 +991,11 @@ impl Settings {
             lineage: Vec::new(),
             minting: Some(Minting::fresh(AuthorRange::ALL)),
             pseudonyms: BTreeMap::new(),
-            author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
         };
-        let grants = Profile::Issuer.grants(&bound.resources())?;
+        let grants = grants_of(&Profile::Issuer, &bound)?;
         let capability = settings.issue(
             &publisher,
             &bound,
@@ -1023,17 +1085,20 @@ impl Settings {
         vault: &Vault,
         transport: &dyn Transport,
         profile: Profile,
+        registry: &Registry,
     ) -> Result<(String, u64), Failure> {
-        profile.grants(&self.domain()?.resources())?;
-        if self.issuing("invites devices")?.devices.len() >= MAX_DEVICES {
-            return Err("device capacity reached".into());
+        grants_of(&profile, &self.domain()?)?;
+        self.issuing("invites devices")?;
+        if registry.devices() >= registry::MAX_DEVICES {
+            return Err(Box::new(RegistryFull));
         }
         let address = transport.address().await?;
         // Nothing was sealed under an unused invitation token.
         let token = vault.replace("invitation")?;
         let expires = now()? + INVITATION_TTL;
-        self.issuing("invites devices")?.invitation =
-            Some(Invitation::open(&token, profile.clone(), expires));
+        let issuing = self.issuing("invites devices")?;
+        issuing.invitation = Some(Invitation::open(&token, profile.clone(), expires));
+        issuing.claimed = None;
         self.save(path)?;
         let invite = Invite {
             v: INVITE_VERSION,
@@ -1054,17 +1119,15 @@ impl Settings {
         Ok((uri, expires))
     }
 
-    /// Answers one pairing request. The invitation's attempts and the
-    /// enrolled device are saved before the answer leaves.
-    pub fn pair(&mut self, path: &Path, vault: &Vault, request: &[u8]) -> Result<Vec<u8>, Failure> {
-        self.issuing("enrolls devices")?;
-        let mut draft = self.clone();
-        let reply = draft.claim(vault, request);
-        draft.save(path)?;
-        *self = draft;
-        reply
-    }
-    fn claim(&mut self, vault: &Vault, request: &[u8]) -> Result<Vec<u8>, Failure> {
+    /// Answers one pairing request with the sealed enrollment and the
+    /// registry rows to commit before it leaves. Save the identity first,
+    /// even on failure: it counts the invitation's attempts.
+    pub fn pair(
+        &mut self,
+        vault: &Vault,
+        request: &[u8],
+        registry: &Registry,
+    ) -> Result<(Vec<u8>, Changes), Failure> {
         let request = PairRequest::from_bytes(request)?;
         let domain = self.domain()?;
         let token = vault.get("invitation")?;
@@ -1082,49 +1145,63 @@ impl Settings {
         if request.context != expected {
             return Err("application schema mismatch".into());
         }
-        let known = authority.devices.get(&request.node);
+        let claimed = authority
+            .claimed
+            .as_ref()
+            .filter(|claim| claim.node == request.node && claim.user == request.user)
+            .cloned();
         match admission {
-            Admission::First if known.is_some() || authority.devices.len() >= MAX_DEVICES => {
-                return Err("device already enrolled or capacity reached".into());
+            Admission::First if registry.get(&request.node).is_some() => {
+                return Err("device already enrolled".into());
             }
-            Admission::Retry
-                if !known.is_some_and(|device| {
-                    device.nonce == request.nonce && device.user == request.user
-                }) =>
-            {
+            // The bound refuses before the invitation is consumed.
+            Admission::First if registry.devices() >= registry::MAX_DEVICES => {
+                return Err(Box::new(RegistryFull));
+            }
+            Admission::Retry if claimed.is_none() => {
                 return Err("invitation already used".into());
             }
             _ => {}
         }
         active.claim(&request);
         let profile = active.profile.clone();
-        let grants = profile.grants(&domain.resources())?;
+        let grants = grants_of(&profile, &domain)?;
         // A retry carves nothing again: the first answer's range is kept.
-        let authors = match (profile.issues(), admission) {
-            (true, Admission::First) => self.minting.as_mut().and_then(Minting::split),
-            (true, Admission::Retry) => self
-                .authority
-                .as_ref()
-                .and_then(|authority| authority.devices.get(&request.node))
-                .and_then(|device| device.authors),
+        let authors = match (profile.issues(), &claimed) {
+            (true, None) => self.minting.as_mut().and_then(Minting::split),
+            (true, Some(claim)) => claim.authors,
             _ => None,
         };
+        self.issuing("enrolls devices")?.claimed = Some(Claim {
+            node: request.node,
+            user: request.user,
+            authors,
+        });
         let issued = self.issue(&publisher, &domain, request.user, grants.clone(), authors)?;
         if profile.issues() {
             self.learn_joined_issuer(request.node, &request.routes);
         }
-        self.issuing("enrolls devices")?.devices.insert(
-            request.node,
-            Device {
+        let mut changes = Changes::default();
+        changes.device(
+            &request.node,
+            &registry::Device {
                 user: request.user,
-                nonce: request.nonce.clone(),
+                kind: registry::Kind::Paired,
+                profile: Some(profile.clone()),
+                issuer,
+                command: command_identity(request.node),
                 enrolled: time,
-                capability: issued.id()?,
-                revoked: false,
-                profile: profile.clone(),
-                authors,
             },
-        );
+            false,
+        )?;
+        changes.capability(
+            &request.node,
+            registry::Capability {
+                id: issued.id()?,
+                expires: issued.capability.expires,
+            },
+            registry.get(&request.node),
+        )?;
         let enrollment = Enrollment {
             mesh: self.mesh,
             domain: self.domain,
@@ -1144,52 +1221,47 @@ impl Settings {
             authors,
             issuers: self.issuer_contacts(&[request.node])?,
         };
-        Ok(seal_enrollment(
-            &token,
-            &request,
-            &serde_json::to_vec(&enrollment)?,
-        )?)
+        let sealed = seal_enrollment(&token, &request, &serde_json::to_vec(&enrollment)?)?;
+        Ok((sealed, changes))
     }
 
     /// Issues `profile`, raw grants included, to the device whose public
     /// keys `device` names: credentials and reader keys it installs with
-    /// `Database::install`, on `terms`. The device is then known
-    /// like an enrolled one; save the identity before handing them out.
-    /// The result carries reader keys: a secret.
+    /// `Database::install`, on `terms`, and the registry rows that record
+    /// it. Save the identity and commit the rows before handing them out.
+    /// Author numbers are carved afresh each time. The result carries
+    /// reader keys: a secret.
     pub fn grant(
         &mut self,
         vault: &Vault,
         device: DeviceKeys,
-        profile: Profile,
-        terms: Terms,
+        (profile, terms): (Profile, Terms),
         contact: Option<String>,
-    ) -> Result<Supplied, Failure> {
+        registry: &Registry,
+    ) -> Result<(Supplied, Changes), Failure> {
         let ttl = terms.ttl(self.ttl)?;
         if profile.issues() {
             return Err("the publisher key travels only in an issuer invitation".into());
         }
         let domain = self.domain()?;
-        let grants = profile.grants(&domain.resources())?;
-        let devices = &self.issuing("grants credentials")?.devices;
-        let known = devices.get(&device.node);
-        match known {
-            Some(known) if known.revoked => return Err("device was revoked".into()),
+        let grants = grants_of(&profile, &domain)?;
+        self.issuing("grants credentials")?;
+        let known = registry.get(&device.node);
+        if self.revoked_device(&device.node, registry) || self.revoked(&device.user) {
+            return Err("device was revoked".into());
+        }
+        match known.and_then(|known| known.device.as_ref()) {
             Some(known) if known.user != device.user => {
                 return Err("this node is known with another user key".into());
             }
-            None if devices.len() >= MAX_DEVICES => return Err("device capacity reached".into()),
+            None if registry.devices() >= registry::MAX_DEVICES => {
+                return Err(Box::new(RegistryFull));
+            }
             _ => {}
         }
-        // Granting again with as many numbers keeps the device's range.
-        let kept = known.and_then(|known| known.authors).filter(|range| {
-            terms
-                .authors
-                .is_some_and(|count| range.last - range.first + 1 == count)
-        });
-        let authors = match (kept, terms.authors) {
-            (Some(range), _) => Some(range),
-            (None, Some(count)) => Some(self.minting()?.carve(count)?),
-            (None, None) => None,
+        let authors = match terms.authors {
+            Some(count) => Some(self.minting()?.carve(count)?),
+            None => None,
         };
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
         let time = now()?;
@@ -1211,19 +1283,33 @@ impl Settings {
                 keys.push((name.clone(), epoch, hex32(&key)?));
             }
         }
-        self.issuing("grants credentials")?.devices.insert(
-            device.node,
-            Device {
+        let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
+        let mut changes = Changes::default();
+        // A grant of another profile replaces what the record said.
+        let replace = known
+            .and_then(registry::Record::profile)
+            .is_some_and(|known| *known != profile);
+        changes.device(
+            &device.node,
+            &registry::Device {
                 user: device.user,
-                nonce: String::new(),
+                kind: registry::Kind::Granted,
+                profile: Some(profile),
+                issuer,
+                command: command_identity(device.node),
                 enrolled: time,
-                capability: capability.id()?,
-                revoked: false,
-                profile,
-                authors,
             },
-        );
-        Ok(Supplied {
+            replace,
+        )?;
+        changes.capability(
+            &device.node,
+            registry::Capability {
+                id: capability.id()?,
+                expires: capability.capability.expires,
+            },
+            known,
+        )?;
+        let supplied = Supplied {
             mesh: self.mesh,
             domain: self.domain,
             credentials: Credentials {
@@ -1237,27 +1323,41 @@ impl Settings {
                 .into_iter()
                 .chain(self.issuer_contacts(&[device.node])?)
                 .collect(),
-        })
+        };
+        Ok((supplied, changes))
     }
     /// Delegates `profile`, which must narrow this device's own grants, to
     /// the device whose public keys `device` names: a link signed by this
     /// device's user key, with the reader keys the grants read. Any device
     /// whose capability allows a further delegation does this; the
     /// delegate renews by being delegated to again. `authors` carves fresh
-    /// numbers from this device's range each time.
+    /// numbers from this device's range each time. On an issuer the
+    /// registry rows recording the delegate come with it.
     pub fn delegate(
         &mut self,
         vault: &Vault,
         device: DeviceKeys,
-        profile: Profile,
-        terms: Terms,
-    ) -> Result<Supplied, Failure> {
+        (profile, terms): (Profile, Terms),
+        registry: Option<&Registry>,
+    ) -> Result<(Supplied, Changes), Failure> {
         let ttl = terms.ttl(self.ttl)?;
         if profile.issues() {
             return Err("the publisher key travels only in an issuer invitation".into());
         }
         let domain = self.domain()?;
         let grants = profile.grants(&domain.resources())?;
+        if let Some(registry) = registry {
+            if self.revoked_device(&device.node, registry) || self.revoked(&device.user) {
+                return Err("device was revoked".into());
+            }
+            if registry
+                .get(&device.node)
+                .is_none_or(|record| record.device.is_none())
+                && registry.devices() >= registry::MAX_DEVICES
+            {
+                return Err(Box::new(RegistryFull));
+            }
+        }
         let user = PrivateKey::from_bytes(&vault.get("user")?);
         let authors = match terms.authors {
             Some(count) => Some(self.minting()?.carve(count)?),
@@ -1278,7 +1378,32 @@ impl Settings {
                 keys.push((name.clone(), epoch, hex32(&key)?));
             }
         }
-        Ok(Supplied {
+        let mut changes = Changes::default();
+        if let Some(registry) = registry {
+            let known = registry.get(&device.node);
+            let leaf = chain.0.last().ok_or("empty delegation")?;
+            changes.device(
+                &device.node,
+                &registry::Device {
+                    user: device.user,
+                    kind: registry::Kind::Delegated,
+                    profile: Some(profile),
+                    issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
+                    command: command_identity(device.node),
+                    enrolled: now()?,
+                },
+                false,
+            )?;
+            changes.capability(
+                &device.node,
+                registry::Capability {
+                    id: leaf.id()?,
+                    expires: chain.expires(),
+                },
+                known,
+            )?;
+        }
+        let supplied = Supplied {
             mesh: self.mesh,
             domain: self.domain,
             credentials: Credentials {
@@ -1289,7 +1414,8 @@ impl Settings {
             },
             keys,
             issuers: Vec::new(),
-        })
+        };
+        Ok((supplied, changes))
     }
     /// Replaces this device's credentials with supplied ones, such as a
     /// delegator's renewed delegation. They are verified like an
@@ -1428,8 +1554,9 @@ impl Settings {
                 })
             })
         };
+        // The registry's author is installed when an issuer first writes it.
         Ok(domain
-            .scopes()
+            .collections()
             .filter(|(_, scope)| {
                 grants.iter().any(|grant| {
                     grant.scope.domain == scope.domain
@@ -1449,6 +1576,83 @@ impl Settings {
             .filter(|name| !current(name))
             .map(str::to_owned)
             .collect())
+    }
+    /// Whether this device holds a current pseudonym for `collection`.
+    pub(crate) fn holds_author(&self, domain: &Domain, collection: &str) -> Result<bool, Failure> {
+        let manifest = domain.manifest().hash();
+        let time = now()?;
+        Ok(self.pseudonyms.get(collection).is_some_and(|chain| {
+            chain.0.iter().all(|credential| {
+                credential.capability.manifest == manifest
+                    && credential.capability.epoch == self.policy.statement.epoch
+                    && credential.capability.expires > time
+            })
+        }))
+    }
+    /// The rows of this issuer's own record: its device entry, current
+    /// capability and pseudonyms. Rows that exist are kept.
+    pub(crate) fn own_record(
+        &self,
+        vault: &Vault,
+        registry: &Registry,
+    ) -> Result<Changes, Failure> {
+        let domain = self.domain()?;
+        let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
+        let known = registry.get(&node);
+        let root = self.credentials.0.first().ok_or("missing credentials")?;
+        let mut changes = Changes::default();
+        changes.device(
+            &node,
+            &registry::Device {
+                user: root.capability.subject,
+                kind: registry::Kind::Created,
+                profile: Some(self.profile.clone()),
+                issuer: node,
+                command: command_identity(node),
+                enrolled: now()?,
+            },
+            false,
+        )?;
+        changes.capability(
+            &node,
+            registry::Capability {
+                id: root.id()?,
+                expires: root.capability.expires,
+            },
+            known,
+        )?;
+        for (collection, chain) in &self.pseudonyms {
+            let Some((_, scope)) = domain.scopes().find(|(name, _)| name == collection) else {
+                continue;
+            };
+            let (Some(leaf), Some(author)) = (
+                chain.0.last(),
+                chain.authors()?.and_then(|range| range.single()),
+            ) else {
+                continue;
+            };
+            let key = leaf.capability.subject;
+            if known.is_some_and(|record| record.pseudonyms.iter().any(|held| held.key == key)) {
+                continue;
+            }
+            changes.pseudonym(
+                &node,
+                &registry::Pseudonym {
+                    table: scope.table,
+                    key,
+                    author,
+                    assigned: now()?,
+                    closed: false,
+                },
+            )?;
+        }
+        // A revocation interrupted before its tombstone was written.
+        for (other, record) in &registry.records {
+            if !record.revoked && record.device.is_some() && self.revoked(other) {
+                changes.revoked(other)?;
+            }
+        }
+        Ok(changes)
     }
     /// Asks the issuers this member knows, in turn, to assign the pseudonym
     /// `request` asks for.
@@ -1481,13 +1685,17 @@ impl Settings {
         Err(failure)
     }
     /// Assigns a pseudonym to the device that sent `request`: its write
-    /// grants on the table, an earlier number it held in this device's
-    /// range, or the next free one. Save the identity before answering.
+    /// grants on the table and the number the registry holds for its key,
+    /// an earlier number it held in this device's range, or the next free
+    /// one. On an issuer the registry row to commit comes with it; save
+    /// the identity and commit the row before answering. Without a
+    /// registry, as on a non-issuer, nothing records the assignment.
     pub fn assign_pseudonym(
         &mut self,
         vault: &Vault,
         request: &PseudonymRequest,
-    ) -> Result<CredentialChain, Failure> {
+        registry: Option<&Registry>,
+    ) -> Result<(CredentialChain, Changes), Failure> {
         let domain = self.domain()?;
         let manifest = domain.manifest().hash();
         let (grants, partitions) = request.verify_selectors(
@@ -1497,6 +1705,36 @@ impl Settings {
             (now()?, SKEW),
         )?;
         let range = self.minting()?.range;
+        let recorded = registry.and_then(|registry| registry.assignment(&request.key));
+        if recorded.is_some_and(|(node, held)| node != request.node || held.table != request.table)
+        {
+            return Err("a pseudonym key is already assigned to another device or table".into());
+        }
+        let kept = recorded
+            .map(|(_, held)| held.author)
+            .or_else(|| request.previous_author(self.publisher, manifest, range));
+        let author = match kept {
+            Some(author) => {
+                if registry.is_some_and(|registry| {
+                    registry
+                        .holders(author)
+                        .iter()
+                        .any(|key| *key != request.key)
+                }) {
+                    return Err("the author number is assigned to another key".into());
+                }
+                author
+            }
+            None => {
+                let minting = self.minting()?;
+                let author = minting.next;
+                if !minting.range.contains(author) {
+                    return Err("this device's author numbers are used up".into());
+                }
+                minting.next += 1;
+                author
+            }
+        };
         let (holder, prefix) = if self.issuer() {
             let key = match self.author_issuer {
                 Some(public) => {
@@ -1516,13 +1754,19 @@ impl Settings {
                     key
                 }
             };
+            // A number another issuer assigned is authorized alone.
+            let authority = if range.contains(author) {
+                range
+            } else {
+                AuthorRange::new(author, author)?
+            };
             let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
             let root = self.issue(
                 &publisher,
                 &domain,
                 key.public_key(),
                 self.grants().to_vec(),
-                Some(range),
+                Some(authority),
             )?;
             (key, CredentialChain(vec![root]))
         } else {
@@ -1542,35 +1786,6 @@ impl Settings {
                 return Err("request a pseudonym from an independent assigner; this chain would disclose its device".into());
             }
             (PrivateKey::from_bytes(&vault.get("user")?), prefix)
-        };
-        let recorded = self.author_assignments.get(&request.key);
-        if recorded.is_some_and(|held| held.node != request.node || held.table != request.table) {
-            return Err("a pseudonym key is already assigned to another device or table".into());
-        }
-        let kept = recorded
-            .filter(|held| range.contains(held.author))
-            .map(|held| held.author)
-            .or_else(|| request.previous_author(self.publisher, manifest, range));
-        let author = match kept {
-            Some(author) => {
-                if self
-                    .author_assignments
-                    .iter()
-                    .any(|(key, held)| *key != request.key && held.author == author)
-                {
-                    return Err("the author number is assigned to another key".into());
-                }
-                author
-            }
-            None => {
-                let minting = self.minting()?;
-                let author = minting.next;
-                if !minting.range.contains(author) {
-                    return Err("this device's author numbers are used up".into());
-                }
-                minting.next += 1;
-                author
-            }
         };
         let assigned = if partitions.is_empty() {
             prefix.assign(
@@ -1592,16 +1807,23 @@ impl Settings {
                 self.validity()?,
             )?
         };
-        self.minting()?.next = self.minting()?.next.max(author + 1);
-        self.author_assignments.insert(
-            request.key,
-            AssignedAuthor {
-                node: request.node,
-                table: request.table,
-                author,
-            },
-        );
-        Ok(assigned)
+        if range.contains(author) {
+            self.minting()?.next = self.minting()?.next.max(author + 1);
+        }
+        let mut changes = Changes::default();
+        if registry.is_some() {
+            changes.pseudonym(
+                &request.node,
+                &registry::Pseudonym {
+                    table: request.table,
+                    key: request.key,
+                    author,
+                    assigned: recorded.map_or(now()?, |(_, held)| held.assigned),
+                    closed: false,
+                },
+            )?;
+        }
+        Ok((assigned, changes))
     }
     /// Keeps a pseudonym assigned to this device, after checking that it
     /// names this device's key for its collection and verifies now.
@@ -1886,7 +2108,6 @@ impl Settings {
             lineage: Vec::new(),
             minting: None,
             pseudonyms: BTreeMap::new(),
-            author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
@@ -2060,7 +2281,6 @@ impl Joining {
             lineage: enrollment.lineage,
             minting: None,
             pseudonyms: BTreeMap::new(),
-            author_assignments: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
@@ -2073,7 +2293,7 @@ impl Joining {
             .policy
             .verify(settings.publisher, domain.manifest().hash())?;
         // The device receives what the invitation said, no more and no less.
-        let grants = invite.profile.grants(&domain.resources())?;
+        let grants = grants_of(&invite.profile, &domain)?;
         if enrollment.capability.issuer != settings.publisher
             || enrollment.capability.capability.subject != user.public_key()
             || settings.profile != invite.profile
@@ -2285,7 +2505,7 @@ impl Settings {
         renewal
             .policy
             .verify(self.publisher, domain.manifest().hash())?;
-        let grants = self.profile.grants(&domain.resources())?;
+        let grants = grants_of(&self.profile, &domain)?;
         if renewal.capability.capability.subject != user.public_key()
             || renewal.capability.capability.grants != grants
         {
@@ -2352,27 +2572,27 @@ impl Settings {
         *self = draft;
         Ok(held)
     }
-    /// Answers a renewal. The request proves a device the publisher once
-    /// issued a chain; it receives the same grants under the current
-    /// policy and the reader keys those grants read. A revoked device or
-    /// user is refused by any issuer, whoever enrolled it.
+    /// Answers a renewal with the registry rows to commit before it
+    /// leaves. The request proves a device the publisher once issued a
+    /// chain; it receives the same grants under the current policy and
+    /// the reader keys those grants read. The record's tombstone and
+    /// profile count wherever the device enrolled; without a record the
+    /// presented chain is renewed and recorded.
     pub fn renew(
-        &mut self,
-        path: &Path,
+        &self,
         vault: &Vault,
         request: &[u8],
-    ) -> Result<Vec<u8>, Failure> {
-        self.issuing("renews devices")?;
+        registry: &Registry,
+    ) -> Result<(Vec<u8>, Changes), Failure> {
+        if !self.issuer() {
+            return Err("only an issuer renews devices".into());
+        }
         let request = RenewRequest::from_bytes(request)?;
         let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         let domain = self.domain()?;
         let time = now()?;
-        let known = self
-            .issuing("renews devices")?
-            .devices
-            .get(&request.node)
-            .cloned();
-        if known.as_ref().is_some_and(|device| device.revoked) {
+        let known = registry.get(&request.node);
+        if self.revoked_device(&request.node, registry) {
             return Err("device was revoked".into());
         }
         let current = domain.manifest().hash();
@@ -2398,14 +2618,20 @@ impl Settings {
                     return Err(error.into());
                 };
                 let profile = known
-                    .map(|device| device.profile.clone())
+                    .and_then(registry::Record::profile)
+                    .cloned()
                     .unwrap_or_else(|| profile_of(&prior.grants, &domain));
-                prior.grants = profile.grants(&domain.resources())?;
+                prior.grants = grants_of(&profile, &domain)?;
                 prior.manifest = current;
                 prior
             }
         };
         let prior = &prior;
+        if known.and_then(|known| known.device.as_ref()).is_none()
+            && registry.devices() >= registry::MAX_DEVICES
+        {
+            return Err(Box::new(RegistryFull));
+        }
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
         let authority = Authority {
             publisher: &publisher,
@@ -2423,83 +2649,101 @@ impl Settings {
             (time, self.ttl, SKEW),
             &serde_json::to_vec(&sealed)?,
         )?;
-        let device = Device {
-            user: prior.subject,
-            nonce: String::new(),
-            enrolled: time,
-            capability: renewal.capability.id()?,
-            revoked: false,
-            profile: profile_of(&prior.grants, &domain),
-            authors: None,
-        };
-        let devices = &mut self.issuing("renews devices")?.devices;
-        let room = devices.len() < MAX_DEVICES;
-        match devices.get_mut(&request.node) {
-            Some(known) => known.capability = device.capability,
-            // A device another issuer enrolled is listed once it renews here.
-            None if room => {
-                devices.insert(request.node, device);
-            }
-            None => {}
-        }
-        self.save(path)?;
-        Ok(renewal.to_bytes()?)
+        let mut changes = Changes::default();
+        // A device another issuer enrolled is recorded once it renews here,
+        // unless its record already arrived.
+        changes.device(
+            &request.node,
+            &registry::Device {
+                user: prior.subject,
+                kind: registry::Kind::Renewed,
+                profile: Some(profile_of(&prior.grants, &domain)),
+                issuer: me,
+                command: command_identity(request.node),
+                enrolled: time,
+            },
+            false,
+        )?;
+        changes.capability(
+            &request.node,
+            registry::Capability {
+                id: renewal.capability.id()?,
+                expires: renewal.capability.capability.expires,
+            },
+            known,
+        )?;
+        Ok((renewal.to_bytes()?, changes))
     }
-    /// Whether the policy or this issuer revoked a device or its user.
-    pub(crate) fn revoked_device(&self, node: &PublicKey) -> bool {
-        let revoked = &self.policy.statement.revoked;
-        revoked.contains(&revoked_subject(node))
-            || self.authority.as_ref().is_some_and(|authority| {
-                authority
-                    .devices
-                    .get(node)
-                    .is_some_and(|device| device.revoked)
-                    || authority
-                        .holders
-                        .get(node)
-                        .is_some_and(|holder| revoked.contains(&revoked_subject(&holder.user)))
+    /// Whether the policy or the registry revoked a device, or the policy
+    /// its recorded user.
+    pub(crate) fn revoked_device(&self, node: &PublicKey, registry: &Registry) -> bool {
+        self.revoked(node)
+            || registry.get(node).is_some_and(|record| {
+                record.revoked
+                    || record
+                        .device
+                        .as_ref()
+                        .is_some_and(|device| self.revoked(&device.user))
             })
     }
-    /// Records partitions granted or delegated to a device against its node
-    /// and user, before the chain leaves this issuer, so that revoking it
-    /// rotates them. Refuses a revoked device or user.
-    pub(crate) fn record_holder(
-        &mut self,
+    /// The registry rows recording partitions granted or delegated to a
+    /// device against its node and user, committed before the chain leaves
+    /// this issuer so that revoking it rotates them. Refuses a revoked
+    /// device or user.
+    pub(crate) fn holder_changes(
+        &self,
+        vault: &Vault,
         device: &DeviceKeys,
         grants: &[rocky_credentials::PartitionGrant],
-    ) -> Result<(), Failure> {
-        if self.revoked_device(&device.node)
-            || self
-                .policy
-                .statement
-                .revoked
-                .contains(&revoked_subject(&device.user))
-        {
+        delegations: u8,
+        registry: &Registry,
+    ) -> Result<Changes, Failure> {
+        if self.revoked_device(&device.node, registry) || self.revoked(&device.user) {
             return Err("the device or its user was revoked".into());
         }
-        let issuing = self.issuing("grants partitions")?;
-        if issuing
-            .devices
-            .get(&device.node)
-            .is_some_and(|known| known.user != device.user)
-        {
-            return Err("this node is known with another user key".into());
+        let known = registry.get(&device.node);
+        match known.and_then(|known| known.device.as_ref()) {
+            Some(known) if known.user != device.user => {
+                return Err("this node is known with another user key".into());
+            }
+            None if registry.devices() >= registry::MAX_DEVICES => {
+                return Err(Box::new(RegistryFull));
+            }
+            _ => {}
         }
-        let holders = &mut issuing.holders;
-        if !holders.contains_key(&device.node) && holders.len() >= MAX_DEVICES {
-            return Err("partition holder capacity reached".into());
-        }
-        holders
-            .entry(device.node)
-            .or_insert_with(|| Holder {
+        let mut changes = Changes::default();
+        changes.device(
+            &device.node,
+            &registry::Device {
                 user: device.user,
-                partitions: Vec::new(),
-            })
-            .record(device.user, grants)
+                kind: registry::Kind::Partition,
+                profile: None,
+                issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
+                command: command_identity(device.node),
+                enrolled: now()?,
+            },
+            false,
+        )?;
+        for grant in grants {
+            changes.grant(
+                &device.node,
+                &registry::Grant {
+                    grant: grant.clone(),
+                    delegations,
+                },
+                known,
+            )?;
+        }
+        Ok(changes)
     }
-    /// Begins revoking a device: the intent is all that changes. `rotate`
-    /// completes it, now or at the next open.
-    pub fn begin_revocation(&mut self, node: PublicKey) -> Result<(), Failure> {
+    /// Begins revoking a device: the intent and what the registry recorded
+    /// of it are all that changes. `rotate` completes it, now or at the
+    /// next open.
+    pub fn begin_revocation(
+        &mut self,
+        node: PublicKey,
+        registry: &Registry,
+    ) -> Result<(), Failure> {
         let epoch = self.policy.statement.epoch + 1;
         // Another issuer is revoked like any device; the publisher key it
         // holds is not taken away (`docs/runtime/sdk-enrollment.md`).
@@ -2511,14 +2755,19 @@ impl Settings {
         if own == Some(node) {
             return Err("an issuer cannot revoke itself".into());
         }
-        if self.revoked_device(&node) {
+        if self.revoked_device(&node, registry) {
             return Err("device is already revoked".into());
         }
+        let record = registry.get(&node).map(Revoking::of);
         let authority = self.issuing("revokes devices")?;
         if authority.rotation.is_some() {
             return Err("another revocation is unfinished".into());
         }
-        authority.rotation = Some(Rotation { epoch, node });
+        authority.rotation = Some(Rotation {
+            epoch,
+            node,
+            record,
+        });
         Ok(())
     }
     /// Completes a begun revocation: a new policy epoch that ends every
@@ -2527,7 +2776,11 @@ impl Settings {
     /// again. Repeating it after an interruption gives the same result.
     /// Returns the new keys.
     pub fn rotate(&mut self, vault: &Vault) -> Result<Vec<(String, u64, [u8; 32])>, Failure> {
-        let Some(Rotation { epoch, node }) = self
+        let Some(Rotation {
+            epoch,
+            node,
+            record,
+        }) = self
             .authority
             .as_ref()
             .and_then(|authority| authority.rotation.clone())
@@ -2536,25 +2789,14 @@ impl Settings {
         };
         let domain = self.domain()?;
         let mut revoked = vec![revoked_subject(&node)];
-        let mut readable: Option<Profile> = None;
-        let issuing = self.issuing("revokes devices")?;
-        if let Some(device) = issuing.devices.get_mut(&node) {
-            device.revoked = true;
-            revoked.extend([revoked_subject(&device.user), device.capability]);
-            readable = Some(device.profile.clone());
+        // A recorded device loses its user subject too, so a fresh node key
+        // under it cannot renew, and its capability and pseudonyms.
+        if let Some(record) = &record {
+            revoked.extend(record.user.as_ref().map(revoked_subject));
+            revoked.extend(record.capability);
+            revoked.extend(record.pseudonyms.iter().map(revoked_subject));
         }
-        // A device known through a partition grant loses its user subject
-        // too, so a fresh node key under it cannot renew.
-        let holder = issuing.holders.get(&node).cloned();
-        if let Some(holder) = &holder {
-            revoked.push(revoked_subject(&holder.user));
-        }
-        revoked.extend(
-            self.author_assignments
-                .iter()
-                .filter(|(_, assigned)| assigned.node == node)
-                .map(|(key, _)| revoked_subject(key)),
-        );
+        let readable: Option<Profile> = record.as_ref().and_then(|record| record.profile.clone());
         // A device this issuer never saw may have read anything.
         let mut keys = Vec::new();
         let names: Vec<String> = self.keys.keys().cloned().collect();
@@ -2597,9 +2839,9 @@ impl Settings {
                         .members
                         .iter()
                         .any(|member| profile.reads(&member.table))
-                        || holder
+                        || record
                             .as_ref()
-                            .is_some_and(|holder| holder.selects(&partition))
+                            .is_some_and(|record| record.selects(&partition))
                 }
             };
             if read {
@@ -2627,10 +2869,11 @@ impl Settings {
             self.policy = authority.revoke(&self.policy.statement, revoked)?;
         }
         self.credentials = self.renew_locally(vault)?;
+        // Own pseudonyms keep their numbers: each request carries its chain.
         let own_authors = self.pseudonyms.keys().cloned().collect::<Vec<_>>();
         for collection in own_authors {
             let request = self.pseudonym_request(vault, &collection)?;
-            let chain = self.assign_pseudonym(vault, &request)?;
+            let (chain, _) = self.assign_pseudonym(vault, &request, None)?;
             self.hold_pseudonym(vault, chain)?;
         }
         self.peers.remove(&node);

@@ -219,6 +219,29 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
+      # The same caches the baseline `android` job keeps warm on main; the
+      # keys must stay identical to its save steps (docs/development.md#ci).
+      - name: Restore the Android toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.gradle
+            ~/.cache/JetBrains/Kotlin
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          restore-keys: |
+            android-tooling-${{ runner.os }}-
+
+      - name: Restore the Android native cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/sdks/native/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
+
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -255,6 +278,25 @@ jobs:
           # shellcheck disable=SC1010 # `do` is the toolchain's command
           ./kotlin do packageAndroid -m rocky-runtime-android
 
+      # Saved on success only; the keys must stay identical to the restore
+      # steps above and to the baseline `android` job.
+      - name: Save the Android toolchain cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.gradle
+            ~/.cache/JetBrains/Kotlin
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+
+      - name: Save the Android native cache
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/sdks/native/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: android
@@ -270,6 +312,8 @@ jobs:
     permissions:
       contents: write
       packages: write
+      # `gh run download` reads the artifacts of this run.
+      actions: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
       CHANNEL: ${{ needs.version.outputs.channel }}
@@ -289,9 +333,27 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
+      # Only what publishing consumes: the notes, the two JVM packages and the
+      # Android repository. The image jobs' Docker build records are not
+      # release inputs, and fetching every artifact once died on one of them
+      # after five retries (run 37939385427); retry the fetch instead of
+      # re-running the whole workflow.
+      - name: Download the release artifacts
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            rm -rf dist
+            if gh run download "${GITHUB_RUN_ID}" --dir dist \
+                --pattern 'notes' --pattern 'android' --pattern 'jvm-*' &&
+              test -f dist/notes/notes.md; then
+              exit 0
+            fi
+            echo "::warning::Downloading the release artifacts failed (attempt ${attempt})"
+            sleep $((attempt * 15))
+          done
+          exit 1
 
       - name: Publish the Maven artifacts
         run: |

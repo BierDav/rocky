@@ -1,21 +1,24 @@
 package org.example.examples.shopping
 
 import androidx.room.Room
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
+import rocky.*
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
-import rocky.*
 
 /** Approvals as strong commands, ordered by an in-process coordinator in place of the public service. */
 class ApprovalsTest {
     private val coordinator = DevelopmentCoordinator()
-    private fun platform(root: File, name: String) = ShoppingPlatform(File(root, name), name,
+    private fun platform(root: File, name: String) = ShoppingPlatform(
+        File(root, name),
+        name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
         transport = { PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" }) },
-        commands = { CommandRuntime(coordinator, ApprovalHandlers) })
+        commands = { CommandRuntime(coordinator, ApprovalHandlers) },
+    )
 
     @Test fun `a member asks, the first decision stands and a member cannot decide`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-approvals").toFile()

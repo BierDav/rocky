@@ -37,16 +37,22 @@ class ApprovalsViewModel(session: ShoppingSession) : NodeViewModel(session) {
     fun ask(title: String, note: String) {
         asking.update { it + 1 }
         write {
-            try { approvals.ask(title, note)?.let { tell(it) } }
-            finally { asking.update { it - 1 } }
+            try {
+                approvals.ask(title, note)?.let { tell(it) }
+            } finally {
+                asking.update { it - 1 }
+            }
         }
     }
     fun decide(key: String, approve: Boolean) {
         if (key in deciding.value) return
         deciding.update { it + key }
         write {
-            try { approvals.decide(key, approve)?.let { tell(it) } }
-            finally { deciding.update { it - key } }
+            try {
+                approvals.decide(key, approve)?.let { tell(it) }
+            } finally {
+                deciding.update { it - key }
+            }
         }
     }
 }

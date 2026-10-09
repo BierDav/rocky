@@ -26,20 +26,29 @@ data class Purge(val waiting: Int, val deadlineEpochSeconds: Long?, val finalize
  */
 class Household(private val database: ShoppingDatabase, private val rocky: RockyDatabase, val self: String) {
     private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
+
     /** The trusted-only tables; a member never touches them. */
     internal val trusted = TrustedRows(rocky)
+
     /** The invitation awaiting its device, so its enrollment records the chosen kind and name. */
     private var pending: Pair<NodeKind, String>? = null
 
     fun devices(): Flow<List<DeviceRow>> = database.devices().observe().settledOnRocky()
+
     /** Durable issuer state, refreshed when its device policy changes. */
-    fun revokedDevices(): Flow<Set<String>> = if (!rocky.isIssuer) flowOf(emptySet()) else rocky.activity()
-        .filter { it is RockyEvent.DeviceRevoked || it is RockyEvent.Renewed }
-        .map { Unit }.onStart { emit(Unit) }
-        .map { rocky.devices().filter { it.revoked }.map { it.node }.toSet() }
-        .distinctUntilChanged()
+    fun revokedDevices(): Flow<Set<String>> = if (!rocky.isIssuer) {
+        flowOf(emptySet())
+    } else {
+        rocky.activity()
+            .filter { it is RockyEvent.DeviceRevoked || it is RockyEvent.Renewed }
+            .map { Unit }.onStart { emit(Unit) }
+            .map { rocky.devices().filter { it.revoked }.map { it.node }.toSet() }
+            .distinctUntilChanged()
+    }
+
     /** Which device was sent the key of which list, at which epoch. */
     fun keys(): Flow<List<ListKey>> = database.keys().observe().settledOnRocky()
+
     /** What key delivery did, for the activity log. */
     val deliveries: SharedFlow<String> = notes.asSharedFlow()
 
@@ -54,13 +63,18 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         }
         return code
     }
+
     /** On a trusted device: each trusted device's open invitation, expired ones included. */
     fun invitations(): Flow<List<InvitationRow>> = if (!rocky.isIssuer) flowOf(emptyList()) else trusted.invitations()
     suspend fun record(node: String, name: String, kind: NodeKind) = database.devices().record(node, name, kind.name.lowercase())
+
     /** On a trusted device: seals [list]'s current key to the partial device [node]. */
     suspend fun share(list: Long, node: String) = deliver(list, listOf(node))
+
     /** Revokes future access and rotates the keys this device could read. */
-    suspend fun revoke(node: String) { rocky.revoke(node) }
+    suspend fun revoke(node: String) {
+        rocky.revoke(node)
+    }
 
     /**
      * On a trusted device: removes a revoked device's record, the keys sealed to it and its identity in one commit, so
@@ -72,6 +86,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         database.devices().forget(node)
         runCatching { rocky.removePeer(node) }
     }
+
     /**
      * Declares horizons on `devices` and `identities` with every live device as participant: once each acknowledged
      * them, or reached its deadline, sync finalizes them and drops the removed rows' tombstones and history. Until then
@@ -82,12 +97,16 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         val participants = rocky.devices().filter { !it.revoked && it.node != self && it.profile !is GrantProfile.Custody }.map { it.node }.toSet()
         for (table in PURGED) rocky.horizons.declare(table, participants)
     }
+
     /** The latest purge, or null when none was declared: the later deadline, and finalized once both tables are. */
     suspend fun purgeStatus(): Purge? = PURGED.map { rocky.horizons.status(it) }
         .filter { it["statement"] != null && it["statement"] !is JsonNull }
         .map { status ->
-            Purge((status["waiting"] as? JsonArray)?.size ?: 0, status["deadline"]?.jsonPrimitive?.longOrNull,
-                status["finalized"]?.jsonPrimitive?.boolean == true)
+            Purge(
+                (status["waiting"] as? JsonArray)?.size ?: 0,
+                status["deadline"]?.jsonPrimitive?.longOrNull,
+                status["finalized"]?.jsonPrimitive?.boolean == true,
+            )
         }
         .reduceOrNull { a, b ->
             Purge(maxOf(a.waiting, b.waiting), listOfNotNull(a.deadlineEpochSeconds, b.deadlineEpochSeconds).maxOrNull(), a.finalized && b.finalized)
@@ -108,11 +127,14 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
             // The enrollment used this device's single invitation: it is no longer open.
             attempt("close the invitation") { trusted.closeInvitation(self) }
             val (kind, name) = pending?.also { pending = null }
-                ?: if (known) return@collect
-                // Enrolled while this app was closed: the grants still tell a trusted device apart.
-                else (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
+                ?: if (known) {
+                    return@collect
+                } // Enrolled while this app was closed: the grants still tell a trusted device apart.
+                else {
+                    (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
+                }
             // A pending `devices` horizon refuses the write until it is finalized: keep the enrollment until then.
-            while (attempt("record ${name}") { record(enrolled.node, name, kind) } == null) delay(15_000)
+            while (attempt("record $name") { record(enrolled.node, name, kind) } == null) delay(15_000)
             notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
         }
     }
@@ -132,9 +154,11 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
                     val epoch = attempt("read ${list.title}") { rocky.list(list.id).status().epochs.maxOrNull() } ?: continue
                     val stale = (recipients.map { it.node } + given.filter { it.list == list.id }.map { it.recipient })
                         .filter { node -> keys.none { it.recipient == node && it.list == list.id && it.epoch == epoch } }
-                    for (recipient in stale) attempt("share ${list.title} with ${recipient.take(6)}") {
-                        deliver(list.id, listOf(recipient))
-                        notes.tryEmit("Sealed “${list.title}” to ${devices.firstOrNull { it.node == recipient }?.name ?: recipient.take(6)}")
+                    for (recipient in stale) {
+                        attempt("share ${list.title} with ${recipient.take(6)}") {
+                            deliver(list.id, listOf(recipient))
+                            notes.tryEmit("Sealed “${list.title}” to ${devices.firstOrNull { it.node == recipient }?.name ?: recipient.take(6)}")
+                        }
                     }
                 }
             }
@@ -164,7 +188,12 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         val PURGED = listOf("devices", "identities")
     }
 
-    private suspend fun <T> attempt(what: String, block: suspend () -> T): T? = try { block() }
-        catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { notes.tryEmit("Could not $what: ${error.message}"); null }
+    private suspend fun <T> attempt(what: String, block: suspend () -> T): T? = try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        notes.tryEmit("Could not $what: ${error.message}")
+        null
+    }
 }

@@ -6,7 +6,26 @@ end_of_line = lf
 insert_final_newline = true
 trim_trailing_whitespace = true
 indent_style = space
+
+[*.rs]
 indent_size = 4
 
-[*.{md,yml,yaml,toml}]
+[*.{md,yml,yaml,toml,json,jsonc,js,ts,tsx,gradle}]
 indent_size = 2
+
+[*.{kt,kts}]
+indent_size = 4
+ktlint_code_style = intellij_idea
+ktlint_function_naming_ignore_when_annotated_with = Composable
+ktlint_experimental = enabled
+ktlint_standard_no-unused-imports = enabled
+ij_kotlin_packages_to_use_import_on_demand = androidx.compose.animation.core.*,androidx.compose.foundation.layout.*,androidx.compose.material.icons.filled.*,androidx.compose.material3.*,androidx.compose.runtime.*,androidx.room.*,kotlin.io.path.*,kotlin.test.*,kotlinx.coroutines.*,kotlinx.coroutines.flow.*,kotlinx.coroutines.sync.*,kotlinx.serialization.json.*,org.example.examples.shopping.*,org.jetbrains.amper.plugins.*,rocky.*
+
+[main.kt]
+ktlint_standard_filename = disabled
+
+[*.sh]
+indent_size = 4
+
+[Makefile]
+indent_style = tab

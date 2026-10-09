@@ -5,8 +5,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.io.path.*
 
-fun sha256(path: Path): String =
-    MessageDigest.getInstance("SHA-256").digest(path.readBytes()).joinToString("") { "%02x".format(it) }
+fun sha256(path: Path): String = MessageDigest.getInstance("SHA-256").digest(path.readBytes()).joinToString("") { "%02x".format(it) }
 
 /** Writes `SHA256.json`, the digest of every other file under [root]. */
 @OptIn(ExperimentalPathApi::class)

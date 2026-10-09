@@ -1,9 +1,9 @@
 package org.example.examples.shopping.qualification
 
+import kotlinx.serialization.json.*
 import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
-import kotlinx.serialization.json.*
 
 private const val PACKAGE = "org.example.examples"
 private const val TAG = "RockyShopping"
@@ -19,18 +19,24 @@ internal class Phone(val name: String, val serial: String, private val log: File
         return output
     }
     fun property(name: String) = adb("shell", "getprop", name).trim()
+
     /** Retried writes: each timed out (code 4) while background sync held the replica, and was rolled back. */
     val retries = mutableListOf<String>()
+
     /** Opens one drive link and waits for its `done` line; returns the app's log lines for it. */
     fun send(vararg parameters: Pair<String, String>, timeoutSeconds: Long = 120): List<String> {
         repeat(3) {
-            try { return attempt(parameters, timeoutSeconds) } catch (busy: Busy) { retries += "${parameters.toList()}: ${busy.message}" }
+            try {
+                return attempt(parameters, timeoutSeconds)
+            } catch (busy: Busy) {
+                retries += "${parameters.toList()}: ${busy.message}"
+            }
         }
         return attempt(parameters, timeoutSeconds)
     }
     private class Busy(message: String) : Exception(message)
     private fun attempt(parameters: Array<out Pair<String, String>>, timeoutSeconds: Long): List<String> {
-        val marker = "${name}-${++step}"
+        val marker = "$name-${++step}"
         adb("logcat", "-c")
         // `adb shell` passes one command line to the device shell: quote the link, whose values are URL-encoded.
         val query = (parameters.toList() + ("step" to marker)).joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
@@ -50,6 +56,7 @@ internal class Phone(val name: String, val serial: String, private val log: File
         }
         error("$name: no reply to ${parameters.toList()} within $timeoutSeconds s")
     }
+
     /** `list title -> items`, each `title` or `title [x]`. */
     fun dump(): Map<String, List<String>> = send("dump" to "1").filter { it.startsWith("dump ") }.associate { line ->
         val (title, items) = line.removePrefix("dump ").split(": ", limit = 2)
@@ -65,7 +72,10 @@ internal fun phones(peer: File, evidence: File) {
     val serials = System.getenv("ROCKY_PHONES").split(",").map { it.trim() }
     require(serials.size == 2) { "ROCKY_PHONES names two adb serials" }
     val apk = File(System.getenv("ROCKY_APK") ?: error("set ROCKY_APK to the shopping app's APK"))
-    val root = File(evidence, "phones").apply { deleteRecursively(); mkdirs() }
+    val root = File(evidence, "phones").apply {
+        deleteRecursively()
+        mkdirs()
+    }
     val notes = mutableListOf<String>()
     val started = System.nanoTime()
     fun elapsed() = (System.nanoTime() - started) / 1_000_000
@@ -140,8 +150,11 @@ internal fun phones(peer: File, evidence: File) {
         }
     }.exceptionOrNull()
     val result = buildJsonObject {
-        put("scenario", "phones"); put("passed", error == null); put("milliseconds", elapsed())
-        put("devices", JsonObject(devices)); put("notes", JsonArray(notes.map(::JsonPrimitive)))
+        put("scenario", "phones")
+        put("passed", error == null)
+        put("milliseconds", elapsed())
+        put("devices", JsonObject(devices))
+        put("notes", JsonArray(notes.map(::JsonPrimitive)))
         put("retried", JsonArray((a.retries + b.retries).map(::JsonPrimitive)))
         error?.let { put("error", it.stackTraceToString()) }
     }

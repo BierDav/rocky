@@ -24,8 +24,10 @@ import rocky.ConnectionState
 import rocky.ReadinessState
 
 private enum class Tab(val label: String, val icon: ImageVector) {
-    Lists("Lists", Icons.AutoMirrored.Filled.List), Approvals("Approvals", Icons.Filled.Gavel), Devices("Devices", Icons.Filled.Devices),
-    Sync("Sync", Icons.Filled.Sync)
+    Lists("Lists", Icons.AutoMirrored.Filled.List),
+    Approvals("Approvals", Icons.Filled.Gavel),
+    Devices("Devices", Icons.Filled.Devices),
+    Sync("Sync", Icons.Filled.Sync),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -44,7 +46,10 @@ fun MainScreen(
         topBar = {
             TopAppBar(
                 title = { Text(if (tab == Tab.Lists) "Shopping" else tab.label) },
-                actions = { SyncBadge(syncState, onClick = { tab = Tab.Sync }); Spacer(Modifier.width(8.dp)) },
+                actions = {
+                    SyncBadge(syncState, onClick = { tab = Tab.Sync })
+                    Spacer(Modifier.width(8.dp))
+                },
             )
         },
         bottomBar = {
@@ -76,7 +81,12 @@ fun SyncBadge(state: SyncState, onClick: () -> Unit) {
     val connection = state.connection
     val readiness = state.readiness?.state
     var now by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) { while (true) { now = currentMillis(); delay(500) } }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = currentMillis()
+            delay(500)
+        }
+    }
     val moving = state.lastTransferAtEpochMillis?.let { now - it < 2_000 } == true || readiness == ReadinessState.Bootstrapping
     val (color, label) = when {
         readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to "Bootstrapping"
@@ -110,4 +120,3 @@ internal fun ago(epochMillis: Long?, now: Long = currentMillis()): String {
         else -> "${seconds / 86_400}d ago"
     }
 }
-

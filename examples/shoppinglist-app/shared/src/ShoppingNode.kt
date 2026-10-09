@@ -1,16 +1,16 @@
 package org.example.examples.shopping
 
 import androidx.room.RoomDatabase
-import java.io.File
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import rocky.CommandRuntime
 import rocky.PeerTransport
-import rocky.RockyDatabase
 import rocky.ReadinessState
+import rocky.RockyDatabase
 import rocky.SecretStore
 import rocky.room.RockyRoom
 import rocky.room.buildOnRocky
+import java.io.File
 
 /** What differs per platform: where data and keys live, how Room is built and how devices reach each other. */
 class ShoppingPlatform(
@@ -29,7 +29,10 @@ class ShoppingPlatform(
 
 /** One open installation: Rocky, Room on its file and the household's background work. Close it to release them. */
 class ShoppingNode private constructor(
-    val rocky: RockyDatabase, private val room: RockyRoom<ShoppingDatabase>, val self: String, commands: CommandRuntime?,
+    val rocky: RockyDatabase,
+    private val room: RockyRoom<ShoppingDatabase>,
+    val self: String,
+    commands: CommandRuntime?,
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
@@ -42,7 +45,11 @@ class ShoppingNode private constructor(
 
     suspend fun close() = withContext(NonCancellable) {
         work.cancelAndJoin()
-        try { room.close() } finally { rocky.close() }
+        try {
+            room.close()
+        } finally {
+            rocky.close()
+        }
     }
 
     companion object {

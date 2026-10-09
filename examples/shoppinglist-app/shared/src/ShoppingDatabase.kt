@@ -13,7 +13,8 @@ data class ShoppingList(
 
 /** A category of one list; its identity is the list and the [id] Rocky issues in that list. */
 @Entity(
-    tableName = "categories", primaryKeys = ["list", "id"],
+    tableName = "categories",
+    primaryKeys = ["list", "id"],
     foreignKeys = [ForeignKey(entity = ShoppingList::class, parentColumns = ["id"], childColumns = ["list"], onDelete = ForeignKey.CASCADE, deferred = true)],
 )
 data class Category(
@@ -28,7 +29,8 @@ data class Category(
  * deleting the list hides the item, and deleting its [category] nulls only that reference.
  */
 @Entity(
-    tableName = "items", primaryKeys = ["list", "key"],
+    tableName = "items",
+    primaryKeys = ["list", "key"],
     indices = [
         Index(value = ["list", "id"], unique = true, name = "items_identity"),
         Index(value = ["list", "title"], unique = true),
@@ -103,55 +105,104 @@ data class DecisionRow(
 @Dao
 interface ListDao {
     /** The held lists: `row_kind = 0` asks for a partial result, since a device need not hold every list. */
-    @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY title, id") fun observe(): Flow<List<ShoppingList>>
+    @Query("SELECT * FROM lists WHERE row_kind = 0 ORDER BY title, id")
+    fun observe(): Flow<List<ShoppingList>>
+
     @Insert suspend fun insert(list: ShoppingList)
+
     /** Verifies the id `partitions.nextId("lists")` prepared, inside the inserting transaction. */
-    @SkipQueryVerification @Query("SELECT rocky_next_id('lists')") suspend fun nextId(): Long
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('lists')")
+    suspend fun nextId(): Long
+
     @Transaction suspend fun create(prepared: Long, title: String): ShoppingList {
         val id = nextId()
         check(id == prepared) { "list id $prepared was taken; prepare again" }
         return ShoppingList(id, title).also { insert(it) }
     }
-    @Query("UPDATE lists SET title = :title WHERE id = :id") suspend fun rename(id: Long, title: String): Int
-    @Query("DELETE FROM lists WHERE id = :id") suspend fun delete(id: Long): Int
+
+    @Query("UPDATE lists SET title = :title WHERE id = :id")
+    suspend fun rename(id: Long, title: String): Int
+
+    @Query("DELETE FROM lists WHERE id = :id")
+    suspend fun delete(id: Long): Int
 }
 
 @Dao
 interface CategoryDao {
-    @Query("SELECT * FROM categories WHERE list = :list ORDER BY name, id") fun observe(list: Long): Flow<List<Category>>
+    @Query("SELECT * FROM categories WHERE list = :list ORDER BY name, id")
+    fun observe(list: Long): Flow<List<Category>>
+
     @Insert suspend fun insert(category: Category)
-    @SkipQueryVerification @Query("SELECT rocky_next_id('categories', :list)") suspend fun nextId(list: Long): Long
+
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('categories', :list)")
+    suspend fun nextId(list: Long): Long
+
     @Transaction suspend fun add(list: Long, name: String): Category = Category(list, nextId(list), name).also { insert(it) }
-    @Query("DELETE FROM categories WHERE list = :list AND id = :id") suspend fun delete(list: Long, id: Long): Int
+
+    @Query("DELETE FROM categories WHERE list = :list AND id = :id")
+    suspend fun delete(list: Long, id: Long): Int
 }
 
 @Dao
 interface ShoppingDao {
     @Query("SELECT * FROM items WHERE list = :list AND (:includeCompleted OR completed = 0) AND instr(lower(title), :search) > 0 ORDER BY completed, title, id")
     fun observe(list: Long, search: String = "", includeCompleted: Boolean = true): Flow<List<ShoppingItem>>
+
     @Insert suspend fun insert(item: ShoppingItem)
+
     /** Rocky reserves the next id of [list] inside the caller's write transaction; a rollback releases it. */
-    @SkipQueryVerification @Query("SELECT rocky_next_id('items', :list)") suspend fun nextId(list: Long): Long
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('items', :list)")
+    suspend fun nextId(list: Long): Long
+
     /** Obtains the id and inserts the item in one transaction. */
-    @Transaction suspend fun add(list: Long, key: String, title: String, category: Long? = null): ShoppingItem =
-        ShoppingItem(list, key, title, completed = false, category = category, id = nextId(list)).also { insert(it) }
-    @Query("UPDATE items SET title = :title WHERE list = :list AND id = :id") suspend fun rename(list: Long, id: Long, title: String): Int
-    @Query("UPDATE items SET completed = :completed WHERE list = :list AND id = :id") suspend fun check(list: Long, id: Long, completed: Boolean): Int
-    @Query("UPDATE items SET category = :category WHERE list = :list AND id = :id") suspend fun categorize(list: Long, id: Long, category: Long?): Int
-    @Query("DELETE FROM items WHERE list = :list AND id = :id") suspend fun delete(list: Long, id: Long): Int
+    @Transaction suspend fun add(list: Long, key: String, title: String, category: Long? = null): ShoppingItem = ShoppingItem(list, key, title, completed = false, category = category, id = nextId(list)).also { insert(it) }
+
+    @Query("UPDATE items SET title = :title WHERE list = :list AND id = :id")
+    suspend fun rename(list: Long, id: Long, title: String): Int
+
+    @Query("UPDATE items SET completed = :completed WHERE list = :list AND id = :id")
+    suspend fun check(list: Long, id: Long, completed: Boolean): Int
+
+    @Query("UPDATE items SET category = :category WHERE list = :list AND id = :id")
+    suspend fun categorize(list: Long, id: Long, category: Long?): Int
+
+    @Query("DELETE FROM items WHERE list = :list AND id = :id")
+    suspend fun delete(list: Long, id: Long): Int
 }
 
 @Dao
 interface DeviceDao {
-    @Query("SELECT * FROM devices ORDER BY name, node") fun observe(): Flow<List<DeviceRow>>
+    @Query("SELECT * FROM devices ORDER BY name, node")
+    fun observe(): Flow<List<DeviceRow>>
+
     @Insert suspend fun insert(device: DeviceRow)
-    @SkipQueryVerification @Query("SELECT rocky_next_id('devices')") suspend fun nextId(): Long
-    @Query("UPDATE devices SET name = :name, kind = :kind WHERE node = :node") suspend fun update(node: String, name: String, kind: String): Int
-    @Query("DELETE FROM devices WHERE node = :node") suspend fun delete(node: String): Int
-    @Query("DELETE FROM keys WHERE recipient = :node") suspend fun deleteKeys(node: String): Int
-    @Query("DELETE FROM identities WHERE node = :node") suspend fun deleteIdentity(node: String): Int
+
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('devices')")
+    suspend fun nextId(): Long
+
+    @Query("UPDATE devices SET name = :name, kind = :kind WHERE node = :node")
+    suspend fun update(node: String, name: String, kind: String): Int
+
+    @Query("DELETE FROM devices WHERE node = :node")
+    suspend fun delete(node: String): Int
+
+    @Query("DELETE FROM keys WHERE recipient = :node")
+    suspend fun deleteKeys(node: String): Int
+
+    @Query("DELETE FROM identities WHERE node = :node")
+    suspend fun deleteIdentity(node: String): Int
+
     /** Removes the device's record, the keys sealed to it and its identity in one commit. */
-    @Transaction suspend fun forget(node: String) { delete(node); deleteKeys(node); deleteIdentity(node) }
+    @Transaction suspend fun forget(node: String) {
+        delete(node)
+        deleteKeys(node)
+        deleteIdentity(node)
+    }
+
     @Transaction suspend fun record(node: String, name: String, kind: String) {
         if (update(node, name, kind) == 0) insert(DeviceRow(node, name, kind, nextId()))
     }
@@ -159,11 +210,18 @@ interface DeviceDao {
 
 @Dao
 interface KeyDao {
-    @Query("SELECT * FROM keys") fun observe(): Flow<List<ListKey>>
+    @Query("SELECT * FROM keys")
+    fun observe(): Flow<List<ListKey>>
+
     @Insert suspend fun insert(key: ListKey)
-    @SkipQueryVerification @Query("SELECT rocky_next_id('keys')") suspend fun nextId(): Long
+
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('keys')")
+    suspend fun nextId(): Long
+
     @Query("UPDATE keys SET epoch = :epoch, envelope = :envelope WHERE recipient = :recipient AND list = :list")
     suspend fun update(recipient: String, list: Long, epoch: Long, envelope: ByteArray): Int
+
     @Transaction suspend fun deliver(recipient: String, list: Long, epoch: Long, envelope: ByteArray) {
         if (update(recipient, list, epoch, envelope) == 0) insert(ListKey(recipient, list, epoch, envelope, nextId()))
     }
@@ -171,10 +229,18 @@ interface KeyDao {
 
 @Dao
 interface IdentityDao {
-    @Query("SELECT * FROM identities") fun observe(): Flow<List<IdentityRow>>
+    @Query("SELECT * FROM identities")
+    fun observe(): Flow<List<IdentityRow>>
+
     @Insert suspend fun insert(row: IdentityRow)
-    @SkipQueryVerification @Query("SELECT rocky_next_id('identities')") suspend fun nextId(): Long
-    @Query("UPDATE identities SET identity = :identity WHERE node = :node") suspend fun update(node: String, identity: String): Int
+
+    @SkipQueryVerification
+    @Query("SELECT rocky_next_id('identities')")
+    suspend fun nextId(): Long
+
+    @Query("UPDATE identities SET identity = :identity WHERE node = :node")
+    suspend fun update(node: String, identity: String): Int
+
     @Transaction suspend fun publish(node: String, identity: String) {
         if (update(node, identity) == 0) insert(IdentityRow(node, identity, nextId()))
     }
@@ -183,8 +249,11 @@ interface IdentityDao {
 /** Confirmed rows: these DAOs only read, since SQL refuses every write to a command-controlled table. */
 @Dao
 interface ApprovalDao {
-    @Query("SELECT * FROM requests ORDER BY id") fun requests(): Flow<List<RequestRow>>
-    @Query("SELECT * FROM decisions") fun decisions(): Flow<List<DecisionRow>>
+    @Query("SELECT * FROM requests ORDER BY id")
+    fun requests(): Flow<List<RequestRow>>
+
+    @Query("SELECT * FROM decisions")
+    fun decisions(): Flow<List<DecisionRow>>
 }
 
 /**
@@ -192,9 +261,12 @@ interface ApprovalDao {
  * trusted-only tables are not Room's: a member's database does not show them at all; see [TrustedRows].
  */
 @Database(
-    entities = [ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class, IdentityRow::class,
-        RequestRow::class, DecisionRow::class],
-    version = 5, exportSchema = true,
+    entities = [
+        ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class, IdentityRow::class,
+        RequestRow::class, DecisionRow::class,
+    ],
+    version = 5,
+    exportSchema = true,
 )
 @ConstructedBy(ShoppingDatabaseConstructor::class)
 abstract class ShoppingDatabase : RoomDatabase() {

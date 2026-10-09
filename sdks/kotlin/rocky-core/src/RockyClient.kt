@@ -12,30 +12,62 @@ interface Transport {
     suspend fun close()
 }
 
-fun request(type: String, body: JsonObjectBuilder.() -> Unit = {}): JsonObject = buildJsonObject { put("type", type); body() }
+fun request(type: String, body: JsonObjectBuilder.() -> Unit = {}): JsonObject = buildJsonObject {
+    put("type", type)
+    body()
+}
 fun bytes(value: ByteArray): JsonArray = JsonArray(value.map { JsonPrimitive(it.toInt() and 255) })
+
 /** `cursor` is the `next` of the previous page of the same query; its `next_kind` is `keyset` or `offset`. */
 fun query(sql: String, values: JsonArray = JsonArray(emptyList()), maxRows: Int = 1024, cursor: String? = null): JsonObject = buildJsonObject {
-    put("sql", sql); put("values", values); put("max_rows", maxRows)
+    put("sql", sql)
+    put("values", values)
+    put("max_rows", maxRows)
     if (cursor != null) put("cursor", cursor)
 }
-fun text(value: String): JsonObject = buildJsonObject { put("type", "text"); put("value", value) }
+fun text(value: String): JsonObject = buildJsonObject {
+    put("type", "text")
+    put("value", value)
+}
 
 class RockyClient(private val transport: Transport) {
     suspend fun call(request: JsonObject): JsonObject = transport.call(request)
+
     /** Requires an open SQL transaction and an installed table pseudonym. */
     suspend fun nextId(table: String): String = call(request("next_id") { put("table", table) }).getValue("id").jsonPrimitive.content
-    suspend fun nextId(table: String, partitionValues: JsonArray): String = call(request("next_id") { put("table", table); put("partition_values", partitionValues) }).getValue("id").jsonPrimitive.content
-    suspend fun moveRow(handle: JsonArray, table: String, id: String, from: JsonArray, to: JsonArray): JsonObject =
-        call(request("move_row") { put("handle", handle); put("table", table); put("id", id); put("from", from); put("to", to) })
+    suspend fun nextId(table: String, partitionValues: JsonArray): String = call(
+        request("next_id") {
+            put("table", table)
+            put("partition_values", partitionValues)
+        },
+    ).getValue("id").jsonPrimitive.content
+    suspend fun moveRow(handle: JsonArray, table: String, id: String, from: JsonArray, to: JsonArray): JsonObject = call(
+        request("move_row") {
+            put("handle", handle)
+            put("table", table)
+            put("id", id)
+            put("from", from)
+            put("to", to)
+        },
+    )
     val partitions: Partitions get() = Partitions(this)
     val horizons: Horizons get() = Horizons(this)
-    suspend fun sql(statement: String, values: JsonArray = JsonArray(emptyList())): JsonObject =
-        call(request("sql") { put("sql", statement); put("values", values) })
+    suspend fun sql(statement: String, values: JsonArray = JsonArray(emptyList())): JsonObject = call(
+        request("sql") {
+            put("sql", statement)
+            put("values", values)
+        },
+    )
     suspend fun read(query: JsonObject): JsonObject = call(request("read") { put("query", query) })
     suspend fun readStrong(query: JsonObject): JsonObject = call(request("read_strong") { put("query", query) })
-    suspend fun mutate(handle: JsonArray, payload: ByteArray, entity: JsonObject? = null, baseline: String? = null): JsonObject =
-        call(request("mutate") { put("handle", handle); put("payload", bytes(payload)); put("entity", entity ?: JsonNull); put("baseline", baseline?.let(::JsonPrimitive) ?: JsonNull) })
+    suspend fun mutate(handle: JsonArray, payload: ByteArray, entity: JsonObject? = null, baseline: String? = null): JsonObject = call(
+        request("mutate") {
+            put("handle", handle)
+            put("payload", bytes(payload))
+            put("entity", entity ?: JsonNull)
+            put("baseline", baseline?.let(::JsonPrimitive) ?: JsonNull)
+        },
+    )
     suspend fun recoverMutation(handle: JsonArray): JsonObject = call(request("mutation_progress") { put("handle", handle) })
     suspend fun recoverCommand(handle: JsonArray): JsonObject = call(request("command_progress") { put("handle", handle) })
     fun observe(query: JsonObject): Flow<JsonObject> = flow {
@@ -50,8 +82,10 @@ class RockyClient(private val transport: Transport) {
             withContext(NonCancellable) { call(request("unsubscribe") { put("subscription", subscription) }) }
         }
     }.buffer(Channel.CONFLATED)
+
     @OptIn(ExperimentalCoroutinesApi::class)
     fun observe(queries: Flow<JsonObject>): Flow<JsonObject> = queries.distinctUntilChanged().flatMapLatest { observe(it) }
+
     /** Committed revision, generation progress and current authority; cancellation releases only this wait. */
     fun readiness(): Flow<JsonObject> = flow {
         var value = call(request("status"))
@@ -63,4 +97,3 @@ class RockyClient(private val transport: Transport) {
     }.buffer(Channel.CONFLATED)
     suspend fun close() = transport.close()
 }
-

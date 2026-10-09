@@ -6,24 +6,33 @@ import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteException
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.sqlite.driver.bundled.SQLITE_OPEN_READONLY
-import java.io.File
-import java.net.ServerSocket
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import rocky.*
 import rocky.room.followRocky
 import rocky.room.setRockyDatabase
+import java.io.File
+import java.net.ServerSocket
+import java.nio.file.Files
+import kotlin.test.*
 
 data class Restocking(val item: String, val quantity: Long)
 
 /** Adds to an item's confirmed stock. Every executor derives the same `id` for an item. */
-val Restock = Command("Restock", handler = "market.restock.v1",
-    arguments = Shape(listOf(Field("item", FieldType.Text), Field("quantity", FieldType.Integer)),
-        { r: Restocking -> listOf(r.item, r.quantity) }, { Restocking(it[0] as String, it[1] as Long) }),
+val Restock = Command(
+    "Restock",
+    handler = "market.restock.v1",
+    arguments = Shape(
+        listOf(Field("item", FieldType.Text), Field("quantity", FieldType.Integer)),
+        { r: Restocking -> listOf(r.item, r.quantity) },
+        { Restocking(it[0] as String, it[1] as Long) },
+    ),
     accepted = Shape(listOf(Field("remaining", FieldType.Integer)), { n: Long -> listOf(n) }, { it.single() as Long }),
-    rejected = Shape.none, invocation = "holds", result = "holds", resources = listOf("holds", "stock"))
+    rejected = Shape.none,
+    invocation = "holds",
+    result = "holds",
+    resources = listOf("holds", "stock"),
+)
 val restock = Restock handledBy { context, request ->
     // A `stock` row is its `item`, then `remaining`, `id` and `row_kind`.
     val remaining = (context.get("stock", request.item)?.get(1) as Long? ?: 0) + request.quantity
@@ -34,23 +43,32 @@ val restock = Restock handledBy { context, request ->
 /** Command-controlled tables through Room: DAOs read confirmed rows, writes fail, confirmation invalidates. */
 class ConfirmedRowsTest {
     private val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    private val schema = schemaFromRoom("market",
-        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.MarketDatabase/1.json").readText()) {
+    private val schema = schemaFromRoom(
+        "market",
+        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.MarketDatabase/1.json").readText(),
+    ) {
         table("stock") { tableClass = TableClass.CommandControlled }
         commands = CommandSet(listOf(Restock))
     }
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
-    private fun bundles(directory: File): Long =
-        BundledSQLiteDriver().open(File(directory, "rocky.sqlite").path, SQLITE_OPEN_READONLY).use { file ->
-            file.prepare("SELECT count(DISTINCT handle) FROM secure_bundle_handles").use { it.step(); it.getLong(0) }
+    private fun bundles(directory: File): Long = BundledSQLiteDriver().open(File(directory, "rocky.sqlite").path, SQLITE_OPEN_READONLY).use { file ->
+        file.prepare("SELECT count(DISTINCT handle) FROM secure_bundle_handles").use {
+            it.step()
+            it.getLong(0)
         }
+    }
 
     @Test fun daosReadConfirmedRowsAndTheirWritesFail() = runBlocking {
         val directory = Files.createTempDirectory("room-confirmed").toFile()
         val coordinator = DevelopmentCoordinator()
         val data = File(directory, "market")
-        val database = RockyDatabase.create(data, schema, tcp(), automaticSync = false,
-            commands = CommandRuntime(coordinator, listOf(restock)))
+        val database = RockyDatabase.create(
+            data,
+            schema,
+            tcp(),
+            automaticSync = false,
+            commands = CommandRuntime(coordinator, listOf(restock)),
+        )
         val work = mutableListOf<Job>()
         try {
             coordinator.register(database.commandIdentity())
@@ -105,7 +123,8 @@ class ConfirmedRowsTest {
             room.close()
         } finally {
             work.forEach { it.cancelAndJoin() }
-            database.close(); directory.deleteRecursively()
+            database.close()
+            directory.deleteRecursively()
         }
     }
 }

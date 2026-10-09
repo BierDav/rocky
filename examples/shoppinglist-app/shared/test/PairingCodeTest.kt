@@ -1,8 +1,8 @@
 package org.example.examples.shopping
 
-import kotlin.test.*
 import rocky.GrantProfile
 import rocky.ReplicaRole
+import kotlin.test.*
 
 class PairingCodeTest {
     @Test fun `pairing codes keep the kind, the name and the invitation`() {
@@ -11,8 +11,10 @@ class PairingCodeTest {
             assertTrue(code.toString().startsWith("rocky-shopping://pair?kind=${kind.name.lowercase()}&"))
             assertEquals(code, PairingCode.parse(" $code\n"))
         }
-        assertEquals(AppLink("drive", mapOf("add" to "Milk & eggs", "step" to "a-1")),
-            AppLink.parse("rocky-shopping://drive?add=Milk+%26+eggs&step=a-1"))
+        assertEquals(
+            AppLink("drive", mapOf("add" to "Milk & eggs", "step" to "a-1")),
+            AppLink.parse("rocky-shopping://drive?add=Milk+%26+eggs&step=a-1"),
+        )
         assertNull(AppLink.parse("https://example.org/pair"))
         assertFailsWith<IllegalArgumentException> { PairingCode.parse("rocky-shopping://drive?kind=full&invitation=x") }
         assertFailsWith<IllegalArgumentException> { PairingCode.parse("rocky://join/abc") }

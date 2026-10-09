@@ -1,23 +1,27 @@
 package org.example.examples.shopping
 
 import androidx.room.Room
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
+import rocky.ConnectionState
+import rocky.PeerTransport
+import rocky.ReadinessState
+import rocky.RockyEvent
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
-import rocky.PeerTransport
-import rocky.RockyEvent
-import rocky.ConnectionState
-import rocky.ReadinessState
 
 /** Device kinds: list keys reach full devices on their own, and partial devices only when shared. */
 class HouseholdTest {
-    private fun platform(root: File, name: String) = ShoppingPlatform(File(root, name), name,
+    private fun platform(root: File, name: String) = ShoppingPlatform(
+        File(root, name),
+        name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" }) })
+        transport = { PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" }) },
+    )
     private suspend fun ShoppingNode.titles(list: Long) = repository.observe(list).first().map { it.title }.sorted()
+
     /** Waits until [list] reads [titles] here; its rows may arrive before it is held. */
     private suspend fun ShoppingNode.awaitTitles(list: Long, vararg titles: String) = withTimeout(60_000) {
         repository.observe(list).first { rows -> rows.map { it.title }.sorted() == titles.toList() }
@@ -51,7 +55,8 @@ class HouseholdTest {
             removed.rocky.setOnline(true)
             assertEquals(ConnectionState.Revoked, removed.rocky.syncOnce().state)
             assertEquals(ReadinessState.Revoked, removed.rocky.observeReadiness().first().state)
-            removed.close(); opened -= removed
+            removed.close()
+            opened -= removed
             val session = ShoppingSession(platform(root, "removed"))
             try {
                 val revoked = withTimeout(30_000) { session.state.first { it is SessionState.Revoked } } as SessionState.Revoked
@@ -70,8 +75,11 @@ class HouseholdTest {
                 trusted.awaitTitles(newList, "Eggs")
                 remaining.awaitTitles(newList, "Eggs")
                 assertTrue(root.listFiles().orEmpty().any { it.name.startsWith("removed-revoked-") && File(it, "revoked.json").exists() })
-            } finally { session.close() }
-            trusted.close(); opened -= trusted
+            } finally {
+                session.close()
+            }
+            trusted.close()
+            opened -= trusted
             val reopened = ShoppingNode.resume(platform(root, "desk")).also { opened += it }
             assertTrue(removed.self in reopened.household.revokedDevices().first())
         } finally {
@@ -97,7 +105,10 @@ class HouseholdTest {
             val reopened = withTimeout(30_000) { session.state.first { it is SessionState.Open } } as SessionState.Open
             assertEquals(listOf("Milk"), reopened.node.titles(list))
         } finally {
-            withContext(NonCancellable) { session.close(); original.close() }
+            withContext(NonCancellable) {
+                session.close()
+                original.close()
+            }
             root.deleteRecursively()
         }
     }
@@ -169,7 +180,8 @@ class HouseholdTest {
             full.awaitTitles(weekly, "Milk")
             full.repository.add(weekly, "Eggs")
             trusted.awaitTitles(weekly, "Eggs", "Milk")
-            full.close(); opened -= full
+            full.close()
+            opened -= full
             full = ShoppingNode.resume(platform(root, "laptop")).also { opened += it }
             assertEquals(listOf("Eggs", "Milk"), full.titles(weekly))
         } finally {

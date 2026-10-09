@@ -6,5 +6,5 @@ plugins {
 sourceSets.main {
     kotlin.srcDir("../../tooling/build-logic/src")
     // The embedded compiler is only for the toolchain plugins.
-    kotlin.exclude("Compiler.kt")
+    kotlin.exclude("Compilation.kt")
 }

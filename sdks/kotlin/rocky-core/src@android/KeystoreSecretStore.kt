@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import rocky.SecretStore
 import java.io.File
 import java.io.FileOutputStream
 import java.security.KeyStore
@@ -11,7 +12,6 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import rocky.SecretStore
 
 /**
  * Installation secrets sealed with AES-256-GCM under a non-exportable Android Keystore key. Only ciphertext
@@ -36,18 +36,23 @@ class KeystoreSecretStore(
         val file = path(name)
         if (!file.exists()) return null
         val sealed = file.readBytes()
-        require(sealed.size > HEADER.size + 1 + IV_BYTES && sealed.copyOfRange(0, HEADER.size).contentEquals(HEADER) &&
-            sealed[HEADER.size] == FORMAT) {
+        require(
+            sealed.size > HEADER.size + 1 + IV_BYTES &&
+                sealed.copyOfRange(0, HEADER.size).contentEquals(HEADER) &&
+                sealed[HEADER.size] == FORMAT,
+        ) {
             "secret $name is not a sealed Rocky secret"
         }
-        val key = key() ?: throw IllegalStateException(
-            "Keystore key $alias is missing, so secret $name cannot be opened; it is never regenerated")
+        val key = key() ?: throw IllegalStateException("Keystore key $alias is missing, so secret $name cannot be opened; it is never regenerated")
         val iv = sealed.copyOfRange(HEADER.size + 1, HEADER.size + 1 + IV_BYTES)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, iv))
         cipher.updateAAD(aad(name))
-        try { cipher.doFinal(sealed, HEADER.size + 1 + IV_BYTES, sealed.size - HEADER.size - 1 - IV_BYTES) }
-        catch (error: javax.crypto.AEADBadTagException) { throw IllegalStateException("secret $name failed authentication", error) }
+        try {
+            cipher.doFinal(sealed, HEADER.size + 1 + IV_BYTES, sealed.size - HEADER.size - 1 - IV_BYTES)
+        } catch (error: javax.crypto.AEADBadTagException) {
+            throw IllegalStateException("secret $name failed authentication", error)
+        }
     }
 
     override fun store(name: String, secret: ByteArray): Unit = synchronized(lock) {
@@ -66,7 +71,10 @@ class KeystoreSecretStore(
         directory.mkdirs()
         val partial = File(directory, ".$name.tmp")
         FileOutputStream(partial).use { out ->
-            out.write(HEADER); out.write(FORMAT.toInt()); out.write(iv); out.write(sealed)
+            out.write(HEADER)
+            out.write(FORMAT.toInt())
+            out.write(iv)
+            out.write(sealed)
             out.fd.sync()
         }
         check(partial.renameTo(file)) { "cannot replace secret $name" }
@@ -80,8 +88,12 @@ class KeystoreSecretStore(
     private fun sealedNames(): List<String> = directory.listFiles()?.map { it.name }?.filter { !it.startsWith(".") }.orEmpty()
 
     private fun path(name: String): File {
-        require(name.isNotEmpty() && name.length <= 128 && !name.startsWith(".") &&
-            name.all { it in 'a'..'z' || it in '0'..'9' || it in "._-" }) { "invalid secret name" }
+        require(
+            name.isNotEmpty() &&
+                name.length <= 128 &&
+                !name.startsWith(".") &&
+                name.all { it in 'a'..'z' || it in '0'..'9' || it in "._-" },
+        ) { "invalid secret name" }
         return File(directory, name)
     }
 
@@ -102,7 +114,10 @@ class KeystoreSecretStore(
             check(Build.VERSION.SDK_INT >= 28) { "StrongBox needs Android 9" }
             spec.setIsStrongBoxBacked(true)
         }
-        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run { init(spec.build()); generateKey() }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run {
+            init(spec.build())
+            generateKey()
+        }
     }
 
     companion object {

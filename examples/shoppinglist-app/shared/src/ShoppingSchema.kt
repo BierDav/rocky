@@ -11,25 +11,64 @@ import rocky.*
  * code, and `coordination`, the household's coordination tenant. `requests` and `decisions` change only through the [ApprovalCommands].
  */
 val ShoppingSchema = schema("shopping", version = 5) {
-    table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+    table("lists") {
+        text("title")
+        primaryKey("id")
+        partitionBy("id", group = "list")
+    }
     table("categories") {
-        integer("list"); text("name")
-        primaryKey("list", "id"); partitionBy("list", group = "list")
+        integer("list")
+        text("name")
+        primaryKey("list", "id")
+        partitionBy("list", group = "list")
         reference("list", "lists", onDelete = Delete.Cascade)
     }
     table("items") {
-        integer("list"); text("key"); text("title"); boolean("completed"); integer("category", nullable = true)
-        primaryKey("list", "key"); partitionBy("list", group = "list")
+        integer("list")
+        text("key")
+        text("title")
+        boolean("completed")
+        integer("category", nullable = true)
+        primaryKey("list", "key")
+        partitionBy("list", group = "list")
         unique("list", "title", onConflict = Conflict.LatestWins)
         index("index_items_list_category", "list", "category")
         reference("list", "lists", onDelete = Delete.Cascade)
         reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
     }
-    table("devices") { text("node"); text("name"); text("kind"); primaryKey("node") }
-    table("keys") { text("recipient"); integer("list"); integer("epoch"); blob("envelope"); primaryKey("recipient", "list") }
-    table("identities") { text("node"); text("identity"); primaryKey("node") }
-    table("requests") { text("key"); text("title"); text("note"); text("requester"); primaryKey("key"); tableClass = TableClass.CommandControlled }
-    table("decisions") { text("key"); boolean("approved"); text("decider"); primaryKey("key"); tableClass = TableClass.CommandControlled }
+    table("devices") {
+        text("node")
+        text("name")
+        text("kind")
+        primaryKey("node")
+    }
+    table("keys") {
+        text("recipient")
+        integer("list")
+        integer("epoch")
+        blob("envelope")
+        primaryKey("recipient", "list")
+    }
+    table("identities") {
+        text("node")
+        text("identity")
+        primaryKey("node")
+    }
+    table("requests") {
+        text("key")
+        text("title")
+        text("note")
+        text("requester")
+        primaryKey("key")
+        tableClass = TableClass.CommandControlled
+    }
+    table("decisions") {
+        text("key")
+        boolean("approved")
+        text("decider")
+        primaryKey("key")
+        tableClass = TableClass.CommandControlled
+    }
     trustedTables()
     commands = ApprovalCommands
 }
@@ -38,7 +77,10 @@ val ShoppingSchema = schema("shopping", version = 5) {
 val shoppingRoomOverlay: SchemaBuilder.() -> Unit = {
     table("lists") { partitionBy("id", group = "list") }
     table("categories") { partitionBy("list", group = "list") }
-    table("items") { partitionBy("list", group = "list"); onConflict("index_items_list_title", Conflict.LatestWins) }
+    table("items") {
+        partitionBy("list", group = "list")
+        onConflict("index_items_list_title", Conflict.LatestWins)
+    }
     table("requests") { tableClass = TableClass.CommandControlled }
     table("decisions") { tableClass = TableClass.CommandControlled }
     trustedTables()

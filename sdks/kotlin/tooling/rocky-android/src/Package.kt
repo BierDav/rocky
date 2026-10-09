@@ -61,12 +61,16 @@ fun packageAndroid(
     val aar = work / "rocky-core-android.aar"
     ZipOutputStream(aar.outputStream()).use { archive ->
         archive.put("classes.jar", core.readBytes())
-        archive.put("AndroidManifest.xml", """
+        archive.put(
+            "AndroidManifest.xml",
+            """
             |<?xml version="1.0" encoding="utf-8"?>
             |<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="rocky.android">
             |    <uses-sdk android:minSdkVersion="${Android.MIN_SDK}"/>
             |</manifest>
-            |""".trimMargin().toByteArray())
+            |
+            """.trimMargin().toByteArray(),
+        )
         archive.put("R.txt", ByteArray(0))
         archive.put("proguard.txt", keepRules.readBytes())
         val runtime = RuntimeArtifact.directory() / "${RuntimeArtifact.NAME}-${RuntimeArtifact.VERSION}.aar"
@@ -77,31 +81,53 @@ fun packageAndroid(
             }
         }
     }
-    publish(repository, "rocky-core-android", "aar", aar, listOf(
-        Pom("org.jetbrains.kotlin", "kotlin-stdlib", KOTLIN),
-        Pom("org.jetbrains.kotlinx", "kotlinx-coroutines-android", "1.10.2"),
-        Pom("org.jetbrains.kotlinx", "kotlinx-serialization-json", "1.9.0"),
-        Pom("net.java.dev.jna", "jna", "5.18.1", "aar"),
-    ))
+    publish(
+        repository,
+        "rocky-core-android",
+        "aar",
+        aar,
+        listOf(
+            Pom("org.jetbrains.kotlin", "kotlin-stdlib", KOTLIN),
+            Pom("org.jetbrains.kotlinx", "kotlinx-coroutines-android", "1.10.2"),
+            Pom("org.jetbrains.kotlinx", "kotlinx-serialization-json", "1.9.0"),
+            Pom("net.java.dev.jna", "jna", "5.18.1", "aar"),
+        ),
+    )
     val room = ROOM.map { (path, digest) ->
         val downloaded = fetch(GOOGLE + path, cache / path.substringAfterLast('/'), digest)
-        if (downloaded.extension != "aar") downloaded else (cache / (downloaded.nameWithoutExtension + ".jar")).also { classes ->
-            ZipFile(downloaded.toFile()).use { classes.writeBytes(it.getInputStream(it.getEntry("classes.jar")).readBytes()) }
+        if (downloaded.extension != "aar") {
+            downloaded
+        } else {
+            (cache / (downloaded.nameWithoutExtension + ".jar")).also { classes ->
+                ZipFile(downloaded.toFile()).use { classes.writeBytes(it.getInputStream(it.getEntry("classes.jar")).readBytes()) }
+            }
         }
     }
     val sqlite = work / "rocky-sqlite.jar"
     compile(listOf(sqliteSources), base + room.filter { it.name.startsWith("sqlite-android") } + listOf(core), sqlite)
-    publish(repository, "rocky-sqlite", "jar", sqlite, listOf(
-        Pom("rocky", "rocky-core-android", VERSION, "aar"),
-        Pom("androidx.sqlite", "sqlite", "2.6.2"),
-    ))
+    publish(
+        repository,
+        "rocky-sqlite",
+        "jar",
+        sqlite,
+        listOf(
+            Pom("rocky", "rocky-core-android", VERSION, "aar"),
+            Pom("androidx.sqlite", "sqlite", "2.6.2"),
+        ),
+    )
     val roomJar = work / "rocky-room.jar"
     compile(listOf(roomSources), base + room + listOf(core, sqlite), roomJar)
-    publish(repository, "rocky-room", "jar", roomJar, listOf(
-        Pom("rocky", "rocky-core-android", VERSION, "aar"),
-        Pom("rocky", "rocky-sqlite", VERSION),
-        Pom("androidx.room", "room-runtime", "2.8.4"),
-    ))
+    publish(
+        repository,
+        "rocky-room",
+        "jar",
+        roomJar,
+        listOf(
+            Pom("rocky", "rocky-core-android", VERSION, "aar"),
+            Pom("rocky", "rocky-sqlite", VERSION),
+            Pom("androidx.room", "room-runtime", "2.8.4"),
+        ),
+    )
     writeManifest(output)
     println(output)
 }
@@ -113,7 +139,9 @@ private fun compile(sources: List<Path>, classpath: List<Path>, destination: Pat
 }
 
 private fun ZipOutputStream.put(name: String, bytes: ByteArray) {
-    putNextEntry(ZipEntry(name)); write(bytes); closeEntry()
+    putNextEntry(ZipEntry(name))
+    write(bytes)
+    closeEntry()
 }
 
 private class Pom(val group: String, val artifact: String, val version: String, val type: String? = null)
@@ -123,10 +151,13 @@ private fun publish(repository: Path, artifact: String, packaging: String, binar
     binary.copyTo(directory / "$artifact-$VERSION.$packaging")
     val items = dependencies.joinToString("") {
         "<dependency><groupId>${it.group}</groupId><artifactId>${it.artifact}</artifactId><version>${it.version}</version>" +
-            (it.type?.let { type -> "<type>$type</type>" } ?: "") + "<scope>compile</scope></dependency>"
+            (it.type?.let { type -> "<type>$type</type>" } ?: "") +
+            "<scope>compile</scope></dependency>"
     }
-    (directory / "$artifact-$VERSION.pom").writeText("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
-        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>rocky</groupId>" +
-        "<artifactId>$artifact</artifactId><version>$VERSION</version><packaging>$packaging</packaging>" +
-        "<dependencies>$items</dependencies></project>\n")
+    (directory / "$artifact-$VERSION.pom").writeText(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+            "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>rocky</groupId>" +
+            "<artifactId>$artifact</artifactId><version>$VERSION</version><packaging>$packaging</packaging>" +
+            "<dependencies>$items</dependencies></project>\n",
+    )
 }

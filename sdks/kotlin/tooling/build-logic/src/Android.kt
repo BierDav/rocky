@@ -60,8 +60,14 @@ object Android {
             environment["CARGO_TARGET_${target.uppercase()}_LINKER"] = compiler
             environment["CC_$target"] = compiler
             environment["AR_$target"] = (bin / "llvm-ar").pathString
-            run(listOf(rustup, "run", toolchain, "cargo", "build", "--manifest-path", "sdks/native/Cargo.toml",
-                "--locked", "--release", "--target", abi.rustTarget), repository, environment)
+            run(
+                listOf(
+                    rustup, "run", toolchain, "cargo", "build", "--manifest-path", "sdks/native/Cargo.toml",
+                    "--locked", "--release", "--target", abi.rustTarget,
+                ),
+                repository,
+                environment,
+            )
             val built = repository / "sdks/native/target" / abi.rustTarget / "release/librocky_uniffi.so"
             val stripped = (output / abi.name / "librocky_uniffi.so").createParentDirectories()
             run(listOf((bin / "llvm-strip").pathString, "--strip-unneeded", "-o", stripped.pathString, built.pathString), repository)
@@ -91,11 +97,17 @@ object Android {
             environment["PATH"] = (home / "cargo/bin").pathString + File.pathSeparator + System.getenv("PATH")
             if (!(home / "cargo/bin/rustup").exists()) {
                 val host = rustupHost()
-                val init = fetch("https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$host/rustup-init",
-                    home / "rustup-init", RUSTUP_SHA256.getValue(host))
+                val init = fetch(
+                    "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$host/rustup-init",
+                    home / "rustup-init",
+                    RUSTUP_SHA256.getValue(host),
+                )
                 init.toFile().setExecutable(true)
-                run(listOf(init.pathString, "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "none"),
-                    repository, environment)
+                run(
+                    listOf(init.pathString, "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "none"),
+                    repository,
+                    environment,
+                )
             }
             (home / "cargo/bin/rustup").pathString
         }
@@ -107,8 +119,16 @@ object Android {
 
     private fun rustupHost(): String {
         val os = System.getProperty("os.name").lowercase()
-        val arch = when (System.getProperty("os.arch")) { "aarch64", "arm64" -> "aarch64"; "amd64", "x86_64" -> "x86_64"; else -> null }
-        val system = when { os.startsWith("mac") -> "apple-darwin"; os.startsWith("linux") -> "unknown-linux-gnu"; else -> null }
+        val arch = when (System.getProperty("os.arch")) {
+            "aarch64", "arm64" -> "aarch64"
+            "amd64", "x86_64" -> "x86_64"
+            else -> null
+        }
+        val system = when {
+            os.startsWith("mac") -> "apple-darwin"
+            os.startsWith("linux") -> "unknown-linux-gnu"
+            else -> null
+        }
         return "$arch-$system".takeIf { arch != null && system != null && it in RUSTUP_SHA256 }
             ?: error("Install rustup; no pinned rustup-init for this host")
     }

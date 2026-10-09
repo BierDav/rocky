@@ -22,7 +22,11 @@ import org.example.examples.shopping.ShoppingSession
 fun ShoppingApp(graph: ShoppingGraph) {
     // A desktop window may not own ViewModels; the app then keeps them for its lifetime.
     val parentOwner = LocalViewModelStoreOwner.current
-    val owner = parentOwner ?: remember { object : ViewModelStoreOwner { override val viewModelStore = ViewModelStore() } }
+    val owner = parentOwner ?: remember {
+        object : ViewModelStoreOwner {
+            override val viewModelStore = ViewModelStore()
+        }
+    }
     DisposableEffect(owner) {
         onDispose { if (parentOwner == null) owner.viewModelStore.clear() }
     }
@@ -57,24 +61,39 @@ private fun Opening() {
 @Composable
 private fun OfferDialog(offer: PairingCode, state: SessionState, session: ShoppingSession) {
     val joinable = state == SessionState.Setup || state is SessionState.Revoked
-    AlertDialog(onDismissRequest = session::dismissOffer,
+    AlertDialog(
+        onDismissRequest = session::dismissOffer,
         title = { Text(if (joinable) "Join as ${offer.name.ifBlank { "this device" }}?" else "Already in a household") },
         text = {
-            Text(if (joinable) "A trusted device invited this one as a ${offer.kind.label.lowercase()} device: ${offer.kind.summary.lowercase()}." +
-                (if (state is SessionState.Revoked) " The revoked copy is kept aside and this device gets a new identity." else "")
-            else "This device already belongs to a household. A pairing code only sets up a new or revoked device.")
+            Text(
+                if (joinable) {
+                    "A trusted device invited this one as a ${offer.kind.label.lowercase()} device: ${offer.kind.summary.lowercase()}." +
+                        (if (state is SessionState.Revoked) " The revoked copy is kept aside and this device gets a new identity." else "")
+                } else {
+                    "This device already belongs to a household. A pairing code only sets up a new or revoked device."
+                },
+            )
         },
         confirmButton = { if (joinable) Button(session::acceptOffer) { Text("Join") } else TextButton(session::dismissOffer) { Text("OK") } },
-        dismissButton = { if (joinable) TextButton(session::dismissOffer) { Text("Cancel") } })
+        dismissButton = { if (joinable) TextButton(session::dismissOffer) { Text("Cancel") } },
+    )
 }
 
 private val Leaf = Color(0xFF2E7D32)
 
 @Composable
 fun ShoppingTheme(content: @Composable () -> Unit) {
-    val colors = if (isSystemInDarkTheme())
+    val colors = if (isSystemInDarkTheme()) {
         darkColorScheme(primary = Color(0xFF8BD58F), secondary = Color(0xFFB8CCB4), tertiary = Color(0xFFA0CFD5))
-    else lightColorScheme(primary = Leaf, secondary = Color(0xFF52634F), tertiary = Color(0xFF39656B),
-        primaryContainer = Color(0xFFB7F1B5), secondaryContainer = Color(0xFFD5E8CF), tertiaryContainer = Color(0xFFBCEBF1))
+    } else {
+        lightColorScheme(
+            primary = Leaf,
+            secondary = Color(0xFF52634F),
+            tertiary = Color(0xFF39656B),
+            primaryContainer = Color(0xFFB7F1B5),
+            secondaryContainer = Color(0xFFD5E8CF),
+            tertiaryContainer = Color(0xFFBCEBF1),
+        )
+    }
     MaterialTheme(colorScheme = colors, content = content)
 }

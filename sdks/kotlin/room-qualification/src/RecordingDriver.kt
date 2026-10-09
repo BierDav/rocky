@@ -37,17 +37,37 @@ class RecordingDriver(private val delegate: SQLiteDriver) : SQLiteDriver {
         override fun close() = connection.close()
     }
 
-    private inner class Statement(private val connection: Int, private val sql: String, private val statement: SQLiteStatement) :
-        SQLiteStatement by statement {
+    private inner class Statement(private val connection: Int, private val sql: String, private val statement: SQLiteStatement) : SQLiteStatement by statement {
         private val bindings = sortedMapOf<Int, Any?>()
         private var running = false
-        override fun bindBlob(index: Int, value: ByteArray) { bindings[index] = value.toList(); statement.bindBlob(index, value) }
-        override fun bindDouble(index: Int, value: Double) { bindings[index] = value; statement.bindDouble(index, value) }
-        override fun bindLong(index: Int, value: Long) { bindings[index] = value; statement.bindLong(index, value) }
-        override fun bindText(index: Int, value: String) { bindings[index] = value; statement.bindText(index, value) }
-        override fun bindNull(index: Int) { bindings[index] = null; statement.bindNull(index) }
-        override fun clearBindings() { bindings.clear(); statement.clearBindings() }
-        override fun reset() { running = false; statement.reset() }
+        override fun bindBlob(index: Int, value: ByteArray) {
+            bindings[index] = value.toList()
+            statement.bindBlob(index, value)
+        }
+        override fun bindDouble(index: Int, value: Double) {
+            bindings[index] = value
+            statement.bindDouble(index, value)
+        }
+        override fun bindLong(index: Int, value: Long) {
+            bindings[index] = value
+            statement.bindLong(index, value)
+        }
+        override fun bindText(index: Int, value: String) {
+            bindings[index] = value
+            statement.bindText(index, value)
+        }
+        override fun bindNull(index: Int) {
+            bindings[index] = null
+            statement.bindNull(index)
+        }
+        override fun clearBindings() {
+            bindings.clear()
+            statement.clearBindings()
+        }
+        override fun reset() {
+            running = false
+            statement.reset()
+        }
         override fun step(): Boolean {
             val first = !running
             running = true
@@ -62,7 +82,6 @@ class RecordingDriver(private val delegate: SQLiteDriver) : SQLiteDriver {
     }
 
     companion object {
-        fun code(error: SQLiteException): Int =
-            Regex("Error code: (\\d+)").find(error.message.orEmpty())?.groupValues?.get(1)?.toInt() ?: -1
+        fun code(error: SQLiteException): Int = Regex("Error code: (\\d+)").find(error.message.orEmpty())?.groupValues?.get(1)?.toInt() ?: -1
     }
 }

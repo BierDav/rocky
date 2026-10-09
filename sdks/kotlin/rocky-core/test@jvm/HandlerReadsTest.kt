@@ -21,15 +21,27 @@ class HandlerReadsTest {
             scans++
             """[[{"type":"text","value":"selected"}]]"""
         })
-        val command = Command("Probe", handler = "probe.v1", arguments = Shape.none,
-            accepted = Shape.none, rejected = Shape.none, invocation = "stock", result = "stock", resources = listOf("stock"))
-        val dispatcher = CommandDispatcher(listOf(command handledBy { context, _ ->
-            val row = context.get("stock", Long.MAX_VALUE, byteArrayOf(0, -1))!!
-            check(row[0] == Long.MAX_VALUE && (row[1] as ByteArray).contentEquals(byteArrayOf(0, -1)))
-            check(context.scan("stock", lower = listOf("selected"), limit = 1) == listOf(listOf("selected")))
-            check(runCatching { context.scan("stock", limit = 0) }.isFailure)
-            Decision.accept(Unit)
-        }))
+        val command = Command(
+            "Probe",
+            handler = "probe.v1",
+            arguments = Shape.none,
+            accepted = Shape.none,
+            rejected = Shape.none,
+            invocation = "stock",
+            result = "stock",
+            resources = listOf("stock"),
+        )
+        val dispatcher = CommandDispatcher(
+            listOf(
+                command handledBy { context, _ ->
+                    val row = context.get("stock", Long.MAX_VALUE, byteArrayOf(0, -1))!!
+                    check(row[0] == Long.MAX_VALUE && (row[1] as ByteArray).contentEquals(byteArrayOf(0, -1)))
+                    check(context.scan("stock", lower = listOf("selected"), limit = 1) == listOf(listOf("selected")))
+                    check(runCatching { context.scan("stock", limit = 0) }.isFailure)
+                    Decision.accept(Unit)
+                },
+            ),
+        )
         val frame = """{"version":2,"method":"Probe","command_version":1,"request":{"node":"node","sequence":"1"},"caller":"caller","predecessor":{"sequence":"0"},"arguments":[]}"""
         check(Json.parseToJsonElement(dispatcher.handle(frame, reads)).jsonObject["outcome"]?.jsonPrimitive?.content == "accepted")
         check(gets == 1 && scans == 1)

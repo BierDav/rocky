@@ -37,18 +37,28 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
         val repository = node.repository
         combine(repository.lists(), selection) { lists, selected -> lists to (lists.firstOrNull { it.id == selected } ?: lists.firstOrNull()) }
             .flatMapLatest { (lists, list) ->
-                if (list == null) flowOf(ListsState(lists, trusted = node.isTrusted))
-                else combine(repository.categories(list.id), filter.flatMapLatest { f ->
-                    repository.observe(list.id, f.search, f.showCompleted).map { f to it }
-                }) { categories, (f, items) ->
-                    ListsState(lists, list, categories, items, f.search, f.showCompleted, f.category?.takeIf { id -> categories.any { it.id == id } }, node.isTrusted)
+                if (list == null) {
+                    flowOf(ListsState(lists, trusted = node.isTrusted))
+                } else {
+                    combine(
+                        repository.categories(list.id),
+                        filter.flatMapLatest { f ->
+                            repository.observe(list.id, f.search, f.showCompleted).map { f to it }
+                        },
+                    ) { categories, (f, items) ->
+                        ListsState(lists, list, categories, items, f.search, f.showCompleted, f.category?.takeIf { id -> categories.any { it.id == id } }, node.isTrusted)
+                    }
                 }
             }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ListsState())
 
-    fun select(list: Long) { selection.value = list; filter.update { it.copy(category = null) } }
+    fun select(list: Long) {
+        selection.value = list
+        filter.update { it.copy(category = null) }
+    }
     fun search(text: String) = filter.update { it.copy(search = text) }
     fun showCompleted(show: Boolean) = filter.update { it.copy(showCompleted = show) }
+
     /** New items go into the selected category. */
     fun selectCategory(category: Long?) = filter.update { it.copy(category = if (it.category == category) null else category) }
 

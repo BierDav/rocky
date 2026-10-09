@@ -1,19 +1,25 @@
 package org.example.examples.shopping
 
-import java.io.File
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import rocky.*
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.*
 
 /** The credential calls travel through the generated UniFFI session ABI. */
 class CredentialPrimitivesTest {
     @Test fun `pseudonyms are assigned installed mapped and renewed through native calls`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-pseudonyms").toFile()
         val schema = schema("authors") {
-            table("items") { text("title"); primaryKey("id") }
-            table("notes") { text("title"); primaryKey("id") }
+            table("items") {
+                text("title")
+                primaryKey("id")
+            }
+            table("notes") {
+                text("title")
+                primaryKey("id")
+            }
         }
         var issuer: RockyDatabase? = null
         var writer: RockyDatabase? = null
@@ -40,16 +46,22 @@ class CredentialPrimitivesTest {
             val noteCredential = a.credentials.assignPseudonym(w.credentials.pseudonymRequest("notes"))
             assertEquals(AuthorPseudonym("notes", 4), w.credentials.installPseudonym(noteCredential))
             // Each table uses a distinct signing key, bound in its credential leaf.
-            assertNotEquals(credential.last().jsonObject["capability"]!!.jsonObject["subject"],
-                noteCredential.last().jsonObject["capability"]!!.jsonObject["subject"])
+            assertNotEquals(
+                credential.last().jsonObject["capability"]!!.jsonObject["subject"],
+                noteCredential.last().jsonObject["capability"]!!.jsonObject["subject"],
+            )
             val otherKeys = Credentials.prepare(File(root, "other"))
-            val recipient = RockyDatabase.install(File(root, "other"), schema,
-                a.credentials.grant(otherKeys, writes)).also { other = it }
+            val recipient = RockyDatabase.install(
+                File(root, "other"),
+                schema,
+                a.credentials.grant(otherKeys, writes),
+            ).also { other = it }
             for ((collection, number) in listOf("items" to 1, "notes" to 2)) {
                 val assigned = w.credentials.assignPseudonym(recipient.credentials.pseudonymRequest(collection))
                 assertEquals(AuthorPseudonym(collection, number), recipient.credentials.installPseudonym(assigned))
             }
-            w.close(); writer = null
+            w.close()
+            writer = null
             val reopened = RockyDatabase.open(File(root, "w"), schema).also { writer = it }
             assertEquals(item, reopened.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
             // Removing and restoring supplied credentials cannot reset the allocator.
@@ -58,11 +70,20 @@ class CredentialPrimitivesTest {
             assertFailsWith<RockyException> { reopened.credentials.assignPseudonym(a.credentials.pseudonymRequest("items")) }
             assertEquals(item, reopened.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
             val rKeys = Credentials.prepare(File(root, "r"))
-            val r = RockyDatabase.install(File(root, "r"), schema,
-                a.credentials.grant(rKeys, listOf(Grant("items", setOf(Right.Read, Right.Custody))))).also { reader = it }
+            val r = RockyDatabase.install(
+                File(root, "r"),
+                schema,
+                a.credentials.grant(rKeys, listOf(Grant("items", setOf(Right.Read, Right.Custody)))),
+            ).also { reader = it }
             assertFailsWith<RockyException> { a.credentials.assignPseudonym(r.credentials.pseudonymRequest("items")) }
             assertFailsWith<RockyException> { reopened.credentials.claimAuthorRange(1, 10) }
-        } finally { other?.close(); reader?.close(); writer?.close(); issuer?.close(); root.deleteRecursively() }
+        } finally {
+            other?.close()
+            reader?.close()
+            writer?.close()
+            issuer?.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `other identity versions refuse through the native ABI without writes`() = runBlocking<Unit> {
@@ -82,6 +103,8 @@ class CredentialPrimitivesTest {
                 assertContentEquals(bytes, identity.readBytes())
                 assertContentEquals(kept, database.readBytes())
             }
-        } finally { root.deleteRecursively() }
+        } finally {
+            root.deleteRecursively()
+        }
     }
 }

@@ -15,12 +15,10 @@ const val ROOM_PROFILE = "room-2.8.4"
  * commit and one signed bundle. Queries run on the IO dispatcher. Call [followRocky] so that sync writes reach DAO
  * observers, or use [buildOnRocky], which does both.
  */
-fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyDatabase): RoomDatabase.Builder<T> =
-    setDriver(RockySQLiteDriver(database, ROOM_PROFILE)).setQueryCoroutineContext(Dispatchers.IO)
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyDatabase): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE)).setQueryCoroutineContext(Dispatchers.IO)
 
 /** Builds Room on [database]'s file and follows its sync until [RockyRoom.close]. */
-fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase): RockyRoom<T> =
-    RockyRoom(setRockyDatabase(database).build(), database)
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase): RockyRoom<T> = RockyRoom(setRockyDatabase(database).build(), database)
 
 /**
  * A Room database on Rocky's file whose observers see sync writes. Closing it closes Room, not [rocky]: the
@@ -50,8 +48,12 @@ suspend fun RoomDatabase.followRocky(database: RockyDatabase) {
 
 /** Moves through Rocky's atomic write surface and refreshes this Room projection after commit. */
 suspend fun RoomDatabase.moveRockyRow(
-    database: RockyDatabase, handle: String, table: String, id: Long,
-    from: List<Any?>, to: List<Any?>,
+    database: RockyDatabase,
+    handle: String,
+    table: String,
+    id: Long,
+    from: List<Any?>,
+    to: List<Any?>,
 ) {
     database.moveRow(handle, table, id, from, to)
     invalidationTracker.refreshAsync()
@@ -68,5 +70,6 @@ fun <T> Flow<T>.settledOnRocky(): Flow<T> = retryWhen { cause, attempt ->
     if (transient) delay(minOf(50L shl minOf(attempt, 4L).toInt(), 1_000L))
     transient
 }
+
 // A list's row may arrive before its other tables are held, while its key installs.
 private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held")

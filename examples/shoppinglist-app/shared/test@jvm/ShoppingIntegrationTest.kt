@@ -1,27 +1,32 @@
 package org.example.examples.shopping
 
-import java.io.File
-import java.net.ServerSocket
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.*
 import rocky.*
 import rocky.room.followRocky
+import java.io.File
+import java.net.ServerSocket
+import java.nio.file.Files
+import kotlin.test.*
 
 /** A table for enrollment, transport and sync tests that need no Room; rows are written with SQL. */
-internal val ItemsSchema = schema("shopping") { table("items") { text("title"); boolean("completed"); primaryKey("id") } }
+internal val ItemsSchema = schema("shopping") {
+    table("items") {
+        text("title")
+        boolean("completed")
+        primaryKey("id")
+    }
+}
 
 /** Installs this device's author for `table`, assigned by [issuer]; inserts need it. */
-internal suspend fun RockyDatabase.author(issuer: RockyDatabase = this, table: String = "items") =
-    credentials.installPseudonym(issuer.credentials.assignPseudonym(credentials.pseudonymRequest(table)))
-internal suspend fun RuntimePort.insertItem(title: String) =
-    write { execute("INSERT INTO items(id, title, completed) VALUES(?, ?, ?)", nextId("items"), title, false) }
+internal suspend fun RockyDatabase.author(issuer: RockyDatabase = this, table: String = "items") = credentials.installPseudonym(issuer.credentials.assignPseudonym(credentials.pseudonymRequest(table)))
+internal suspend fun RuntimePort.insertItem(title: String) = write { execute("INSERT INTO items(id, title, completed) VALUES(?, ?, ?)", nextId("items"), title, false) }
 
 class ShoppingIntegrationTest {
     private fun directory(): File = Files.createTempDirectory("rocky-room-test").toFile()
+
     /** Loopback iroh: no relay and no address lookup, so tests need no network. */
     private fun local(): PeerTransport = PeerTransport.Iroh(relay = "disabled", discovery = false, bind = "127.0.0.1:0")
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
@@ -31,7 +36,9 @@ class ShoppingIntegrationTest {
     private suspend fun RockyDatabase.titles() = Row.decode(read(items.query())).map { it.text("title") }.sorted()
 
     /** A transport written in Kotlin: named nodes joined by small in-process queues. */
-    private class Pipes { val listeners = java.util.concurrent.ConcurrentHashMap<String, Channel<InboundStream>>() }
+    private class Pipes {
+        val listeners = java.util.concurrent.ConcurrentHashMap<String, Channel<InboundStream>>()
+    }
     private class PipeStream(private val incoming: Channel<ByteArray>, private val outgoing: Channel<ByteArray>) : ByteStream {
         private var rest = ByteArray(0)
         override suspend fun read(max: Int): ByteArray {
@@ -41,8 +48,13 @@ class ShoppingIntegrationTest {
             return head
         }
         override suspend fun write(bytes: ByteArray) = outgoing.send(bytes)
-        override suspend fun finish() { outgoing.close() }
-        override suspend fun close() { outgoing.close(); incoming.cancel() }
+        override suspend fun finish() {
+            outgoing.close()
+        }
+        override suspend fun close() {
+            outgoing.close()
+            incoming.cancel()
+        }
     }
     private class PipeTransport(private val pipes: Pipes, private val name: String) : StreamTransport {
         private val inbound = Channel<InboundStream>(8).also { pipes.listeners[name] = it }
@@ -68,39 +80,64 @@ class ShoppingIntegrationTest {
         try {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, second, automaticSync = false)
             assertEquals("pipe", b.session().transport)
-            a.author(); b.author(issuer = a)
-            a.add("Milk"); b.add("Eggs")
+            a.author()
+            b.author(issuer = a)
+            a.add("Milk")
+            b.add("Eggs")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Eggs", "Milk"), a.titles())
             assertEquals(a.titles(), b.titles())
             assertFalse(b.network().owned)
             // Closing the databases leaves both transports open: the same objects carry the next ones.
-            b.close(); a.close()
+            b.close()
+            a.close()
             a = RockyDatabase.resume(File(root, "a"), ItemsSchema, first, automaticSync = false)
             b = RockyDatabase.resume(File(root, "b"), ItemsSchema, second, automaticSync = false)
             a.add("Jam")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Eggs", "Jam", "Milk"), b.titles())
-        } finally { b?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            b?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `a Kotlin protocol and Rocky share an endpoint the application owns`() = runBlocking {
         val root = directory()
         fun secret() = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-        val endpoint = RockyEndpoint.bind(secret(), relay = "disabled", discovery = false, bind = "127.0.0.1:0", protocols = mapOf(
-            "example/echo/1" to { _, stream ->
-                while (true) { val chunk = stream.read(1024); if (chunk.isEmpty()) break; stream.write(chunk) }
-                stream.finish()
-            }))
+        val endpoint = RockyEndpoint.bind(
+            secret(),
+            relay = "disabled",
+            discovery = false,
+            bind = "127.0.0.1:0",
+            protocols = mapOf(
+                "example/echo/1" to { _, stream ->
+                    while (true) {
+                        val chunk = stream.read(1024)
+                        if (chunk.isEmpty()) break
+                        stream.write(chunk)
+                    }
+                    stream.finish()
+                },
+            ),
+        )
         val caller = RockyEndpoint.bind(secret(), relay = "disabled", discovery = false, bind = "127.0.0.1:0")
         suspend fun echo(): String {
             val stream = caller.connect(endpoint.address(), "example/echo/1")
             try {
-                stream.write("hello".toByteArray()); stream.finish()
+                stream.write("hello".toByteArray())
+                stream.finish()
                 var reply = ByteArray(0)
-                while (true) { val chunk = stream.read(1024); if (chunk.isEmpty()) break; reply += chunk }
+                while (true) {
+                    val chunk = stream.read(1024)
+                    if (chunk.isEmpty()) break
+                    reply += chunk
+                }
                 return String(reply)
-            } finally { stream.close() }
+            } finally {
+                stream.close()
+            }
         }
         var a: RockyDatabase? = RockyDatabase.create(File(root, "a"), ItemsSchema, PeerTransport.Endpoint(endpoint), automaticSync = false)
         var b: RockyDatabase? = null
@@ -113,7 +150,8 @@ class ShoppingIntegrationTest {
             assertEquals("hello", echo())
             assertFalse(a.network().owned)
             // Closing Rocky leaves the endpoint and the application's protocol running.
-            a.close(); a = null
+            a.close()
+            a = null
             assertEquals("hello", echo())
             assertEquals(ConnectionState.Unavailable, b.syncOnce().state)
             // The same endpoint, and so the same address, serves the database again.
@@ -122,9 +160,11 @@ class ShoppingIntegrationTest {
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Eggs", "Milk"), b.titles())
         } finally {
-            b?.close(); a?.close()
+            b?.close()
+            a?.close()
             // The final shutdown is the application's.
-            endpoint.shutdown(); caller.shutdown()
+            endpoint.shutdown()
+            caller.shutdown()
             root.deleteRecursively()
         }
     }
@@ -137,7 +177,8 @@ class ShoppingIntegrationTest {
         try {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, tcp(), automaticSync = false)
             c = RockyDatabase.join(File(root, "c"), ItemsSchema, a.pairing(writer).uri, tcp(), automaticSync = false)
-            b.author(issuer = a); c.author(issuer = a)
+            b.author(issuer = a)
+            c.author(issuer = a)
             assertTrue(b.contact().uri.startsWith("rocky://peer/"))
             assertEquals(b.session().node, c.addPeer(b.contact().uri))
             // Nobody is served before both sides configured each other.
@@ -160,7 +201,12 @@ class ShoppingIntegrationTest {
             assertFailsWith<RockyException> { b.removePeer(peers.single { it.isIssuer }.node) }
             b.removePeer(c.session().node)
             assertEquals(listOf(true), b.peers().map { it.isIssuer })
-        } finally { c?.close(); b?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            c?.close()
+            b?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `raw grants and delegation reach devices that are not issuers without Rust`() = runBlocking<Unit> {
@@ -184,9 +230,16 @@ class ShoppingIntegrationTest {
             d = RockyDatabase.install(File(root, "d"), ItemsSchema, s.credentials.delegate(dKeys, inserts), transport = tcp())
             assertEquals(GrantProfile.Grants(inserts), d.session().profile)
             assertFailsWith<RockyException> { d.credentials.delegate(Credentials.prepare(File(root, "e")), inserts) }
-            for ((left, right) in listOf(a to s, a to d)) { left.addPeer(right.contact().uri); right.addPeer(left.contact().uri) }
-            a.author(); s.author(issuer = a); d.author(issuer = a)
-            a.add("Milk"); s.add("Eggs"); d.add("Jam")
+            for ((left, right) in listOf(a to s, a to d)) {
+                left.addPeer(right.contact().uri)
+                right.addPeer(left.contact().uri)
+            }
+            a.author()
+            s.author(issuer = a)
+            d.author(issuer = a)
+            a.add("Milk")
+            s.add("Eggs")
+            d.add("Jam")
             assertEquals(ConnectionState.Connected, s.syncOnce().state)
             assertEquals(ConnectionState.Connected, d.syncOnce().state)
             assertEquals(ConnectionState.Connected, s.syncOnce().state)
@@ -197,7 +250,12 @@ class ShoppingIntegrationTest {
             val renewed = d.credentials.install(s.credentials.delegate(dKeys, readsTitles))
             assertEquals(GrantProfile.Grants(readsTitles), renewed.profile)
             assertFailsWith<RockyException> { d.add("Forged") }
-        } finally { d?.close(); s?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            d?.close()
+            s?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     /** A full device: it edits lists it receives and reads the tables trusted devices write. */
@@ -256,7 +314,11 @@ class ShoppingIntegrationTest {
             assertTrue(da.items().all(list).isEmpty())
             assertEquals(listOf("Hardware"), da.lists().all().map { it.title })
             assertEquals(listOf("Milk"), da.items().all(other).map { it.title })
-        } finally { da.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            da.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `offline DAO edits converge with conflicting fields and permanent deletion`() = runBlocking {
@@ -280,23 +342,32 @@ class ShoppingIntegrationTest {
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Groceries"), db.lists().all().map { it.title })
             assertEquals(listOf("Milk"), db.items().all(list).map { it.title })
-            a.setOnline(false); b.setOnline(false)
+            a.setOnline(false)
+            b.setOnline(false)
             ra.rename(list, id, "Oat milk")
             rb.check(list, id, true)
             rb.add(list, "Eggs")
             assertEquals(2, db.items().all(list).size)
             assertEquals(ConnectionState.Offline, b.syncOnce().state)
-            a.setOnline(true); b.setOnline(true)
+            a.setOnline(true)
+            b.setOnline(true)
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(da.items().all(list), db.items().all(list))
             assertEquals("Oat milk" to true, da.items().all(list).first { it.id == id }.let { it.title to it.completed })
             a.setOnline(false)
             ra.delete(list, id)
             rb.rename(list, id, "Late rename")
-            a.setOnline(true); b.syncOnce()
+            a.setOnline(true)
+            b.syncOnce()
             assertEquals(listOf("Eggs"), db.items().all(list).map { it.title })
             assertEquals(da.items().all(list), db.items().all(list))
-        } finally { db?.close(); b?.close(); da.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            db?.close()
+            b?.close()
+            da.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `filtered DAO flows follow local and synced writes`() = runBlocking {
@@ -323,24 +394,37 @@ class ShoppingIntegrationTest {
             checked.await()
             assertTrue(repository.observe(list).first().single().completed)
         } finally {
-            following?.cancelAndJoin(); db?.close(); b?.close(); da.close(); a.close(); root.deleteRecursively()
+            following?.cancelAndJoin()
+            db?.close()
+            b?.close()
+            da.close()
+            a.close()
+            root.deleteRecursively()
         }
     }
 
     @Test fun `native SDK supports independent tables and full width nullable integers`() = runBlocking {
         val root = directory()
         val schema = schema("stock") {
-            table("products") { text("name"); integer("quantity"); text("note", nullable = true); primaryKey("id") }
-            table("categories") { text("name"); primaryKey("id") }
+            table("products") {
+                text("name")
+                integer("quantity")
+                text("note", nullable = true)
+                primaryKey("id")
+            }
+            table("categories") {
+                text("name")
+                primaryKey("id")
+            }
         }
         val products = schema.table("products")
         val categories = schema.table("categories")
-        suspend fun RockyDatabase.category(name: String) =
-            write { execute("INSERT INTO categories(id, name) VALUES(?, ?)", nextId("categories"), name) }
+        suspend fun RockyDatabase.category(name: String) = write { execute("INSERT INTO categories(id, name) VALUES(?, ?)", nextId("categories"), name) }
         val a = RockyDatabase.create(File(root, "a"), schema, local(), automaticSync = false)
         var b: RockyDatabase? = null
         try {
-            a.author(table = "products"); a.author(table = "categories")
+            a.author(table = "products")
+            a.author(table = "categories")
             a.write { execute("INSERT INTO products(id, name, quantity, note) VALUES(?, ?, ?, ?)", nextId("products"), "Coffee", Long.MAX_VALUE, null) }
             a.category("Drinks")
             val row = Row.decode(a.read(products.query())).single()
@@ -348,10 +432,12 @@ class ShoppingIntegrationTest {
             assertTrue(row.isNull("note"))
             assertEquals("Drinks", Row.decode(a.read(categories.query())).single().text("name"))
             // A failed statement rolls its whole transaction back.
-            assertFailsWith<RockyException> { a.write {
-                execute("INSERT INTO categories(id, name) VALUES(?, ?)", nextId("categories"), "Rolled back")
-                execute("INSERT INTO missing VALUES(1)")
-            } }
+            assertFailsWith<RockyException> {
+                a.write {
+                    execute("INSERT INTO categories(id, name) VALUES(?, ?)", nextId("categories"), "Rolled back")
+                    execute("INSERT INTO missing VALUES(1)")
+                }
+            }
             assertEquals(1, Row.decode(a.read(categories.query())).size)
             val invitation = a.pairing(GrantProfile.Writer(setOf("products")))
             assertFailsWith<Exception> { RockyDatabase.join(File(root, "wrong"), ItemsSchema, invitation.uri, local(), automaticSync = false) }
@@ -364,7 +450,11 @@ class ShoppingIntegrationTest {
             b.write { execute("UPDATE products SET quantity = ? WHERE id = ?", Long.MIN_VALUE, row.id.toLong()) }
             b.syncOnce()
             assertEquals(Long.MIN_VALUE, Row.decode(a.read(products.query())).single().integer("quantity"))
-        } finally { b?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            b?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `native lifecycle cancels observations and releases locks for compatible resume`() = runBlocking {
@@ -379,9 +469,9 @@ class ShoppingIntegrationTest {
             runtime.author()
             runtime.add("Persisted")
             val waiting = launch(start = CoroutineStart.UNDISPATCHED) {
-                try { runtime.observe(ItemsSchema.table("items").query()).collect() }
-                catch (_: IllegalStateException) { /* Native closure terminates subscriptions. */ }
-                catch (_: RockyException) { /* Native closure terminates subscriptions. */ }
+                try {
+                    runtime.observe(ItemsSchema.table("items").query()).collect()
+                } catch (_: IllegalStateException) { /* Native closure terminates subscriptions. */ } catch (_: RockyException) { /* Native closure terminates subscriptions. */ }
             }
             runtime.close()
             withTimeout(10_000) { waiting.join() }
@@ -390,7 +480,10 @@ class ShoppingIntegrationTest {
             runtime = RockyDatabase.resume(root, ItemsSchema.copy(version = 2), local(), automaticSync = false)
             assertEquals(1, runtime.generation().getValue("current").jsonObject.getValue("schema").jsonPrimitive.int)
             assertEquals("Persisted", Row.decode(runtime.read(ItemsSchema.table("items").query())).single().text("title"))
-        } finally { runtime.close(); root.deleteRecursively() }
+        } finally {
+            runtime.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `enrollment keeps keys in the supplied store and revocation and logout end authority`() = runBlocking {
@@ -398,8 +491,12 @@ class ShoppingIntegrationTest {
         val keys = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         val store = object : SecretStore {
             override fun load(name: String): ByteArray? = keys[name]
-            override fun store(name: String, secret: ByteArray) { keys[name] = secret }
-            override fun delete(name: String) { keys.remove(name) }
+            override fun store(name: String, secret: ByteArray) {
+                keys[name] = secret
+            }
+            override fun delete(name: String) {
+                keys.remove(name)
+            }
         }
         var a = RockyDatabase.create(File(root, "a"), ItemsSchema, local(), store, automaticSync = false)
         var b: RockyDatabase? = null
@@ -438,7 +535,8 @@ class ShoppingIntegrationTest {
             assertFailsWith<RockyException> { a.logout() }
             b.logout(purge = true)
             assertFailsWith<RockyException> { b.read(ItemsSchema.table("items").query()) }
-            b.close(); b = null
+            b.close()
+            b = null
             assertFalse(File(root, "b/rocky.sqlite").exists())
             assertFalse(File(root, "b/secrets").exists())
             assertFailsWith<RockyException> { RockyDatabase.resume(File(root, "b"), ItemsSchema, local(), automaticSync = false) }
@@ -448,7 +546,12 @@ class ShoppingIntegrationTest {
             assertFailsWith<RockyException> { RockyDatabase.resume(File(root, "a"), ItemsSchema, local(), automaticSync = false) }
             a = RockyDatabase.resume(File(root, "a"), ItemsSchema, local(), store, automaticSync = false)
             assertTrue(a.isIssuer)
-        } finally { c?.close(); b?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            c?.close()
+            b?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `sync splits expanded JSON pages without skipping large records`() = runBlocking {
@@ -462,7 +565,10 @@ class ShoppingIntegrationTest {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, local(), automaticSync = false)
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals((0 until 40).toSet(), Row.decode(b.read(items.query())).map { it.text("title").substringBefore(':').toInt() }.toSet())
-        } finally { b?.close(); a.close(); root.deleteRecursively() }
+        } finally {
+            b?.close()
+            a.close()
+            root.deleteRecursively()
+        }
     }
-
 }

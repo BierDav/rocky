@@ -23,12 +23,15 @@ fun packageSdk(
     }
     jar.artifact.copyTo(output / "consumer.jar")
     consumerSource.copyTo(output / consumerSource.name)
-    (output / "run").writeText("""
+    (output / "run").writeText(
+        """
         |#!/bin/sh
         |set -eu
         |cd "${'$'}(CDPATH= cd -- "${'$'}(dirname -- "${'$'}0")" && pwd)"
         |exec java -cp 'consumer.jar:lib/*' $mainClass "${'$'}@"
-        |""".trimMargin())
+        |
+        """.trimMargin(),
+    )
     (output / "run").toFile().setExecutable(true)
     writeManifest(output)
     println(output)
@@ -43,8 +46,12 @@ fun qualifyPackage(@Input packaged: Path, mainClass: String) {
     val java = Path(javaLauncher().let { if (File(it).isAbsolute) it else onPath(it) ?: error("$it is not on PATH") }).toRealPath()
     val runtime = (consumer / "runtime").createDirectories()
     (runtime / "java").createSymbolicLinkPointingTo(java)
-    run(listOf(java.pathString, "-cp", "consumer.jar${File.pathSeparator}lib/*", mainClass, (consumer / "data").pathString),
-        consumer, mapOf("PATH" to runtime.pathString), clearEnvironment = true)
+    run(
+        listOf(java.pathString, "-cp", "consumer.jar${File.pathSeparator}lib/*", mainClass, (consumer / "data").pathString),
+        consumer,
+        mapOf("PATH" to runtime.pathString),
+        clearEnvironment = true,
+    )
     println("Clean consumer: $consumer")
 }
 
@@ -59,15 +66,21 @@ fun qualifyPackageOnLinux(repositoryRoot: String) {
         if (file.isRegularFile()) file.copyTo((source / name).createParentDirectories(), overwrite = true)
     }
     (source / "kotlin").toFile().setExecutable(true)
-    run(listOf("docker", "run", "--rm", "--platform", "linux/amd64",
-        "-v", "$source:/source",
-        "-v", "${qualification / "cargo"}:/usr/local/cargo/registry",
-        "-v", "${qualification / "cache"}:/root/.cache",
-        "rust@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1", "sh", "-c", """
+    run(
+        listOf(
+            "docker", "run", "--rm", "--platform", "linux/amd64",
+            "-v", "$source:/source",
+            "-v", "${qualification / "cargo"}:/usr/local/cargo/registry",
+            "-v", "${qualification / "cache"}:/root/.cache",
+            "rust@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1", "sh", "-c",
+            """
             set -eu
             apt-get update
             apt-get install -y --no-install-recommends openjdk-17-jdk-headless unzip curl pkg-config libclang-dev
             cd /source
             ./kotlin check packaged -m packaged-consumer
-        """.trimIndent()), repository)
+            """.trimIndent(),
+        ),
+        repository,
+    )
 }

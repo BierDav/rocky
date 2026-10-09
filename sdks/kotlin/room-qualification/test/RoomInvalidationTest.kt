@@ -1,21 +1,23 @@
 package rocky.room.qualification
 
 import androidx.room.Room
-import java.io.File
-import java.net.ServerSocket
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import rocky.*
 import rocky.room.followRocky
 import rocky.room.setRockyDatabase
+import java.io.File
+import java.net.ServerSocket
+import java.nio.file.Files
+import kotlin.test.*
 
 /** DAO observers follow every commit of Rocky's tables, sync writes included, with no trigger on Room's side. */
 class RoomInvalidationTest {
     private val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    private val schema = schemaFromRoom("shop",
-        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText())
+    private val schema = schemaFromRoom(
+        "shop",
+        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
+    )
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
     private fun item(key: String, title: String) = ShopItem(key, "l1", title)
 
@@ -26,8 +28,13 @@ class RoomInvalidationTest {
         val work = mutableListOf<Job>()
         try {
             a.installAuthors()
-            b = RockyDatabase.join(File(directory, "b"), schema, a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
-                tcp(), automaticSync = false)
+            b = RockyDatabase.join(
+                File(directory, "b"),
+                schema,
+                a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
+                tcp(),
+                automaticSync = false,
+            )
             b.installAuthors(issuer = a)
             val roomA = Room.databaseBuilder<ShopDatabase>(File(directory, "a.room").path).setRockyDatabase(a).build()
             val roomB = Room.databaseBuilder<ShopDatabase>(File(directory, "b.room").path).setRockyDatabase(b).build()
@@ -51,10 +58,13 @@ class RoomInvalidationTest {
             assertEquals(listOf("Free-range eggs", "Milk"), roomB.shop().items("l1").map { it.title })
             work.forEach { it.cancelAndJoin() }
             work.clear()
-            roomA.close(); roomB.close()
+            roomA.close()
+            roomB.close()
         } finally {
             work.forEach { it.cancelAndJoin() }
-            b?.close(); a.close(); directory.deleteRecursively()
+            b?.close()
+            a.close()
+            directory.deleteRecursively()
         }
     }
 }

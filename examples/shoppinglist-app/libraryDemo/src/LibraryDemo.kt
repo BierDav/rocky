@@ -1,27 +1,33 @@
 package org.example.examples.shopping
 
-import java.io.File
 import androidx.room.Room
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import rocky.RockyDatabase
+import java.io.File
 
 /** A developer walkthrough of a shared list; the Compose app uses the same [ShoppingNode]. */
 fun main() = runBlocking {
     val directory = File(requireNotNull(System.getenv("ROCKY_DEMO_DATA")))
     val creatorDirectory = File(directory, "creator")
-    fun platform(directory: File, name: String) = ShoppingPlatform(directory, name,
-        room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) })
+    fun platform(directory: File, name: String) = ShoppingPlatform(
+        directory,
+        name,
+        room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
+    )
     val creatorPlatform = platform(creatorDirectory, "Desktop")
-    val creator = if (RockyDatabase.exists(creatorDirectory)) ShoppingNode.resume(creatorPlatform)
-        else ShoppingNode.create(creatorPlatform)
+    val creator = if (RockyDatabase.exists(creatorDirectory)) {
+        ShoppingNode.resume(creatorPlatform)
+    } else {
+        ShoppingNode.create(creatorPlatform)
+    }
     var peer: ShoppingNode? = null
     try {
         val peerDirectory = File(directory, "peer")
         val peerPlatform = platform(peerDirectory, "Peer")
-        peer = if (RockyDatabase.exists(peerDirectory))
+        peer = if (RockyDatabase.exists(peerDirectory)) {
             ShoppingNode.resume(peerPlatform)
-        else {
+        } else {
             val code = creator.household.invite(NodeKind.Full, "Peer")
             println("Transport: ${creator.rocky.session().transport}; QR payload: $code")
             ShoppingNode.join(peerPlatform, code)
@@ -51,5 +57,8 @@ fun main() = runBlocking {
         }
         println("Deleting the category kept the item: $uncategorized")
         println("Data retained in ${directory.absolutePath}; next run resumes the same domain")
-    } finally { peer?.close(); creator.close() }
+    } finally {
+        peer?.close()
+        creator.close()
+    }
 }

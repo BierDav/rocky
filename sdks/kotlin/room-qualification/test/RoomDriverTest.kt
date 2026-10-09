@@ -11,14 +11,14 @@ import androidx.sqlite.SQLiteDriver
 import androidx.sqlite.SQLiteException
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
-import java.io.File
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import rocky.RockyDatabase
 import rocky.schemaFromRoom
 import rocky.sqlite.RockySQLiteDriver
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.*
 
 /**
  * The acceptance reference for the pinned Room 2.8.4 / androidx.sqlite 2.6.2: Room's own statements, recorded
@@ -35,8 +35,7 @@ class RoomDriverTest {
     private val names = Files.createTempDirectory("room-names").toFile().also { it.deleteOnExit() }
     private fun room(driver: SQLiteDriver): ShopDatabase = Room.databaseBuilder<ShopDatabase>(File(names, "shop").path)
         .setDriver(driver).setQueryCoroutineContext(Dispatchers.IO).build()
-    private fun item(key: String, title: String, id: Long, list: String = "l1") =
-        ShopItem(key, list, title, price = 1.25, photo = byteArrayOf(1), id = id)
+    private fun item(key: String, title: String, id: Long, list: String = "l1") = ShopItem(key, list, title, price = 1.25, photo = byteArrayOf(1), id = id)
 
     /**
      * Every write kind and read shape of the DAO, with what each returned. The ids are those Rocky issues, so the
@@ -65,7 +64,12 @@ class RoomDriverTest {
             writer.immediateTransaction {
                 dao.insertList(ShopList("l2", "Hardware", ids.list()))
                 val next = ids.item()
-                runCatching { withNestedTransaction { dao.insertItems(listOf(item("i5", "Nails", next, "l2"))); error("undo") } }
+                runCatching {
+                    withNestedTransaction {
+                        dao.insertItems(listOf(item("i5", "Nails", next, "l2")))
+                        error("undo")
+                    }
+                }
                 dao.insertItems(listOf(item("i6", "Screws", next, "l2")))
             }
         }
@@ -75,21 +79,36 @@ class RoomDriverTest {
     }
 
     private data class Run(val log: List<String>, val reopened: String, val recorder: RecordingDriver)
+
     /** The scenario, then a second Room instance on the same data. */
     private fun run(driver: () -> SQLiteDriver): Run = runBlocking {
         val recorder = RecordingDriver(driver())
         val first = room(recorder)
-        val log = try { scenario(first) } finally { first.close() }
+        val log = try {
+            scenario(first)
+        } finally {
+            first.close()
+        }
         val second = room(recorder)
-        val reopened = try { second.shop().withItems("l2").toString() } finally { second.close() }
+        val reopened = try {
+            second.shop().withItems("l2").toString()
+        } finally {
+            second.close()
+        }
         Run(log, reopened, recorder)
     }
     private fun bundled(): Run {
         val directory = Files.createTempDirectory("room-bundled").toFile()
         try {
             val file = File(directory, "shop.sqlite").absolutePath
-            return run { object : SQLiteDriver by BundledSQLiteDriver() { override fun open(fileName: String) = BundledSQLiteDriver().open(file) } }
-        } finally { directory.deleteRecursively() }
+            return run {
+                object : SQLiteDriver by BundledSQLiteDriver() {
+                    override fun open(fileName: String) = BundledSQLiteDriver().open(file)
+                }
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
     private fun <T> rocky(block: suspend (RockyDatabase) -> T): T = runBlocking {
         val directory = Files.createTempDirectory("room-rocky").toFile()
@@ -97,7 +116,10 @@ class RoomDriverTest {
         try {
             assertEquals(listOf(1, 2), database.installAuthors().map { it.author }, "the authors Ids assumes")
             block(database)
-        } finally { database.close(); directory.deleteRecursively() }
+        } finally {
+            database.close()
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun roomSendsTheRecordedStatements() {
@@ -109,7 +131,11 @@ class RoomDriverTest {
 
     @Test fun theRecordedTraceRunsThroughTheRockyDriver() {
         val recorded = bundled().recorder
-        val expected = replay(recorded) { file -> object : SQLiteDriver by BundledSQLiteDriver() { override fun open(fileName: String) = BundledSQLiteDriver().open(file) } }
+        val expected = replay(recorded) { file ->
+            object : SQLiteDriver by BundledSQLiteDriver() {
+                override fun open(fileName: String) = BundledSQLiteDriver().open(file)
+            }
+        }
         val answered = rocky { database -> replay(recorded) { RockySQLiteDriver(database, "room-2.8.4") } }
         for ((index, step) in recorded.trace.withIndex()) {
             val (rocky, engine) = answered[index] to expected[index]
@@ -136,6 +162,7 @@ class RoomDriverTest {
     }
 
     private data class Outcome(val rows: List<List<Any?>>, val failure: Int?)
+
     /** Runs the trace's steps in order, each on the connection it ran on. */
     private fun replay(recorded: RecordingDriver, driver: (String) -> SQLiteDriver): List<Outcome> {
         val directory = Files.createTempDirectory("room-replay").toFile()
@@ -151,9 +178,13 @@ class RoomDriverTest {
                         while (statement.step()) rows += (0 until statement.getColumnCount()).map { value(statement, it) }
                         Outcome(rows, null)
                     }
-                } catch (error: SQLiteException) { Outcome(emptyList(), RecordingDriver.code(error)) }
+                } catch (error: SQLiteException) {
+                    Outcome(emptyList(), RecordingDriver.code(error))
+                }
             }.also { connections.values.forEach { it.close() } }
-        } finally { directory.deleteRecursively() }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
     private fun bind(statement: SQLiteStatement, index: Int, value: Any?) = when (value) {
         null -> statement.bindNull(index)

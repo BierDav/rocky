@@ -1,27 +1,50 @@
 package shopping.qualification
 
-import java.io.File
-import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
 import rocky.*
+import java.io.File
+import java.nio.file.Files
 
 /** The scope's required definition: lists, categories and items in one `list` group. */
 val required = schema("shopping", version = 4) {
-    table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+    table("lists") {
+        text("title")
+        primaryKey("id")
+        partitionBy("id", group = "list")
+    }
     table("categories") {
-        integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
+        integer("list")
+        text("name")
+        primaryKey("list", "id")
+        partitionBy("list", group = "list")
         reference("list", "lists", onDelete = Delete.Cascade)
     }
     table("items") {
-        integer("list"); text("key"); text("title"); boolean("completed"); integer("category", nullable = true)
-        primaryKey("list", "key"); partitionBy("list", group = "list")
+        integer("list")
+        text("key")
+        text("title")
+        boolean("completed")
+        integer("category", nullable = true)
+        primaryKey("list", "key")
+        partitionBy("list", group = "list")
         unique("list", "title", onConflict = Conflict.LatestWins)
         index("index_items_list_category", "list", "category")
         reference("list", "lists", onDelete = Delete.Cascade)
         reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
     }
-    table("devices") { text("node"); text("name"); text("kind"); primaryKey("node") }
-    table("keys") { text("recipient"); integer("list"); integer("epoch"); blob("envelope"); primaryKey("recipient", "list") }
+    table("devices") {
+        text("node")
+        text("name")
+        text("kind")
+        primaryKey("node")
+    }
+    table("keys") {
+        text("recipient")
+        integer("list")
+        integer("epoch")
+        blob("envelope")
+        primaryKey("recipient", "list")
+    }
 }
 
 /**
@@ -34,7 +57,10 @@ fun main() = runBlocking {
     val imported = schemaFromRoom("shopping", export) {
         table("lists") { partitionBy("id", group = "list") }
         table("categories") { partitionBy("list", group = "list") }
-        table("items") { partitionBy("list", group = "list"); onConflict("index_items_list_title", Conflict.LatestWins) }
+        table("items") {
+            partitionBy("list", group = "list")
+            onConflict("index_items_list_title", Conflict.LatestWins)
+        }
     }
     val definition = required.definitionJson("09".repeat(32))
     check(definition == imported.definitionJson("09".repeat(32))) { "the Room import differs from the hand-written definition" }
@@ -45,8 +71,14 @@ fun main() = runBlocking {
             RockyDatabase.local(directory, first).close()
             // Reopening checks the installed descriptor's identity against the other declaration.
             val reopened = RockyDatabase.open(directory, second)
-            try { check(Row.decode(reopened.read(second.table("items").query())).isEmpty()) } finally { reopened.close() }
-        } finally { directory.deleteRecursively() }
+            try {
+                check(Row.decode(reopened.read(second.table("items").query())).isEmpty())
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
     println(definition)
     println("required shopping schema: hand and Room definitions are identical and install natively")

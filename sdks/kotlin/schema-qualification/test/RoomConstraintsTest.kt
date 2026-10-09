@@ -2,12 +2,12 @@ package rocky.qualification
 
 import androidx.room.Room
 import androidx.sqlite.SQLiteException
-import java.io.File
-import java.nio.file.Files
-import kotlin.test.*
 import kotlinx.coroutines.runBlocking
 import rocky.*
 import rocky.room.setRockyDatabase
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.*
 
 class RoomConstraintsTest {
     @Test fun exportedConstraintsRunOnRockysFile() = runBlocking {
@@ -47,11 +47,20 @@ class RoomConstraintsTest {
                     assertTrue(dao.children().isEmpty())
                     dao.createParent("Groceries")
                     assertTrue(dao.children().isEmpty(), "old children reference the deleted incarnation")
-                } finally { room.close() }
-            } finally { rocky.close() }
+                } finally {
+                    room.close()
+                }
+            } finally {
+                rocky.close()
+            }
             val reopened = RockyDatabase.open(directory, schema)
-            try { assertEquals("[]", reopened.read(schema.table("children").query()).getValue("rows").toString()) }
-            finally { reopened.close() }
-        } finally { directory.deleteRecursively() }
+            try {
+                assertEquals("[]", reopened.read(schema.table("children").query()).getValue("rows").toString())
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 }

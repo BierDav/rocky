@@ -3,24 +3,33 @@ package rocky
 import kotlinx.serialization.json.*
 
 enum class TableClass(internal val wire: String) {
-    Mergeable("mergeable"), LocalOnly("local_only"), ConfirmedReadOnly("confirmed_read_only"), CommandControlled("command_controlled")
+    Mergeable("mergeable"),
+    LocalOnly("local_only"),
+    ConfirmedReadOnly("confirmed_read_only"),
+    CommandControlled("command_controlled"),
 }
 enum class UpdatePolicy(internal val wire: String) { Changed("changed"), Assigned("assigned") }
 enum class Collation(internal val wire: String) { Binary("binary"), Nocase("nocase"), Rtrim("rtrim") }
 data class IndexColumn(val name: String, val descending: Boolean = false) {
-    init { require(name.matches(IDENTIFIER)) { "invalid index column $name" } }
+    init {
+        require(name.matches(IDENTIFIER)) { "invalid index column $name" }
+    }
 }
+
 /** What a remote write that collides on a unique index does to the row with the earlier stamp. */
 enum class Conflict(internal val wire: String) {
     /** Its indexed columns read NULL while the clash lasts; they must be nullable. */
     SetNull("set_null"),
+
     /** The whole row is hidden. */
     LatestWins("latest_wins"),
 }
+
 /** What a child shows while its parent is not alive. */
 enum class Delete(internal val wire: String) {
     /** The child is hidden. */
     Cascade("cascade"),
+
     /** The reference reads NULL; the column must be nullable and outside the key. */
     SetNull("set_null"),
 }
@@ -30,11 +39,23 @@ data class Index(val name: String, val columns: List<IndexColumn>, val unique: B
         require(onConflict == null || unique) { "$name: onConflict needs a unique index" }
     }
     internal fun json(): JsonObject = buildJsonObject {
-        put("name", name); put("unique", unique)
-        put("columns", JsonArray(columns.map { buildJsonObject { put("name", it.name); put("descending", it.descending) } }))
+        put("name", name)
+        put("unique", unique)
+        put(
+            "columns",
+            JsonArray(
+                columns.map {
+                    buildJsonObject {
+                        put("name", it.name)
+                        put("descending", it.descending)
+                    }
+                },
+            ),
+        )
         onConflict?.let { put("on_conflict", it.wire) }
     }
 }
+
 /**
  * A reference to the identity of a mergeable parent table: its partition columns, then `id`. [columns] holds one
  * child column per identity column; [references], when given (as Room declares them), must name that identity.
@@ -45,13 +66,14 @@ data class ForeignKey(val columns: List<String>, val table: String, val onDelete
         require(references == null || references.size == columns.size) { "foreign key to $table: one referenced column per column" }
     }
     internal fun json(): JsonObject = buildJsonObject {
-        put("columns", JsonArray(columns.map(::JsonPrimitive))); put("table", table); put("on_delete", onDelete.wire)
+        put("columns", JsonArray(columns.map(::JsonPrimitive)))
+        put("table", table)
+        put("on_delete", onDelete.wire)
     }
 }
 
 /** Builds the same portable definition whether declarations are supplied by hand or imported. */
-fun schema(application: String, version: Int = 1, block: SchemaBuilder.() -> Unit): Schema =
-    SchemaBuilder(application, version).apply(block).build()
+fun schema(application: String, version: Int = 1, block: SchemaBuilder.() -> Unit): Schema = SchemaBuilder(application, version).apply(block).build()
 
 class SchemaBuilder internal constructor(private val application: String, private val version: Int) {
     private val tables = linkedMapOf<String, TableBuilder>()
@@ -62,9 +84,9 @@ class SchemaBuilder internal constructor(private val application: String, privat
     }
     var updatePolicy: UpdatePolicy = UpdatePolicy.Changed
     var commands: CommandSet? = null
+
     /** On an imported table, this adds Rocky attributes to the existing declaration. */
-    fun table(name: String, block: TableBuilder.() -> Unit): TableBuilder =
-        tables.getOrPut(name) { TableBuilder(name) }.apply(block)
+    fun table(name: String, block: TableBuilder.() -> Unit): TableBuilder = tables.getOrPut(name) { TableBuilder(name) }.apply(block)
     fun fromRoom(exportedJson: String) {
         val imported = importRoom(exportedJson)
         importRoomViews(exportedJson).forEach { (name, select) -> view(name, select) }
@@ -107,7 +129,9 @@ class TableBuilder internal constructor(val name: String) {
     fun boolean(name: String, nullable: Boolean = false) = column(Column.boolean(name, nullable))
     fun real(name: String, nullable: Boolean = false) = column(Column.real(name, nullable))
     fun blob(name: String, nullable: Boolean = false) = column(Column.blob(name, nullable))
-    fun primaryKey(vararg columns: String) { key = columns.toList() }
+    fun primaryKey(vararg columns: String) {
+        key = columns.toList()
+    }
     fun partitionBy(vararg columns: String, group: String? = null) {
         require(group == null || group.matches(IDENTIFIER)) { "$name: invalid partition group $group" }
         partitionGroup = group
@@ -119,17 +143,20 @@ class TableBuilder internal constructor(val name: String) {
     fun index(index: Index) {
         require(indexes.putIfAbsent(index.name, index) == null) { "${this.name}: duplicate index ${index.name}" }
     }
+
     /** A unique index of real rows; Room's default name unless [name] is given. */
-    fun unique(vararg columns: String, onConflict: Conflict, name: String = "index_${this.name}_${columns.joinToString("_")}") =
-        index(Index(name, columns.map { IndexColumn(it) }, unique = true, onConflict = onConflict))
+    fun unique(vararg columns: String, onConflict: Conflict, name: String = "index_${this.name}_${columns.joinToString("_")}") = index(Index(name, columns.map { IndexColumn(it) }, unique = true, onConflict = onConflict))
+
     /** Adds Rocky's conflict policy to a unique index, such as one Room's export declared. */
     fun onConflict(index: String, policy: Conflict) {
         val old = indexes[index] ?: error("${this.name}: unknown index $index")
         indexes[index] = old.copy(onConflict = policy)
     }
+
     /** A reference to [table]'s `id`; declares the integer [column] unless it exists. */
     fun reference(column: String, table: String, onDelete: Delete) = reference(listOf(column), table, onDelete)
     fun reference(column: String, table: TableBuilder, onDelete: Delete) = reference(column, table.name, onDelete)
+
     /**
      * A reference to [table]'s identity: one column per partition column of [table], in its `partitionBy` order,
      * then the one holding its `id`. Declares each absent column as an integer, nullable under [Delete.SetNull].
@@ -143,6 +170,7 @@ class TableBuilder internal constructor(val name: String) {
         require(foreignKeys.none { it.columns == key.columns }) { "$name: duplicate foreign key ${key.columns}" }
         foreignKeys += key
     }
+
     /** Add attributes without repeating an imported column's type. */
     fun configureColumn(name: String, block: (Column) -> Column) {
         val old = columns[name] ?: error("${this.name}: unknown column $name")

@@ -31,6 +31,7 @@ class ShoppingLinks(
             PairingCode.ACTION -> runCatching { PairingCode.parse(link.toString()) }
                 .onSuccess(graph.session::offer)
                 .onFailure { Log.w(TAG, "ignored pairing link: ${it.message}") }
+
             DRIVE -> if (debuggable) drive(link.parameters) else Log.w(TAG, "drive links need a debuggable build")
         }
     }
@@ -86,12 +87,16 @@ class ShoppingLinks(
             repository.move(moved.list, moved.id, list(parameters["to"]) ?: error("no target list"))
         }
         if ("sync" in parameters) Log.i(TAG, "sync " + rocky.syncOnce().state)
-        if ("status" in parameters) for (list in repository.lists().first()) {
-            Log.i(TAG, "status ${list.title}: " + rocky.list(list.id).status())
+        if ("status" in parameters) {
+            for (list in repository.lists().first()) {
+                Log.i(TAG, "status ${list.title}: " + rocky.list(list.id).status())
+            }
         }
-        if ("dump" in parameters) for (list in repository.lists().first()) {
-            val items = repository.observe(list.id).first()
-            Log.i(TAG, "dump ${list.title}: " + items.joinToString(",") { it.title + if (it.completed) " [x]" else "" })
+        if ("dump" in parameters) {
+            for (list in repository.lists().first()) {
+                val items = repository.observe(list.id).first()
+                Log.i(TAG, "dump ${list.title}: " + items.joinToString(",") { it.title + if (it.completed) " [x]" else "" })
+            }
         }
     }
 

@@ -7,11 +7,11 @@ import androidx.sqlite.SQLITE_DATA_NULL
 import androidx.sqlite.SQLITE_DATA_TEXT
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.throwSQLiteException
-import java.math.BigDecimal
-import java.math.MathContext
 import rocky.internal.native.NativePage
 import rocky.internal.native.NativeStatement
 import rocky.internal.native.NativeValue
+import java.math.BigDecimal
+import java.math.MathContext
 
 /**
  * One statement. It runs at its first `step` or column query, once its parameters are bound, and then delivers
@@ -107,18 +107,23 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
         if (closed) throwSQLiteException(21, "statement is closed")
     }
     private fun statement(): NativeStatement = native ?: connection.native().statement(sql).also { native = it }
+
     /** The current page, running the statement first if it has not run. */
     private fun execute(): NativePage {
         open()
         page?.let { return it }
         val params = bindings.toList()
-        return native { statement().execute(params) }.also { page = it; row = -1 }
+        return native { statement().execute(params) }.also {
+            page = it
+            row = -1
+        }
     }
     private fun value(index: Int): NativeValue {
         val current = page ?: throwSQLiteException(21, "no row; step the statement first")
         val values = current.rows.getOrNull(row) ?: throwSQLiteException(21, "no row; step the statement first")
         return values.getOrNull(index) ?: throwSQLiteException(25, "column index out of range")
     }
+
     /** Drops the undelivered rest of the result; the next step runs the statement again. */
     private fun finish() {
         val current = page ?: return
@@ -135,6 +140,7 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
             val prefix = DIGITS.find(text.trimStart(' ', '\t', '\n', '\r', '\u000c'))?.value ?: return 0
             return prefix.toBigInteger().coerceIn(Long.MIN_VALUE.toBigInteger(), Long.MAX_VALUE.toBigInteger()).toLong()
         }
+
         /** SQLite's real-to-integer conversion: truncation, saturating at the 64-bit bounds. */
         internal fun integer(value: Double): Long = when {
             value.isNaN() -> 0
@@ -142,8 +148,8 @@ internal class RockySQLiteStatement(private val connection: RockySQLiteConnectio
             value >= 9.223372036854775807E18 -> Long.MAX_VALUE
             else -> value.toLong()
         }
-        internal fun real(text: String): Double =
-            NUMBER.find(text.trimStart(' ', '\t', '\n', '\r', '\u000c'))?.value?.toDoubleOrNull() ?: 0.0
+        internal fun real(text: String): Double = NUMBER.find(text.trimStart(' ', '\t', '\n', '\r', '\u000c'))?.value?.toDoubleOrNull() ?: 0.0
+
         /** SQLite renders a real with 15 significant digits and always a decimal point or exponent. */
         internal fun text(value: Double): String {
             if (value.isNaN()) return ""

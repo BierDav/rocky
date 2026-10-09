@@ -13,6 +13,7 @@ import org.example.examples.shopping.ShoppingSession
 abstract class NodeViewModel(session: ShoppingSession) : ViewModel() {
     protected val node: Flow<ShoppingNode> = session.node
     private val failures = Channel<String>(Channel.BUFFERED)
+
     /** One message per failed or refused action, for a snackbar. */
     val messages: Flow<String> = failures.receiveAsFlow()
 
@@ -21,9 +22,13 @@ abstract class NodeViewModel(session: ShoppingSession) : ViewModel() {
 
     protected fun write(action: suspend ShoppingNode.() -> Unit) {
         viewModelScope.launch {
-            try { node.first().action() }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { failures.send(error.message ?: error.toString()) }
+            try {
+                node.first().action()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                failures.send(error.message ?: error.toString())
+            }
         }
     }
 }

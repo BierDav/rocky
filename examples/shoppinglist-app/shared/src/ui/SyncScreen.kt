@@ -20,7 +20,12 @@ import rocky.ConnectionState
 fun SyncScreen(model: SyncViewModel) {
     val state by model.state.collectAsState()
     var now by remember { mutableStateOf(currentMillis()) }
-    LaunchedEffect(Unit) { while (true) { now = currentMillis(); delay(1_000) } }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = currentMillis()
+            delay(1_000)
+        }
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { StatusCard(state, now, onOnline = model::setOnline, onSync = model::syncNow) }
         item { IdentityCard(state) }
@@ -50,7 +55,11 @@ private fun StatusCard(state: SyncState, now: Long, onOnline: (Boolean) -> Unit,
             Fact("Last transfer", ago(state.lastTransferAtEpochMillis, now))
             connection.error?.let { Fact("Error", it) }
             Fact("Revision", state.readiness?.revision?.toString() ?: "…")
-            OutlinedButton(onSync, enabled = online) { Icon(Icons.Filled.Sync, null); Spacer(Modifier.width(6.dp)); Text("Sync now") }
+            OutlinedButton(onSync, enabled = online) {
+                Icon(Icons.Filled.Sync, null)
+                Spacer(Modifier.width(6.dp))
+                Text("Sync now")
+            }
         }
     }
 }
@@ -81,12 +90,18 @@ private fun HoldingCard(holding: ListHolding) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(holding.list.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                Text(if (status?.isKeyed == true) "secret epoch ${status.epochs.maxOrNull()}" else "no key",
-                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    if (status?.isKeyed == true) "secret epoch ${status.epochs.maxOrNull()}" else "no key",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
             }
             status?.tables?.forEach { table ->
-                Text("${table.table}: ${table.holding ?: "not subscribed"} · key epochs ${table.keyEpochs.joinToString().ifEmpty { "none" }} · ${table.partition.take(8)}",
-                    style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                Text(
+                    "${table.table}: ${table.holding ?: "not subscribed"} · key epochs ${table.keyEpochs.joinToString().ifEmpty { "none" }} · ${table.partition.take(8)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
     }

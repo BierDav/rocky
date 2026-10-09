@@ -14,7 +14,11 @@ val repository = rootDir.resolve("../../..").canonicalFile
 /** Builds librocky_uniffi.so and places JNA's libjnidispatch.so for every packaged ABI. */
 abstract class RockyRuntime : DefaultTask() {
     @get:Internal abstract val repository: DirectoryProperty
-    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) abstract val sources: ConfigurableFileCollection
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sources: ConfigurableFileCollection
+
     @get:OutputDirectory abstract val libraries: DirectoryProperty
 
     @TaskAction
@@ -54,5 +58,10 @@ publishing {
         }
     }
     // The release workflow uploads this directory to GitHub Packages; see docs/releasing.md.
-    repositories { maven { name = "staging"; url = uri(repository.resolve("local/release-maven")) } }
+    repositories {
+        maven {
+            name = "staging"
+            url = uri(repository.resolve("local/release-maven"))
+        }
+    }
 }

@@ -14,6 +14,7 @@ data class AppLink(val action: String, val parameters: Map<String, String> = emp
 
     companion object {
         const val SCHEME = "rocky-shopping"
+
         /** Null when [text] is not one of the app's links. */
         fun parse(text: String): AppLink? {
             val uri = runCatching { URI(text.trim()) }.getOrNull() ?: return null
@@ -23,6 +24,7 @@ data class AppLink(val action: String, val parameters: Map<String, String> = emp
                 .associate { decode(it.substringBefore("=")) to decode(it.substringAfter("=", "")) }
             return AppLink(action, parameters)
         }
+
         // The charset-name overloads exist on every Android version the app supports.
         private fun encode(value: String) = URLEncoder.encode(value, "UTF-8")
         private fun decode(value: String) = URLDecoder.decode(value, "UTF-8")

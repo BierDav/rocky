@@ -7,37 +7,39 @@ import androidx.room.immediateTransaction
 import androidx.room.useReaderConnection
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteException
-import java.io.File
-import java.net.ServerSocket
-import java.nio.file.Files
-import java.util.concurrent.TimeUnit
-import kotlin.test.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import rocky.*
 import rocky.room.ROOM_PROFILE
 import rocky.room.setRockyDatabase
 import rocky.sqlite.RockySQLiteDriver
+import java.io.File
+import java.net.ServerSocket
+import java.nio.file.Files
+import java.util.concurrent.TimeUnit
+import kotlin.test.*
 
 /** What one Room transaction publishes, and what peers, readers and ordinary SQLite see of it. */
 class RoomGateTest {
     private val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    private val schema = schemaFromRoom("shop",
-        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText())
+    private val schema = schemaFromRoom(
+        "shop",
+        File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
+    )
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
     private fun item(key: String, title: String, list: String = "l1") = ShopItem(key, list, title)
-    private fun room(directory: File, database: RockyDatabase): ShopDatabase =
-        Room.databaseBuilder<ShopDatabase>(File(directory, "shop").path).setRockyDatabase(database).build()
+    private fun room(directory: File, database: RockyDatabase): ShopDatabase = Room.databaseBuilder<ShopDatabase>(File(directory, "shop").path).setRockyDatabase(database).build()
 
     /** Inspect the live file in another process so SQLite's lock bookkeeping is shared correctly. */
-    private fun <T> file(directory: File, block: (FileReader) -> T): T =
-        block(FileReader(File(directory, "rocky.sqlite")))
+    private fun <T> file(directory: File, block: (FileReader) -> T): T = block(FileReader(File(directory, "rocky.sqlite")))
     private class FileReader(private val path: File) {
         fun rows(sql: String): List<List<String?>> {
             val process = ProcessBuilder("sqlite3", "-readonly", "-json", "-cmd", ".explain off", path.path, sql).start()
-            check(process.waitFor(10, TimeUnit.SECONDS).also { finished ->
-                if (!finished) process.destroyForcibly().waitFor()
-            }) { "SQLite inspection timed out" }
+            check(
+                process.waitFor(10, TimeUnit.SECONDS).also { finished ->
+                    if (!finished) process.destroyForcibly().waitFor()
+                },
+            ) { "SQLite inspection timed out" }
             val output = process.inputStream.bufferedReader().readText()
             val error = process.errorStream.bufferedReader().readText()
             check(process.exitValue() == 0) { error }
@@ -47,6 +49,7 @@ class RoomGateTest {
             }
         }
     }
+
     /** Bundles this device authored, as the Rust driver test counts them. */
     private fun bundles(directory: File): Long = file(directory) { it.rows("SELECT count(DISTINCT handle) FROM secure_bundle_handles").single().single()!!.toLong() }
 
@@ -56,15 +59,30 @@ class RoomGateTest {
         val a = RockyDatabase.create(File(directory, "a"), schema, tcp(), automaticSync = false)
         try {
             a.installAuthors()
-            val b = RockyDatabase.join(File(directory, "b"), schema, a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
-                tcp(), automaticSync = false)
+            val b = RockyDatabase.join(
+                File(directory, "b"),
+                schema,
+                a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
+                tcp(),
+                automaticSync = false,
+            )
             try {
                 b.installAuthors(issuer = a)
                 val roomA = room(File(directory, "a"), a)
                 val roomB = room(File(directory, "b"), b)
-                try { Devices(directory, a, b, roomA, roomB).block() } finally { roomA.close(); roomB.close() }
-            } finally { b.close() }
-        } finally { a.close(); directory.deleteRecursively() }
+                try {
+                    Devices(directory, a, b, roomA, roomB).block()
+                } finally {
+                    roomA.close()
+                    roomB.close()
+                }
+            } finally {
+                b.close()
+            }
+        } finally {
+            a.close()
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun aRoomTransactionIsOneBundleOnPeersAndAnOversizedOneFailsWhole() = pair {
@@ -95,7 +113,9 @@ class RoomGateTest {
                     }
                 }
             }
-        } finally { bulk.close() }
+        } finally {
+            bulk.close()
+        }
         assertContains(oversized.message.orEmpty(), "Error code: 18")
         assertEquals(before + 1, bundles(File(directory, "a")), "nothing published, nothing split")
         assertEquals(3, roomA.shop().items("l1").size)
@@ -123,7 +143,10 @@ class RoomGateTest {
         var released = 0L
         assertFailsWith<IllegalStateException> {
             roomA.useWriterConnection { writer ->
-                writer.immediateTransaction { released = roomA.shop().nextId("items"); error("undo") }
+                writer.immediateTransaction {
+                    released = roomA.shop().nextId("items")
+                    error("undo")
+                }
             }
         }
         assertEquals(3L, released and 0xFFFF_FFFFL)
@@ -167,7 +190,10 @@ class RoomGateTest {
 
     @Test fun readersNeverBlockTheWriter() = pair {
         roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk")))
-        suspend fun count(connection: PooledConnection) = connection.usePrepared("SELECT count(*) FROM items") { it.step(); it.getLong(0) }
+        suspend fun count(connection: PooledConnection) = connection.usePrepared("SELECT count(*) FROM items") {
+            it.step()
+            it.getLong(0)
+        }
         val seen = roomA.useReaderConnection { reader ->
             reader.deferredTransaction {
                 val first = count(reader)
@@ -194,6 +220,7 @@ class RoomGateTest {
             assertEquals(listOf("Eggs", "Milk"), sqlite.rows("SELECT title FROM items WHERE list = 'l1' ORDER BY title").map { it.single() })
         }
     }
+
     @Test fun kotlinHorizonsFinalizeThroughTheNativeBridgeAndRoomKeepsConvergedRows() = pair {
         roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs")))
         roomA.shop().delete(roomA.shop().items("l1").first { it.key == "i2" })
@@ -212,5 +239,4 @@ class RoomGateTest {
         assertEquals(listOf(listOf("0")), file(File(directory, "a")) { it.rows("SELECT sum(tombstones) FROM secure_scope_state") })
         assertTrue(a.horizons.maintain("items", 1).getValue("finalized").jsonPrimitive.boolean)
     }
-
 }

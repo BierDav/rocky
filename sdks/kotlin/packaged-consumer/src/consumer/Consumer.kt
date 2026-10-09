@@ -1,18 +1,32 @@
 package consumer
 
-import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import rocky.*
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val amount = Shape(listOf(Field("amount", FieldType.Integer)), { n: Long -> listOf(n) }, { it.single() as Long })
-private val add = Command("Add", handler = "items.add.v1", arguments = amount, accepted = amount,
-    rejected = Shape.none, invocation = "items", result = "items", resources = listOf("items"))
-private val schema = schema("packaged") { table("items") { text("title"); primaryKey("id") }; commands = CommandSet(listOf(add)) }
+private val add = Command(
+    "Add",
+    handler = "items.add.v1",
+    arguments = amount,
+    accepted = amount,
+    rejected = Shape.none,
+    invocation = "items",
+    result = "items",
+    resources = listOf("items"),
+)
+private val schema = schema("packaged") {
+    table("items") {
+        text("title")
+        primaryKey("id")
+    }
+    commands = CommandSet(listOf(add))
+}
 private val table = schema.table("items")
 private fun handle(n: Int) = n.toString(16).padStart(64, '0')
 private suspend fun titles(port: RuntimePort) = Row.decode(port.read(table.query())).map { it.text("title") }
@@ -26,9 +40,12 @@ private suspend fun credentialPrimitives(root: File) {
     try {
         val keys = Credentials.prepare(File(root, "executor"))
         val all = listOf(Grant("items", setOf(Right.Read, Right.Insert, Right.Update, Right.Delete, Right.Invoke, Right.Execute, Right.Custody)))
-        val x = RockyDatabase.install(File(root, "executor"), schema,
+        val x = RockyDatabase.install(
+            File(root, "executor"),
+            schema,
             issuer.credentials.grant(keys, all, delegations = 2, authors = 2),
-            commands = CommandRuntime(coordinator, listOf(add handledBy Handler { _, n -> Decision.accept(n) }))).also { executor = it }
+            commands = CommandRuntime(coordinator, listOf(add handledBy Handler { _, n -> Decision.accept(n) })),
+        ).also { executor = it }
         check(!x.isIssuer && x.commandIdentity().executes)
         coordinator.register(x.commandIdentity())
         x.commands.submit(add, 11L, handle(20))
@@ -42,24 +59,42 @@ private suspend fun credentialPrimitives(root: File) {
         check(runCatching { x.credentials.pseudonymOwner(credential) }.exceptionOrNull() is RockyException)
         val delegated = Credentials.prepare(File(root, "delegate"))
         val writes = listOf(Grant("items", setOf(Right.Read, Right.Insert, Right.Custody)))
-        val d = RockyDatabase.install(File(root, "delegate"), schema,
-            x.credentials.delegate(delegated, writes, authors = 1)).also { delegate = it }
+        val d = RockyDatabase.install(
+            File(root, "delegate"),
+            schema,
+            x.credentials.delegate(delegated, writes, authors = 1),
+        ).also { delegate = it }
         check(!d.isIssuer)
         check(d.credentials.installPseudonym(x.credentials.assignPseudonym(d.credentials.pseudonymRequest("items"))) == AuthorPseudonym("items", 2))
-    } finally { delegate?.close(); executor?.close(); issuer.close() }
+    } finally {
+        delegate?.close()
+        executor?.close()
+        issuer.close()
+    }
 }
 
 /** The shopping schema's group, title policy and references, declared and installed from the packaged library. */
 private suspend fun groupedLists(root: File) {
     val shopping = schema("shopping", version = 3) {
-        table("lists") { text("title"); primaryKey("id"); partitionBy("id", group = "list") }
+        table("lists") {
+            text("title")
+            primaryKey("id")
+            partitionBy("id", group = "list")
+        }
         table("categories") {
-            integer("list"); text("name"); primaryKey("list", "id"); partitionBy("list", group = "list")
+            integer("list")
+            text("name")
+            primaryKey("list", "id")
+            partitionBy("list", group = "list")
             reference("list", "lists", onDelete = Delete.Cascade)
         }
         table("items") {
-            integer("list"); text("key"); text("title"); integer("category", nullable = true)
-            primaryKey("list", "key"); partitionBy("list", group = "list")
+            integer("list")
+            text("key")
+            text("title")
+            integer("category", nullable = true)
+            primaryKey("list", "key")
+            partitionBy("list", group = "list")
             unique("list", "title", onConflict = Conflict.LatestWins)
             reference("list", "lists", onDelete = Delete.Cascade)
             reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
@@ -67,8 +102,9 @@ private suspend fun groupedLists(root: File) {
     }
     val db = RockyDatabase.local(root, shopping)
     try {
-        for (table in listOf("lists", "categories", "items"))
+        for (table in listOf("lists", "categories", "items")) {
             db.credentials.installPseudonym(db.credentials.assignPseudonym(db.credentials.pseudonymRequest(table)))
+        }
         val list = db.partitions.next("lists").getValue("id").jsonPrimitive.content.toLong()
         val category = db.write {
             check(nextId("lists") == list)
@@ -78,9 +114,25 @@ private suspend fun groupedLists(root: File) {
         db.write { execute("INSERT INTO items(id, list, key, title, category) VALUES(?, ?, ?, ?, ?)", nextId("items", list), list, "k1", "Milk", category) }
         check(runCatching { db.write { execute("INSERT INTO items(id, list, key, title) VALUES(?, ?, ?, ?)", nextId("items", list), list, "k2", "Milk") } }.isFailure)
         db.write { execute("DELETE FROM categories WHERE list = ? AND id = ?", list, category) }
-        val items = Row.decode(db.read(query("SELECT id, title, category FROM items WHERE list = ?", JsonArray(listOf(buildJsonObject { put("type", "integer"); put("value", list.toString()) })))))
+        val items = Row.decode(
+            db.read(
+                query(
+                    "SELECT id, title, category FROM items WHERE list = ?",
+                    JsonArray(
+                        listOf(
+                            buildJsonObject {
+                                put("type", "integer")
+                                put("value", list.toString())
+                            },
+                        ),
+                    ),
+                ),
+            ),
+        )
         check(items.single().isNull("category") && items.single().text("title") == "Milk")
-    } finally { db.close() }
+    } finally {
+        db.close()
+    }
 }
 
 /** Runs with only this consumer, packaged jars and a JVM: no repository, native paths or build tools. */
@@ -89,7 +141,15 @@ fun main(args: Array<String>) = runBlocking {
     val directory = File(root, "database")
     val coordinator = DevelopmentCoordinator()
     var calls = 0
-    val runtime = CommandRuntime(coordinator, listOf(add handledBy Handler { _, n -> calls++; Decision.accept(n) }))
+    val runtime = CommandRuntime(
+        coordinator,
+        listOf(
+            add handledBy Handler { _, n ->
+                calls++
+                Decision.accept(n)
+            },
+        ),
+    )
     var db = RockyDatabase.local(directory, schema, commands = runtime)
     check(!db.network().attached)
     val a = db.openSession()
@@ -133,8 +193,14 @@ fun main(args: Array<String>) = runBlocking {
     val invitation = db.credentials.pairing(GrantProfile.Writer(setOf("items")))
     val archive = File(root, "device.backup")
     db.backup(archive)
-    val restored = RockyDatabase.restore(File(root, "restored"), schema, archive, invitation.uri,
-        PeerTransport.Tcp("127.0.0.1:0"), commands = runtime)
+    val restored = RockyDatabase.restore(
+        File(root, "restored"),
+        schema,
+        archive,
+        invitation.uri,
+        PeerTransport.Tcp("127.0.0.1:0"),
+        commands = runtime,
+    )
     check(restored.credentials.status().node != db.credentials.status().node)
     check(titles(restored) == listOf("apples"))
     check(restored.commands.ticket(add, handle(2))?.state == TicketState.Applied)
@@ -162,10 +228,15 @@ fun main(args: Array<String>) = runBlocking {
     val store = object : SecretStore {
         override fun load(name: String): ByteArray? = keys[name]
         override fun store(name: String, secret: ByteArray) {
-            if (firstStore.compareAndSet(true, false)) { began.countDown(); proceed.await() }
+            if (firstStore.compareAndSet(true, false)) {
+                began.countDown()
+                proceed.await()
+            }
             keys[name] = secret
         }
-        override fun delete(name: String) { keys.remove(name) }
+        override fun delete(name: String) {
+            keys.remove(name)
+        }
     }
     val cancelledDirectory = File(root, "cancelled-open")
     val opening = launch { RockyDatabase.local(cancelledDirectory, schema, secrets = store).close() }
@@ -178,19 +249,30 @@ fun main(args: Array<String>) = runBlocking {
     check(reopened.credentials.status().isIssuer)
     reopened.close()
     credentialPrimitives(File(root, "primitives"))
-    val moveSchema = schema("packagedmoves") { table("rows") { text("list"); text("title"); primaryKey("list", "id"); partitionBy("list") } }
+    val moveSchema = schema("packagedmoves") {
+        table("rows") {
+            text("list")
+            text("title")
+            primaryKey("list", "id")
+            partitionBy("list")
+        }
+    }
     val moving = RockyDatabase.local(File(root, "moves"), moveSchema)
     try {
         for (partition in listOf("A", "B")) moving.partitions.create("rows", JsonArray(listOf(text(partition))))
         moving.credentials.installPseudonym(moving.credentials.assignPseudonym(moving.credentials.pseudonymRequest("rows")))
         var id = 0L
-        moving.write { id = nextId("rows", "A"); execute("INSERT INTO rows(list,title,id) VALUES(?,?,?)", "A", "kept", id) }
+        moving.write {
+            id = nextId("rows", "A")
+            execute("INSERT INTO rows(list,title,id) VALUES(?,?,?)", "A", "kept", id)
+        }
         moving.moveRow(handle(90), "rows", id, listOf("A"), listOf("B"))
         moving.moveRow(handle(90), "rows", id, listOf("A"), listOf("B"))
         val moved = Row.decode(moving.read(moveSchema.table("rows").query())).single()
         check(moved.text("list") == "B" && moved.integer("id") == id)
-    } finally { moving.close() }
+    } finally {
+        moving.close()
+    }
     groupedLists(File(root, "lists"))
     println("Packaged consumer passed: grouped partitioned constraints, idempotent row moves, credential primitives, non-issuer executor, local sessions, authority/progress Flow, reconciliation, Kotlin handler/tickets, owned/borrowed networks, fresh restore and generation reopen")
 }
-

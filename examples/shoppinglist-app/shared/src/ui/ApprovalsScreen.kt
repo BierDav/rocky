@@ -11,12 +11,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import org.example.examples.shopping.Approval
+import org.example.examples.shopping.Coordinated
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-import org.example.examples.shopping.Approval
-import org.example.examples.shopping.Coordinated
 
 /**
  * Purchase approvals as strong commands: any device asks, a trusted device approves or declines, and the coordination
@@ -31,13 +31,25 @@ fun ApprovalsScreen(model: ApprovalsViewModel) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item { CoordinationCard(state.status, state.trusted) }
             val (pending, decided) = state.approvals.partition { it.approved == null }
-            item { SectionTitle("Waiting for a decision", if (state.trusted) "Approve or decline. If another trusted device decides at the same time, the coordinator keeps the first decision and refuses the other."
-                else "A trusted device decides; the result reaches this device with sync.") }
+            item {
+                SectionTitle(
+                    "Waiting for a decision",
+                    if (state.trusted) {
+                        "Approve or decline. If another trusted device decides at the same time, the coordinator keeps the first decision and refuses the other."
+                    } else {
+                        "A trusted device decides; the result reaches this device with sync."
+                    },
+                )
+            }
             if (state.asking > 0) item { Sending("Sending your request to an executing trusted device…") }
             if (pending.isEmpty() && state.asking == 0) item { Hint("No open requests") }
             items(pending, key = { it.key }) { approval ->
-                ApprovalCard(approval, decidable = state.trusted && available, busy = approval.key in state.deciding,
-                    onDecide = { model.decide(approval.key, it) })
+                ApprovalCard(
+                    approval,
+                    decidable = state.trusted && available,
+                    busy = approval.key in state.deciding,
+                    onDecide = { model.decide(approval.key, it) },
+                )
             }
             if (decided.isNotEmpty()) {
                 item { SectionTitle("Decided") }
@@ -45,25 +57,47 @@ fun ApprovalsScreen(model: ApprovalsViewModel) {
             }
             item { Spacer(Modifier.height(72.dp)) }
         }
-        if (available) ExtendedFloatingActionButton(
-            onClick = { asking = true }, icon = { Icon(Icons.Filled.AddShoppingCart, null) }, text = { Text("Ask to buy") },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        )
+        if (available) {
+            ExtendedFloatingActionButton(
+                onClick = { asking = true },
+                icon = { Icon(Icons.Filled.AddShoppingCart, null) },
+                text = { Text("Ask to buy") },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+        }
     }
-    if (asking) AskDialog(onDismiss = { asking = false }) { title, note -> asking = false; model.ask(title, note) }
+    if (asking) {
+        AskDialog(onDismiss = { asking = false }) { title, note ->
+            asking = false
+            model.ask(title, note)
+        }
+    }
 }
 
 @Composable
 private fun CoordinationCard(status: Coordinated, trusted: Boolean) {
     val (color, title, detail) = when (status) {
-        Coordinated.Unavailable -> Triple(Color(0xFF9E9E9E), "No coordination service",
-            "This device opened without one, as over direct TCP. Requests need the public coordinator, reached over iroh.")
-        Coordinated.Member -> Triple(Color(0xFF43A047), "Coordinated",
-            "Requests go to a trusted device that executes them; the public coordination service orders them.")
+        Coordinated.Unavailable -> Triple(
+            Color(0xFF9E9E9E),
+            "No coordination service",
+            "This device opened without one, as over direct TCP. Requests need the public coordinator, reached over iroh.",
+        )
+
+        Coordinated.Member -> Triple(
+            Color(0xFF43A047),
+            "Coordinated",
+            "Requests go to a trusted device that executes them; the public coordination service orders them.",
+        )
+
         is Coordinated.Waiting -> Triple(Color(0xFFF9A825), "Setting up coordination", status.reason)
-        is Coordinated.Registered -> Triple(Color(0xFF43A047), "Registered with the coordination service",
+
+        is Coordinated.Registered -> Triple(
+            Color(0xFF43A047),
+            "Registered with the coordination service",
             "Control revision ${status.revision}: ${status.executors} trusted device(s) execute, ${status.invokers} device(s) may ask. " +
-                "Renewed automatically before ${date(status.expiresAtEpochSeconds)}.")
+                "Renewed automatically before ${date(status.expiresAtEpochSeconds)}.",
+        )
+
         is Coordinated.Failed -> Triple(MaterialTheme.colorScheme.error, "Coordination problem", status.message)
     }
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -74,8 +108,13 @@ private fun CoordinationCard(status: Coordinated, trusted: Boolean) {
                 Text(title, style = MaterialTheme.typography.titleMedium)
             }
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (trusted) Text("The coordinator sees only request identities and commitments, never titles or decisions.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (trusted) {
+                Text(
+                    "The coordinator sees only request identities and commitments, never titles or decisions.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -97,11 +136,22 @@ private fun ApprovalCard(approval: Approval, decidable: Boolean, busy: Boolean, 
                 }
             }
             approval.decider?.let { Text("Decided by $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            if (decidable) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (busy) Sending("Ordering the decision…")
-                else {
-                    Button({ onDecide(true) }) { Icon(Icons.Filled.Check, null); Spacer(Modifier.width(6.dp)); Text("Approve") }
-                    OutlinedButton({ onDecide(false) }) { Icon(Icons.Filled.Close, null); Spacer(Modifier.width(6.dp)); Text("Decline") }
+            if (decidable) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (busy) {
+                        Sending("Ordering the decision…")
+                    } else {
+                        Button({ onDecide(true) }) {
+                            Icon(Icons.Filled.Check, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Approve")
+                        }
+                        OutlinedButton({ onDecide(false) }) {
+                            Icon(Icons.Filled.Close, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Decline")
+                        }
+                    }
                 }
             }
         }
@@ -132,20 +182,23 @@ private fun Hint(text: String) = Text(text, Modifier.padding(horizontal = 4.dp, 
 private fun AskDialog(onDismiss: () -> Unit, onAsk: (String, String) -> Unit) {
     var title by remember { mutableStateOf("") }
     var note by remember { mutableStateOf("") }
-    AlertDialog(onDismiss,
+    AlertDialog(
+        onDismiss,
         title = { Text("Ask to buy") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("A trusted device approves or declines it. The request is a strong command: it counts once its order is confirmed.",
-                    style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "A trusted device approves or declines it. The request is a strong command: it counts once its order is confirmed.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 OutlinedTextField(title, { title = it }, label = { Text("What, e.g. Coffee machine") }, singleLine = true)
                 OutlinedTextField(note, { note = it }, label = { Text("Why or how much (optional)") })
             }
         },
         confirmButton = { Button({ onAsk(title, note) }, enabled = title.isNotBlank()) { Text("Ask") } },
-        dismissButton = { TextButton(onDismiss) { Text("Cancel") } })
+        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** A local date, such as a deadline or an expiry. */
-internal fun date(epochSeconds: Long): String =
-    DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(epochSeconds))
+internal fun date(epochSeconds: Long): String = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(epochSeconds))

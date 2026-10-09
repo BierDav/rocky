@@ -29,10 +29,15 @@ internal fun importRoom(json: String): List<Table> {
         val entity = raw.jsonObject
         val name = entity.getValue("tableName").jsonPrimitive.content
         if (name.lowercase().let { it == "android_metadata" || listOf("rocky_", "room_", "sqlite_").any(it::startsWith) }) return@mapNotNull null
-        try { importEntity(name, entity) }
-        catch (error: IllegalArgumentException) { throw IllegalArgumentException("Room entity $name: ${error.message}", error) }
-        catch (error: IllegalStateException) { throw IllegalArgumentException("Room entity $name: ${error.message}", error) }
-        catch (error: NoSuchElementException) { throw IllegalArgumentException("Room entity $name: ${error.message}", error) }
+        try {
+            importEntity(name, entity)
+        } catch (error: IllegalArgumentException) {
+            throw IllegalArgumentException("Room entity $name: ${error.message}", error)
+        } catch (error: IllegalStateException) {
+            throw IllegalArgumentException("Room entity $name: ${error.message}", error)
+        } catch (error: NoSuchElementException) {
+            throw IllegalArgumentException("Room entity $name: ${error.message}", error)
+        }
     }.also { tables ->
         val duplicate = tables.groupBy { it.name.lowercase() }.values.firstOrNull { it.size > 1 }
         require(duplicate == null) { "Room entity ${duplicate?.first()?.name}: duplicate entity" }
@@ -46,14 +51,18 @@ private fun importEntity(name: String, entity: JsonObject): Table {
     require(primary["autoGenerate"]?.jsonPrimitive?.boolean != true) { "autoGenerate = true is refused; Rocky issues row ids, reserve one with rocky_next_id" }
     val key = primary.getValue("columnNames").jsonArray.map { it.jsonPrimitive.content }
     val sql = RoomSql(entity.getValue("createSql").jsonPrimitive.content)
-    sql.expect("CREATE", "TABLE"); sql.ifNotExists(); sql.table(name); sql.expect("(")
+    sql.expect("CREATE", "TABLE")
+    sql.ifNotExists()
+    sql.table(name)
+    sql.expect("(")
     val fields = entity.getValue("fields").jsonArray
     val columns = fields.map { raw ->
         val field = raw.jsonObject
         require(field.keys.all { it in setOf("fieldPath", "columnName", "affinity", "notNull", "defaultValue") }) { "unsupported field feature" }
         val columnName = field.getValue("columnName").jsonPrimitive.content
         val affinity = field.getValue("affinity").jsonPrimitive.content
-        sql.identifier(columnName); sql.expect(affinity)
+        sql.identifier(columnName)
+        sql.expect(affinity)
         val notNull = field["notNull"]?.jsonPrimitive?.boolean ?: false
         var declaredNotNull = false
         var default: JsonElement? = null
@@ -61,15 +70,28 @@ private fun importEntity(name: String, entity: JsonObject): Table {
         var declaredCollation = false
         while (!sql.at(",") && !sql.at(")")) {
             when {
-                sql.take("NOT") -> { require(!declaredNotNull) { "duplicate NOT NULL" }; sql.expect("NULL"); declaredNotNull = true }
-                sql.take("DEFAULT") -> { require(default == null) { "duplicate default" }; default = sql.default() }
+                sql.take("NOT") -> {
+                    require(!declaredNotNull) { "duplicate NOT NULL" }
+                    sql.expect("NULL")
+                    declaredNotNull = true
+                }
+
+                sql.take("DEFAULT") -> {
+                    require(default == null) { "duplicate default" }
+                    default = sql.default()
+                }
+
                 sql.take("COLLATE") -> {
-                    require(!declaredCollation) { "duplicate collation" }; declaredCollation = true
+                    require(!declaredCollation) { "duplicate collation" }
+                    declaredCollation = true
                     collation = when (sql.next().uppercase()) {
-                        "BINARY" -> Collation.Binary; "NOCASE" -> Collation.Nocase; "RTRIM" -> Collation.Rtrim
+                        "BINARY" -> Collation.Binary
+                        "NOCASE" -> Collation.Nocase
+                        "RTRIM" -> Collation.Rtrim
                         else -> error("unsupported collation on $columnName")
                     }
                 }
+
                 else -> error("unsupported SQL column clause on $columnName: ${sql.next()}")
             }
         }
@@ -78,17 +100,23 @@ private fun importEntity(name: String, entity: JsonObject): Table {
         require(default == exportedDefault) { "$columnName: SQL default differs from export" }
         sql.expect(",")
         val column = when (affinity) {
-            "TEXT" -> Column.text(columnName, !notNull); "INTEGER" -> Column.integer(columnName, !notNull)
-            "REAL" -> Column.real(columnName, !notNull); "BLOB" -> Column.blob(columnName, !notNull)
+            "TEXT" -> Column.text(columnName, !notNull)
+            "INTEGER" -> Column.integer(columnName, !notNull)
+            "REAL" -> Column.real(columnName, !notNull)
+            "BLOB" -> Column.blob(columnName, !notNull)
             else -> error("unsupported affinity $affinity on $columnName")
         }
         column.copy(default = default, collation = collation)
     }
     sql.expect("PRIMARY", "KEY", "(")
-    key.forEachIndexed { i, column -> if (i > 0) sql.expect(","); sql.identifier(column) }
+    key.forEachIndexed { i, column ->
+        if (i > 0) sql.expect(",")
+        sql.identifier(column)
+    }
     sql.expect(")")
     val foreignKeys = entity["foreignKeys"]?.jsonArray.orEmpty().map { raw -> importForeignKey(raw.jsonObject, sql) }
-    sql.expect(")"); sql.end()
+    sql.expect(")")
+    sql.end()
     var identityIndex: List<String>? = null
     val indexes = entity["indices"]?.jsonArray.orEmpty().mapNotNull { raw ->
         val index = raw.jsonObject
@@ -113,17 +141,33 @@ private fun importEntity(name: String, entity: JsonObject): Table {
         require(orders.all { it == "ASC" || it == "DESC" }) { "$indexName: unsupported index order" }
         val terms = names.mapIndexed { i, column -> IndexColumn(column, orders.getOrNull(i) == "DESC") }
         val statement = RoomSql(index.getValue("createSql").jsonPrimitive.content)
-        statement.expect("CREATE"); if (unique) statement.expect("UNIQUE"); statement.expect("INDEX")
-        statement.ifNotExists(); statement.identifier(indexName)
-        statement.expect("ON"); statement.table(name); statement.expect("(")
+        statement.expect("CREATE")
+        if (unique) statement.expect("UNIQUE")
+        statement.expect("INDEX")
+        statement.ifNotExists()
+        statement.identifier(indexName)
+        statement.expect("ON")
+        statement.table(name)
+        statement.expect("(")
         terms.forEachIndexed { i, column ->
             if (i > 0) statement.expect(",")
             statement.identifier(column.name)
-            val descending = if (statement.take("DESC")) true else { statement.take("ASC"); false }
+            val descending = if (statement.take("DESC")) {
+                true
+            } else {
+                statement.take("ASC")
+                false
+            }
             require(descending == column.descending) { "$indexName: SQL order differs from export" }
         }
-        statement.expect(")"); statement.end()
-        if (identity) { require(terms.none { it.descending }) { "identity index must be ascending" }; null } else Index(indexName, terms, unique = unique)
+        statement.expect(")")
+        statement.end()
+        if (identity) {
+            require(terms.none { it.descending }) { "identity index must be ascending" }
+            null
+        } else {
+            Index(indexName, terms, unique = unique)
+        }
     }
     val builder = TableBuilder(name)
     columns.filterNot { it.name in setOf("id", "row_kind") }.forEach(builder::column)
@@ -156,15 +200,27 @@ private fun importForeignKey(key: JsonObject, sql: RoomSql): ForeignKey {
     val onDelete = key["onDelete"]?.jsonPrimitive?.content ?: "NO ACTION"
     val onUpdate = key["onUpdate"]?.jsonPrimitive?.content ?: "NO ACTION"
     val action = when (onDelete) {
-        "CASCADE" -> Delete.Cascade; "SET NULL" -> Delete.SetNull
+        "CASCADE" -> Delete.Cascade
+        "SET NULL" -> Delete.SetNull
         else -> error("onDelete $onDelete on $table is refused; use CASCADE or SET_NULL")
     }
     require(onUpdate == "NO ACTION") { "onUpdate $onUpdate on $table is refused; an id never changes" }
     sql.expect(",", "FOREIGN", "KEY", "(")
-    columns.forEachIndexed { i, column -> if (i > 0) sql.expect(","); sql.identifier(column) }
-    sql.expect(")", "REFERENCES"); sql.identifier(table); sql.expect("(")
-    referenced.forEachIndexed { i, column -> if (i > 0) sql.expect(","); sql.identifier(column) }
-    sql.expect(")", "ON", "UPDATE"); sql.action(onUpdate); sql.expect("ON", "DELETE"); sql.action(onDelete)
+    columns.forEachIndexed { i, column ->
+        if (i > 0) sql.expect(",")
+        sql.identifier(column)
+    }
+    sql.expect(")", "REFERENCES")
+    sql.identifier(table)
+    sql.expect("(")
+    referenced.forEachIndexed { i, column ->
+        if (i > 0) sql.expect(",")
+        sql.identifier(column)
+    }
+    sql.expect(")", "ON", "UPDATE")
+    sql.action(onUpdate)
+    sql.expect("ON", "DELETE")
+    sql.action(onDelete)
     if (sql.take("DEFERRABLE")) sql.expect("INITIALLY", "DEFERRED")
     return ForeignKey(columns, table, action, referenced)
 }
@@ -181,8 +237,15 @@ private class RoomSql(sql: String) {
     }
     fun next(): String = tokens.getOrNull(position++) ?: error("incomplete SQL declaration")
     fun at(token: String): Boolean = tokens.getOrNull(position)?.equals(token, ignoreCase = true) == true
-    fun take(token: String): Boolean = if (at(token)) { position++; true } else false
-    fun expect(vararg tokens: String) { tokens.forEach { require(take(it)) { "expected $it, found ${this.tokens.getOrNull(position)}" } } }
+    fun take(token: String): Boolean = if (at(token)) {
+        position++
+        true
+    } else {
+        false
+    }
+    fun expect(vararg tokens: String) {
+        tokens.forEach { require(take(it)) { "expected $it, found ${this.tokens.getOrNull(position)}" } }
+    }
     fun identifier(expected: String) {
         val token = next()
         val value = when (token.first()) {
@@ -196,7 +259,10 @@ private class RoomSql(sql: String) {
     fun table(name: String) {
         if (tokens.getOrNull(position)?.contains("\${TABLE_NAME}") == true) identifier("\${TABLE_NAME}") else identifier(name)
     }
-    fun ifNotExists() { if (take("IF")) expect("NOT", "EXISTS") }
+    fun ifNotExists() {
+        if (take("IF")) expect("NOT", "EXISTS")
+    }
+
     /** A referential action as Room writes it, such as `SET NULL`. */
     fun action(expected: String) = expected.split(" ").forEach { expect(it) }
     fun default(): JsonElement {
@@ -213,7 +279,10 @@ private class RoomSql(sql: String) {
         return value
     }
     fun scalar(): JsonElement = default().also { end() }
-    fun end() { take(";"); require(position == tokens.size) { "unsupported trailing SQL" } }
+    fun end() {
+        take(";")
+        require(position == tokens.size) { "unsupported trailing SQL" }
+    }
 }
 
 internal fun importRoomViews(json: String): Map<String, String> = roomExport(json).getValue("database").jsonObject["views"]?.jsonArray.orEmpty().associate { raw ->

@@ -5,8 +5,8 @@ import kotlinx.coroutines.sync.*
 import kotlinx.serialization.json.*
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /** JVM qualification transport. The host binds this connection to one authorized domain. */
 class ProcessTransport private constructor(private val process: Process, val domain: JsonObject, private val reader: java.io.BufferedReader) : Transport {
@@ -39,20 +39,34 @@ class ProcessTransport private constructor(private val process: Process, val dom
             val reply = CompletableDeferred<JsonObject>()
             val call = buildJsonObject {
                 put("id", id)
-                put("call", buildJsonObject { put("version", 1); put("scope", domain); put("request", request) })
+                put(
+                    "call",
+                    buildJsonObject {
+                        put("version", 1)
+                        put("scope", domain)
+                        put("request", request)
+                    },
+                )
             }.toString()
             require(call.toByteArray().size <= 1024 * 1024) { "call frame quota" }
             pending[id] = reply
             check(!closed.get()) { "transport closed" }
             withContext(Dispatchers.IO) {
-                writes.withLock { writer.write(call); writer.newLine(); writer.flush() }
+                writes.withLock {
+                    writer.write(call)
+                    writer.newLine()
+                    writer.flush()
+                }
             }
             val result = reply.await()
             check(result.getValue("version").jsonPrimitive.int == 1) { "SDK version mismatch" }
             if (result.getValue("status").jsonPrimitive.content == "error") {
                 val error = result.getValue("error").jsonObject
-                throw RockyException(error.getValue("code").jsonPrimitive.content,
-                    error.getValue("retryable").jsonPrimitive.boolean, error.getValue("message").jsonPrimitive.content)
+                throw RockyException(
+                    error.getValue("code").jsonPrimitive.content,
+                    error.getValue("retryable").jsonPrimitive.boolean,
+                    error.getValue("message").jsonPrimitive.content,
+                )
             }
             return result.getValue("value").jsonObject
         } finally {
@@ -86,7 +100,10 @@ class ProcessTransport private constructor(private val process: Process, val dom
                 check(hello.getValue("version").jsonPrimitive.int == 1)
                 // Reuse the greeting reader: a buffered reader may read ahead.
                 ProcessTransport(process, hello.getValue("scope").jsonObject, reader)
-            } catch (error: Throwable) { process.destroy(); throw error }
+            } catch (error: Throwable) {
+                process.destroy()
+                throw error
+            }
         }
     }
 }

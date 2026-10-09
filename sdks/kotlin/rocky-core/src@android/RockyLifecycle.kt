@@ -47,6 +47,7 @@ class RockyLifecycle private constructor(private val application: Application) :
     override fun onActivityStarted(activity: Activity) {
         if (started++ == 0) followed.values.forEach { it.trySend(true) }
     }
+
     @Synchronized
     override fun onActivityStopped(activity: Activity) {
         if (started > 0 && --started == 0) followed.values.forEach { it.trySend(false) }
@@ -67,7 +68,6 @@ class RockyLifecycle private constructor(private val application: Application) :
     }
 
     companion object {
-        fun register(application: Application): RockyLifecycle =
-            RockyLifecycle(application).also { application.registerActivityLifecycleCallbacks(it) }
+        fun register(application: Application): RockyLifecycle = RockyLifecycle(application).also { application.registerActivityLifecycleCallbacks(it) }
     }
 }

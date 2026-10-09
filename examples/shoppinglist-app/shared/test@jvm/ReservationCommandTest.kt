@@ -1,12 +1,12 @@
 package org.example.examples.shopping
 
+import kotlinx.coroutines.*
+import rocky.*
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
-import kotlinx.coroutines.*
-import rocky.*
 
 /** Typed strong commands decided by a handler written in Kotlin, through the packaged runtime. */
 class ReservationCommandTest {
@@ -14,9 +14,12 @@ class ReservationCommandTest {
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
     private fun handle() = RockyDatabase.newHandle()
     private val writer = GrantProfile.Writer(setOf("stock", "holds"))
+
     /** Business columns only: without the trailing `id` and `row_kind`. */
     private fun List<Any?>.fields() = dropLast(2)
-    @JvmName("rowFields") private fun List<List<Any?>>.fields() = map { it.fields() }
+
+    @JvmName("rowFields")
+    private fun List<List<Any?>>.fields() = map { it.fields() }
     private suspend fun RockyDatabase.restock(quantity: Long) {
         val handle = handle()
         submit(Restock, RestockArguments("bolt", quantity), handle)
@@ -26,11 +29,22 @@ class ReservationCommandTest {
     @Test fun `a Kotlin handler confirms one of two competing reservations and rejects the other`() = runBlocking {
         val root = directory()
         val coordinator = DevelopmentCoordinator()
-        val executor = RockyDatabase.create(File(root, "a"), ReservationSchema, tcp(), automaticSync = false,
-            commands = CommandRuntime(coordinator, listOf(reserve, restock)))
+        val executor = RockyDatabase.create(
+            File(root, "a"),
+            ReservationSchema,
+            tcp(),
+            automaticSync = false,
+            commands = CommandRuntime(coordinator, listOf(reserve, restock)),
+        )
         // The caller holds the definitions and no handler: it invokes and reads, and cannot execute.
-        val caller = RockyDatabase.join(File(root, "b"), ReservationSchema, executor.pairing(writer).uri, PeerTransport.Tcp(),
-            automaticSync = false, commands = CommandRuntime(coordinator))
+        val caller = RockyDatabase.join(
+            File(root, "b"),
+            ReservationSchema,
+            executor.pairing(writer).uri,
+            PeerTransport.Tcp(),
+            automaticSync = false,
+            commands = CommandRuntime(coordinator),
+        )
         try {
             val owner = executor.commandIdentity()
             assertTrue(owner.executes && !caller.commandIdentity().executes)
@@ -67,7 +81,11 @@ class ReservationCommandTest {
             assertEquals(0, executor.runCommands() + caller.runCommands())
             // A protocol failure is an exception with a code, never a rejection.
             assertNull(caller.ticket(Reserve, handle()))
-        } finally { caller.close(); executor.close(); root.deleteRecursively() }
+        } finally {
+            caller.close()
+            executor.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `a device an issuer granted Execute registers and executes without being an issuer`() = runBlocking<Unit> {
@@ -80,8 +98,13 @@ class ReservationCommandTest {
             val all = setOf(Right.Read, Right.Insert, Right.Update, Right.Delete, Right.Invoke, Right.Execute, Right.Custody)
             val grants = listOf(Grant("stock", all), Grant("holds", all))
             val keys = Credentials.prepare(File(root, "x"))
-            executor = RockyDatabase.install(File(root, "x"), ReservationSchema, issuer.credentials.grant(keys, grants), transport = tcp(),
-                commands = CommandRuntime(coordinator, listOf(reserve, restock)))
+            executor = RockyDatabase.install(
+                File(root, "x"),
+                ReservationSchema,
+                issuer.credentials.grant(keys, grants),
+                transport = tcp(),
+                commands = CommandRuntime(coordinator, listOf(reserve, restock)),
+            )
             assertFalse(executor.isIssuer)
             assertEquals(GrantProfile.Grants(grants), executor.session().profile)
             val identity = executor.commandIdentity()
@@ -94,7 +117,11 @@ class ReservationCommandTest {
             assertEquals(TicketState.Applied, accepted.state)
             assertEquals(Outcome.Accepted(Remaining(1)), accepted.outcome)
             assertEquals(2, coordinator.sequence(identity))
-        } finally { executor?.close(); issuer.close(); root.deleteRecursively() }
+        } finally {
+            executor?.close()
+            issuer.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `a failing or slow handler fails one call and the same ticket recovers`() = runBlocking {
@@ -111,7 +138,9 @@ class ReservationCommandTest {
                     2 -> Thread.sleep(700)
                 }
                 reserve.handler.handle(context, arguments)
-            } finally { running.decrementAndGet() }
+            } finally {
+                running.decrementAndGet()
+            }
         }
         val runtime = CommandRuntime(coordinator, listOf(flaky, restock), handlerDeadlineMillis = 250)
         var executor = RockyDatabase.create(File(root, "a"), ReservationSchema, tcp(), automaticSync = false, commands = runtime)
@@ -176,8 +205,12 @@ class ReservationCommandTest {
             assertEquals(TicketState.Cancelled, executor.cancel(Reserve, withdrawn).state)
             assertEquals("rejected", executor.run(Reserve, withdrawn).error?.code)
             assertEquals(5, coordinator.sequence(owner))
-        } finally { executor.close(); root.deleteRecursively() }
+        } finally {
+            executor.close()
+            root.deleteRecursively()
+        }
     }
+
     @Test fun `handler reads select keys and bounded ranges and expire after return`() = runBlocking<Unit> {
         val root = directory()
         val coordinator = DevelopmentCoordinator()
@@ -187,8 +220,10 @@ class ReservationCommandTest {
             assertEquals(listOf<Any?>("bolt", 2L), context.get("stock", "bolt")?.fields())
             assertNull(context.get("stock", "missing"))
             assertEquals(listOf(listOf<Any?>("alpha", 3L)), context.scan("stock", limit = 1).fields())
-            assertEquals(listOf(listOf<Any?>("bolt", 2L)),
-                context.scan("stock", lower = listOf("bolt"), upper = listOf("cedar"), limit = 10).fields())
+            assertEquals(
+                listOf(listOf<Any?>("bolt", 2L)),
+                context.scan("stock", lower = listOf("bolt"), upper = listOf("cedar"), limit = 10).fields(),
+            )
             assertEquals(emptyList(), context.scan("stock", lower = listOf("bolt"), upper = listOf("bolt"), limit = 1))
             assertFails { context.get("undeclared", "bolt") }
             assertFails { context.get("stock") }
@@ -198,8 +233,13 @@ class ReservationCommandTest {
             assertFails { context.scan("stock", lower = listOf("cedar"), upper = listOf("alpha"), limit = 1) }
             reserve.handler.handle(context, arguments)
         }
-        val executor = RockyDatabase.create(File(root, "a"), ReservationSchema, tcp(), automaticSync = false,
-            commands = CommandRuntime(coordinator, listOf(probe, restock)))
+        val executor = RockyDatabase.create(
+            File(root, "a"),
+            ReservationSchema,
+            tcp(),
+            automaticSync = false,
+            commands = CommandRuntime(coordinator, listOf(probe, restock)),
+        )
         try {
             coordinator.register(executor.commandIdentity())
             for ((item, quantity) in listOf("cedar" to 4L, "bolt" to 2L, "alpha" to 3L)) {
@@ -214,7 +254,9 @@ class ReservationCommandTest {
             assertEquals(Outcome.Accepted(Remaining(1)), ticket.outcome)
             assertFails { retained.get().get("stock", "bolt") }
             assertFails { retained.get().scan("stock", limit = 1) }
-        } finally { executor.close(); root.deleteRecursively() }
+        } finally {
+            executor.close()
+            root.deleteRecursively()
+        }
     }
-
 }

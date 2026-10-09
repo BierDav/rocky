@@ -2,20 +2,20 @@ package rocky.qualification
 
 import androidx.room.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
-import java.nio.file.Files
-import java.io.File
-import rocky.RockyDatabase
-import rocky.schema
-import rocky.schemaFromRoom
 import kotlinx.coroutines.runBlocking
-import kotlin.test.*
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import rocky.RockyDatabase
 import rocky.RockyException
+import rocky.schema
+import rocky.schemaFromRoom
 import rocky.sqlite.RockySQLiteDriver
+import java.io.File
+import java.nio.file.Files
+import kotlin.test.*
 
 class RoomScalarsTest {
     @Test fun definitionBuilderReopensThroughNativeBindings() = runBlocking {
@@ -25,7 +25,10 @@ class RoomScalarsTest {
         val imported = schemaFromRoom("samples", exported)
         val handmade = schema("samples") {
             table("samples") {
-                text("sensor"); integer("sequence"); real("reading", nullable = true); blob("raw", nullable = true)
+                text("sensor")
+                integer("sequence")
+                real("reading", nullable = true)
+                blob("raw", nullable = true)
                 primaryKey("sensor", "sequence")
                 index("samples_by_reading", listOf(rocky.IndexColumn("reading", descending = true)))
             }
@@ -33,19 +36,41 @@ class RoomScalarsTest {
         val directory = Files.createTempDirectory("rocky-native-schema").toFile()
         try {
             val database = RockyDatabase.local(directory, handmade)
-            try { assertTrue(database.read(handmade.table("samples").query()).getValue("rows").toString() == "[]") }
-            finally { database.close() }
+            try {
+                assertTrue(database.read(handmade.table("samples").query()).getValue("rows").toString() == "[]")
+            } finally {
+                database.close()
+            }
             val reopened = RockyDatabase.open(directory, imported)
-            try { assertEquals("[]", reopened.read(imported.table("samples").query()).getValue("rows").toString()) }
-            finally { reopened.close() }
-        } finally { directory.deleteRecursively() }
+            try {
+                assertEquals("[]", reopened.read(imported.table("samples").query()).getValue("rows").toString())
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun groupPartitionSharesOneSecretForEveryTable() = runBlocking<Unit> {
         val grouped = schema("groupsecret") {
-            table("lists") { text("name"); primaryKey("name"); partitionBy("name", group = "list") }
-            table("items") { text("list"); text("key"); primaryKey("list", "key"); partitionBy("list", group = "list") }
-            table("attachments") { text("list"); text("key"); primaryKey("list", "key"); partitionBy("list", group = "list") }
+            table("lists") {
+                text("name")
+                primaryKey("name")
+                partitionBy("name", group = "list")
+            }
+            table("items") {
+                text("list")
+                text("key")
+                primaryKey("list", "key")
+                partitionBy("list", group = "list")
+            }
+            table("attachments") {
+                text("list")
+                text("key")
+                primaryKey("list", "key")
+                partitionBy("list", group = "list")
+            }
         }
         val directory = Files.createTempDirectory("rocky-group-secret").toFile()
         try {
@@ -63,8 +88,12 @@ class RoomScalarsTest {
                 assertEquals(1, shared.getValue("envelopes").jsonArray.size)
                 assertFailsWith<RockyException> { database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))), epoch = 2) }
                 assertFailsWith<RockyException> { database.partitions.subscribe("list", list, omit = listOf("photos")) }
-            } finally { database.close() }
-        } finally { directory.deleteRecursively() }
+            } finally {
+                database.close()
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun partitionedRoomOverlayAndViews() = runBlocking {
@@ -73,7 +102,13 @@ class RoomScalarsTest {
         val exported = File(root, "sdks/kotlin/schema-qualification/schemas/rocky.qualification.PartitionDatabase/1.json").readText()
         val imported = schemaFromRoom("partitionroom", exported) { table("partition_samples") { partitionBy("sensor") } }
         val handmade = schema("partitionroom") {
-            table("partition_samples") { text("sensor"); integer("sequence"); integer("reading"); primaryKey("sensor", "sequence"); partitionBy("sensor") }
+            table("partition_samples") {
+                text("sensor")
+                integer("sequence")
+                integer("reading")
+                primaryKey("sensor", "sequence")
+                partitionBy("sensor")
+            }
             view("partial_partition_samples", "SELECT * FROM partition_samples WHERE row_kind = 0")
         }
         assertEquals(handmade.definitionJson("09".repeat(32)), imported.definitionJson("09".repeat(32)))
@@ -94,14 +129,22 @@ class RoomScalarsTest {
                 assertEquals(ids[0] + 1, ids[1])
                 RockySQLiteDriver(database).open("partitions").use { connection ->
                     connection.prepare("SELECT SUM(reading) FROM partial_partition_samples").use { statement ->
-                        assertTrue(statement.step()); assertEquals(30L, statement.getLong(0))
+                        assertTrue(statement.step())
+                        assertEquals(30L, statement.getLong(0))
                     }
                 }
-            } finally { database.close() }
+            } finally {
+                database.close()
+            }
             val reopened = RockyDatabase.open(directory, handmade)
-            try { assertEquals(2, reopened.read(rocky.query("SELECT * FROM partial_partition_samples")).getValue("rows").let { (it as kotlinx.serialization.json.JsonArray).size }) }
-            finally { reopened.close() }
-        } finally { directory.deleteRecursively() }
+            try {
+                assertEquals(2, reopened.read(rocky.query("SELECT * FROM partial_partition_samples")).getValue("rows").let { (it as kotlinx.serialization.json.JsonArray).size })
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test fun scalarsAndCompoundKeys() = runBlocking {

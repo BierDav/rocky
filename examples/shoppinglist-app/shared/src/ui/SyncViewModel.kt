@@ -1,11 +1,11 @@
 package org.example.examples.shopping.ui
 
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.binding
-import androidx.lifecycle.ViewModel
 import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -39,7 +39,12 @@ class SyncViewModel(session: ShoppingSession) : NodeViewModel(session) {
     val state: StateFlow<SyncState> = node.flatMapLatest { node ->
         val rocky = node.rocky
         val events = rocky.activity().shareIn(viewModelScope, SharingStarted.WhileSubscribed(), replay = KEPT)
-        val ticks = flow { while (true) { emit(Unit); delay(3_000) } }
+        val ticks = flow {
+            while (true) {
+                emit(Unit)
+                delay(3_000)
+            }
+        }
         // Holding changes with keys, checkpoints and evictions: read it again on each event and every few seconds.
         val holdings = combine(node.repository.lists(), merge(ticks, events.map { })) { lists, _ -> lists }
             .conflate()
@@ -69,8 +74,13 @@ class SyncViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 entries.map { entry ->
                     when (entry) {
                         is Entry.Event -> describe(entry.event, lists, titles, names)
-                        is Entry.Note -> ActivityEntry("note-${entry.at}-${entry.text.hashCode()}", entry.at,
-                            if (entry.text.startsWith("Could not")) EntryKind.Problem else EntryKind.Key, entry.text)
+
+                        is Entry.Note -> ActivityEntry(
+                            "note-${entry.at}-${entry.text.hashCode()}",
+                            entry.at,
+                            if (entry.text.startsWith("Could not")) EntryKind.Problem else EntryKind.Key,
+                            entry.text,
+                        )
                     }
                 },
             )
@@ -84,7 +94,9 @@ class SyncViewModel(session: ShoppingSession) : NodeViewModel(session) {
         data class Event(val event: RockyEvent) : Entry
         data class Note(val text: String, val at: Long) : Entry
     }
-    private companion object { const val KEPT = 300 }
+    private companion object {
+        const val KEPT = 300
+    }
 }
 
 /** The domain as a short hex id instead of its JSON byte arrays. */

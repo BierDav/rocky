@@ -1,15 +1,16 @@
 package org.example.examples.shopping
 
+import kotlinx.coroutines.*
+import rocky.*
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
-import kotlinx.coroutines.*
-import rocky.*
 
 /** The starter pairing makes a second issuer, which carries the list once the creator device is lost. */
 class IssuerRecoveryTest {
     private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+
     /** Room checks every table it declares, so a device reads the household and approval tables too. */
     private val writer = GrantProfile.Writer(ShoppingTables.toSet() + listOf("devices", "keys", "identities", "requests", "decisions"))
     private val rooms = mutableMapOf<RockyDatabase, ShoppingDatabase>()
@@ -18,16 +19,20 @@ class IssuerRecoveryTest {
     private val RockyDatabase.repository get() = ShoppingRepository(rooms.getValue(this), this)
     private suspend fun RockyDatabase.add(title: String) = repository.add(list, title)
     private suspend fun RockyDatabase.titles() = rooms.getValue(this).items().all(list).map { it.title }.sorted()
+
     /** The issuer shares the list's current secret with [readers], as the application delivers envelopes. */
     private suspend fun RockyDatabase.share(vararg readers: RockyDatabase) {
         val envelopes = repository.share(list, readers.map { it.session().node })
         for (reader in readers) reader.repository.accept(list, envelopes.getValue(reader.session().node))
     }
+
     /** A joined device finishes its own bootstrap before it starts a list from a checkpoint. */
     private suspend fun RockyDatabase.joined() = also { assertEquals(ConnectionState.Connected, syncOnce().state) }
-    private suspend fun close(runtime: RockyDatabase) { rooms.remove(runtime)?.close(); runtime.close() }
-    private suspend fun join(directory: File, invitation: PairingInvitation) =
-        RockyDatabase.join(directory, ShoppingSchema, invitation.uri, tcp(), automaticSync = false)
+    private suspend fun close(runtime: RockyDatabase) {
+        rooms.remove(runtime)?.close()
+        runtime.close()
+    }
+    private suspend fun join(directory: File, invitation: PairingInvitation) = RockyDatabase.join(directory, ShoppingSchema, invitation.uri, tcp(), automaticSync = false)
 
     @Test fun `a second device invites and renews after the creator device is destroyed`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-issuers").toFile()
@@ -53,7 +58,8 @@ class IssuerRecoveryTest {
 
             // The creator device is destroyed, keys included; the second issuer revokes it.
             val creator = a.session().node
-            close(a); opened -= a
+            close(a)
+            opened -= a
             assertTrue(File(root, "a").deleteRecursively())
             b.revoke(creator)
             assertEquals(expiring.policyEpoch + 1, b.session().policyEpoch)
@@ -79,7 +85,10 @@ class IssuerRecoveryTest {
             assertEquals(ConnectionState.Connected, d.syncOnce().state)
             assertEquals(ConnectionState.Connected, c.syncOnce().state)
             assertEquals(listOf("Eggs", "Milk"), c.titles())
-        } finally { opened.forEach { close(it) }; root.deleteRecursively() }
+        } finally {
+            opened.forEach { close(it) }
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `a device paired with the opt-out cannot issue`() = runBlocking<Unit> {
@@ -110,6 +119,9 @@ class IssuerRecoveryTest {
             assertEquals(listOf("Milk"), a.titles())
             // The creator still holds the only publisher key and keeps its logout guard.
             assertFailsWith<RockyException> { a.logout() }
-        } finally { opened.forEach { close(it) }; root.deleteRecursively() }
+        } finally {
+            opened.forEach { close(it) }
+            root.deleteRecursively()
+        }
     }
 }

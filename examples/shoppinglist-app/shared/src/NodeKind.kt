@@ -12,10 +12,13 @@ import rocky.Right
 enum class NodeKind(val label: String, val summary: String) {
     /** An issuer: creates lists, invites devices and receives every list. */
     Trusted("Trusted", "Creates lists, adds devices and holds every list"),
+
     /** Holds and edits every list, receiving each list's key automatically. */
     Full("Full", "Holds and edits every list"),
+
     /** Holds only the lists a trusted device shares with it. */
-    Partial("Partial", "Holds only the lists shared with it");
+    Partial("Partial", "Holds only the lists shared with it"),
+    ;
 
     /**
      * What the device may do: members read devices and keys, which only trusted devices write, publish their own
@@ -23,14 +26,17 @@ enum class NodeKind(val label: String, val summary: String) {
      */
     val profile: GrantProfile get() = when (this) {
         Trusted -> GrantProfile.Issuer
+
         Full, Partial -> GrantProfile.Grants(
             listOf("lists", "devices", "keys", "decisions").map { Grant(it, setOf(Right.Read)) } +
                 listOf("categories", "items").map { Grant(it, setOf(Right.Read, Right.Insert, Right.Update, Right.Delete)) } +
                 Grant("identities", setOf(Right.Read, Right.Insert, Right.Update)) +
                 // A command's row effects need the caller's right too; SQL never writes a command-controlled table.
-                Grant("requests", setOf(Right.Read, Right.Insert, Right.Invoke)))
+                Grant("requests", setOf(Right.Read, Right.Insert, Right.Invoke)),
+        )
     }
     val role: ReplicaRole get() = if (this == Partial) ReplicaRole.Partial else ReplicaRole.Full
+
     /** Trusted devices send every list's key to devices of this kind. */
     val receivesEveryList: Boolean get() = this != Partial
 
@@ -45,8 +51,7 @@ enum class NodeKind(val label: String, val summary: String) {
  * so a camera app opens it in the shopping app.
  */
 data class PairingCode(val kind: NodeKind, val name: String, val invitation: String) {
-    override fun toString(): String =
-        AppLink(ACTION, linkedMapOf("kind" to kind.name.lowercase(), "name" to name, "invitation" to invitation)).toString()
+    override fun toString(): String = AppLink(ACTION, linkedMapOf("kind" to kind.name.lowercase(), "name" to name, "invitation" to invitation)).toString()
 
     companion object {
         const val ACTION = "pair"

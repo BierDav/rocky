@@ -290,7 +290,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if signed.id()? != checkpoint {
             return Err(denied("checkpoint superseded; restart the rebootstrap"));
         }
-        // Byte strings encode as integer arrays: at most four encoded bytes per stored byte.
         let strong = if after.is_none() {
             let mut record = inner
                 .conn
@@ -314,7 +313,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None
         };
         let strong_bytes = encode(&strong)?.len();
-        let budget = (byte_quota - 2048) / 4;
+        // Byte strings encode as integer arrays of at most two bytes per byte, once
+        // in the sealed plaintext and again as the page's ciphertext. The plaintext
+        // must also fit one package.
+        let budget = ((byte_quota - 2048) / 2).min(rocky_core::MAX_PAYLOAD_BYTES - 1024);
         if strong_bytes > budget {
             return Err(denied("byte quota smaller than checkpoint strong state"));
         }
@@ -345,7 +347,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                 return Err(Error::Corrupt("checkpoint row".into()));
             };
-            let weight = 48 + fields.len();
+            let weight = 2 * (48 + fields.len());
             if plain.rows.len() == STEP_ROWS || used + weight > budget {
                 plain.next = plain.rows.last().map(|(row, _, _)| *row);
                 break;

@@ -102,6 +102,32 @@ async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Re
     Ok(())
 }
 
+/// Checkpoint pages take a whole frame; large rows still split so each page's
+/// plaintext fits one package.
+#[tokio::test(flavor = "multi_thread")]
+async fn join_restores_large_rows_across_checkpoint_pages() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    for handle in 0..40 {
+        a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
+            .await;
+    }
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    b.sync().await.expect("join sync");
+    assert_eq!(b.titles().await.len(), 40);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;

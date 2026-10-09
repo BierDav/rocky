@@ -9,6 +9,7 @@ import rocky.PeerTransport
 import rocky.RockyDatabase
 import rocky.ReadinessState
 import rocky.SecretStore
+import rocky.ServiceCoordinator
 import rocky.room.RockyRoom
 import rocky.room.buildOnRocky
 
@@ -29,11 +30,11 @@ class ShoppingPlatform(
 
 /** One open installation: Rocky, Room on its file and the household's background work. Close it to release them. */
 class ShoppingNode private constructor(
-    val rocky: RockyDatabase, private val room: RockyRoom<ShoppingDatabase>, val self: String, coordinated: Boolean,
+    val rocky: RockyDatabase, private val room: RockyRoom<ShoppingDatabase>, val self: String, commands: CommandRuntime?,
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
-    val approvals = Approvals(room.room, rocky, household, self, coordinated)
+    val approvals = Approvals(room.room, rocky, household, self, commands != null, commands?.coordinator is ServiceCoordinator)
     val isTrusted: Boolean get() = rocky.isIssuer
     private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         launch { household.run() }
@@ -89,7 +90,7 @@ class ShoppingNode private constructor(
                         val self = rocky.session().node
                         // Room keeps only a lock file next to Rocky's.
                         val room = platform.room(File(platform.directory, "shopping").absolutePath).buildOnRocky(rocky)
-                        ShoppingNode(rocky, room, self, commands != null).also { opened = it }
+                        ShoppingNode(rocky, room, self, commands).also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) { rocky.close() }
                         throw error

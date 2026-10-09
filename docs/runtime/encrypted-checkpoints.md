@@ -130,7 +130,9 @@ against their digests, and the replay, in batches under the replica lock.
 - Checkpoint pages use the whole frame, less 8 KiB. The first page carries a
   command table's strong state whole, mostly the latest confirmed command and
   its two credential chains: about 49 KiB after one command of the shopping
-  example, within the page's budget of a quarter of its bytes.
+  example. A page's sealed plaintext must fit one 64 KiB package, and row bytes
+  encode as integer arrays of up to two bytes each, so the budget is at most
+  63 KiB, counting each stored row byte twice.
 - `export_recovery` and recovery custodians need complete mergeable history.
 
 ## Offering an imported checkpoint back to its signer

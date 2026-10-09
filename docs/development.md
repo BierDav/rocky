@@ -49,6 +49,14 @@ bookmarks or rewrite shared history as an incidental part of local editing.
 The script resolves the repository from its own location. It runs formatting,
 Clippy for workspace targets with warnings treated as errors, and workspace
 tests, including doc tests. Dependency resolution uses the committed lockfile.
+It uses [cargo-nextest](https://nexte.st) when installed, which runs every test
+binary in parallel, and falls back to `cargo test`. Settings are in
+`.config/nextest.toml`.
+
+Soak tests are `#[ignore]`d and named `soak_*`; `./scripts/check --slow` runs
+only those. Keep a short variant of each soak test in the baseline.
+Dependencies are built with `opt-level = 2` in the dev profile, since crypto
+and SQLite dominate test time; workspace crates stay unoptimized.
 
 During development, narrow verification to the package you changed:
 
@@ -106,6 +114,14 @@ The baseline workflow runs on macOS, matching the first desktop target. It
 downloads an archive of the exact event revision and calls `scripts/check`.
 It needs no version-control CLI or repository history, and never invokes Git.
 The repository toolchain file is also the toolchain source of truth in CI.
+
+A job that passes records a cache marker keyed by the source tree. A later run
+of the same tree, such as a redescribed or rebased commit with unchanged content
+or the release of an already-checked commit, finds the marker and skips its
+steps. Any change to a tracked file, including the workflow, runs it again.
+The Rust build cache is saved from `main` and restored on other refs.
+
+The `slow` job runs `./scripts/check --slow` on `main` and before releases.
 
 Required status checks are a hosting setting; the workflow file does not configure
 branch protection. No remotely hosted CI run has been verified by this baseline.

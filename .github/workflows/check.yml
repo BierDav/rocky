@@ -1,10 +1,19 @@
 name: Baseline checks
 
+# A job that passed for the same source tree records a cache marker; later runs
+# of that tree (rebased, redescribed or released commits) reuse it instead of
+# running again. See docs/development.md#ci.
+
 on:
   push:
   pull_request:
   # The release workflow gates every release on these checks.
   workflow_call:
+    inputs:
+      slow:
+        description: Also run the soak tests
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,12 +22,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  # Smaller test binaries and build cache; backtraces keep line numbers.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  NEXTEST_PROFILE: ci
+
 jobs:
   check:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Download the exact source revision
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
@@ -32,14 +48,110 @@ jobs:
             "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Look for a passing run of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
 
       - name: Install the repository toolchain
+        if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: rustup show active-toolchain
 
+      - uses: Swatinem/rust-cache@v2
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          workspaces: source -> target
+          shared-key: check
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@v2
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-nextest
+
       - name: Run shared checks
+        if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: ./scripts/check
+
+      - name: Record the passing tree
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: touch passed
+
+      - uses: actions/cache/save@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          path: passed
+          key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
+
+  slow:
+    # Soak tests: on the default branch and before releases, never on every push.
+    if: inputs.slow || github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download the exact source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Look for a passing run of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-slow-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
+
+      - name: Install the repository toolchain
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          workspaces: source -> target
+          shared-key: check
+          save-if: false
+
+      - uses: taiki-e/install-action@v2
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-nextest
+
+      - name: Run soak tests
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/check --slow
+
+      - name: Record the passing tree
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: touch passed
+
+      - uses: actions/cache/save@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          path: passed
+          key: baseline-slow-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
   shopping:
     # Multi-process shopping qualification: device JVMs and the packaged custody peer.
@@ -47,6 +159,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Download the exact source revision
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
@@ -60,11 +173,32 @@ jobs:
             "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Look for a passing run of this tree
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: passed
+          key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          lookup-only: true
 
       - name: Install the repository toolchain
+        if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: rustup show active-toolchain
 
       - name: Run the shopping qualification
+        if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: ./examples/shoppinglist-app/qualify
+
+      - name: Record the passing tree
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: touch passed
+
+      - uses: actions/cache/save@v4
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          path: passed
+          key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}

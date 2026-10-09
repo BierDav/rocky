@@ -89,7 +89,17 @@ async fn bootstrap(f: &Fixture, source: &Replica, target: &Replica, config: &Sec
 }
 
 #[tokio::test]
-async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_the_base() {
+async fn executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base() {
+    cross_commands_with_a_window(200).await;
+}
+
+#[tokio::test]
+#[ignore = "soak; run by scripts/check --slow"]
+async fn soak_executor_and_reader_cross_4096_commands_with_a_window() {
+    cross_commands_with_a_window(4100).await;
+}
+
+async fn cross_commands_with_a_window(total: u32) {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let a_key = PrivateKey::new();
@@ -109,7 +119,7 @@ async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_
     retain(&f, &b, &[], 16).await;
     let mut size_at_100 = 0;
     let mut receipts = std::collections::VecDeque::new();
-    for n in 1..=4100 {
+    for n in 1..=total {
         let result = command(&f, &a, &c, n).await;
         b.receive_encrypted_result(result.clone(), &c)
             .await
@@ -158,7 +168,7 @@ async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_
         }
     }
     assert!(
-        a.missing_results(f.public.domain, 4100, 64)
+        a.missing_results(f.public.domain, u64::from(total), 64)
             .await
             .unwrap()
             .is_empty()
@@ -226,7 +236,7 @@ async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_
         .unwrap();
     assert_eq!(
         behind
-            .missing_results(f.public.domain, 4100, 1)
+            .missing_results(f.public.domain, u64::from(total), 1)
             .await
             .unwrap(),
         vec![1]
@@ -246,7 +256,7 @@ async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_
     bootstrap(&f, &a, &behind, &bc).await;
     assert!(
         behind
-            .missing_results(f.public.domain, 4100, 64)
+            .missing_results(f.public.domain, u64::from(total), 64)
             .await
             .unwrap()
             .is_empty()
@@ -262,11 +272,14 @@ async fn executor_and_reader_cross_4096_commands_with_a_window_and_recover_from_
         1,
     )
     .unwrap();
-    command(&f, &behind, &c, 4101).await;
-    assert_eq!(c.head(f.public.domain).unwrap().sequence, 4101);
+    command(&f, &behind, &c, total + 1).await;
+    assert_eq!(
+        c.head(f.public.domain).unwrap().sequence,
+        u64::from(total) + 1
+    );
     a.acknowledge_tickets(&c).await.unwrap();
     eprintln!(
-        "4100 confirmations: executor/reader retain 16 results, bytes {size_at_100}, no preparations; bootstrap + recovery + next confirmation pass"
+        "{total} confirmations: executor/reader retain 16 results, bytes {size_at_100}, no preparations; bootstrap + recovery + next confirmation pass"
     );
 }
 

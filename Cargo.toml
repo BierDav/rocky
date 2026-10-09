@@ -25,3 +25,7 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+
+# Crypto and SQLite dominate test time; optimize dependencies, not workspace crates.
+[profile.dev.package."*"]
+opt-level = 2

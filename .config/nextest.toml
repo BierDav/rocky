@@ -1,0 +1,13 @@
+# Test runner settings; see docs/development.md#shared-checks.
+
+[profile.default]
+slow-timeout = { period = "60s" }
+
+# The probe asserts fsync latency, which parallel tests would distort.
+[[profile.default.overrides]]
+filter = 'package(rocky-coordinator) & test(/^raft_store::probe::/)'
+threads-required = "num-test-threads"
+
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 10 }

@@ -134,7 +134,8 @@ jobs:
     name: Publish manifest
     needs: build
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # Any architecture; Gitea has more arm64 runners.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
     timeout-minutes: 15
     # The package stays private; deployments supply a ghcr-pull registry secret.
     steps:

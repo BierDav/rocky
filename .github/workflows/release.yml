@@ -32,7 +32,8 @@ concurrency:
 jobs:
   version:
     name: Version
-    runs-on: ubuntu-latest
+    # Any architecture; Gitea has more arm64 runners.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
     timeout-minutes: 10
     outputs:
       release: ${{ steps.changes.outputs.release }}
@@ -234,6 +235,7 @@ jobs:
     name: Android SDK
     needs: version
     if: needs.version.outputs.release == 'true'
+    # x64: the Android NDK has no Linux arm64 host build.
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -358,7 +360,8 @@ jobs:
   publish:
     name: Publish
     needs: [version, check, coordinator-image, peer-image, jvm, android]
-    runs-on: ubuntu-latest
+    # Any architecture; Gitea has more arm64 runners.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
     timeout-minutes: 20
     permissions:
       contents: write

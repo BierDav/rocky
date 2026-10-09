@@ -153,7 +153,9 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   first step points `CARGO_HOME`, `RUSTUP_HOME` and `PATH` at `/Users/gitea-runner`.
   Its Actions cache is stored on `/Volumes/david-mm-linz-ext-1/gitea-runner`.
 - Linux jobs run in the runner image, which lacks rustup and the Android SDK; the
-  jobs install them. The arm64 image build uses the `ubuntu-24.04-arm64` label.
+  jobs install them. Jobs that need no particular architecture use the
+  `ubuntu-24.04-arm64` label. Only the Android builds, the `linux-x86-64` JVM SDK and
+  the amd64 image use `ubuntu-latest` (x64); the Android NDK has no arm64 Linux host.
 - Images and Maven artifacts go to the instance's registries with the
   `PACKAGE_TOKEN` secret; releases are created through the Gitea API.
 

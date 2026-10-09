@@ -121,7 +121,8 @@ or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
 The Rust build cache is saved from `main` and restored on other refs.
 
-The `slow` job runs `./scripts/check --slow` on `main` and before releases.
+The `slow` job runs `./scripts/check --slow` on pushes to `main`; releases do not
+wait for it.
 
 The `android` job runs only on pushes to `main`. It performs the release
 workflow's Android build steps to keep two caches warm: the Gradle and Kotlin
@@ -139,12 +140,22 @@ baseline; it has not run on a hosted runner yet.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on
-demand to GitHub Packages; it is the one workflow that clones history, which
-git-cliff needs to compute the version ([releasing](releasing.md)).
+demand to the hosting forge's packages; it is the one workflow that clones
+history, which git-cliff needs to compute the version ([releasing](releasing.md)).
 
-The Gitea mirror uses a dedicated macOS runner for its [nightly prerelease](releasing.md).
-Its Actions cache is stored on the attached volume at
-`/Volumes/david-mm-linz-ext-1/gitea-runner`.
+### Gitea
+
+The Gitea mirror runs the same `.github/workflows`; it has no `.gitea` directory,
+which would replace them. The workflows call the REST endpoints both forges serve
+and never `gh`. Where they differ, steps branch on `github.server_url`:
+
+- macOS jobs run on a dedicated launchd runner without a login environment; a
+  first step points `CARGO_HOME`, `RUSTUP_HOME` and `PATH` at `/Users/gitea-runner`.
+  Its Actions cache is stored on `/Volumes/david-mm-linz-ext-1/gitea-runner`.
+- Linux jobs run in the runner image, which lacks rustup and the Android SDK; the
+  jobs install them. The arm64 image build uses the `ubuntu-24.04-arm64` label.
+- Images and Maven artifacts go to the instance's registries with the
+  `PACKAGE_TOKEN` secret; releases are created through the Gitea API.
 
 ## Code and tests
 

@@ -7,13 +7,8 @@ name: Baseline checks
 on:
   push:
   pull_request:
-  # The release workflow gates every release on these checks.
+  # The release workflow gates every release on these checks, without `slow`.
   workflow_call:
-    inputs:
-      slow:
-        description: Also run the soak tests
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -33,6 +28,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
+      # The Gitea macOS runner is a service without a login environment.
+      - name: Use the Gitea runner's tools
+        if: github.server_url != 'https://github.com'
+        run: |
+          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
+          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
+
       - name: Download the exact source revision
         id: source
         env:
@@ -41,14 +44,18 @@ jobs:
           GH_REPOSITORY: ${{ github.repository }}
           GH_REVISION: ${{ github.sha }}
         run: |
-          curl --fail --silent --show-error --location \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "Accept: application/vnd.github+json" \
-            --output "$RUNNER_TEMP/source.tar.gz" \
-            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
       - name: Look for a passing run of this tree
         id: passed
@@ -91,11 +98,19 @@ jobs:
           key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
   slow:
-    # Soak tests: on the default branch and before releases, never on every push.
-    if: inputs.slow || github.ref == 'refs/heads/main'
+    # Soak tests: on pushes to the default branch only; releases do not wait for them.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
+      # The Gitea macOS runner is a service without a login environment.
+      - name: Use the Gitea runner's tools
+        if: github.server_url != 'https://github.com'
+        run: |
+          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
+          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
+
       - name: Download the exact source revision
         id: source
         env:
@@ -104,14 +119,18 @@ jobs:
           GH_REPOSITORY: ${{ github.repository }}
           GH_REVISION: ${{ github.sha }}
         run: |
-          curl --fail --silent --show-error --location \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "Accept: application/vnd.github+json" \
-            --output "$RUNNER_TEMP/source.tar.gz" \
-            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
       - name: Look for a passing run of this tree
         id: passed
@@ -158,6 +177,14 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
+      # The Gitea macOS runner is a service without a login environment.
+      - name: Use the Gitea runner's tools
+        if: github.server_url != 'https://github.com'
+        run: |
+          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
+          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
+
       - name: Download the exact source revision
         id: source
         env:
@@ -166,14 +193,18 @@ jobs:
           GH_REPOSITORY: ${{ github.repository }}
           GH_REVISION: ${{ github.sha }}
         run: |
-          curl --fail --silent --show-error --location \
-            --header "Authorization: Bearer ${GH_TOKEN}" \
-            --header "Accept: application/vnd.github+json" \
-            --output "$RUNNER_TEMP/source.tar.gz" \
-            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(gh api "repos/${GH_REPOSITORY}/commits/${GH_REVISION}" --jq .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
       - name: Look for a passing run of this tree
         id: passed
@@ -254,18 +285,34 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Gitea's runner image has no Android SDK.
+      - uses: android-actions/setup-android@v3
+        if: github.server_url != 'https://github.com'
+        with:
+          packages: ""
+
       # The versions docs/runtime/android.md names.
       - name: Install the Android platform and NDK
         run: |
           set -euo pipefail
-          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          sdkmanager="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
           yes | "${sdkmanager}" --licenses > /dev/null || true
           "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - name: Install the repository toolchain
         working-directory: source
-        run: rustup show active-toolchain
+        run: |
+          set -euo pipefail
+          # Gitea's runner image has no rustup.
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+            rustup toolchain install
+          fi
+          rustup show active-toolchain
 
       - name: Build the Android runtime
         working-directory: source

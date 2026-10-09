@@ -1,17 +1,17 @@
 #!/bin/sh
-# Uploads every artifact of Maven repository directories to GitHub Packages, with
-# MD5 and SHA-1 checksums; see docs/releasing.md.
+# Uploads every artifact of Maven repository directories to a Maven registry
+# (GitHub Packages or Gitea), with MD5 and SHA-1 checksums; see docs/releasing.md.
 #
-#   GH_TOKEN=... GITHUB_ACTOR=... GITHUB_REPOSITORY=owner/repo scripts/release/maven-deploy DIRECTORY...
+#   MAVEN_URL=... MAVEN_USER=... MAVEN_TOKEN=... scripts/release/maven-deploy DIRECTORY...
 set -eu
 
-registry="https://maven.pkg.github.com/$GITHUB_REPOSITORY"
+registry=${MAVEN_URL:?MAVEN_URL is required}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 put() { # file, repository path
     status=$(curl --silent --show-error --output "$work/response" --write-out '%{http_code}' \
-        --user "$GITHUB_ACTOR:$GH_TOKEN" --upload-file "$1" "$registry/$2")
+        --user "${MAVEN_USER:?}:${MAVEN_TOKEN:?}" --upload-file "$1" "$registry/$2")
     case "$status" in
     2??) echo "uploaded $2" ;;
     # A version is immutable; a retried release finds its earlier uploads.

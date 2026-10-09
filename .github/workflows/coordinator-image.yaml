@@ -54,27 +54,30 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # GHCR requires a lowercase repository name; `github.repository_owner` is
-  # `BierDav`, which Docker rejects in a tag.
-  IMAGE: ghcr.io/bierdav/rocky-db-coordinator
+  # Registries require a lowercase repository name; `github.repository_owner` is
+  # `BierDav` on GitHub, which Docker rejects in a tag.
+  NAME: bierdav/rocky-db-coordinator
 
 jobs:
   build:
     name: Build ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.server_url == 'https://github.com' && matrix.runner || matrix.gitea-runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           # Native runners, not QEMU: a release build of a Rust workspace under
-          # emulation is many times slower than the hosted arm64 runner.
+          # emulation is many times slower than the hosted arm64 runner. Gitea's
+          # runners use their own labels.
           - arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
+            gitea-runner: ubuntu-latest
           - arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
+            gitea-runner: ubuntu-24.04-arm64
     steps:
       - name: Download the exact source revision
         env:
@@ -91,14 +94,25 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          echo "IMAGE=${registry}/${NAME}" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         if: github.event_name != 'pull_request'
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -107,8 +121,9 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ env.IMAGE }}:${{ github.sha }}-${{ matrix.arch }}
+          # Gitea's cache server may not serve BuildKit; a cold build still works.
           cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }},ignore-error=true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -123,13 +138,24 @@ jobs:
     timeout-minutes: 15
     # The package stays private; deployments supply a ghcr-pull registry secret.
     steps:
+      # GHCR on GitHub; the instance's own container registry on Gitea.
+      - name: Select the registry
+        run: |
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+          fi
+          echo "REGISTRY=${registry}" >> "$GITHUB_ENV"
+          echo "IMAGE=${registry}/${NAME}" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          password: ${{ github.server_url == 'https://github.com' && secrets.GITHUB_TOKEN || secrets.PACKAGE_TOKEN }}
 
       # Each architecture is a single-platform image, so merge them rather than
       # pushing another index. `main` is the moving tag selfhosted-platform

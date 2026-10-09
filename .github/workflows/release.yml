@@ -1,8 +1,9 @@
 name: Release
 
-# Publishes a versioned release to GitHub Packages and GitHub Releases: nightly
-# when shipped code changed, or a manually chosen channel. The version is
-# computed from Conventional Commits; see docs/releasing.md.
+# Publishes a versioned release to the packages and releases of the hosting
+# forge, GitHub or Gitea: nightly when shipped code changed, or a manually
+# chosen channel. The version is computed from Conventional Commits; see
+# docs/releasing.md.
 
 on:
   schedule:
@@ -40,7 +41,7 @@ jobs:
     env:
       CHANNEL: ${{ inputs.channel || 'nightly' }}
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
+      GH_API_URL: ${{ github.api_url }}
     steps:
       - name: Require the default branch
         if: github.ref_name != github.event.repository.default_branch
@@ -59,7 +60,11 @@ jobs:
           set -euo pipefail
           release=true
           if [ "${CHANNEL}" = nightly ]; then
-            latest="$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // ""')"
+            latest="$(curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
+              | jq -r '[.[] | select(.draft == false)] | .[0].tag_name // ""')"
             if [ -n "${latest}" ]; then
               release="$(scripts/release/code-changed "${latest}" "${GITHUB_SHA}")"
               if [ "${release}" != true ]; then
@@ -79,9 +84,15 @@ jobs:
         if: steps.changes.outputs.release == 'true'
         run: |
           set -euo pipefail
-          version="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" \
-            --jq '.[].ref | ltrimstr("refs/tags/")' | scripts/release/version "${CHANNEL}")"
+          version="$(git tag --list 'v*' | scripts/release/version "${CHANNEL}")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            registry=ghcr.io
+            maven="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
+          else
+            registry="${GITHUB_SERVER_URL#*://}"
+            maven="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven"
+          fi
           if [ "${CHANNEL}" = stable ]; then echo channel=latest; else echo "channel=${CHANNEL}"; fi >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/notes"
           {
@@ -89,9 +100,9 @@ jobs:
             echo
             echo "### Packages"
             echo
-            echo "- \`ghcr.io/bierdav/rocky-db-coordinator:${version}\`"
-            echo "- \`ghcr.io/bierdav/rocky-db-peer:${version}\`"
-            echo "- Maven \`https://maven.pkg.github.com/${GITHUB_REPOSITORY}\`: \`rocky:rocky-core-jvm\`,"
+            echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
+            echo "- \`${registry}/bierdav/rocky-db-peer:${version}\`"
+            echo "- Maven \`${maven}\`: \`rocky:rocky-core-jvm\`,"
             echo "  \`rocky:rocky-core-android\`, \`rocky:rocky-sqlite\`, \`rocky:rocky-room\` and"
             echo "  \`rocky:rocky-runtime-android\`, version \`${version}\`"
           } > "$RUNNER_TEMP/notes/notes.md"
@@ -108,8 +119,6 @@ jobs:
     needs: version
     if: needs.version.outputs.release == 'true'
     uses: ./.github/workflows/check.yml
-    with:
-      slow: true
 
   coordinator-image:
     name: Coordinator image
@@ -118,6 +127,8 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/coordinator-image.yaml
+    # Gitea's registry takes the PACKAGE_TOKEN secret.
+    secrets: inherit
     with:
       version: ${{ needs.version.outputs.version }}
       channel: ${{ needs.version.outputs.channel }}
@@ -129,6 +140,7 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/peer-image.yaml
+    secrets: inherit
     with:
       version: ${{ needs.version.outputs.version }}
       channel: ${{ needs.version.outputs.channel }}
@@ -150,6 +162,14 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
+      # The Gitea macOS runner is a service without a login environment.
+      - name: Use the Gitea runner's tools
+        if: github.server_url != 'https://github.com' && runner.os == 'macOS'
+        run: |
+          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
+          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
+
       - name: Download the exact source revision
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,13 +190,28 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Gitea's runner image runs as root without sudo and a package index.
       - name: Install native build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get install --yes --no-install-recommends libclang-dev pkg-config
+        run: |
+          set -euo pipefail
+          sudo="$(command -v sudo || true)"
+          ${sudo} apt-get update
+          ${sudo} apt-get install --yes --no-install-recommends libclang-dev pkg-config
 
       - name: Install the repository toolchain
         working-directory: source
-        run: rustup show active-toolchain
+        run: |
+          set -euo pipefail
+          # Gitea's runner image has no rustup.
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+            rustup toolchain install
+          fi
+          rustup show active-toolchain
 
       - name: Package and qualify the SDK
         working-directory: source
@@ -247,18 +282,34 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # Gitea's runner image has no Android SDK.
+      - uses: android-actions/setup-android@v3
+        if: github.server_url != 'https://github.com'
+        with:
+          packages: ""
+
       # The versions docs/runtime/android.md names.
       - name: Install the Android platform and NDK
         run: |
           set -euo pipefail
-          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          sdkmanager="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
           yes | "${sdkmanager}" --licenses > /dev/null || true
           "${sdkmanager}" --install "platforms;android-35" "ndk;28.2.13676358"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - name: Install the repository toolchain
         working-directory: source
-        run: rustup show active-toolchain
+        run: |
+          set -euo pipefail
+          # Gitea's runner image has no rustup.
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+            rustup toolchain install
+          fi
+          rustup show active-toolchain
 
       # Maven local keeps the development version the toolchain verifies; the
       # staging repository holds the release version.
@@ -339,6 +390,7 @@ jobs:
       # after five retries (run 37939385427); retry the fetch instead of
       # re-running the whole workflow.
       - name: Download the release artifacts
+        if: github.server_url == 'https://github.com'
         env:
           GH_REPO: ${{ github.repository }}
         run: |
@@ -355,15 +407,43 @@ jobs:
           done
           exit 1
 
+      # Gitea has no `gh`; the same layout as `gh run download`.
+      - uses: actions/download-artifact@v4
+        if: github.server_url != 'https://github.com'
+        with:
+          name: notes
+          path: dist/notes
+
+      - uses: actions/download-artifact@v4
+        if: github.server_url != 'https://github.com'
+        with:
+          name: android
+          path: dist/android
+
+      - uses: actions/download-artifact@v4
+        if: github.server_url != 'https://github.com'
+        with:
+          pattern: jvm-*
+          path: dist
+
       - name: Publish the Maven artifacts
+        env:
+          MAVEN_USER: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
+          MAVEN_TOKEN: ${{ github.server_url == 'https://github.com' && github.token || secrets.PACKAGE_TOKEN }}
         run: |
           set -euo pipefail
+          if [ "${GITHUB_SERVER_URL}" = https://github.com ]; then
+            export MAVEN_URL="https://maven.pkg.github.com/${GITHUB_REPOSITORY}"
+          else
+            export MAVEN_URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven"
+          fi
           source/scripts/release/jvm-maven "${VERSION}" dist/maven-jvm \
             dist/jvm-darwin-aarch64/rocky-core-jvm.jar dist/jvm-linux-x86-64/rocky-core-jvm.jar
           source/scripts/release/maven-deploy dist/maven-jvm \
             dist/android/release-maven dist/android/packaged-android/maven
 
       - name: Create the GitHub release
+        if: github.server_url == 'https://github.com'
         run: |
           set -euo pipefail
           if [ "${CHANNEL}" = latest ]; then
@@ -378,14 +458,63 @@ jobs:
             --notes-file dist/notes/notes.md \
             dist/jvm-*/rocky-kotlin-sdk-*.tar.gz
 
-      # Nightly GitHub releases and tags are kept for two weeks of builds;
-      # their package versions stay in GitHub Packages.
-      - name: Prune old nightly releases
-        if: needs.version.outputs.channel == 'nightly'
+      - name: Create the Gitea release
+        if: github.server_url != 'https://github.com'
+        env:
+          GH_API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: token ${GH_TOKEN}" "$@"
+          }
+          prerelease="$([ "${CHANNEL}" = latest ] && echo false || echo true)"
+          payload="$(jq -n \
+            --arg tag "v${VERSION}" \
+            --arg target "${GITHUB_SHA}" \
+            --rawfile body dist/notes/notes.md \
+            --argjson prerelease "${prerelease}" \
+            '{tag_name: $tag, target_commitish: $target, name: $tag, body: $body, draft: false, prerelease: $prerelease}')"
+          id="$(api --request POST --header 'Content-Type: application/json' --data "${payload}" \
+            "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases" | jq -r .id)"
+          for asset in dist/jvm-*/rocky-kotlin-sdk-*.tar.gz; do
+            api --request POST --form "attachment=@${asset}" \
+              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${id}/assets?name=$(basename "${asset}")" > /dev/null
+          done
+
+      # Nightly releases and tags are kept for two weeks of builds; their
+      # package versions stay in the package registry.
+      - name: Prune old nightly GitHub releases
+        if: github.server_url == 'https://github.com' && needs.version.outputs.channel == 'nightly'
         run: |
           set -euo pipefail
           gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName,createdAt \
             --jq '[.[] | select(.tagName | test("-nightly\\."))] | sort_by(.createdAt) | reverse | .[14:] | .[].tagName' \
           | while read -r tag; do
               gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+            done
+
+      - name: Prune old nightly Gitea releases
+        if: github.server_url != 'https://github.com' && needs.version.outputs.channel == 'nightly'
+        env:
+          GH_API_URL: ${{ github.api_url }}
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: token ${GH_TOKEN}" "$@"
+          }
+          page=1
+          : > "$RUNNER_TEMP/releases"
+          while :; do
+            api "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases?per_page=50&page=${page}" > "$RUNNER_TEMP/page"
+            [ "$(jq length "$RUNNER_TEMP/page")" -gt 0 ] || break
+            jq -c '.[]' "$RUNNER_TEMP/page" >> "$RUNNER_TEMP/releases"
+            page=$((page + 1))
+          done
+          jq -rs '[.[] | select(.tag_name | test("-nightly\\."))] | sort_by(.created_at) | reverse | .[14:] | .[].tag_name' \
+            "$RUNNER_TEMP/releases" \
+          | while read -r tag; do
+              api --request DELETE "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
+              api --request DELETE "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/tags/${tag}"
             done

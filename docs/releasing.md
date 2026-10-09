@@ -1,13 +1,11 @@
 # Releasing
 
 The [Release workflow](../.github/workflows/release.yml) publishes every artifact of one
-commit of `main` under one version, to GitHub Packages and a GitHub release.
-
-The Gitea mirror runs [its own nightly workflow](../.gitea/workflows/nightly-release.yml).
-It checks the full repository on the registered macOS runner and creates a Gitea
-prerelease with the same version and notes policy. Gitea generates source archives
-for that release; the GitHub workflow remains responsible for the published SDK,
-container and Maven packages.
+commit of `main` under one version, to the packages and releases of the forge it runs on:
+GitHub, or the Gitea mirror ([CI on Gitea](development.md#gitea)). The tables below name the
+GitHub locations; on Gitea, images are `gitea.quickme.at/bierdav/<image>` and the Maven
+repository is `https://gitea.quickme.at/api/packages/bierdav/maven`, both published with the
+`PACKAGE_TOKEN` secret.
 
 ## Triggers and channels
 
@@ -67,11 +65,12 @@ dependencies { implementation("rocky:rocky-core-jvm:0.1.0-alpha.1") }
 ## Pipeline
 
 1. Version: decides whether to release and computes the version and notes.
-2. The [shared checks](development.md#shared-checks); the images wait for them.
+2. The [shared checks](development.md#shared-checks), without the soak tests; the images
+   wait for them.
 3. In parallel: both images, the JVM SDK packaged and qualified per platform, and the Android
    runtime and SDK built at the release version (`-ProckyVersion`, `ROCKY_VERSION`).
 4. Publish: merges the JVM natives into one jar (`scripts/release/jvm-maven`), uploads every Maven
-   artifact (`scripts/release/maven-deploy`), then creates the tag and GitHub release last.
+   artifact (`scripts/release/maven-deploy`), then creates the tag and release last.
 
 A failed run publishes no release or tag; rerunning it computes the same version. Images are
 retagged and Maven uploads that already exist are skipped, since package versions are immutable.

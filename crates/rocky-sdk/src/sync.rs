@@ -174,6 +174,7 @@ async fn rows(
                     && replica.finalized_horizon(*scope).await?.as_ref() != Some(&signed)
                     && !replica.horizon_rebootstrap_required(*scope).await?
                     && replica.horizon_progress(*scope).await?.waiting.is_empty()
+                    && !replica.horizon_dependents_pending(*scope).await?
                 {
                     replica.finalize_horizon(*scope).await?;
                     replica.prune(*scope).await?;

@@ -22,8 +22,12 @@ impl NativeSession {
                 frontiers.push(replica.frontier(*scope).await?);
             }
             validate_frontiers(&frontiers)?;
+            let partitions = replica
+                .custody_offers(self.peer, &self.credentials, &batch)
+                .await?;
             self.send(&Message::FrontiersQuery {
                 frontiers: frontiers.clone(),
+                partitions,
             })
             .await?;
             let Message::Frontiers { states } = self.receive().await? else {

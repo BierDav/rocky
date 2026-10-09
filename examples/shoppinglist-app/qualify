@@ -1,0 +1,11 @@
+#!/bin/sh
+# Multi-process shopping qualification: device JVMs and the packaged rocky-peer
+# custody launcher. Evidence goes to $ROCKY_EVIDENCE (default local/shopping-qualification).
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+# The custody peer is the packaged launcher; the application has no Rust source.
+cargo build --locked -p rocky-sdk --bin rocky-peer
+ROCKY_PEER="$repo_root/target/debug/rocky-peer" \
+ROCKY_EVIDENCE="${ROCKY_EVIDENCE:-$repo_root/local/shopping-qualification}" \
+    ./kotlin run -m qualification

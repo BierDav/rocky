@@ -907,6 +907,25 @@ mod partition_tests {
         );
     }
     #[test]
+    fn partitioned_confirmed_rows_are_refused_on_every_profile() {
+        let mut confirmed = definition();
+        confirmed.tables[0].class = TableClass::ConfirmedReadOnly;
+        let schema = confirmed.build().unwrap();
+        for profile in [crate::Profile::Secure, crate::Profile::Trusted] {
+            assert!(
+                matches!(
+                    schema.supported_on(profile),
+                    Err(SchemaError::Incompatible {
+                        reason: crate::Incompatibility::TableClass(TableClass::ConfirmedReadOnly),
+                        ..
+                    })
+                ),
+                "{profile:?}: {:?}",
+                schema.supported_on(profile)
+            );
+        }
+    }
+    #[test]
     fn existence_logs_bind_the_manifest_and_refuse_nondeterministic_support_rows() {
         let shop = |lists: &str, extra: &str| {
             format!(

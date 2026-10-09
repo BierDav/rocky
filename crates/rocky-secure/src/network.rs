@@ -127,6 +127,8 @@ enum Message {
     },
     FrontiersQuery {
         frontiers: Vec<ScopeFrontier>,
+        /// Tuples offered to a keyless custody peer; see decision 0045.
+        partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
     },
     Frontiers {
         states: Vec<FrontierState>,
@@ -324,7 +326,7 @@ impl NativeSession {
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
         parts.sort_by_key(|(key, _)| *key);
         // The current wire label refuses every other session format.
-        let binding = signing_bytes("rocky.native-session.v5", &parts)?;
+        let binding = signing_bytes("rocky.native-session.v6", &parts)?;
         write_frame(&mut stream, &encode(&local.sign(&binding))?).await?;
         let signature: Signature = decode(&read_frame(&mut stream).await?)?;
         if !peer.node.verify(&binding, &signature) {
@@ -1517,7 +1519,14 @@ impl NativeSession {
                     .await?;
                 self.send(&Message::Acknowledged).await
             }
-            Message::FrontiersQuery { frontiers } => {
+            Message::FrontiersQuery {
+                frontiers,
+                partitions,
+            } => {
+                let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+                replica
+                    .accept_custody_offers(self.peer, &self.credentials, &scopes, &partitions)
+                    .await?;
                 let states = replica
                     .exchange_frontiers(self.peer, &self.credentials, &frontiers)
                     .await?;

@@ -339,7 +339,8 @@ build, package and qualify the SDK ([build tooling](../sdks/kotlin/README.md#bui
 
 `examples/shoppinglist-app` is a Kotlin-only Compose Multiplatform consumer whose typed Room entities
 and DAOs run on Rocky's file, with a small repository, shared screen and QRKit helper;
-`androidApp` is its Android app. Its exported Room
+`androidApp` is its Android app, and `qualification` the multi-process
+[shopping qualification](runtime/shopping-qualification.md) harness. Its exported Room
 schema qualifies Kotlin import. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
 driver's pinned acceptance fixture and runs the same DAOs on Rocky's file.
 `sdks/kotlin/schema-qualification` supplies Room-generated

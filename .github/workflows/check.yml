@@ -40,3 +40,31 @@ jobs:
       - name: Run shared checks
         working-directory: source
         run: ./scripts/check
+
+  shopping:
+    # Multi-process shopping qualification: device JVMs and the packaged custody peer.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Install the repository toolchain
+        working-directory: source
+        run: rustup show active-toolchain
+
+      - name: Run the shopping qualification
+        working-directory: source
+        run: ./examples/shoppinglist-app/qualify

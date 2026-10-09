@@ -102,6 +102,32 @@ If the only copy is destroyed, strong progress for that domain stops explicitly
 from a commitment. Enroll custodians before revoking devices: a device enrolled after
 a revocation cannot sync earlier mergeable rows ([limits](credentials.md#limits)).
 
+## Share lists without a coordinator
+
+A mergeable-only app needs no coordinator. The [shopping example](../../examples/shoppinglist-app/README.md)
+puts a list, its categories and items in one partition group, so one secret per
+list derives every table's key:
+
+1. `partitions.next("lists")` prepares a new list's secret; insert the list in
+   the same transaction that reserves its id.
+2. On an issuer, `partitions.share("list", values, nodes)` returns one envelope
+   per device; the app delivers it and the device calls `install` and
+   `bootstrap`. Accept several lists before syncing if you like.
+3. Run the packaged [custody peer](always-on-peer.md) with the same schema JSON
+   and add its contact on each device. Phones that are never online together
+   then sync through it; it learns new lists from the devices and reads nothing.
+4. `moveRow` moves an item to another list in one commit; an offline edit to it
+   follows it.
+5. Revoking a device rotates every list. Share each list it held again with the
+   remaining devices.
+6. A horizon declares per table and list. Finalize items, then categories, then
+   lists. Each participant syncs with an issuer to acknowledge: custody does not
+   relay horizons.
+
+`./examples/shoppinglist-app/qualify` runs exactly this with each device in its
+own process; the [shopping qualification](shopping-qualification.md) records
+what is proven.
+
 ## Limits
 
 A device keeps strong command payloads behind a result window (256 by
@@ -112,5 +138,6 @@ rewrites the device's coordinator evidence file. Plan strong commands for
 low-volume transitions; see the [measured limits](end-to-end-evidence.md#device-limits).
 
 Qualified on JVM desktop, macOS arm64 and Linux x86_64, loopback only.
-[Android](android.md) has one emulator and one LAN phone run. No Internet
+[Android](android.md) has one emulator and one LAN phone run; the two-phone
+shopping run is [outstanding](shopping-qualification.md#outstanding). No Internet
 relay/NAT, iOS, web or cross-provider migration claim.

@@ -1,114 +1,125 @@
 # Shopping qualification
 
-Incomplete; audited on 2026-10-08. This is not a release qualification. The [current roadmap](../features_06/README.md)
-schedules the missing partition-aware constraints.
+Qualified on 2026-10-09 by [phase 10](../features_06/10-qualification.md) on
+the JVM desktop profile (macOS arm64, loopback TCP), with each device in its own
+process, and its sharing and move steps on two Android emulators. Phone runs, the
+market scenario and horizons through custody alone are [outstanding](#outstanding). This is not an Internet, NAT or relay claim.
 
-## Required schema installs
+## Commands
 
-```sh
-./kotlin run -m requiredSchema
-```
+| Command | Runs |
+| --- | --- |
+| `./examples/shoppinglist-app/qualify` | Builds the packaged `rocky-peer`, then the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt): every device is a JVM running the app's Room repository; evidence in `local/shopping-qualification/evidence.json` |
+| `cargo test -p rocky-sdk --test shopping_release` | The release gate, a checkpoint join after a move and custody restart, in `./scripts/check` |
+| `./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
+| `./kotlin check qualify -m schema-qualification` | Hand/Room equivalence and every partitioned refusal |
+| `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
 
-Since [phase 7](../features_06/07-builder-room-and-shopping-schema.md) the
-Kotlin-only [required definition](../../examples/shoppinglist-app/requiredSchema/src/RequiredSchema.kt)
-builds: `lists`, `categories` and `items` in the `list` group, a `LatestWins`
-unique index on `(list, title)`, a cascading list reference and a nullable
-`(list, category)` reference with `SET NULL`. It equals the import of the app's
-Room export, and the native runtime installs either and reopens with the other.
-`./examples/shoppinglist-app/check` runs it first. Partitioned `SetNull`
-indexes, references across groups, existence logs and command control stay
-refused ([mergeable constraints](mergeable-constraints.md)).
+`ROCKY_SCENARIOS=gate,relink` selects harness scenarios. The application
+modules contain no Rust source; the custody process is the packaged launcher
+([always-on peer](always-on-peer.md)).
+
+## Release gate
+
+The harness's `gate` scenario: phones A and B are never online together and
+meet only the custody process, which restarts in between. A and B share three
+lists through the Share button's codes, add the same title offline (one survives
+by `LatestWins`), and A moves an item B ticked offline: the item arrives in the
+other list ticked, its category nulled. Deleting a category nulls only
+`items.category`; deleting a list cascades to its items. A horizon on all nine
+group-partition table scopes finalizes on A and B, and phone C, which joined from
+checkpoints and stayed offline across the horizon, rebootstraps to the finalized
+state. `two_phones_never_online_together_pass_the_release_gate_through_custody`
+repeats it natively. Measured: see [evidence](#evidence).
+
+For the horizon, B meets A directly; see [outstanding](#outstanding).
 
 ## Acceptance scenarios
 
-The deliverable is the shopping-list application as a packaged Kotlin app with no
-Rust source: Room DAOs on Rocky's file through the driver, `lists` partitioned by
-its own `id` and `items` by `list`, per-list sharing through partition grants and
-key envelopes, two Android devices, a packaged always-on custody peer and a second
-issuing device. It is mergeable-only and needs no coordinator; the market app
-covers strong commands.
+The deliverable is the shopping-list application as a packaged Kotlin app with
+no Rust source: Room DAOs on Rocky's file, lists, categories and items in one
+partition group, per-list sharing through one envelope, a packaged always-on
+custody peer and a second issuing device. It is mergeable-only and needs no
+coordinator; the market app covers strong commands.
 
-1. Two phones never online together share one list through the custody peer; a
-   third device joins from a checkpoint and catches up.
-2. A list is shared with one device and not another; the other never receives
-   its frames. Revocation rotates the partition key.
-3. An item is unlinked and relinked offline on two devices and converges; a
-   duplicate title under the list's unique index converges by policy.
-4. The creator phone is lost; the second device invites and renews.
-5. A horizon drops tombstones on every device and a long-offline phone
-   rebootstraps.
-6. Market: 4,096 confirmed commands without hitting the budget; a DAO reads
-   confirmed stock; a handler reads by key.
-7. An ERP-shaped schema with a cross-scope foreign key and 200 partitions on one
-   device, against [the budget](partitioned-scopes.md#limits-and-budget).
+| Scenario | Evidence | Status |
+| --- | --- | --- |
+| 1 Phones alternate through custody; checkpoint join | Harness `gate`; native `shopping_release` | Passed on JVM processes |
+| 2 Per-list exclusion and revocation | Harness `exclusion-revocation`; `group_secrets` tests | Passed on JVM processes |
+| 3 Offline relink and duplicate title policy | Harness `relink` and `gate` | Passed on JVM processes |
+| 4 Creator loss; second issuer invites and renews | Harness `creator-loss`; `IssuerRecoveryTest` | Passed on JVM processes |
+| 5 All-device horizon and long-offline rebootstrap | Harness `gate` | Passed on JVM processes |
+| 6 Market 4,096 commands, DAO stock, keyed read | Secure 4,100-command test only | [Outstanding](#outstanding) |
+| 7 ERP fixture, 200 partitions | `measure_200_partition_group_sync`, `erp_group_sync_preserves_all_references_and_reopens` | Measured; see [evidence](#evidence) |
 
-The deterministic multi-process scenarios run in CI; one real Android run with a
-real network is recorded separately. Loopback evidence does not establish
-Internet readiness.
+## Partitioned constraints acceptance
 
-## Remaining acceptance work
-
-| Scenario | Status |
+| # | Evidence |
 | --- | --- |
-| 1 Phones alternate through custody; checkpoint join | Partitioned Room app and multi-process scenario outstanding; one-phone LAN run only |
-| 2 Per-list exclusion and revocation | The app shares a list with one envelope; JVM tests share, rotate and reshare; per-device exclusion on phones outstanding |
-| 3 Offline relink and duplicate title policy | Schema installs from Room; native per-partition convergence tested in `rocky-secure`; app scenario outstanding |
-| 4 Creator loss; second issuer invites and renews | `IssuerRecoveryTest` runs it on the partitioned app schema on the JVM; devices outstanding |
-| 5 All-device tombstone finalization and rebootstrap | Horizon regressions exist; app scenario outstanding |
-| 6 Market 4,096 commands, DAO stock, keyed read | Secure 4,100-command test exists; packaged scenario outstanding |
-| 7 ERP cross-scope foreign key with 200 partitions | Partition probe and unpartitioned existence tests are separate; combined fixture outstanding |
+| 1 | `./kotlin run -m requiredSchema` passes |
+| 2 | `partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen`; harness `gate` |
+| 3 | `partition_frames_keys_custody_sql_and_checkpoints_are_isolated`; harness `exclusion-revocation` |
+| 4 | `group_references_hold_cascade_and_null_only_category_per_partition`, `group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step`; harness `gate` |
+| 5 | `partition_checkpoint_rebuilds_keyless_support_and_base_import_preserves_unrelated_graph`, the eviction cases above; `a_device_joining_after_a_move_starts_the_list_from_a_checkpoint` |
+| 6 | The ERP measurement below, against [the budget](partitioned-scopes.md#limits-and-budget) |
+| 7 | [Refusal regressions](#refusal-regressions) |
 
-None of the seven multi-process scenarios is implemented or run in CI. The
-Android app now builds on the required version-3 definition, but no phone run
-used it, and no device driver is in the tree. A single-phone LAN run cannot
-establish the two-phone custody topology or Internet/NAT/relay readiness.
+## Move acceptance
 
-## Physical-device run, 2026-10-08
-
-The since-removed Android device driver passed on a Pixel 11 Pro (Android 17,
-API 37, `arm64-v8a`) using direct TCP to `192.168.0.186`. Apps were installed over USB; their traffic
-used direct TCP over home Wi-Fi to a macOS arm64 host peer on the packaged JVM SDK.
-Three apps ran: the Gradle `todo` and `shopping` consumers of the packaged AAR, and `compose`,
-the [Compose Multiplatform app](../../examples/shoppinglist-app/androidApp) built by the
-Kotlin toolchain from the shared shopping module.
-
-| Check | Result |
+| # | Evidence |
 | --- | --- |
-| Instrumentation, debug and R8 release | Packaged consumer, Keystore store (non-exportable key, security level 1), missing-secret refusal and lifecycle reopen passed |
-| todo: join / phone→host / background then foreground / kill then restart | 7.2 s / 2.3 s / 7.3 s / 7.3 s |
-| shopping (Room DAOs on Rocky's file): same steps | 3.7 s / 0.2 s / 3.7 s / 1.9 s |
-| compose (same DAOs, Compose UI): same steps | 3.7 s / 2.5 s / 2.5 s / 1.3 s |
-| Secrets | 7 sealed secrets per app under `no_backup/rocky-secrets`; no plaintext directory |
+| 1 | `foreign_author_move_follows_offline_edit_once_and_keeps_identity`; harness `gate` |
+| 2, 3 | `source_only_author_drops_offline_update_and_cannot_open_destination` |
+| 4 | `destination_edit_with_later_stamp_wins_over_offline_update` |
+| 5 | `attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuilds` |
+| 6 | `missing_child_holding_and_interrupted_move_leave_everything_unchanged` |
 
-During the background step, the host wrote a row and the paused app did not receive
-it within 3 s; it received the row after returning to the foreground. Timings are single
-samples of the polling driver on a lossy home network, not latency measurements; an
-earlier passing run measured 0.7 s for each todo step.
+`six_scenarios_across_device_processes` runs all six with each device in its own
+process. Phone runs are outstanding.
 
-Findings fixed on the way:
+## Refusal regressions
 
-- Each issuing app claimed the SDK's default `127.0.0.1:47470`; a cold-started second
-  app failed with `Address already in use`. The examples now listen on an ephemeral
-  loopback port, since the phone only dials.
-- Android 17 gates LAN connections behind the runtime `ACCESS_LOCAL_NETWORK`
-  permission for apps targeting API 37. The Compose app targets it and requests the
-  permission before opening; the Gradle apps target API 35. Without it, joins time out
-  as `peer unreachable`.
+Each shape under [not requested](../features_06/scope-partitioned-constraints.md#not-requested)
+and every reference between groups is refused natively and in Kotlin:
 
-One run failed while the Wi-Fi was degraded (phone→host pings 100% then 50% lost): the
-todo join's 30 s pairing exchange (`enrollment::exchange`) elapsed and the app
-reported `open failed`; a repeat at 50% loss failed the same way. The same build passed
-every step in under a second over USB loopback (`adb reverse`), so these are network
-failures. The examples do not retry a failed join. Such timeouts surface as
-`deadline has elapsed` rather than a classified unreachable error.
+| Shape | Native | Kotlin (`schema-qualification`) |
+| --- | --- | --- |
+| Uniqueness across partitions | `partitioned_tables_refuse_incomplete_indexes_references_and_command_control` | `must include every partition column` |
+| `RESTRICT` | `partitioned_foreign_keys_refuse_restrict` | Room `onDelete RESTRICT` |
+| Natural-key reference | `partitioned_foreign_keys_refuse_natural_keys` | builder and Room identity messages |
+| Partitioned command control | as uniqueness | `cannot be command-controlled` |
+| Confirmed rows of a partitioned table | `partitioned_confirmed_rows_are_refused_on_every_profile` | `cannot hold confirmed rows` |
+| Reference between groups | `foreign_keys_refuse_different_partition_groups`, `foreign_keys_refuse_unlogged_parent_outside_group` | `needs the same explicit partition group` |
 
-This is one phone and one host on one LAN, with the version-2 unpartitioned shopping schema.
+## Defects fixed during qualification
 
-## Resumption boundary
+- A keyless custody peer could not hold a list created after it enrolled, and a
+  device syncing with it failed its whole batch as an end of file. Devices now
+  offer partition tuples to custody ([decision 0045](../decisions/0045-custody-partition-offers.md)).
+- Accepting a second list while a checkpoint-first bootstrap waited for a
+  checkpoint peer was refused; it now joins the pending intent.
+- Importing a checkpoint of a list an item had moved out of failed on the
+  imageless tombstone, so no device could start that list from a checkpoint.
+- A participant finalized a parent table before its child, after which the
+  child's horizon could never be acknowledged. Finalization now waits for
+  pending dependent children ([horizon](mergeable-horizon.md#dependencies-and-ordering)).
+- The Share button shared with the custody peer, which holds no key, and
+  failed; it now skips custody devices.
+- The trusted profile installed a partitioned confirmed table.
+- The Compose screen crashed when a DAO flow's read transaction met an
+  authority change or an incomplete list; the repository observes again.
 
-Implement partition-aware unique/FK resolution, row identities in candidate and
-support bookkeeping, and checkpoint/horizon finalization without crossing
-partition authority. Qualify refusal and convergence before lifting the guards.
-Then migrate the Room entities and repository to the required schema, compose
-explicit per-list grants/envelopes and custody, build all seven process
-scenarios, wire them into CI and record the Android topology separately.
+## Evidence
+
+Recorded on 2026-10-09; see the [phase brief](../features_06/10-qualification.md#evidence).
+
+## Outstanding
+
+| Scenario | Blocking contract |
+| --- | --- |
+| Two-phone runs of the gate, moves and revocation | Two physical Android phones on the qualification host, running the [device procedure](shopping-devices.md#two-phone-procedure). Only one phone, in personal use, was attached; the procedure [passed on two emulators](shopping-devices.md#emulator-pair-2026-10-09) |
+| 6 Market | A packaged market application on a coordination service; strong commands are outside [features_06](../features_06/README.md) |
+| Horizon through custody alone | A keyless node that admits signed horizon statements and forwards participants' signed acknowledgments; no such contract exists, so participants meet an issuer |
+| Internet, NAT and relays | A run over iroh relays between networks; only loopback and one LAN were used |
+
+The earlier single-phone LAN run is recorded in [shopping devices](shopping-devices.md).

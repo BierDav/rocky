@@ -1,9 +1,10 @@
 # features_06: constraints, groups and moves on partitioned tables
 
-Status: sequenced on 2026-10-08. Phase 1 passed its completion gate on
-2026-10-09; each brief records its own status. This is the next-work authority.
-It completes the shopping qualification, whose evidence is in
-[the audit](../runtime/shopping-qualification.md).
+Status: sequenced on 2026-10-08. Phases 1 to 9, 11 and 12 passed their
+completion gates on 2026-10-09; [phase 10](10-qualification.md) passed its JVM
+and emulator gate, with the two-phone runs, the market scenario and horizons
+through custody alone outstanding. Each brief records its own status. This is
+the next-work authority. Evidence is in [the audit](../runtime/shopping-qualification.md).
 
 Read the two scopes first; every brief links their sections instead of
 repeating them:

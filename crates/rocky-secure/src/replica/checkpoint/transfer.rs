@@ -512,7 +512,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 cursor = Some(*row);
                 sets.replace(row, None, fields)?;
                 let record = decode::<Materialized>(fields)?;
-                if let Some(tuple) = &staging.signed.statement.partition {
+                // A row moved out leaves a tombstone without an image.
+                if let Some(tuple) = &staging.signed.statement.partition
+                    && !(record.deleted && record.fields.is_empty())
+                {
                     let change = RowChange {
                         scope: staging.signed.statement.scope,
                         row: record

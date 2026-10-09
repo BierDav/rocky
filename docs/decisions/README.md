@@ -20,9 +20,10 @@ naturally holds.
 | [0042](0042-bounded-strong-cut.md) | A strong cut named by its checkpoint base |
 | [0043](0043-partition-horizon-state.md) | Partition horizon state and pending dependency index |
 | [0044](0044-group-frontier-exchange.md) | Bounded authenticated group frontier exchange |
+| [0045](0045-custody-partition-offers.md) | Custody partition offers in native session v6 |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
-not reused. 0038 is reserved for row moves; the next unreserved record is 0045.
+not reused. 0038 is reserved for row moves; the next unreserved record is 0046.
 
 ## Rationale by topic
 

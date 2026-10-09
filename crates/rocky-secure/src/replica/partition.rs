@@ -521,3 +521,153 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(batches)
     }
 }
+
+/// Custody of a partition without read: the grants of a keyless custody node.
+fn custody_only(grants: &[rocky_core::ResourceGrant]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant.rights.contains(&Right::Custody))
+        && !grants
+            .iter()
+            .any(|grant| grant.rights.contains(&Right::Read))
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// `chain`'s grants on one concrete partition, under the policy of its generation.
+    fn partition_grants(
+        &self,
+        chain: &CredentialChain,
+        key: PublicKey,
+        scope: ResourceScope,
+        tuple: &PartitionTuple,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let manifest = chain
+            .0
+            .first()
+            .map_or(self.manifest, |root| root.capability.manifest);
+        let policy = self.credential_policy(manifest, &self.config.policy.statement)?;
+        chain
+            .verify_partition(
+                self.config.publisher,
+                manifest,
+                key,
+                scope,
+                tuple,
+                &policy,
+                now()?,
+            )
+            .map_err(credential)
+    }
+}
+
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// The partition tuples of `scopes` that `peer` may hold only as keyless
+    /// custody. Revealed to that peer alone, so it can register partitions
+    /// created after it enrolled (`docs/decisions/0045-custody-partition-offers.md`).
+    pub(crate) async fn custody_offers(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<(ResourceScope, PartitionTuple)>, Error> {
+        let inner = self.inner.lock().await;
+        let manifest = credentials
+            .0
+            .first()
+            .map_or(inner.manifest, |root| root.capability.manifest);
+        // One chain verification per batch. A peer without custody, or of a
+        // generation this replica cannot verify, gets no offer.
+        let Ok(policy) = inner.credential_policy(manifest, &inner.config.policy.statement) else {
+            return Ok(Vec::new());
+        };
+        let Ok((_, selectors)) =
+            credentials.verify_selectors(inner.config.publisher, manifest, peer, &policy, now()?)
+        else {
+            return Ok(Vec::new());
+        };
+        if !selectors
+            .iter()
+            .any(|selector| selector.rights.contains(&Right::Custody))
+        {
+            return Ok(Vec::new());
+        }
+        let mut offers = Vec::new();
+        for scope in scopes {
+            let Some(tuple) = inner.partitions.get(scope) else {
+                continue;
+            };
+            let mut grants = Vec::new();
+            for selector in &selectors {
+                if let Ok(Some(grant)) = selector.resolve(scope.domain, scope.table, tuple) {
+                    grants.push(grant);
+                }
+            }
+            if custody_only(&grants) {
+                offers.push((*scope, tuple.clone()));
+            }
+        }
+        Ok(offers)
+    }
+    /// Registers offered partitions this node holds only as keyless custody,
+    /// from a peer authorized to read or keep each of them. Other offers are
+    /// refused; a known partition is unchanged.
+    pub(crate) async fn accept_custody_offers(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scopes: &[ResourceScope],
+        offers: &[(ResourceScope, PartitionTuple)],
+    ) -> Result<(), Error> {
+        if offers.len() > scopes.len() {
+            return Err(denied("partition offers outside the frontier batch"));
+        }
+        let mut inner = self.inner.lock().await;
+        let mut accepted = Vec::new();
+        for (scope, tuple) in offers {
+            if !scopes.contains(scope) {
+                return Err(denied("partition offers outside the frontier batch"));
+            }
+            if inner.partitions.contains_key(scope) {
+                continue;
+            }
+            inner.check_tuple(*scope, tuple)?;
+            let own = inner.config.node.public_key();
+            let held = inner.partition_grants(&inner.config.credentials, own, *scope, tuple)?;
+            if !custody_only(&held) {
+                return Err(denied(
+                    "only a keyless custody node registers offered partitions",
+                ));
+            }
+            let sender = inner.partition_grants(credentials, peer, *scope, tuple)?;
+            if !sender.iter().any(|grant| {
+                grant.rights.contains(&Right::Read) || grant.rights.contains(&Right::Custody)
+            }) {
+                return Err(denied(
+                    "partition offer from a peer without read or custody",
+                ));
+            }
+            accepted.push((*scope, tuple.clone()));
+        }
+        if accepted.is_empty() {
+            return Ok(());
+        }
+        if inner.partitions.len() + accepted.len() > 4096 {
+            return Err(Error::Backpressure);
+        }
+        transaction!(inner, |inner| {
+            for (scope, tuple) in &accepted {
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_partitions VALUES(?,?)",
+                        [encode(scope)?, encode(tuple)?],
+                    )
+                    .await?;
+            }
+            Ok(())
+        })?;
+        inner.partitions.extend(accepted);
+        inner.bump_authority();
+        Ok(())
+    }
+}

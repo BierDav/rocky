@@ -11,7 +11,9 @@ is for an author who schedules horizons, syncs across one, or changes the format
 1. Sync the scope and its row/existence dependencies. `horizon_statement(scope,
    peers)` captures a proposal from verified peer credential chains (at most 64
    peers); the manifest publisher signs it outside the DB transaction and
-   distributes it through `receive_horizon`.
+   distributes it through `receive_horizon`. Statements and acknowledgments
+   travel between a participant and the peer it syncs with. A keyless custody
+   peer relays neither, so each participant meets an issuer.
 2. Participants sync missing cut evidence, then `acknowledge_horizon` and
    `receive_horizon_ack`. Exact row heads/digests and every existence cut must
    match. A holder already ahead of the cut refuses the proposal and imports the
@@ -49,7 +51,9 @@ identity marks with their signing keys.
   dependent child cuts; child-only holders import that base, without a parent
   row key, before acknowledging the child.
 - For unlogged same-reader parents, finalize dependent children before the
-  parent removes their captured input.
+  parent removes their captured input. Finalizing a parent refuses while a
+  pending child declaration captured it, and automatic finalization during
+  sync waits, so no participant changes a cut a child still needs.
 - In-group dependencies name the parent's concrete scope in the same partition.
   Declaration and acknowledgment require that parent partition locally;
   required peers must be authorized for every related row scope. Devices holding
@@ -103,7 +107,7 @@ reverse a parent's retirement at the same cut.
 | Checkpoint | Format 6 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 6, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
 | File identity | `rocky.encrypted-replica.v8` |
-| Native session | `rocky.native-session.v5` |
+| Native session | `rocky.native-session.v6` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 2, with an explicit existence-base list.

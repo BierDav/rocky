@@ -739,6 +739,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(result)
     }
+    /// Whether finalizing `scope` must wait for a dependent child horizon.
+    pub async fn horizon_dependents_pending(&self, scope: ResourceScope) -> Result<bool, Error> {
+        self.inner
+            .lock()
+            .await
+            .horizon_dependents_pending(scope)
+            .await
+    }
     pub async fn admitted_horizon(
         &self,
         scope: ResourceScope,
@@ -942,6 +950,22 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
+    /// Whether a pending child declaration captured `scope` as a related
+    /// parent cut. Finalizing the parent first would change that cut, so the
+    /// child could never be acknowledged.
+    pub(super) async fn horizon_dependents_pending(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<bool, Error> {
+        Ok(self.pending_horizons(scope).await?.iter().any(|signed| {
+            signed.statement.scope != scope
+                && signed
+                    .statement
+                    .related
+                    .iter()
+                    .any(|cut| cut.scope == scope)
+        }))
+    }
     async fn pending_horizons(&self, scope: ResourceScope) -> Result<Vec<SignedHorizon>, Error> {
         let mut pending = Vec::new();
         for row in collect_rows(self.conn.query(
@@ -1102,6 +1126,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(previous_signed);
         }
         let result = transaction!(inner, |inner| {
+            if inner.horizon_dependents_pending(scope).await? {
+                return Err(denied("finalize the dependent child horizons first"));
+            }
             inner.check_horizon_cut(&signed.statement).await?;
             if !inner
                 .horizon_progress_at(&signed, now()?)

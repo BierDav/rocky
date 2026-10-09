@@ -49,7 +49,7 @@ empty row transfers; existence logs and horizon acknowledgments still run.
 limits and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v5`) pulls by frontier:
+`NativeSession` (label `rocky.native-session.v6`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |

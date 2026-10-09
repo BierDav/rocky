@@ -644,9 +644,12 @@ impl LogicalTable {
             .filter_map(|index| index.on_conflict.map(|policy| (index, policy)))
     }
     fn installable(&self) -> Result<(), Incompatibility> {
-        // Partitioned command control remains unsupported.
+        // Partitioned command control and confirmed rows remain unsupported.
         if !self.partition_by.is_empty() {
-            if self.class == TableClass::CommandControlled {
+            if matches!(
+                self.class,
+                TableClass::CommandControlled | TableClass::ConfirmedReadOnly
+            ) {
                 return Err(Incompatibility::TableClass(self.class));
             }
             for (index, policy) in self.policy_indexes() {

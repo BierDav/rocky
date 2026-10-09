@@ -314,6 +314,7 @@ private fun refusePartitionedShapes(listsExport: String, listsOverlay: SchemaBui
     refused("maps its partition columns by position") { lists(); table("tags") { item() }; table("items") { item(); integer("tag"); reference(listOf("tag", "list"), "tags", onDelete = Delete.Cascade) } }
     refused("needs a column outside the partition columns") { lists(); table("items") { item(); reference("list", "lists", onDelete = Delete.SetNull) } }
     refused("cannot be command-controlled") { table("holds") { text("customer"); primaryKey("customer"); partitionBy("customer"); tableClass = TableClass.CommandControlled } }
+    refused("cannot hold confirmed rows") { table("stock") { text("customer"); primaryKey("customer"); partitionBy("customer"); tableClass = TableClass.ConfirmedReadOnly } }
     refused("an existence log needs an unpartitioned") { table("lists") { text("title"); primaryKey("id"); partitionBy("id"); existenceLog = true } }
     refused("names the unknown table") { lists(); table("items") { item(); reference("list", "missing", onDelete = Delete.Cascade) } }
     // From Room: a reference must name the parent's identity as the overlay partitions it.
@@ -321,6 +322,10 @@ private fun refusePartitionedShapes(listsExport: String, listsOverlay: SchemaBui
         .replace("REFERENCES `categories`(`list`, `id`)", "REFERENCES `categories`(`name`, `id`)")
     check(natural != listsExport)
     check(runCatching { schemaFromRoom("shopping", natural, listsOverlay) }.exceptionOrNull()?.message?.contains("must name its identity (list, id)") == true)
+    // RESTRICT stays refused: a parent's deletion never waits for its children.
+    val restrict = listsExport.replaceFirst("\"onDelete\": \"CASCADE\"", "\"onDelete\": \"RESTRICT\"")
+    check(restrict != listsExport)
+    check(runCatching { schemaFromRoom("shopping", restrict, listsOverlay) }.exceptionOrNull()?.message?.contains("onDelete RESTRICT") == true)
     // The overlay must partition what the Room keys declare: categories are keyed by (list, id).
     val unpartitioned = runCatching { schemaFromRoom("shopping", listsExport) { table("items") { onConflict("index_items_list_title", Conflict.LatestWins) } } }
     check(unpartitioned.exceptionOrNull()?.message?.contains("categories: Room identity index must contain partition columns followed by id") == true) { unpartitioned.toString() }

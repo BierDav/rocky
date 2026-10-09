@@ -2,6 +2,7 @@ modules:
   - examples/shoppinglist-app/androidApp
   - examples/shoppinglist-app/desktopApp
   - examples/shoppinglist-app/libraryDemo
+  - examples/shoppinglist-app/qualification
   - examples/shoppinglist-app/requiredSchema
   - examples/shoppinglist-app/shared
   - sdks/kotlin/inventory-qualification

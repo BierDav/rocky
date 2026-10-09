@@ -72,7 +72,8 @@ qualified separately; see [below](#android). The SDK's build, packaging and
 qualification steps are [toolchain plugins](../sdks/kotlin/README.md#build-tooling);
 `./kotlin check` runs every check and test.
 Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
-and desktop compilation, and `./kotlin check qualify -m inventory-qualification`
+and desktop compilation, `./examples/shoppinglist-app/qualify` for the
+multi-process [shopping qualification](runtime/shopping-qualification.md), and `./kotlin check qualify -m inventory-qualification`
 for the existing SDK contract qualification. Run `./sdks/native/check` for the
 excluded UniFFI ABI crate. Run `./kotlin check packaged -m packaged-consumer` for an
 artifact-only JVM consumer, or `./kotlin do packageSdk -m packaged-consumer` to
@@ -108,6 +109,9 @@ The repository toolchain file is also the toolchain source of truth in CI.
 
 Required status checks are a hosting setting; the workflow file does not configure
 branch protection. No remotely hosted CI run has been verified by this baseline.
+
+The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
+baseline; it has not run on a hosted runner yet.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on

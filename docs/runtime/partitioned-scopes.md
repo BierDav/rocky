@@ -84,8 +84,8 @@ native request may name `table` instead of `group` to mean that table's group.
 | `share(group, values, recipients)` | Issuer: one envelope of the current epoch per recipient node key |
 | `install(group, values, envelope)` | Opens the envelope, then requires whole-partition read on every member before anything is stored |
 | `grant` / `delegate` | Selector grants; an issuer records the device and user first |
-| `register(group, values)` | Registers the addresses without a key, as custody |
-| `subscribe` / `bootstrap(group, values, omit)` | Holds every member except those left out; `bootstrap` saves checkpoint-first intent |
+| `register(group, values)` | Registers the addresses without a key, as custody; a custody peer also registers partitions devices offer ([0045](../decisions/0045-custody-partition-offers.md)) |
+| `subscribe` / `bootstrap(group, values, omit)` | Holds every member except those left out; `bootstrap` saves checkpoint-first intent, joining one still pending |
 | `unsubscribe` / `evict(group, values, keep)` | Releases every member except those kept |
 | `status(group, values)` | Held secret epochs, and each member's key epochs and holding |
 

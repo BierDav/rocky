@@ -70,7 +70,7 @@ a peer below the horizon and confirms after takeover ([strong history](strong-hi
 ## Not qualified
 
 No relay, NAT, WAN or public Internet run was made; everything is loopback on
-one machine except one [phone on a LAN](shopping-qualification.md#physical-device-run-2026-10-08).
+one machine except one [phone on a LAN](shopping-devices.md#physical-device-run-2026-10-08).
 iOS, web, physical power loss, disk-full recovery and Byzantine voters are
 outside this evidence. The packaged native library is a development build, so
 packaged timings are not release numbers.

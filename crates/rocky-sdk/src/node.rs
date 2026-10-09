@@ -962,6 +962,7 @@ impl Node {
                         .await?
                         .waiting
                         .is_empty()
+                    && !self.replica.horizon_dependents_pending(scope).await?
                 {
                     self.replica.finalize_horizon(scope).await?;
                     self.replica.prune(scope).await?;

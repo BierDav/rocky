@@ -184,6 +184,7 @@ class TableBuilder internal constructor(val name: String) {
         require(foreignKeys.all { key -> key.columns.all { it in columns } }) { "$name: a foreign key names an absent column" }
         require(partitions.all { it in key && (it == "id" || columns[it]?.let { column -> !column.nullable && !column.localOnly && column.derived == null } == true) }) { "$name: partition columns must be non-null primary-key columns" }
         require(partitions.isEmpty() || tableClass != TableClass.CommandControlled) { "$name: a partitioned table cannot be command-controlled" }
+        require(partitions.isEmpty() || tableClass != TableClass.ConfirmedReadOnly) { "$name: a partitioned table cannot hold confirmed rows" }
         // Puppets copy only the id of a referenced row.
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }

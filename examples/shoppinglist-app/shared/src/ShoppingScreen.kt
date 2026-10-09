@@ -40,7 +40,7 @@ fun ShoppingScreen(repository: ShoppingRepository, onError: (Throwable) -> Unit 
                         Button(onClick = { write { shared = repository.shareWithDevices(list) } }) { Text("Share") }
                         OutlinedButton(onClick = { write { repository.deleteList(list) } }) { Text("Delete list") }
                     }
-                    ListContent(repository, list, ::write)
+                    ListContent(repository, list, lists.firstOrNull { it.id != list }, ::write)
                 }
             }
         }
@@ -56,7 +56,7 @@ fun ShoppingScreen(repository: ShoppingRepository, onError: (Throwable) -> Unit 
 }
 
 @Composable
-private fun ListContent(repository: ShoppingRepository, list: Long, write: (suspend () -> Unit) -> Unit) {
+private fun ListContent(repository: ShoppingRepository, list: Long, target: ShoppingList?, write: (suspend () -> Unit) -> Unit) {
     val categories by remember(repository, list) { repository.categories(list) }.collectAsState(emptyList())
     val items by remember(repository, list) { repository.observe(list) }.collectAsState(emptyList())
     var category by remember(list) { mutableStateOf<Long?>(null) }
@@ -79,6 +79,8 @@ private fun ListContent(repository: ShoppingRepository, list: Long, write: (susp
                 TextButton(onClick = { write { repository.categorize(list, item.id, category) } }) {
                     Text(item.category?.let(names::get) ?: "No category")
                 }
+                // Moves the item, keeping its ticks, to the next list.
+                target?.let { to -> TextButton(onClick = { write { repository.move(list, item.id, to.id) } }) { Text("→ ${to.title}") } }
                 TextButton(onClick = { write { repository.delete(list, item.id) } }) { Text("Delete") }
             }
         }

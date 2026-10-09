@@ -444,10 +444,7 @@ impl Node {
         covered: &[&crate::groups::Member],
     ) -> Result<Value, Failure> {
         let marker = self.path.with_file_name("bootstrap.json");
-        if marker.exists() {
-            return Err(refused("a bootstrap is pending; sync to finish it first"));
-        }
-        let pending: Vec<ResourceScope> = {
+        let added: Vec<ResourceScope> = {
             let settings = self.settings.lock().await;
             covered
                 .iter()
@@ -455,10 +452,25 @@ impl Node {
                 .map(|member| member.scope)
                 .collect()
         };
-        rocky_credentials::write_private(
-            &marker,
-            &serde_json::to_vec(&json!({"intent": true, "pending": pending}))?,
-        )?;
-        Ok(json!({"pending": pending.len()}))
+        // A pending intent waits for a peer that offers checkpoints, which a
+        // keyless custody peer never does: later partitions join it.
+        let mut intent = if marker.exists() {
+            serde_json::from_slice::<Value>(&std::fs::read(&marker)?)?
+        } else {
+            json!({"intent": true, "pending": []})
+        };
+        let Some(pending) = intent.get_mut("pending").and_then(Value::as_array_mut) else {
+            // An intent without a scope list covers every granted scope.
+            return Ok(json!({"pending": added.len()}));
+        };
+        for scope in &added {
+            let scope = serde_json::to_value(scope)?;
+            if !pending.contains(&scope) {
+                pending.push(scope);
+            }
+        }
+        let count = pending.len();
+        rocky_credentials::write_private(&marker, &serde_json::to_vec(&intent)?)?;
+        Ok(json!({"pending": count}))
     }
 }

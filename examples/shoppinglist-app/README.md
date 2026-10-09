@@ -1,4 +1,4 @@
-# Shopping list: Room example and phase-16 preflight
+# Shopping list: Room example and qualification
 
 This is a Kotlin-only consumer of the desktop UniFFI SDK whose Room DAOs read
 and write Rocky's own file. Start with the small
@@ -65,6 +65,7 @@ From the repository root:
 
 ```sh
 ./examples/shoppinglist-app/check
+./examples/shoppinglist-app/qualify
 ./examples/shoppinglist-app/demo
 ```
 
@@ -89,6 +90,11 @@ The desktop screen remains the starter UI.
 
 The [phase-16 required definition](requiredSchema/src/RequiredSchema.kt) is the same schema.
 `./kotlin run -m requiredSchema`, the first step of `check`, builds it by hand and from the
-Room export to identical bytes and installs either natively. It is a preflight, not acceptance
-evidence: device qualification of custody-mediated sharing, horizons and moves is
-[phase 10](../../docs/features_06/10-qualification.md).
+Room export to identical bytes and installs either natively.
+
+`repository.move(from, id, to)` moves an item to another list in one commit; a tick made
+offline on another device follows it. Devices that are never online together share lists
+through the packaged [custody peer](../../docs/runtime/always-on-peer.md), which learns each
+list from the devices and reads none. `./examples/shoppinglist-app/qualify` runs the
+[qualification](../../docs/runtime/shopping-qualification.md) with every device in its own
+process, and on two Android devices with `ROCKY_PHONES` ([procedure](../../docs/runtime/shopping-devices.md)).

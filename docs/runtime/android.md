@@ -2,7 +2,7 @@
 
 The SDK has the same contract on Android as on the JVM desktop
 ([SDK packaging](sdk-packaging.md)). An Android consumer needs Gradle and the Android SDK, and no Rust
-toolchain, Cargo, Python or NDK. Qualified on one emulator and one phone ([qualification](#qualification)).
+toolchain, Cargo, Python or NDK. Qualified on emulators and one phone ([qualification](#qualification)).
 
 ## The packaged artifact
 
@@ -100,13 +100,15 @@ store remains the fallback and the default when no store is passed.
 
 ## Qualification
 
-There is no device qualification gate in the tree: the Gradle consumers and the device driver were
-removed when examples were reduced to the todo and shopping-list apps. The recorded runs used them.
+`ROCKY_PHONES=<a>,<b> ./examples/shoppinglist-app/qualify` drives the Compose app on two devices
+([shopping devices](shopping-devices.md)). The earlier Gradle consumers and device driver were removed
+when examples were reduced to the todo and shopping-list apps; the 2026-10-07 and 2026-10-08 runs used them.
 
 | Run | Covered |
 | --- | --- |
 | Android 15 (API 35) arm64 emulator, loopback TCP through `adb reverse`, 2026-10-07 | Instrumented packaged consumer, Keystore store, missing-secret refusal and a background/foreground/reopen cycle, in debug and R8-minified release builds; todo and shopping apps joining a host issuer, syncing both ways, pausing sync while backgrounded and resuming the same identity after `am kill` |
-| Pixel 11 Pro (Android 17), direct LAN TCP, 2026-10-08 | The same steps plus the Compose app; Keystore security level 1 ([details](shopping-qualification.md#physical-device-run-2026-10-08)) |
+| Two Android 15 arm64 emulators, `adb reverse`, 2026-10-09 | Shopping lists shared through the packaged custody peer, a duplicate title and a move keeping an offline tick ([details](shopping-devices.md#emulator-pair-2026-10-09)) |
+| Pixel 11 Pro (Android 17), direct LAN TCP, 2026-10-08 | The same steps plus the Compose app; Keystore security level 1 ([details](shopping-devices.md#physical-device-run-2026-10-08)) |
 
 Steps took 0.2–0.6 s on the emulator. A row written while the app was backgrounded was absent after
 3 s and arrived once the app returned to the foreground.

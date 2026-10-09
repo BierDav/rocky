@@ -8,8 +8,12 @@ command execution or issuing authority. It uses the same authenticated secure
 runtime as devices; it verifies signatures and the author's scope write grant
 before receipt, and grants recipients only authorized ciphertext. Its receipt
 does not count as applied full-node custody for pruning or eviction.
-Custody scopes are tables today; partition groups are
-[roadmap work](../features_06/02-partition-groups.md).
+A custody grant covers every partition of its tables. A device
+offers each list's partition tuple to a peer whose credentials grant custody
+without read, and the peer registers and keeps it across restarts
+([decision 0045](../decisions/0045-custody-partition-offers.md)). It does not
+admit horizon statements or forward acknowledgments: participants exchange them
+with an issuer directly.
 
 ## Enroll and configure
 
@@ -26,9 +30,7 @@ compiled reducer or coordinator is needed.
 ```json
 {
   "directory": "/data",
-  "schema": {"application":"shopping","version":1,"collections":[
-    {"name":"items","fields":[{"name":"title","kind":"text"},
-      {"name":"completed","kind":"boolean"}]}]},
+  "schema": <the application's schema JSON, e.g. Kotlin `ShoppingSchema.json()`>,
   "transport": {"kind":"tcp","listen":"0.0.0.0:7447",
     "advertised":"peer.example.net:7447"},
   "invitation": "rocky://join/<issuer invitation>",

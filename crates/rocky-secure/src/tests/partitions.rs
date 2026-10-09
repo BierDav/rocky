@@ -612,7 +612,7 @@ async fn measure_200_partitions() {
             writer
                 .author_bundle(
                     [index; 32],
-                    vec![f.write(&name, u32::from(index) + 1, i64::from(index))],
+                    vec![f.write(&name, u32::from(index), i64::from(index))],
                     vec![],
                 )
                 .await

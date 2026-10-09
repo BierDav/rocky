@@ -136,6 +136,13 @@ rebuilds and authority changes never pass through Room's connections:
 the Room database and cancel it before closing Room. Without it, DAO flows
 miss synced rows until the next local write.
 
+Room reads a flow's query inside a read transaction. That transaction fails,
+and the flow ends, when an authority change such as an installed partition
+secret ends its session, while sync applies a bundle that arrived in part
+(`held partition is incomplete`), or while a scope is unavailable. Collect
+such flows with a retry; the [shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
+observes again with a short backoff.
+
 ## Schema and migrations
 
 Rocky creates the tables when the database is created or joined, with real

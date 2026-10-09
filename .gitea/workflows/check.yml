@@ -3,6 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .config/nextest.toml
+      - scripts/check
+      - crates/**
+      - examples/**
+      - sdks/**
+      - tests/**
+      - benchmarks/runtime-scaling/**
   workflow_dispatch:
 
 permissions:
@@ -12,6 +23,8 @@ env:
   CARGO_HOME: /Users/gitea-runner/.cargo
   RUSTUP_HOME: /Users/gitea-runner/.rustup
   PATH: /Users/gitea-runner/.cargo/bin:/Users/gitea-runner/node/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+  RUSTUP_TOOLCHAIN: 1.99.0
+  NEXTEST_PROFILE: default
 
 jobs:
   check:
@@ -21,6 +34,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Add Rust tools to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
@@ -35,6 +50,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Add Rust tools to PATH
+        run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target

@@ -463,7 +463,7 @@ jobs:
     # so a nightly build does not recompile the Android runtime from nothing.
     # The cache keys must stay identical to the release workflow's Android job.
     # After `build`, so a commit that does not compile spends no Android build;
-    # it cannot reuse the macOS build.
+    # it cannot reuse the shared Linux build.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # x64: the Android NDK has no Linux arm64 host build.

@@ -14,7 +14,7 @@ permissions:
 jobs:
   lint:
     # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
     timeout-minutes: 5
     steps:
       - name: Download the exact source revision

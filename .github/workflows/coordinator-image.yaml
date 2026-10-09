@@ -61,23 +61,20 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.arch }}
-    runs-on: ${{ github.server_url == 'https://github.com' && matrix.runner || matrix.gitea-runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           # Native runners, not QEMU: a release build of a Rust workspace under
-          # emulation is many times slower than the hosted arm64 runner. Gitea's
-          # runners use their own labels.
+          # emulation is many times slower than the hosted arm64 runner.
           - arch: amd64
             platform: linux/amd64
-            runner: ubuntu-latest
-            gitea-runner: ubuntu-latest
+            runner: ubuntu-26.04
           - arch: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            gitea-runner: ubuntu-24.04-arm64
+            runner: ubuntu-26.04-arm
     steps:
       - name: Download the exact source revision
         env:
@@ -135,7 +132,7 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request'
     # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
     timeout-minutes: 15
     # The package stays private; deployments supply a ghcr-pull registry secret.
     steps:

@@ -264,7 +264,7 @@ jobs:
     # The cache keys must stay identical to the release workflow's Android job.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # x64: the Android NDK has no Linux arm64 host build.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - name: Download the exact source revision

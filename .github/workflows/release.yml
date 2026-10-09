@@ -33,7 +33,7 @@ jobs:
   version:
     name: Version
     # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
     timeout-minutes: 10
     outputs:
       release: ${{ steps.changes.outputs.release }}
@@ -159,7 +159,7 @@ jobs:
           - platform: darwin-aarch64
             runner: macos-latest
           - platform: linux-x86-64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
@@ -236,7 +236,7 @@ jobs:
     needs: version
     if: needs.version.outputs.release == 'true'
     # x64: the Android NDK has no Linux arm64 host build.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -361,7 +361,7 @@ jobs:
     name: Publish
     needs: [version, check, coordinator-image, peer-image, jvm, android]
     # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm64' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-26.04' || 'ubuntu-26.04-arm' }}
     timeout-minutes: 20
     permissions:
       contents: write

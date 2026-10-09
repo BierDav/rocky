@@ -383,18 +383,13 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      # Gitea's runner image runs as root without sudo and a package index.
-      - name: Install native build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          sudo="$(command -v sudo || true)"
-          ${sudo} apt-get update
-          ${sudo} apt-get install --yes --no-install-recommends libclang-dev pkg-config
-
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
 
       - name: Package and qualify the SDK
         working-directory: source
@@ -495,9 +490,13 @@ jobs:
           done
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
 
       # Maven local keeps the development version the toolchain verifies; the
       # staging repository holds the release version.

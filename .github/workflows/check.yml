@@ -73,10 +73,10 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Install the repository toolchain
+      - uses: dtolnay/rust-toolchain@1.99.0
         if: steps.passed.outputs.cache-hit != 'true'
-        working-directory: source
-        run: ./scripts/ci/install-toolchain
+        with:
+          components: rustfmt, clippy
 
       - name: Install the pinned lint tools
         if: steps.passed.outputs.cache-hit != 'true'
@@ -134,10 +134,15 @@ jobs:
           key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
           lookup-only: true
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -151,20 +156,12 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - uses: moonrepo/setup-rust@v1
+      # install-action's checksum check fails with the Gitea runner's sha256sum,
+      # so Gitea installs the matching nextest for the runner architecture.
+      - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        with:
-          channel: "1.99.0"
-          profile: minimal
-          components: rustfmt, clippy
-          bins: cargo-nextest, cargo-insta@1.28.0
-          cache: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify installed Cargo tools
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: cargo nextest --version && cargo insta --version
+        working-directory: source
+        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
@@ -219,10 +216,15 @@ jobs:
           key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
           lookup-only: true
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          components: rustfmt, clippy
 
       # Doc tests still compile the workspace libraries.
       - uses: Swatinem/rust-cache@v2
@@ -237,20 +239,12 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - uses: moonrepo/setup-rust@v1
+      # install-action's checksum check fails with the Gitea runner's sha256sum,
+      # so Gitea installs the matching nextest for the runner architecture.
+      - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        with:
-          channel: "1.99.0"
-          profile: minimal
-          components: rustfmt, clippy
-          bins: cargo-nextest, cargo-insta@1.28.0
-          cache: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify installed Cargo tools
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: cargo nextest --version && cargo insta --version
+        working-directory: source
+        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.
@@ -317,10 +311,15 @@ jobs:
           key: baseline-slow-${{ runner.os }}-${{ steps.source.outputs.tree }}
           lookup-only: true
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -334,20 +333,12 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - uses: moonrepo/setup-rust@v1
+      # install-action's checksum check fails with the Gitea runner's sha256sum,
+      # so Gitea installs the matching nextest for the runner architecture.
+      - name: Install cargo-nextest on Gitea
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        with:
-          channel: "1.99.0"
-          profile: minimal
-          components: rustfmt, clippy
-          bins: cargo-nextest, cargo-insta@1.28.0
-          cache: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Verify installed Cargo tools
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        run: cargo nextest --version && cargo insta --version
+        working-directory: source
+        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
       # Missing when `build` found this tree's checks passed; the job then
       # builds what it runs.
@@ -415,10 +406,15 @@ jobs:
           key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
           lookup-only: true
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        if: steps.passed.outputs.cache-hit != 'true'
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
@@ -542,9 +538,13 @@ jobs:
           done
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Install the repository toolchain
+      - name: Install the system build dependencies
         working-directory: source
-        run: ./scripts/ci/install-toolchain
+        run: ./scripts/ci/install-system-deps
+
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
 
       - name: Build the Android runtime
         working-directory: source

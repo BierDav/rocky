@@ -133,16 +133,19 @@ On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-latest-any-arch`.
 The `build` job downloads an archive of the exact
 event revision and runs `scripts/check --build`: strict workspace Clippy, then
 the test binaries as nextest archives, uploaded with the custody peer binary.
-Gitea uses `moonrepo/setup-rust` to install nextest and cargo-insta for the
-runner architecture; GitHub uses `taiki-e/install-action` for nextest.
+Every job installs the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
+workflow names the same version as `rust-toolchain.toml`, which `rustup` still
+resolves inside the checkout. Gitea installs the runner-architecture nextest
+with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 `check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
 the tests and doc tests, without compiling the test binaries again. `slow`,
 `shopping` and `android` also start after `build`; the first two run its
 archives and peer binary.
 It needs no version-control CLI or repository history, and never invokes Git.
-The repository toolchain file is also the toolchain source of truth in CI.
-The shared CI toolchain setup installs `libclang` for bundled SQLite's bindgen
-build when the runner image does not provide it.
+`scripts/ci/install-system-deps` installs the libraries a bare runner image
+lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,
+X11, `libxdo` and OpenSSL development packages the Dioxus desktop example and
+the websocket transport link against.
 
 A job that passes records a cache marker keyed by the source tree. A later run
 of the same tree, such as a redescribed or rebased commit with unchanged content

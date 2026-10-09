@@ -6,23 +6,12 @@ site and a proposed fix. Scheduled work is in
 in its [small fixes](../features_07/04-small-fixes.md). Remove an entry when it
 is fixed or moved into a phase.
 
-## Kotlin automatic sync polls every peer
-
-`sdks/kotlin/rocky-core/src/native/RockyDatabase.kt`: the default
-`automaticSync` calls `syncOnce` every 500 ms while foregrounded, which dials
-every peer. `enterBackground` waits for the running pass under the lifecycle
-mutex, so an unreachable peer delays the pause by up to 15 s per route.
-
-Fix: drive it from the native change-driven worker that `syncContinuously()`
-already uses, and make the pause cancel the running pass.
-
 ## A Room write times out behind background sync
 
 Seen twice in nine runs of the [emulator pair](../runtime/shopping-devices.md#emulator-pair-2026-10-09):
 right after a device came online, a Room write transaction failed with code 4
 (`transaction was rolled back: Timeout`), most likely because background sync
-held the replica past the 5 s write limit while applying incoming frames, as
-the polling above repeats passes. Not yet measured. Nothing was committed, so the driver retries.
+held the replica past the 5 s write limit while applying incoming frames, during catch-up. Not yet measured. Nothing was committed, so the driver retries.
 
 Fix: apply received pages in bounded transactions that yield to a waiting
 writer, and measure the longest replica hold during catch-up on a device.

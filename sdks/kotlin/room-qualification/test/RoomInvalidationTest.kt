@@ -3,11 +3,14 @@ package rocky.room.qualification
 import androidx.room.Room
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.test.runTest
 import rocky.*
 import rocky.room.followRocky
 import rocky.room.setRockyDatabase
+import rocky.room.settledOnRocky
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -18,8 +21,28 @@ class RoomInvalidationTest {
         "shop",
         File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
     )
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private fun item(key: String, title: String) = ShopItem(key, "l1", title)
+
+    @Test fun readTimeoutRetriesCommittedRowsAndPermanentErrorsStillFail() = runTest {
+        var reads = 0
+        val observed = flow {
+            reads++
+            if (reads == 1) throw RockyException("storage", false, "SQL session: transaction was rolled back: Timeout")
+            emit(listOf("committed"))
+        }.settledOnRocky().first()
+        assertEquals(listOf("committed"), observed)
+        assertEquals(2, reads)
+
+        val failure = RockyException("storage", false, "SQL session: corrupt projection")
+        var failedReads = 0
+        val failed = flow<List<String>> {
+            failedReads++
+            throw failure
+        }.settledOnRocky()
+        assertSame(failure, assertFailsWith<RockyException> { failed.first() })
+        assertEquals(1, failedReads)
+    }
 
     @Test fun daoObserversFireOnLocalAndSyncWrites() = runBlocking {
         val directory = Files.createTempDirectory("room-invalidation").toFile()
@@ -27,7 +50,7 @@ class RoomInvalidationTest {
         var b: RockyDatabase? = null
         val work = mutableListOf<Job>()
         try {
-            a.installAuthors()
+            a.installRoomAuthors()
             b = RockyDatabase.join(
                 File(directory, "b"),
                 schema,
@@ -35,7 +58,7 @@ class RoomInvalidationTest {
                 tcp(),
                 automaticSync = false,
             )
-            b.installAuthors(issuer = a)
+            b.installRoomAuthors(issuer = a)
             val roomA = Room.databaseBuilder<ShopDatabase>(File(directory, "a.room").path).setRockyDatabase(a).build()
             val roomB = Room.databaseBuilder<ShopDatabase>(File(directory, "b.room").path).setRockyDatabase(b).build()
             work += launch(Dispatchers.IO) { roomB.followRocky(b) }

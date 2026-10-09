@@ -21,6 +21,11 @@ Debug builds also accept `rocky-shopping://drive?…` links, implemented in
 they accept raw invitations for the qualification harness. Browsers cannot open
 drive links, and release builds ignore them.
 
+Invitation choices are matched by the native invitation/enrollment event order,
+so a delayed enrollment keeps its chosen name and kind. Closing that invitation
+checks its code and cannot delete a newer invitation. The pending choices share
+the activity feed's 512-event lifetime; they are discarded when the app closes.
+
 ## Two-phone procedure
 
 The [Compose app](../../examples/shoppinglist-app/androidApp) opens drive

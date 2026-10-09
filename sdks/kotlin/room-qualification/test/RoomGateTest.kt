@@ -14,7 +14,6 @@ import rocky.room.ROOM_PROFILE
 import rocky.room.setRockyDatabase
 import rocky.sqlite.RockySQLiteDriver
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
@@ -26,7 +25,7 @@ class RoomGateTest {
         "shop",
         File(root, "sdks/kotlin/room-qualification/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
     )
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private fun item(key: String, title: String, list: String = "l1") = ShopItem(key, list, title)
     private fun room(directory: File, database: RockyDatabase): ShopDatabase = Room.databaseBuilder<ShopDatabase>(File(directory, "shop").path).setRockyDatabase(database).build()
 
@@ -58,7 +57,7 @@ class RoomGateTest {
         val directory = Files.createTempDirectory("room-gate").toFile()
         val a = RockyDatabase.create(File(directory, "a"), schema, tcp(), automaticSync = false)
         try {
-            a.installAuthors()
+            a.installRoomAuthors()
             val b = RockyDatabase.join(
                 File(directory, "b"),
                 schema,
@@ -67,7 +66,7 @@ class RoomGateTest {
                 automaticSync = false,
             )
             try {
-                b.installAuthors(issuer = a)
+                b.installRoomAuthors(issuer = a)
                 val roomA = room(File(directory, "a"), a)
                 val roomB = room(File(directory, "b"), b)
                 try {

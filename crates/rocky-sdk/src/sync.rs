@@ -134,6 +134,7 @@ pub(crate) async fn bootstrap(
     marker: &std::path::Path,
     mut expected: Vec<u8>,
     transfer: &mut Transfer,
+    mut first: Option<NativeSession>,
 ) -> Result<Option<Vec<u8>>, Failure> {
     let saved: serde_json::Value = serde_json::from_slice(&expected)?;
     let intent = saved.get("intent").unwrap_or(&saved).clone();
@@ -143,7 +144,10 @@ pub(crate) async fn bootstrap(
     let mut next = 0;
     let mut imported = false;
     for _ in 0..SESSIONS {
-        let mut session = session(upstream).await?;
+        let mut session = match first.take() {
+            Some(session) => session,
+            None => session(upstream).await?,
+        };
         let scope = scopes.get(next).ok_or("missing bootstrap scope")?;
         let (catch_up, checkpoint) = if imported {
             (
@@ -190,7 +194,7 @@ pub(crate) async fn bootstrap(
     }
     Err("bootstrap exceeded its session budget; it continues on the next sync".into())
 }
-async fn session(upstream: &Upstream<'_>) -> Result<NativeSession, Failure> {
+pub(crate) async fn session(upstream: &Upstream<'_>) -> Result<NativeSession, Failure> {
     let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
     Ok(NativeSession::authenticate(
         stream,
@@ -384,6 +388,7 @@ pub async fn serve(
     credentials: CredentialChain,
     admitted: Vec<PublicKey>,
     coordinator: Option<&dyn Coordinator>,
+    admitted_peer: impl FnOnce(PublicKey),
 ) -> Result<(), Failure> {
     let mut session = NativeSession::accept(
         stream,
@@ -394,6 +399,7 @@ pub async fn serve(
         MAX_SECURE_BYTES,
     )
     .await?;
+    admitted_peer(session.peer());
     match coordinator {
         Some(coordinator) => Ok(session.serve_with_commands(replica, coordinator).await?),
         None => Ok(session.serve(replica).await?),

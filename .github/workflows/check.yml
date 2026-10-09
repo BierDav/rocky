@@ -105,7 +105,8 @@ jobs:
   build:
     # Compiles once: clippy and the test binaries as nextest archives, plus the
     # custody peer. `check`, `e2e` and `shopping` run those artifacts instead of
-    # building again, each downloading only what it runs.
+    # building again, each downloading only what it runs; GitHub `shopping`
+    # reuses the x64 peer, while Gitea builds its own.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
@@ -264,8 +265,8 @@ jobs:
               && [ -f "$RUNNER_TEMP/build/sdk-without-defaults.tar.zst" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
-            # The build job already ran clippy and the doc tests; only its
-            # archives are missing, so rebuild the test binaries without clippy.
+            # The build job already ran clippy; only its archives are missing.
+            # Rebuild the test binaries without repeating clippy.
             ./scripts/check --no-clippy
           fi
 
@@ -331,12 +332,13 @@ jobs:
           tree: ${{ steps.source.outputs.tree }}
 
   shopping:
-    # Multi-process shopping qualification: device JVMs and the packaged custody peer.
-    # Releases skip it; the release refuses a commit whose run of it failed.
+    # Shopping, Kotlin integration and exhaustive change-driven sync qualification.
+    # Releases skip it; it does not gate a release.
     needs: build
     if: ${{ !inputs.release }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 45
+    # The Android NDK requires x64; Gitea's build artifacts are arm64.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Download the exact source revision
         id: source
@@ -360,14 +362,39 @@ jobs:
           echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
       # The Kotlin build compiles the native library, which needs the
-      # restored registry even with the custody peer.
+      # restored registry even with the custody peer. The x64 baseline peer
+      # matches only the GitHub runner; Gitea's qualification builds it itself.
       - id: reuse
         uses: ./source/.github/actions/reuse-build
         with:
           job: shopping
           tree: ${{ steps.source.outputs.tree }}
           peer: true
+          peer-github-only: true
           nextest: false
+
+      - uses: actions/setup-java@v5
+        if: steps.reuse.outputs.passed != 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+        if: steps.reuse.outputs.passed != 'true' && github.server_url != 'https://github.com'
+        with:
+          packages: ""
+
+      - name: Install the Android runtime prerequisites
+        if: steps.reuse.outputs.passed != 'true'
+        run: |
+          set -euo pipefail
+          sdkmanager="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          for attempt in 1 2 3; do
+            "$sdkmanager" --install "platforms;android-35" "ndk;28.2.13676358" && break
+            [ "$attempt" -lt 3 ] || exit 1
+          done
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
       - name: Run the shopping qualification
         if: steps.reuse.outputs.passed != 'true'
@@ -380,6 +407,9 @@ jobs:
             export ROCKY_PEER="$RUNNER_TEMP/build/rocky-peer"
           fi
           ./examples/shoppinglist-app/qualify
+          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
+          ./kotlin check
+          cargo test --locked --release -p rocky-sdk --lib cancellation_at_every_session_byte -- --ignored --nocapture
 
       - uses: ./source/.github/actions/record-pass
         if: steps.reuse.outputs.passed != 'true'

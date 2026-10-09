@@ -6,9 +6,10 @@ import kotlinx.coroutines.flow.first
 import rocky.ConnectionState
 import rocky.PeerTransport
 import rocky.ReadinessState
+import rocky.RockyDatabase
 import rocky.RockyEvent
+import rocky.room.buildOnRocky
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -18,7 +19,7 @@ class HouseholdTest {
         File(root, name),
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" }) },
+        transport = { PeerTransport.Tcp("127.0.0.1:0") },
     )
     private suspend fun ShoppingNode.titles(list: Long) = repository.observe(list).first().map { it.title }.sorted()
 
@@ -31,6 +32,36 @@ class HouseholdTest {
     /** The household records an enrollment asynchronously, using its single pending invitation. */
     private suspend fun ShoppingNode.awaitEnrollment(node: ShoppingNode, name: String, kind: NodeKind) = withTimeout(30_000) {
         household.devices().first { devices -> devices.any { it.node == node.self && it.name == name && it.kind == kind.name.lowercase() } }
+    }
+
+    @Test fun `delayed enrollment events keep each invitation choice and leave the newer code open`() = runBlocking {
+        val root = Files.createTempDirectory("rocky-invitation-order").toFile()
+        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), automaticSync = false)
+        val room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
+        val household = Household(room.room, issuer, issuer.session().node)
+        val members = mutableListOf<RockyDatabase>()
+        var recording: Job? = null
+        try {
+            val first = household.invite(NodeKind.Full, "Laptop")
+            members += RockyDatabase.join(File(root, "full"), ShoppingSchema, first.invitation, transport(), automaticSync = false)
+            val second = household.invite(NodeKind.Partial, "Phone")
+            members += RockyDatabase.join(File(root, "partial"), ShoppingSchema, second.invitation, transport(), automaticSync = false)
+            val unused = household.invite(NodeKind.Trusted, "Next")
+            // All enrollments are retained before the application collector starts.
+            recording = launch { household.run() }
+            val devices = withTimeout(30_000) { household.devices().first { it.size == 2 } }
+            assertEquals(setOf("Laptop" to "full", "Phone" to "partial"), devices.map { it.name to it.kind }.toSet())
+            assertEquals(unused.toString(), household.invitations().first().single().code)
+        } finally {
+            withContext(NonCancellable) {
+                recording?.cancelAndJoin()
+                members.forEach { it.close() }
+                room.close()
+                issuer.close()
+            }
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `revocation keeps the new list keys away from the removed device and reaches remaining devices`() = runBlocking {

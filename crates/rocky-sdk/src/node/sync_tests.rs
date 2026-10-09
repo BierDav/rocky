@@ -280,6 +280,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             };
             a.configure(|settings| settings.add_peer(&a.vault, &contact))
                 .await?;
+            add(&a, 2).await?;
             b.detach(None).await;
             let mut status = a.sync_status.subscribe();
             a.automatic.store(true, Ordering::SeqCst);
@@ -359,3 +360,5 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
     Ok(())
     }).await
 }
+
+mod change_driven;

@@ -209,32 +209,39 @@ struct Pair {
 }
 impl Pair {
     async fn new(deadline: Option<Duration>) -> Result<Self, Failure> {
+        Self::with_schema(deadline, SCHEMA, &["holds", "stock"]).await
+    }
+    async fn with_schema(
+        deadline: Option<Duration>,
+        schema: &str,
+        scopes: &[&str],
+    ) -> Result<Self, Failure> {
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let coordinator = Arc::new(MemoryCoordinator::default());
         let handler = Arc::new(Reservations::default());
-        let a = Device::new(Database::create(
-            open(
-                &root.path().join("a"),
-                Some(Network::Owned(hub.connector("a"))),
-                commands(&coordinator, Some(&handler), deadline),
-            ),
-            None,
-        )?)?;
+        let creator_path = root.path().join("a");
+        let mut creator = open(
+            &creator_path,
+            Some(Network::Owned(hub.connector("a"))),
+            commands(&coordinator, Some(&handler), deadline),
+        );
+        creator.schema = schema;
+        let a = Device::new(Database::create(creator, None)?)?;
         let invitation = a
-            .ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": ["holds", "stock"]}}))
+            .ok(json!({"type": "pairing", "profile": {"kind": "writer", "scopes": scopes}}))
             .await["uri"]
             .as_str()
             .ok_or("uri")?
             .to_owned();
-        let b = Device::new(Database::join(
-            open(
-                &root.path().join("b"),
-                Some(Network::Owned(hub.connector("b"))),
-                commands(&coordinator, None, None),
-            ),
-            &invitation,
-        )?)?;
+        let joining_path = root.path().join("b");
+        let mut joining = open(
+            &joining_path,
+            Some(Network::Owned(hub.connector("b"))),
+            commands(&coordinator, None, None),
+        );
+        joining.schema = schema;
+        let b = Device::new(Database::join(joining, &invitation)?)?;
         // Provisioning the coordinator is the application's or provider's
         // step: who may execute, and who may ask.
         let (executor, owner, scope) = a.identity().await;
@@ -261,6 +268,43 @@ impl Pair {
     fn sequence(&self) -> u64 {
         self.coordinator.head(self.scope).expect("head").sequence
     }
+}
+
+/// Partition selectors on an unrelated table must not refuse the reader's
+/// explicitly granted command tables or their result acknowledgments.
+#[tokio::test(flavor = "multi_thread")]
+async fn results_sync_with_unrelated_partition_selectors() -> Result<(), Failure> {
+    let mut schema: Value = serde_json::from_str(SCHEMA)?;
+    schema["tables"]
+        .as_array_mut()
+        .ok_or("tables")?
+        .push(json!({
+            "name": "notes", "class": "mergeable",
+            "columns": [{"name": "key", "type": "text", "not_null": true}],
+            "primary_key": ["key"], "partition_by": ["key"]
+        }));
+    let schema = schema.to_string();
+    let pair = Pair::with_schema(None, &schema, &["holds", "stock", "notes"]).await?;
+    pair.restock(1, 2).await;
+    pair.b.ok(json!({"type": "sync"})).await;
+    assert_eq!(pair.b.rows("stock").await["rows"][0][1], integer(2));
+    pair.restock(2, 1).await;
+    pair.b.ok(json!({"type": "sync"})).await;
+    let snapshot = pair.b.rows("stock").await;
+    assert_eq!(snapshot["complete"], true, "{snapshot}");
+    assert_eq!(snapshot["rows"][0][1], integer(3), "{snapshot}");
+    let activity = pair.b.ok(json!({"type": "activity"})).await;
+    assert!(
+        !activity["events"]
+            .as_array()
+            .ok_or("events")?
+            .iter()
+            .any(|event| event["kind"] == "results_failed"),
+        "{activity}"
+    );
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
 }
 
 /// An executor acknowledging before another device syncs leaves that

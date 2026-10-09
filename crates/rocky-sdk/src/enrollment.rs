@@ -1239,9 +1239,7 @@ impl Settings {
             authors,
         });
         let issued = self.issue(&publisher, &domain, request.user, grants.clone(), authors)?;
-        if profile.issues() {
-            self.learn_joined_issuer(request.node, &request.routes);
-        }
+        self.learn_joined_peer(request.node, &request.routes, profile.issues());
         let mut changes = Changes::default();
         changes.device(
             &request.node,
@@ -2043,9 +2041,8 @@ impl Settings {
             }
         }
     }
-    /// Keeps the routes an issuer enrolled by this device announced, so
-    /// both sync and either renews the other's devices.
-    fn learn_joined_issuer(&mut self, node: PublicKey, routes: &[(String, String)]) {
+    /// Keeps the authenticated return route for change-driven delivery.
+    fn learn_joined_peer(&mut self, node: PublicKey, routes: &[(String, String)], issuer: bool) {
         let routes = routes
             .iter()
             .map(|(transport, address)| Route {
@@ -2057,11 +2054,11 @@ impl Settings {
             return;
         };
         let full = (!self.peers.contains_key(&node) && self.peers.len() >= MAX_PEERS)
-            || (!self.issuers.contains(&node) && self.issuers.len() >= MAX_ISSUERS);
+            || (issuer && !self.issuers.contains(&node) && self.issuers.len() >= MAX_ISSUERS);
         if contact.routes.is_empty() || full {
             return;
         }
-        if !self.issuers.contains(&node) {
+        if issuer && !self.issuers.contains(&node) {
             self.issuers.push(node);
         }
         self.peers.entry(node).or_default().learn(contact.routes);
@@ -2281,10 +2278,8 @@ impl Joining {
             user.public_key(),
             context(schema)?,
         );
-        // A joining issuer tells the enrolling one how to reach it, so both
-        // issuers sync and renew through each other.
-        if invite.profile.issues()
-            && let Ok(address) = transport.address().await
+        // Every joining device supplies a return route for later commits.
+        if let Ok(address) = transport.address().await
             && !address.is_empty()
         {
             request = request.with_routes(&token, vec![(transport.kind().into(), address)]);

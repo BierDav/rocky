@@ -46,11 +46,12 @@ class RockyDatabase private constructor(
     }
 
     /**
-     * For a process the platform may freeze or kill: stops automatic sync once a running pass ends, so none
+     * For a process the platform may freeze or kill: cancels the native automatic pass promptly, so none
      * runs after this returns. The file, sessions, attached network and its endpoint stay open, and reads and
      * writes continue; acknowledged writes are already durable.
      */
     suspend fun enterBackground() = lifecycle.withLock {
+        setAutomaticSync(false)
         synchronizing?.cancelAndJoin()
         synchronizing = null
     }
@@ -58,13 +59,8 @@ class RockyDatabase private constructor(
     /** Resumes automatic sync, starting with an immediate pass, if the database was opened with it. */
     suspend fun enterForeground() = lifecycle.withLock {
         if (automaticSync && synchronizing == null) {
-            synchronizing = lifetime.launch {
-                // A native pass continues when its caller is cancelled; finish it rather than abandon the wait.
-                while (isActive) {
-                    withContext(NonCancellable) { syncOnce() }
-                    delay(500)
-                }
-            }
+            val status = setAutomaticSync(true)
+            synchronizing = lifetime.launch { observeSync(status) }
         }
     }
 

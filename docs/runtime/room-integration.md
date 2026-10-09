@@ -138,10 +138,15 @@ and cancels it when its `RockyRoom` wrapper closes; Rocky remains open.
 Room reads a flow's query inside a read transaction. That transaction fails,
 and the flow ends, when an authority change such as an installed partition
 secret ends its session, while sync applies a bundle that arrived in part
-(`held partition is incomplete`), or while a scope is unavailable. Collect
+(`held partition is incomplete`), while a scope is unavailable, or when its
+read lease expires and rolls back the transaction. Collect
 such flows with `settledOnRocky()`, which uses a bounded backoff for these
-transient read failures and lets other errors end the flow; the [shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
-observes again with a short backoff.
+transient read failures and lets other errors end the flow. Retrying a rolled-back
+read queries committed rows again; it never resumes the expired transaction.
+A virtual-clock qualification injects that timeout and a permanent storage
+failure, checking recovery and error propagation. The
+[shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
+uses this retry for its observations.
 
 ## Schema and migrations
 

@@ -44,6 +44,10 @@ Each scope keeps authenticated confirmed rows at a base sequence/head. The first
 command read after open or an authority change audits that base and the retained
 suffix, verifying predecessor heads and rows. Later reads continue incrementally.
 Full reconcile applies only projections beyond the already installed head.
+Historical checkpoint verification checks explicit table grants even when the
+signer also holds selectors for unrelated partitioned tables. It still requires
+a node credential with whole-scope read and write authority; a partitioned
+checkpoint must carry and verify its concrete tuple.
 
 `missing_results` starts above the local base. When the source cannot supply a
 missing prefix, SDK result sync uses [checkpoint bootstrap](sdk-bootstrapping.md);

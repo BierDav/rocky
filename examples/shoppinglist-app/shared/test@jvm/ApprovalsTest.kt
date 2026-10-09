@@ -5,7 +5,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import rocky.*
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -16,7 +15,7 @@ class ApprovalsTest {
         File(root, name),
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" }) },
+        transport = { PeerTransport.Tcp("127.0.0.1:0") },
         commands = { CommandRuntime(coordinator, ApprovalHandlers) },
     )
 

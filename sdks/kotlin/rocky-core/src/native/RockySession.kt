@@ -101,7 +101,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     /** A fresh invitation for one device with `profile`, replacing the previous one. Only an issuer invites. */
     suspend fun pairing(profile: GrantProfile): PairingInvitation {
         val result = client.call(request("pairing") { put("profile", profile.json()) })
-        return PairingInvitation(result.text("uri"), result.text("expires").toLong(), profile(result.getValue("profile").jsonObject))
+        return PairingInvitation(result.text("uri"), result.text("expires").toLong(), profile(result.getValue("profile").jsonObject), result.text("sequence").toLong())
     }
 
     /**
@@ -261,7 +261,13 @@ open class RockySession internal constructor(internal val client: RockyClient, o
 
     /** Enables native change-driven sync; cancellation stops this status observer. */
     suspend fun syncContinuously() {
-        var result = client.call(request("sync_start"))
+        observeSync(setAutomaticSync(true))
+    }
+
+    internal suspend fun setAutomaticSync(enabled: Boolean): JsonObject = client.call(request("sync_start") { put("enabled", enabled) })
+
+    internal suspend fun observeSync(initial: JsonObject) {
+        var result = initial
         while (currentCoroutineContext().isActive) {
             mutableStatus.value = ConnectionStatus(
                 when (result["state"]?.jsonPrimitive?.content) {
@@ -271,6 +277,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                     else -> ConnectionState.Unavailable
                 },
                 result["error"]?.jsonPrimitive?.contentOrNull,
+                peers = result["peers"]?.jsonPrimitive?.int ?: 0,
+                atEpochMillis = System.currentTimeMillis(),
             )
             result = client.call(request("sync_next") { put("after", result.getValue("token")) })
         }

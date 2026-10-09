@@ -62,7 +62,7 @@ suspend fun RoomDatabase.moveRockyRow(
 /**
  * Observes a DAO flow again, with a short backoff, when its read transaction met a transient state: an authority
  * change such as a newly installed partition secret, a bundle sync applies in part, or a partition that is not
- * available or held yet. A screen stays on the last committed rows instead of ending. Other failures end the flow.
+ * available or held yet, or a read lease timeout. A screen stays on the last committed rows instead of ending. Other failures end the flow.
  */
 fun <T> Flow<T>.settledOnRocky(): Flow<T> = retryWhen { cause, attempt ->
     val message = cause.message.orEmpty()
@@ -72,4 +72,4 @@ fun <T> Flow<T>.settledOnRocky(): Flow<T> = retryWhen { cause, attempt ->
 }
 
 // A list's row may arrive before its other tables are held, while its key installs.
-private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held")
+private val TRANSIENT_READS = listOf("held partition is incomplete", "session authority changed", " is not available: ", "named partition is not held", "SQL session: transaction was rolled back: Timeout")

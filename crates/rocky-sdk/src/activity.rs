@@ -30,12 +30,14 @@ impl Activity {
         )
     }
     /// Appends `kind` with `detail`'s fields, a sequence and a time.
-    pub fn record(&self, kind: &str, detail: Value) {
+    pub fn record(&self, kind: &str, detail: Value) -> u64 {
         let at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as u64)
             .unwrap_or_default();
+        let mut sequence = 0;
         self.0.send_modify(|log| {
+            sequence = log.next;
             let mut event =
                 json!({"sequence": log.next.to_string(), "at": at.to_string(), "kind": kind});
             if let (Some(event), Value::Object(fields)) = (event.as_object_mut(), detail) {
@@ -47,6 +49,7 @@ impl Activity {
                 log.events.pop_front();
             }
         });
+        sequence
     }
     /// Records like [`Self::record`] unless the latest event of `kind` had
     /// the same detail, as a retried pass would repeat it.

@@ -1,5 +1,5 @@
 //! Retry deadlines use Tokio's clock; successful idle peers have no deadline.
-use tokio::time::{Duration, Instant, sleep_until};
+use tokio::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(crate) struct Retry {
@@ -15,9 +15,17 @@ impl Retry {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+    pub fn ready(&self) -> bool {
+        self.deadline
+            .is_none_or(|deadline| deadline <= Instant::now())
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    #[cfg(test)]
     pub async fn wait(&self) {
         match self.deadline {
-            Some(deadline) => sleep_until(deadline).await,
+            Some(deadline) => tokio::time::sleep_until(deadline).await,
             None => std::future::pending().await,
         }
     }

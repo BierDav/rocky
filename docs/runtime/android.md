@@ -54,14 +54,18 @@ the kill: a secure transaction is committed and flushed before `write` returns, 
 recovered by its handle with `reconcile` ([SDK packaging](sdk-packaging.md#batches-cancellation-and-reconciliation)).
 What remains is not syncing while nobody looks:
 
-- `RockyDatabase.enterBackground()` stops automatic sync. It waits for a pass already running, so
-  none runs after it returns. Sessions, reads and writes continue; the file, the attached network
+- `RockyDatabase.enterBackground()` stops automatic sync. It cancels the native pass and returns within
+  one second, so none runs after it returns. Sessions, reads and writes continue; the file, the attached network
   service and an owned or borrowed endpoint stay open, so the device keeps its address.
 - `enterForeground()` restarts automatic sync with an immediate pass, if the database was opened with
   it. A database opened without automatic sync is left to the application's own `syncOnce` calls.
 - `rocky.android.RockyLifecycle.register(application)` in `Application.onCreate` counts started
   activities; `follow(database)` applies the visibility now and on every change. It never closes a
   database or a network, and `unfollow` leaves the database in its current state.
+
+The JVM stalled-transport test measured a 5 ms pause and a 4 ms foreground
+dial on 2026-10-10 ([phase-2 evidence](../features_07/02-change-driven-sync.md#measured-evidence-2026-10-10)).
+These timings have not been measured on an Android device.
 
 What a killed process loses, and what the next open does:
 

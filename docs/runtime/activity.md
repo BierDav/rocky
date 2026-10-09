@@ -25,6 +25,9 @@ scope.launch {
 The database retains the latest 512 events in memory, in sequence order.
 A new collector receives retained events before waiting for new ones. Sequence
 numbers start at one per open database; timestamps are local Unix milliseconds.
+`pairing(profile)` returns its invitation event's sequence as well as the URI
+and expiry. This lets an application associate later enrollment events with
+the invitation choice even if a newer invitation is created before collection.
 Closing or restarting the database discards its feed. Cancelling one collector
 leaves other sessions, observers and networking running.
 

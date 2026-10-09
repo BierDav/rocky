@@ -83,9 +83,21 @@ adapters may supply `Transport::connectivity`. On TCP or a foreign adapter,
 call `setOnline(true)` / `{"type":"connection","online":true}` when the
 application learns connectivity returned. Offline mode suspends attempts.
 
-Successful idle peers have no sync timer. Failed work retries after 1, 2, 4, 8,
-16, 32 and then 60 seconds; changes interrupt backoff. Tokio's controllable clock
-qualifies the schedule. Committed observation and sync notifications never
+A pass reconciles at most four peers concurrently. Each peer has its own
+back-off: 1, 2, 4, 8, 16, 32 and then 60 seconds. A local write wakes the
+worker but leaves a failed peer's deadline intact. Connectivity and
+`setOnline(true)` reset all peers; a peer configuration change or an
+authenticated inbound session resets that peer alone. Reachability is recorded
+as each peer answers; the pass status follows once all dialed peers finish.
+
+Retry timers run only for pending changes, requested metadata refresh or bounded
+continuation;
+an idle failed peer waits for a signal, as does a successful idle peer.
+Disabling with `sync_start` cancels the active automatic pass and acknowledges
+its cancellation within one second. Committed frames stay whole and the next
+pass repeats interrupted work. Enabling starts a pass immediately, resetting
+back-off. Cancelling a Kotlin status observer alone does not disable the worker.
+Tokio's controllable clock qualifies the schedule. Committed observation and sync notifications never
 substitute for the runtime's durable export fence. Ordinary row and readiness
 observers also wait on events; credential expiry uses a single deadline.
 
@@ -93,6 +105,9 @@ Command-result fetch failures and bounded continuation retain retry work without
 blocking row sync. An external coordinator head change is not a connectivity
 signal: applications that learn of it should request sync. No new coordinator
 watch protocol or Internet/NAT qualification is claimed here.
+
+The paused-clock scheduling, cancellation and idle evidence is recorded in
+[phase 2](../features_07/02-change-driven-sync.md#measured-evidence-2026-10-10).
 
 ## Backup and replacement
 

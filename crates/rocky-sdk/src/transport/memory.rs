@@ -3,13 +3,13 @@
 //! it and injects stalls, disconnects and backpressure.
 use super::{BoxFuture, Connector, Failure, Protocol, Stream, Transport};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     pin::Pin,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
@@ -34,6 +34,13 @@ pub struct Hub {
     /// Bytes each pipe buffers before its writer waits.
     pub capacity: AtomicUsize,
     cut: Mutex<Option<usize>>,
+    cut_waiters: Mutex<Vec<Waker>>,
+    stalled_peers: Mutex<HashSet<String>>,
+    peer_dials: Mutex<HashMap<String, usize>>,
+    dial_events: tokio::sync::watch::Sender<()>,
+    written: tokio::sync::watch::Sender<usize>,
+    /// At the cut, hold the stream instead of disconnecting it.
+    pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
 }
 impl Default for Hub {
@@ -46,6 +53,12 @@ impl Default for Hub {
             stalled: AtomicBool::new(false),
             capacity: AtomicUsize::new(64 * 1024),
             cut: Mutex::new(None),
+            cut_waiters: Mutex::default(),
+            stalled_peers: Mutex::default(),
+            peer_dials: Mutex::default(),
+            dial_events: tokio::sync::watch::channel(()).0,
+            written: tokio::sync::watch::channel(0).0,
+            hold_cut: AtomicBool::new(false),
             connectivity: tokio::sync::watch::channel(()).0,
         }
     }
@@ -57,6 +70,42 @@ impl Hub {
             hub: self.clone(),
             name: name.into(),
         })
+    }
+    /// Holds dials to just this address; does not signal connectivity.
+    pub fn stall_peer(&self, address: &str, stalled: bool) {
+        let mut peers = self
+            .stalled_peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if stalled {
+            peers.insert(address.into());
+        } else {
+            peers.remove(address);
+        }
+    }
+    pub fn dials_to(&self, address: &str) -> usize {
+        self.peer_dials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(address)
+            .copied()
+            .unwrap_or(0)
+    }
+    pub async fn wait_dials(&self, address: &str, count: usize) {
+        let mut events = self.dial_events.subscribe();
+        loop {
+            events.borrow_and_update();
+            if self.dials_to(address) >= count {
+                return;
+            }
+            if events.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+    /// Total bytes written, and an event for deterministic stream cuts.
+    pub fn written(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.written.subscribe()
     }
     /// Signals a controllable network transition, without advancing time.
     pub fn network_changed(&self) {
@@ -75,6 +124,27 @@ impl Hub {
     /// hub; `None` heals it for later writes.
     pub fn cut_after(&self, bytes: Option<usize>) {
         *self.cut.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
+        for waker in self
+            .cut_waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+        {
+            waker.wake();
+        }
+    }
+    fn blocked(&self, cx: &Context<'_>) -> Poll<std::io::Result<()>> {
+        if !self.hold_cut.load(Ordering::SeqCst) {
+            return Poll::Ready(Err(cut()));
+        }
+        let mut waiters = self
+            .cut_waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+            waiters.push(cx.waker().clone());
+        }
+        Poll::Pending
     }
     /// How many of `wanted` bytes may still cross; `None` once cut.
     fn allow(&self, wanted: usize) -> Option<usize> {
@@ -85,6 +155,7 @@ impl Hub {
         }
     }
     fn spend(&self, written: usize) {
+        self.written.send_modify(|total| *total += written);
         if let Some(left) = &mut *self.cut.lock().unwrap_or_else(PoisonError::into_inner) {
             *left = left.saturating_sub(written);
         }
@@ -106,7 +177,7 @@ impl AsyncRead for Pipe {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         if self.hub.allow(1).is_none() {
-            return Poll::Ready(Err(cut()));
+            return self.hub.blocked(cx);
         }
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
@@ -118,7 +189,7 @@ impl AsyncWrite for Pipe {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let Some(allowed) = self.hub.allow(buf.len()) else {
-            return Poll::Ready(Err(cut()));
+            return self.hub.blocked(cx).map_ok(|()| 0);
         };
         let written = Pin::new(&mut self.io).poll_write(cx, &buf[..allowed]);
         if let Poll::Ready(Ok(written)) = &written {
@@ -186,7 +257,22 @@ impl Transport for Node {
     ) -> BoxFuture<'a, Result<Stream, Failure>> {
         Box::pin(async move {
             self.hub.dials.fetch_add(1, Ordering::SeqCst);
-            if self.hub.stalled.load(Ordering::SeqCst) {
+            *self
+                .hub
+                .peer_dials
+                .lock()
+                .map_err(|_| "hub poisoned")?
+                .entry(address.into())
+                .or_default() += 1;
+            self.hub.dial_events.send_replace(());
+            if self.hub.stalled.load(Ordering::SeqCst)
+                || self
+                    .hub
+                    .stalled_peers
+                    .lock()
+                    .map_err(|_| "hub poisoned")?
+                    .contains(address)
+            {
                 std::future::pending::<()>().await;
             }
             let (listener, listening) = self

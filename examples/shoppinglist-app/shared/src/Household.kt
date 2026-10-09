@@ -6,6 +6,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
@@ -30,8 +32,10 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     /** The trusted-only tables; a member never touches them. */
     internal val trusted = TrustedRows(rocky)
 
-    /** The invitation awaiting its device, so its enrollment records the chosen kind and name. */
-    private var pending: Pair<NodeKind, String>? = null
+    private val invitationsLock = Mutex()
+
+    /** Choices by native invitation event, including enrollments the collector has not processed yet. */
+    private val pending = sortedMapOf<Long, PairingCode>()
 
     fun devices(): Flow<List<DeviceRow>> = database.devices().observe().settledOnRocky()
 
@@ -53,15 +57,16 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     val deliveries: SharedFlow<String> = notes.asSharedFlow()
 
     /** On a trusted device: a single-use code for one new device of [kind], replacing the previous one. */
-    suspend fun invite(kind: NodeKind, name: String): PairingCode {
+    suspend fun invite(kind: NodeKind, name: String): PairingCode = invitationsLock.withLock {
         val invitation = rocky.pairing(kind.profile)
-        pending = kind to name
         val code = PairingCode(kind, name, invitation.uri)
+        pending[invitation.sequence] = code
+        if (pending.size > 512) pending.remove(pending.firstKey())
         // Other trusted devices list it too; members cannot read `invitations`.
         attempt("list the invitation") {
             trusted.openInvitation(self, kind.name.lowercase(), name, code.toString(), invitation.expiresAtEpochSeconds)
         }
-        return code
+        code
     }
 
     /** On a trusted device: each trusted device's open invitation, expired ones included. */
@@ -124,15 +129,15 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     private suspend fun recordEnrollments() {
         rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
             val known = devices().first().any { it.node == enrolled.node }
-            // The enrollment used this device's single invitation: it is no longer open.
-            attempt("close the invitation") { trusted.closeInvitation(self) }
-            val (kind, name) = pending?.also { pending = null }
-                ?: if (known) {
-                    return@collect
-                } // Enrolled while this app was closed: the grants still tell a trusted device apart.
-                else {
-                    (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
+            val choice = invitationsLock.withLock {
+                val sequence = pending.keys.lastOrNull { it < enrolled.sequence }
+                sequence?.let { pending.remove(it) }?.also { code ->
+                    attempt("close the invitation") { trusted.closeInvitation(self, code.toString()) }
                 }
+            }
+            if (known) return@collect
+            val (kind, name) = choice?.let { it.kind to it.name }
+                ?: (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
             // A pending `devices` horizon refuses the write until it is finalized: keep the enrollment until then.
             while (attempt("record $name") { record(enrolled.node, name, kind) } == null) delay(15_000)
             notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")

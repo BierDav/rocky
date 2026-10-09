@@ -7,7 +7,6 @@ import kotlinx.serialization.json.*
 import rocky.*
 import rocky.room.followRocky
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -29,7 +28,7 @@ class ShoppingIntegrationTest {
 
     /** Loopback iroh: no relay and no address lookup, so tests need no network. */
     private fun local(): PeerTransport = PeerTransport.Iroh(relay = "disabled", discovery = false, bind = "127.0.0.1:0")
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private val items get() = ItemsSchema.table("items")
     private val writer = GrantProfile.Writer(setOf("items"))
     private suspend fun RockyDatabase.add(title: String) = insertItem(title)
@@ -200,6 +199,10 @@ class ShoppingIntegrationTest {
             assertEquals(32, network.inboundLimit)
             b.removePeer(peers.single { it.isIssuer }.node)
             assertEquals(listOf(c.session().node), b.peers().map { it.node })
+            assertFalse(b.observeReadiness().first().issuerContact)
+            b.add("Bread")
+            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertEquals(listOf("Bread", "Eggs", "Milk"), c.titles())
             b.removePeer(c.session().node)
             assertTrue(b.peers().isEmpty())
         } finally {

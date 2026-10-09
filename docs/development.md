@@ -152,28 +152,30 @@ workflow's call, not for pull requests. Its `lint` job runs `scripts/tools` and
 `scripts/lint` on Linux; it needs no build and fails within minutes. The
 `build`, `check`, `e2e`
 and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
-On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
-they exchange architecture-specific nextest archives and custody peer, while
-`lint` uses `ubuntu-latest-any-arch`.
-The `build` job is the only job that compiles the workspace. It downloads an
-archive of the exact event revision and runs `scripts/check --build`: strict
-workspace Clippy and the test binaries as nextest archives; it then builds the
-custody peer binary. It uploads three independent artifacts --
-`nextest-workspace`, `nextest-sdk` and `rocky-peer` -- so a failure to finalize
-one cannot also lose the others, and each consumer fetches only what it runs.
+On GitHub they use `ubuntu-latest`; on Gitea `build`, `check` and `e2e` use
+`ubuntu-24.04-arm` to exchange architecture-specific nextest archives.
+`shopping` uses the x64 `ubuntu-latest` runner for the Android NDK and builds
+its own custody peer on Gitea; `lint` uses `ubuntu-latest-any-arch`.
+The `build` job compiles the baseline workspace. It downloads an archive of
+the exact event revision and runs `scripts/check --build`: strict workspace
+Clippy and the test binaries as nextest archives; it then builds the custody
+peer. It uploads three independent artifacts -- `nextest-workspace`,
+`nextest-sdk` and `rocky-peer` -- so a failure to finalize one cannot also lose
+the others, and each consumer fetches only what it runs.
 Every job installs the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 `check` downloads both test archives and runs `scripts/check --from` them:
 `cargo fmt --all -- --check` and the unit and integration tiers, without
-compiling. `e2e` downloads both for the end-to-end tier; `shopping` downloads only
-`rocky-peer`; `android` needs no Rust artifact and keeps its own Gradle and
-native caches. The downloads are best-effort: Gitea's artifact service sometimes
-fails to finalize an artifact, and a job that finds one missing rebuilds the
-test binaries from the dependency cache (`check` runs `scripts/check --no-clippy`
-so it does not repeat the Clippy the `build` job already ran). `check` and `e2e`
-compile nothing otherwise, so they restore the Rust cache only then.
+compiling. `e2e` downloads both for the end-to-end tier. GitHub `shopping`
+downloads only the x64 `rocky-peer`, while on Gitea it builds its own; `android`
+needs no Rust artifact and keeps its own Gradle and native caches. The downloads
+are best-effort: Gitea's artifact service sometimes fails to finalize an
+artifact, and a job that finds one missing rebuilds the test binaries from the
+dependency cache (`check` runs `scripts/check --no-clippy` so it does not repeat
+the Clippy the `build` job already ran). `check` and `e2e` compile nothing
+otherwise, so they restore the Rust cache only then.
 It needs no version-control CLI or repository history, and never invokes Git.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
 lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,
@@ -208,8 +210,10 @@ Required status checks are a hosting setting; the workflow file does not configu
 branch protection. No remotely hosted CI run has been verified by this baseline.
 
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
-baseline; it has not run on a hosted runner yet. Releases skip it and do not
-wait for its result.
+baseline. It also builds the Android runtime prerequisite for `./kotlin check`
+and runs the exhaustive phase-2 byte-offset cancellation gate in the release
+profile. This job uses an x64 runner for the Android NDK and has not run on a
+hosted runner yet. Releases skip it and do not wait for its result.
 
 A release calls the baseline workflow. Before it starts, it waits only for the
 push run's `lint`, `build` and `check` jobs for that commit; a failure in any of
@@ -261,9 +265,10 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   particular architecture use `ubuntu-latest-any-arch` on Gitea, carried by
   runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
-  arm64 Linux host. The baseline `build`, `check`, `e2e` and `shopping` jobs
-  exchange architecture-specific binaries, so they pin `ubuntu-24.04-arm` rather
-  than the mixed `-any-arch` label.
+  arm64 Linux host. The baseline `build`, `check` and `e2e` jobs exchange
+  architecture-specific binaries, so they pin `ubuntu-24.04-arm` rather than the
+  mixed `-any-arch` label. `shopping` uses x64 for its Android prerequisite and
+  builds its peer there instead of using the arm64 artifact.
 - The release job that produces the `darwin-aarch64` JVM SDK still uses macOS
   because it builds a macOS native library. Other release jobs use Linux.
 - Images and Maven artifacts go to the instance's registries with the

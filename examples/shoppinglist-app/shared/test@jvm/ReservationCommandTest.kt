@@ -3,7 +3,6 @@ package org.example.examples.shopping
 import kotlinx.coroutines.*
 import rocky.*
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
@@ -11,7 +10,7 @@ import kotlin.test.*
 /** Typed strong commands decided by a handler written in Kotlin, through the packaged runtime. */
 class ReservationCommandTest {
     private fun directory(): File = Files.createTempDirectory("rocky-commands-test").toFile()
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private fun handle() = RockyDatabase.newHandle()
     private val writer = GrantProfile.Writer(setOf("stock", "holds"))
 

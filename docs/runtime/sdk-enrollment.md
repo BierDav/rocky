@@ -54,7 +54,7 @@ registry before the issuer answers, so a lost reply retried at any issuer
 returns the same number. The
 `rocky.sdk.author.v1` prefix distinguishes this request from ordinary renewal
 and generation offers; it carries the existing signed `PseudonymRequest`.
-Issuers verify its grants, manifest, epoch and device binding through the same
+Issuers verify its grants, manifest, revocations and device binding through the same
 [author assignment](credential-primitives.md#author-pseudonyms) boundary.
 There is one current request format and no legacy reader.
 
@@ -99,7 +99,9 @@ credential is returned.
 ## Invitations and pairing
 
 `pairing(profile)` on an issuer returns a `rocky://join/…` URI; treat it as a
-secret until used.
+secret until used. The result's `sequence` is its `InvitationCreated` activity
+sequence for this open database. Applications can associate choices with the
+subsequent `DeviceEnrolled` events before another invitation replaces it.
 
 - It lasts ten minutes and enrolls one device. A new one replaces it. Ten
   wrong tokens lock it.
@@ -114,9 +116,13 @@ secret until used.
   consuming the invitation.
 - A domain's registry holds up to 256 devices; the 257th enrollment fails
   with `registry_full` before the invitation is consumed.
-- A joining issuer sends its routes, bound by the token proof, so both issuers
-  become peers. The enrollment carries contacts of other issuers, added as
-  peers that also renew the joiner.
+- Every joiner sends its available return route, bound by the token proof.
+  The issuer persists it as a peer and wakes sync, so later writes reach an
+  idle member without polling. Only an issuer profile adds issuing authority.
+  The 16-peer limit still applies. If it prevents learning a return route,
+  arrange delivery through a configured peer or free a peer slot and add
+  the recipient's contact. The enrollment also carries contacts of other
+  issuers, added as peers that renew the joiner.
 
 ### Supplied credentials
 
@@ -225,7 +231,8 @@ contact again replaces the routes of its transport kinds.
 
 ## Sync
 
-Each sync opens an authenticated native session with every configured peer,
+An explicit sync opens authenticated native sessions with every configured peer,
+reconciling at most four peers concurrently,
 pushes what the peer lacks and pulls what this device lacks for the granted
 collections, in bounded frames. It succeeds when one peer was reached; `peers`
 shows each. Members keep syncing while every issuer is offline, until their
@@ -235,10 +242,25 @@ device learned. When a peer refuses, the device renews once and retries, which
 is how it learns a revocation. Checkpoints and catch-up are in
 [SDK bootstrapping](sdk-bootstrapping.md).
 
-Kotlin `create`/`join`/`resume` default to `automaticSync = true`, which runs
-`syncOnce` every 500 ms while foregrounded. `syncContinuously()` instead
-enables the native [change-driven worker](always-on-peer.md#change-driven-sync);
-`syncOnce` stays available.
+Kotlin `create`/`join`/`resume` default to `automaticSync = true`, enabling and
+observing the native [change-driven worker](always-on-peer.md#change-driven-sync)
+while foregrounded. `syncContinuously()` enables the same worker and observes
+its status. Automatic passes respect per-peer back-off; `syncOnce` and native
+`sync` ignore it and retain their response shape. `enterBackground` cancels
+the automatic pass within one second; `enterForeground` starts one immediately.
+
+A differing revocation set or refused credentials triggers one renewal after
+the concurrent attempts finish. Successful old handshakes and credential
+failures are then checked again against the refreshed authority, still at most
+four at a time. Unavailable routes keep their retry deadline.
+
+Change-driven delivery needs a configured route back to each recipient.
+Pairing learns the joining device's authenticated return route when it supplies
+one and the issuer has room in its peer set. Supplied credentials and custom
+transports without an address still require contacts to be exchanged explicitly.
+An idle recipient with only a one-way route needs a connectivity signal or
+`syncOnce` to pull later remote writes. General contact exchange is in
+[phase 14](../features_07/14-contacts-and-partner-choice.md).
 
 ## Native calls
 
@@ -252,10 +274,10 @@ enables the native [change-driven worker](always-on-peer.md#change-driven-sync);
 | --- | --- |
 | `domain` | `scope`, `issuer`, `profile`, `collections`, `transport` (attached kind or empty) |
 | `session` | `principal`, `node`, `revocations` (`digest`, live `statements`), `expires`, `issuer`, `profile`, readable/writable counts |
-| `pairing` with `profile` | `uri`, `expires`, `profile` (issuer) |
+| `pairing` with `profile` | `uri`, `expires`, `profile`, invitation activity `sequence` (issuer) |
 | `grant` / `delegate` with `device` and `grants` or `profile` | `supplied` for `install`; `delegate` narrows this device's grants |
 | `install` with `supplied` | Replaces credentials; the new `session` |
-| `devices`, `device_label`, `revoke` with `node` | [Registry](issuer-registry.md#calls) records; a label set; the new epoch (issuer) |
+| `devices`, `device_label`, `revoke` with `node` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
 | `renew` | The renewed `session` |
 | `authors` | Newly installed table authors; see [above](#author-installation) |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
@@ -310,7 +332,9 @@ Not covered: publisher key backup, login providers, desktop keychains.
 Status: current identity and routing formats supersede their compatibility
 clauses as of 2026-10-08; identity 10 moves device records to the
 [registry](../decisions/0048-replicated-issuer-registry.md) as of 2026-10-10.
-Identity 10, invitation 4 and contact 2 each have one reader; other versions
+Identity 11 replaces its policy epoch with the
+[revocation set](../decisions/0049-mergeable-revocation-set.md).
+Identity 11, invitation 4 and contact 2 each have one reader; other versions
 require reinstall.
 
 - Identity is transport-independent: a domain is its definition identity and

@@ -3189,6 +3189,7 @@ name = "rocky-sdk"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "futures-util",
  "rand 0.8.8",
  "rocky-coordinator",
  "rocky-core",

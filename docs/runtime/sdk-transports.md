@@ -61,7 +61,9 @@ stable or remotely reachable TCP routes.
 
 `rocky_sdk::transport::memory::Hub` joins named nodes of one process with
 bounded pipes, counts starts, dials and closes, and injects faults: `stalled`
-holds every dial, `cut_after(bytes)` breaks streams, `capacity` sets the pipe
+holds every dial, `stall_peer(address, true)` holds just one peer,
+`dials_to(address)` counts its attempts, `cut_after(bytes)` breaks streams,
+`hold_cut` pauses at the cut for cancellation tests, `capacity` sets the pipe
 buffer and `network_changed()` signals connectivity.
 
 ## Sync wakeups
@@ -69,7 +71,10 @@ buffer and `network_changed()` signals connectivity.
 The optional `Transport::connectivity` watch reports reachability changes;
 iroh supplies it from endpoint address updates. Without a transport signal,
 the application calls `setOnline` / the native `connection` request. See
-[change-driven sync](always-on-peer.md#change-driven-sync).
+[change-driven sync](always-on-peer.md#change-driven-sync). Connectivity and
+`setOnline(true)` reset per-peer back-off; committed local writes do not.
+Pausing the worker cancels outstanding dials and sessions without closing the
+attached transport.
 
 ## Supplying a transport
 
@@ -185,9 +190,11 @@ peer. Disable both options or name your own relay to depend on no public service
 | Sessions per sync and peer | 16 |
 | Closing a network service | 5 s drain, then cancellation |
 
-A sync makes one attempt per route. There is no background reconnect loop in
-the runtime; the caller's schedule or [change-driven sync](always-on-peer.md#change-driven-sync)
-is the only retry.
+A peer attempt tries routes in order until one connects, each with its own
+deadline. A pass reconciles at most four peers at once, so a stalled route
+does not hold up the other three. Explicit `sync` attempts every peer;
+[change-driven sync](always-on-peer.md#change-driven-sync) skips peers still
+in back-off. Disabling that worker cancels its attempts within one second.
 
 ## Qualification
 
@@ -196,6 +203,12 @@ is the only retry.
   streams cut during handshake, push and pull lose no local row and leave no
   partial one; a 4 KiB pipe converges; inbound streams beyond 32 are dropped
   and served again once free.
+- The SDK's `node::sync_tests::change_driven` tests use the hub and paused Tokio
+  clock for independent peer deadlines, four concurrent peers, lifecycle
+  cancellation, bootstrap progress, two-worker idle behavior and an unreachable
+  idle hour. Representative byte cuts run in the baseline. The exhaustive gate
+  runs with `cargo test --locked --release -p rocky-sdk --lib cancellation_at_every_session_byte -- --ignored --nocapture`;
+  every offset audits both replicas before a healed pass converges.
 - `cargo test -p rocky-iroh` and `-p rocky-sdk --test iroh`: Rocky's handlers
   and an echo protocol share an application router; Rocky's ALPNs refuse before
   a service listens and after it closes while echo keeps working; the same

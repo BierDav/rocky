@@ -3,13 +3,12 @@ package org.example.examples.shopping
 import kotlinx.coroutines.*
 import rocky.*
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
 /** The starter pairing makes a second issuer, which carries the list once the creator device is lost. */
 class IssuerRecoveryTest {
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
 
     /** Room checks every table it declares, so a device reads the household and approval tables too. */
     private val writer = GrantProfile.Writer(ShoppingTables.toSet() + listOf("devices", "keys", "identities", "requests", "decisions"))

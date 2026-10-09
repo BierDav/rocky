@@ -70,7 +70,7 @@ internal class TrustedRows(private val rocky: RockyDatabase) {
             )
         }
     }
-    suspend fun closeInvitation(issuer: String) = write { execute("DELETE FROM invitations WHERE issuer = ?", issuer) }
+    suspend fun closeInvitation(issuer: String, code: String) = write { execute("DELETE FROM invitations WHERE issuer = ? AND code = ?", issuer, code) }
 
     fun coordination(): Flow<CoordinationRow?> = rows("coordination").map { rows ->
         rows.firstOrNull()?.let {

@@ -33,7 +33,7 @@ interface SqlWrite {
 }
 
 /** A single-use `rocky://join/…` URI. It carries the issuer's routes, the invitation secret and the profile it grants. */
-data class PairingInvitation(val uri: String, val expiresAtEpochSeconds: Long, val profile: GrantProfile)
+data class PairingInvitation(val uri: String, val expiresAtEpochSeconds: Long, val profile: GrantProfile, val sequence: Long)
 
 /** A right a raw grant names on one table. `Invoke` and `Execute` need a command that uses the table. */
 enum class Right(val wire: String) {

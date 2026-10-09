@@ -36,6 +36,7 @@ class CredentialPrimitivesTest {
             val asked = w.credentials.pseudonymRequest("items")
             val credential = a.credentials.assignPseudonym(asked)
             val item = w.credentials.installPseudonym(credential)
+            // The registry author follows the two delegated numbers.
             assertEquals(AuthorPseudonym("items", 4), item)
             assertEquals(item, w.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
             assertEquals(PseudonymOwner(w.session().node, "items", 4), a.credentials.pseudonymOwner(credential))
@@ -95,8 +96,9 @@ class CredentialPrimitivesTest {
             val current = Json.parseToJsonElement(identity.readText()).jsonObject
             val database = File(directory, "rocky.sqlite")
             val kept = database.readBytes()
-            val currentVersion = current.getValue("version").jsonPrimitive.int
-            for (version in (0..currentVersion + 1).filter { it != currentVersion } + Int.MAX_VALUE) {
+            val versionNow = current.getValue("version").jsonPrimitive.int
+            val refusedVersions = (0..versionNow + 1).filter { it != versionNow } + Int.MAX_VALUE
+            for (version in refusedVersions) {
                 val bytes = JsonObject(current + ("version" to JsonPrimitive(version))).toString().toByteArray()
                 identity.writeBytes(bytes)
                 val error = assertFailsWith<RockyException> { RockyDatabase.open(directory, ItemsSchema) }

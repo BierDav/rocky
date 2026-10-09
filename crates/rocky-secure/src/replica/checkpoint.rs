@@ -259,16 +259,28 @@ impl SignedCheckpoint {
                     time,
                 )
                 .map_err(credential)?,
-            None => self
-                .credentials
-                .verify(
-                    inner.config.publisher,
-                    self.statement.definition,
-                    self.node,
-                    &revocations,
-                    time,
-                )
-                .map_err(credential)?,
+            None => {
+                // Unrelated partition selectors do not remove explicit table grants.
+                let (grants, _) = self
+                    .credentials
+                    .verify_selectors(
+                        inner.config.publisher,
+                        self.statement.definition,
+                        self.node,
+                        &revocations,
+                        time,
+                    )
+                    .map_err(credential)?;
+                if self
+                    .credentials
+                    .0
+                    .last()
+                    .is_none_or(|leaf| leaf.capability.kind != rocky_core::PrincipalKind::Node)
+                {
+                    return Err(denied("checkpoint requires a node credential"));
+                }
+                grants
+            }
         };
         if !grants.iter().any(|grant| {
             grant.scope == self.statement.scope

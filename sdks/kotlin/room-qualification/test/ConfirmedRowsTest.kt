@@ -12,7 +12,6 @@ import rocky.*
 import rocky.room.followRocky
 import rocky.room.setRockyDatabase
 import java.io.File
-import java.net.ServerSocket
 import java.nio.file.Files
 import kotlin.test.*
 
@@ -50,7 +49,7 @@ class ConfirmedRowsTest {
         table("stock") { tableClass = TableClass.CommandControlled }
         commands = CommandSet(listOf(Restock))
     }
-    private fun tcp(): PeerTransport = PeerTransport.Tcp(ServerSocket(0).use { "127.0.0.1:${it.localPort}" })
+    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private fun bundles(directory: File): Long = BundledSQLiteDriver().open(File(directory, "rocky.sqlite").path, SQLITE_OPEN_READONLY).use { file ->
         file.prepare("SELECT count(DISTINCT handle) FROM secure_bundle_handles").use {
             it.step()
@@ -72,7 +71,7 @@ class ConfirmedRowsTest {
         val work = mutableListOf<Job>()
         try {
             coordinator.register(database.commandIdentity())
-            database.installAuthors(tables = listOf("holds"))
+            database.installRoomAuthors(tables = listOf("holds"))
             val room = Room.databaseBuilder<MarketDatabase>(File(directory, "market.room").path).setRockyDatabase(database).build()
             val market = room.market()
             work += launch(Dispatchers.IO) { room.followRocky(database) }

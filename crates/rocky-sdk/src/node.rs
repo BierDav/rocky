@@ -13,6 +13,7 @@ use crate::{
     transport::{Protocol, Stream, Transport},
 };
 use data_encoding::HEXLOWER;
+use futures_util::{StreamExt, stream};
 use rocky_core::{Coordinator, ResourceScope, SqlValue, TypedCommands, commitment};
 use rocky_credentials::Profile;
 use rocky_secure::{
@@ -176,12 +177,24 @@ struct Link {
     served: AtomicU64,
     refused: AtomicU64,
 }
-/// The outcome of the last sync attempt with a peer.
+/// Signals when an automatic pass has been dropped.
+struct WorkerActivity(watch::Sender<bool>);
+impl Drop for WorkerActivity {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
+    }
+}
 struct SyncActivity(watch::Sender<&'static str>);
 impl Drop for SyncActivity {
     fn drop(&mut self) {
         self.0.send_replace("idle");
     }
+}
+#[derive(Default)]
+struct PeerRetry {
+    retry: crate::scheduling::Retry,
+    pending: bool,
+    generation: u64,
 }
 struct Reached {
     at: u64,
@@ -211,6 +224,10 @@ pub(crate) struct Node {
     links: AtomicU64,
     clients: std::sync::Mutex<BTreeMap<u64, Arc<Client>>>,
     syncing: Mutex<()>,
+    bootstrap: Mutex<()>,
+    retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
+    sync_control: watch::Sender<u64>,
+    worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<&'static str>,
     automatic: AtomicBool,
     sync_events: watch::Sender<u64>,
@@ -257,6 +274,10 @@ impl Node {
             links: AtomicU64::new(1),
             clients: std::sync::Mutex::new(BTreeMap::new()),
             syncing: Mutex::new(()),
+            bootstrap: Mutex::new(()),
+            retries: std::sync::Mutex::new(BTreeMap::new()),
+            sync_control: watch::channel(0).0,
+            worker_running: watch::channel(false).0,
             sync_state: watch::channel("idle").0,
             automatic: AtomicBool::new(false),
             sync_events: watch::channel(0).0,
@@ -525,11 +546,13 @@ impl Node {
                         )
                         .await
                         .map_err(named)?;
-                    self.activity.record(
+                    let sequence = self.activity.record(
                         "invitation_created",
                         json!({"profile": profile, "expires": expires.to_string()}),
                     );
-                    Ok(json!({"uri": uri, "expires": expires.to_string(), "profile": profile}))
+                    Ok(
+                        json!({"uri": uri, "expires": expires.to_string(), "profile": profile, "sequence": sequence.to_string()}),
+                    )
                 }
                 "renew" => {
                     self.renew(transport, true, None).await?;
@@ -617,19 +640,26 @@ impl Node {
                 self.backup(std::path::Path::new(target)).await
             }
             "sync_start" => {
-                self.automatic.store(
-                    request
-                        .get("enabled")
-                        .map(|enabled| {
-                            enabled
-                                .as_bool()
-                                .ok_or_else(|| refused("enabled must be boolean"))
-                        })
-                        .transpose()?
-                        .unwrap_or(true),
-                    Ordering::SeqCst,
-                );
-                self.wake_sync();
+                let enabled = request
+                    .get("enabled")
+                    .map(|enabled| {
+                        enabled
+                            .as_bool()
+                            .ok_or_else(|| refused("enabled must be boolean"))
+                    })
+                    .transpose()?
+                    .unwrap_or(true);
+                self.automatic.store(enabled, Ordering::SeqCst);
+                if enabled {
+                    self.reset_retry(None);
+                }
+                self.control_sync();
+                if !enabled {
+                    // Acknowledge only after the worker has dropped its pass.
+                    let mut running = self.worker_running.subscribe();
+                    running.wait_for(|running| !running).await?;
+                    self.synced(json!({"state": "idle", "retry": false}));
+                }
                 Ok(self.sync_status.borrow().clone())
             }
             "sync_next" => {
@@ -707,6 +737,7 @@ impl Node {
                         Ok(node)
                     })
                     .await?;
+                self.reset_retry(Some(node));
                 self.activity
                     .record("peer_added", json!({"peer": node.to_hex()}));
                 self.wake_sync();
@@ -725,6 +756,10 @@ impl Node {
                 })
                 .await?;
                 self.reached()?.remove(&node);
+                self.retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&node);
                 self.activity
                     .record("peer_removed", json!({"peer": node.to_hex()}));
                 self.wake_sync();
@@ -752,7 +787,10 @@ impl Node {
                     self.activity
                         .record(if enabled { "online" } else { "offline" }, json!({}));
                 }
-                self.wake_sync();
+                if enabled {
+                    self.reset_retry(None);
+                }
+                self.control_sync();
                 Ok(json!({"online": enabled}))
             }
 
@@ -1638,29 +1676,82 @@ impl Node {
             *current = status;
         });
     }
-    /// One worker per link. A timer exists only while retrying failed work.
+    fn control_sync(&self) {
+        self.sync_control
+            .send_modify(|event| *event = event.wrapping_add(1));
+        self.wake_sync();
+    }
+    fn reset_retry(&self, peer: Option<PublicKey>) {
+        let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        for (node, state) in retries.iter_mut() {
+            if peer.is_none_or(|peer| peer == *node) {
+                state.retry.reset();
+                state.generation = state.generation.wrapping_add(1);
+            }
+        }
+    }
+    fn inbound_sync(&self, peer: PublicKey) {
+        let backed_off = self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .is_some_and(|state| state.retry.deadline().is_some());
+        if backed_off {
+            self.reset_retry(Some(peer));
+            self.wake_sync();
+        }
+    }
+    fn pending_sync(&self) {
+        for state in self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values_mut()
+        {
+            state.pending = true;
+        }
+    }
+    fn retry_deadline(&self) -> Option<tokio::time::Instant> {
+        self.retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|state| state.pending)
+            .filter_map(|state| state.retry.deadline())
+            .min()
+    }
+    /// One worker per link; only pending work has a retry timer.
     async fn synchronize(self: Arc<Self>, link: Arc<Link>) {
         let mut stage = link.stage.subscribe();
         let mut events = self.sync_events.subscribe();
+        let mut control = self.sync_control.subscribe();
         let mut frames = self.replica.observe_frames().await;
         let mut revisions = self.replica.observe_revision();
         let mut connectivity = link.transport.connectivity();
-        let mut retry = crate::scheduling::Retry::default();
+        let mut retry_only = false;
         loop {
             if *stage.borrow() != Stage::Open {
                 break;
             }
+            control.borrow_and_update();
+            events.borrow_and_update();
             if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) {
+                self.worker_running.send_replace(true);
+                let running = WorkerActivity(self.worker_running.clone());
                 let result = tokio::select! {
+                    biased;
+                    _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
+                    _ = control.changed() => continue,
                     result = async {
                         let attached = self.network.read().await;
                         if attached.as_ref().is_none_or(|current| current.id != link.id) {
                             return Ok((json!({"state": "idle"}), false));
                         }
-                        self.sync(&*link.transport).await
+                        self.sync_pass(&*link.transport, true, retry_only).await
                     } => result,
-                    _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
                 };
+                drop(running);
                 let status = match result {
                     Ok((mut status, retry)) => {
                         status["retry"] = json!(retry);
@@ -1670,39 +1761,33 @@ impl Node {
                         json!({"state": "revoked", "error": error.to_string(), "retry": false})
                     }
                     Err(error) => {
-                        json!({"state": "unavailable", "error": error.to_string(), "retry": error.downcast_ref::<ServiceError>().is_none_or(ServiceError::retryable)})
+                        json!({"state": "unavailable", "error": error.to_string(), "retry": self.retry_deadline().is_some()})
                     }
                 };
-                if status["retry"] == true {
-                    retry.failed();
-                } else {
-                    retry.reset();
-                }
                 self.synced(status);
             } else if !self.online.load(Ordering::SeqCst) {
                 self.synced(json!({"state": "offline", "retry": false}));
             }
+            retry_only = false;
+            let deadline = self.retry_deadline();
             tokio::select! {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
-                changed = events.changed() => {
-                    if changed.is_err() { break; }
-                    retry.reset();
-                }
-                changed = frames.changed() => {
-                    if changed.is_err() { break; }
-                    retry.reset();
-                }
+                _ = control.changed() => {},
+                changed = events.changed() => { if changed.is_err() { break; } self.pending_sync(); }
+                changed = frames.changed() => { if changed.is_err() { break; } self.pending_sync(); }
+                changed = revisions.changed() => { if changed.is_err() { break; } self.pending_sync(); }
                 () = async {
                     match &mut connectivity {
                         Some(events) => { if events.changed().await.is_err() { connectivity = None; } },
                         None => std::future::pending().await,
                     }
-                } => { retry.reset(); }
-                changed = revisions.changed() => {
-                    if changed.is_err() { break; }
-                    retry.reset();
-                }
-                () = retry.wait(), if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) => {}
+                } => { self.reset_retry(None); }
+                () = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                }, if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) => { retry_only = true; }
             }
         }
     }
@@ -1710,6 +1795,14 @@ impl Node {
     /// Syncs with every configured peer. One reachable peer is enough;
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
+        self.sync_pass(transport, false, false).await
+    }
+    async fn sync_pass(
+        &self,
+        transport: &dyn Transport,
+        automatic: bool,
+        retry_only: bool,
+    ) -> Result<(Value, bool), Failure> {
         if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
@@ -1746,40 +1839,134 @@ impl Node {
         }
         let registry = Box::pin(self.admission()).await;
         let targets = self.settings.lock().await.targets(&registry);
-        let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
-        // The peer holds other revocations, or an issuer does not know this
-        // device yet: renew once, from that peer if it is an issuer. An
-        // issuer hears of revocations from the other issuers.
-        let mut renewable = member || !settings.issuers.is_empty();
-        for (peer, contact) in &targets {
-            let mut result = self.reconcile(transport, *peer, contact).await;
-            if let Err(error) = &result
-                && renewable
-                && !error.is::<ServiceError>()
-            {
-                renewable = false;
-                if self.renew(Some(transport), true, Some(*peer)).await.is_ok() {
-                    result = self.reconcile(transport, *peer, contact).await;
+        let needs_initial = {
+            let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+            targets.iter().any(|(peer, _)| !retries.contains_key(peer))
+        };
+        let mut has_frames = false;
+        if needs_initial {
+            let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+            let mut after = None;
+            loop {
+                let (scopes, next) = self
+                    .replica
+                    .held_scopes(node, &settings.credentials, after)
+                    .await?;
+                for scope in scopes {
+                    has_frames |= !self.replica.frontier(scope).await?.logs.is_empty();
                 }
+                if has_frames || next.is_none() {
+                    break;
+                }
+                after = next;
+            }
+        }
+        let targets: Vec<_> = {
+            let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+            retries.retain(|peer, _| targets.iter().any(|(node, _)| node == peer));
+            targets
+                .into_iter()
+                .filter_map(|(peer, contact)| {
+                    let state = retries.entry(peer).or_insert_with(|| PeerRetry {
+                        pending: has_frames,
+                        ..PeerRetry::default()
+                    });
+                    (!automatic || (state.retry.ready() && (!retry_only || state.pending)))
+                        .then_some((peer, contact, state.generation))
+                })
+                .collect()
+        };
+        if automatic && targets.is_empty() {
+            return Ok((
+                self.sync_status.borrow().clone(),
+                self.retry_deadline().is_some(),
+            ));
+        }
+        let renewable = member || !settings.issuers.is_empty();
+        let mut targets = targets;
+        let mut results = Vec::new();
+        for round in 0..2 {
+            let attempts = stream::iter(targets)
+                .map(|(peer, contact, generation)| async move {
+                    let result = self.reconcile(transport, peer, &contact).await;
+                    (peer, contact, generation, result)
+                })
+                .buffer_unordered(4);
+            tokio::pin!(attempts);
+            while let Some((peer, contact, generation, result)) = attempts.next().await {
+                let error = result.as_ref().err().map(ToString::to_string);
+                let (refused, received) = match &result {
+                    Ok((_, _, transfer)) => (transfer.refused.clone(), transfer.results.clone()),
+                    Err(_) => (Vec::new(), None),
+                };
+                let before = self.reached()?.insert(
+                    peer,
+                    Reached {
+                        at: now()?,
+                        error,
+                        refused,
+                        results: received,
+                    },
+                );
+                self.record_reach(peer, before, &result);
+                results.push((peer, contact, generation, result));
+            }
+            let failed = |result: &Result<(bool, bool, sync::Transfer), Failure>| {
+                result
+                    .as_ref()
+                    .is_err_and(|error| !error.is::<ServiceError>())
+            };
+            let renewal_peer = results
+                .iter()
+                .filter(|(_, _, _, result)| failed(result))
+                .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))
+                .map(|(peer, _, _, _)| *peer);
+            if round == 0
+                && renewable
+                && let Some(peer) = renewal_peer
+            {
+                // Finish old-authority sessions before renewing once. Even a successful
+                // old handshake must be checked again against the learned revocations.
+                let renewed = self.renew(Some(transport), true, Some(peer)).await.is_ok();
                 if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                     return Err(Box::new(crate::enrollment::Revoked(statement)));
                 }
+                if renewed {
+                    targets = results
+                        .iter()
+                        .filter(|(_, _, _, result)| result.is_ok() || failed(result))
+                        .map(|(peer, contact, generation, _)| (*peer, contact.clone(), *generation))
+                        .collect();
+                    results.retain(|(_, _, _, result)| {
+                        result
+                            .as_ref()
+                            .is_err_and(|error| error.is::<ServiceError>())
+                    });
+                    continue;
+                }
             }
-            let error = result.as_ref().err().map(ToString::to_string);
-            let (refused, results) = match &result {
-                Ok((_, _, transfer)) => (transfer.refused.clone(), transfer.results.clone()),
-                Err(_) => (Vec::new(), None),
-            };
-            let before = self.reached()?.insert(
-                *peer,
-                Reached {
-                    at: now()?,
-                    error: error.clone(),
-                    refused,
-                    results,
-                },
-            );
-            self.record_reach(*peer, before, &result);
+            break;
+        }
+        let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
+        for (peer, _, generation, result) in results {
+            {
+                let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(state) = retries.get_mut(&peer)
+                    && state.generation == generation
+                {
+                    match &result {
+                        Ok((_, false, _)) => {
+                            state.retry.reset();
+                            state.pending = false;
+                        }
+                        Ok((_, true, _)) => {
+                            state.pending = true;
+                            state.retry.failed();
+                        }
+                        Err(_) => state.retry.failed(),
+                    }
+                }
+            }
             match result {
                 Ok((behind, pending, _)) => {
                     connected += 1;
@@ -1831,58 +2018,68 @@ impl Node {
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
-            self.sync_state.send_replace("bootstrapping");
-            let expected = std::fs::read(&marker)?;
-            let intent: Value = serde_json::from_slice(&expected)?;
-            let token = intent.get("intent").unwrap_or(&intent);
-            if token != &json!(true) {
-                return Err(refused("invalid bootstrap authority intent"));
-            }
-            let pending: Vec<ResourceScope> = match intent.get("pending") {
-                Some(pending) => serde_json::from_value(pending.clone())?,
-                None if intent == true => self.scopes(),
-                None => return Err(refused("invalid bootstrap intent")),
-            };
-            if pending.iter().any(|scope| !self.scopes().contains(scope)) {
-                return Err(refused("bootstrap intent names an ungranted scope"));
-            }
-            // Keyless custody scopes cannot import a checkpoint; they sync rows.
-            // Nor can a partitioned table's own scope, which holds no rows.
-            let pending: Vec<ResourceScope> = {
-                let settings = self.settings.lock().await;
-                pending
-                    .into_iter()
-                    .filter(|scope| {
-                        settings.reads_whole(&self.domain, scope)
-                            && !self.domain.partitioned_table(scope)
-                    })
-                    .collect()
-            };
-            self.activity.record_changed(
-                "bootstrap_started",
-                json!({"peer": peer.to_hex(), "scopes": pending.len()}),
-            );
-            // `None`: this peer offers no checkpoint; intent stays for another.
-            if let Some(completed) = sync::bootstrap(
-                &self.replica,
-                &upstream,
-                &pending,
-                &marker,
-                expected,
-                &mut bootstrapped,
-            )
-            .await?
-            {
-                self.replica.flush().await?;
-                if std::fs::read(&marker)? != completed {
-                    return Err("bootstrap authority changed; retry with the new intent".into());
+            // A stalled dial must not hold the shared checkpoint import slot.
+            let first = sync::session(&upstream).await?;
+            let _bootstrap = self.bootstrap.lock().await;
+            if !marker.exists() {
+                first.close().await?;
+            } else {
+                self.sync_state.send_replace("bootstrapping");
+                let expected = std::fs::read(&marker)?;
+                let intent: Value = serde_json::from_slice(&expected)?;
+                let token = intent.get("intent").unwrap_or(&intent);
+                if token != &json!(true) {
+                    return Err(refused("invalid bootstrap authority intent"));
                 }
-                std::fs::remove_file(&marker)?;
-                #[cfg(unix)]
-                std::fs::File::open(marker.parent().ok_or("bootstrap marker has no directory")?)?
+                let pending: Vec<ResourceScope> = match intent.get("pending") {
+                    Some(pending) => serde_json::from_value(pending.clone())?,
+                    None if intent == true => self.scopes(),
+                    None => return Err(refused("invalid bootstrap intent")),
+                };
+                if pending.iter().any(|scope| !self.scopes().contains(scope)) {
+                    return Err(refused("bootstrap intent names an ungranted scope"));
+                }
+                // Keyless custody scopes cannot import a checkpoint; they sync rows.
+                // Nor can a partitioned table's own scope, which holds no rows.
+                let pending: Vec<ResourceScope> = {
+                    let settings = self.settings.lock().await;
+                    pending
+                        .into_iter()
+                        .filter(|scope| {
+                            settings.reads_whole(&self.domain, scope)
+                                && !self.domain.partitioned_table(scope)
+                        })
+                        .collect()
+                };
+                self.activity.record_changed(
+                    "bootstrap_started",
+                    json!({"peer": peer.to_hex(), "scopes": pending.len()}),
+                );
+                // `None`: this peer offers no checkpoint; intent stays for another.
+                if let Some(completed) = sync::bootstrap(
+                    &self.replica,
+                    &upstream,
+                    &pending,
+                    &marker,
+                    expected,
+                    &mut bootstrapped,
+                    Some(first),
+                )
+                .await?
+                {
+                    self.replica.flush().await?;
+                    if std::fs::read(&marker)? != completed {
+                        return Err("bootstrap authority changed; retry with the new intent".into());
+                    }
+                    std::fs::remove_file(&marker)?;
+                    #[cfg(unix)]
+                    std::fs::File::open(
+                        marker.parent().ok_or("bootstrap marker has no directory")?,
+                    )?
                     .sync_all()?;
-                self.activity
-                    .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
+                    self.activity
+                        .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
+                }
             }
         }
         self.sync_state.send_replace("syncing");
@@ -1924,6 +2121,7 @@ impl Node {
                     credentials,
                     admitted,
                     coordinator,
+                    |peer| self.inbound_sync(peer),
                 )
                 .await
             }
@@ -1932,7 +2130,9 @@ impl Node {
                     if let Some(reply) = self.forward_enrollment(Protocol::Pair, &request).await? {
                         return Ok(reply);
                     }
-                    Box::pin(self.answer_pair(&request)).await
+                    let reply = Box::pin(self.answer_pair(&request)).await?;
+                    self.wake_sync();
+                    Ok(reply)
                 })
                 .await
             }

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Prints `true` when shipped code differs between a release tag and a commit,
-# otherwise `false`; see docs/releasing.md. Uses the GitHub compare API.
+# otherwise `false`; see docs/releasing.md. Needs a clone with both revisions.
 #
-#   GH_TOKEN=... GITHUB_REPOSITORY=owner/repo scripts/release/code-changed TAG SHA
+#   scripts/release/code-changed TAG SHA
 set -eu
 
 base=${1:?usage: code-changed TAG SHA}
@@ -10,16 +10,8 @@ head=${2:?usage: code-changed TAG SHA}
 # Paths that end up in a published artifact. Markdown never does.
 shipped='^(crates/|sdks/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|project\.yaml$|project\.module-template\.yaml$|kotlin$|\.dockerignore$)'
 
-comparison=$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$head")
-if [ "$(printf '%s' "$comparison" | jq '.ahead_by')" -eq 0 ]; then
-    echo false
-    exit 0
-fi
-files=$(printf '%s' "$comparison" | jq -r '.files[].filename')
-# The API lists at most 300 files; a larger change is certainly a code change.
-if [ "$(printf '%s\n' "$files" | wc -l)" -ge 300 ]; then
-    echo true
-elif printf '%s\n' "$files" | grep -E "$shipped" | grep -vqE '\.md$'; then
+files=$(git diff --name-only "$base...$head")
+if printf '%s\n' "$files" | grep -E "$shipped" | grep -vqE '\.md$'; then
     echo true
 else
     echo false

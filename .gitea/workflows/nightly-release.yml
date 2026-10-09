@@ -71,7 +71,7 @@ jobs:
             https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-aarch64-apple-darwin.tar.gz \
             --output "$RUNNER_TEMP/git-cliff.tar.gz"
           checksum=$(shasum -a 256 "$RUNNER_TEMP/git-cliff.tar.gz" | awk '{print $1}')
-          [ "$checksum" = 'a0be97e237d440d34c5e508ec21d070b2c85cbb8be48a46f9a4e8bd247f05' ]
+          [ "$checksum" = 'a0be97e237d440d34c5e508ec21d070b2c85cbb8be48a46a56f9a4e8bd247f05' ]
           tar -xzf "$RUNNER_TEMP/git-cliff.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/git-cliff"
           export PATH="$RUNNER_TEMP/git-cliff:$PATH"
           version=$(printf '%s\n' "$tags" | ./scripts/release/version nightly)

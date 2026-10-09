@@ -28,11 +28,11 @@ from the same sources and run them on the simulator and the iPhone.
   second. If phase 20 has landed, this phase writes them on its schema; if
   not, this phase pairs by the existing flow only as far as its own steps
   need, and phase 20 writes the rest.
-- Local discovery on iOS belongs to [phase 15](15-discovery.md), which adds
-  the local-network usage description, the Bonjour service name and the
-  multicast entitlement to both `iosApp`s when it lands. Until then iOS
-  devices find peers by contacts.
-- The only permission the applications request in this phase is the camera.
+- Local discovery on iOS runs on the simulator only
+  ([phase 15](15-discovery.md)); on the iPhone it is reported as
+  unavailable. The applications carry no local-network usage description
+  and no multicast entitlement.
+- The only permission the applications request is the camera.
 
 ## Ordered slices
 

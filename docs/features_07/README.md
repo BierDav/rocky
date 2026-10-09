@@ -17,8 +17,9 @@ repeating them:
 Defects outside these phases are in [fix later](../fix_later/README.md).
 
 Deferred: a Swift surface, [rotating pseudonyms](../ideas/pseudonym_rotation.md)
-(the registry format allows for it), local-network discovery in an iOS store
-build, the 4,096-command market soak on devices and a live public
+(the registry format allows for it), local-network discovery on a physical iOS
+device ([an idea](../ideas/ios_bonjour_discovery.md) covers a system-API
+path), the 4,096-command market soak on devices and a live public
 coordination service.
 
 ## Destination
@@ -65,7 +66,7 @@ budget, not a schedule.
 | 12 | [Direct key delivery](12-direct-key-delivery.md) | 8, 9 | 10 | L | Envelopes reach their recipient through the session or a mailbox, never a replicated table |
 | 13 | [Relayed horizon](13-relayed-horizon.md) | 5, 10 | | L | A horizon finalizes with participants that met only a custody peer |
 | 14 | [Contacts and partner choice](14-contacts-and-partner-choice.md) | 2, 9 | 10 | M | Peers hand over contacts; partners ranked; an unreachable peer costs no round |
-| 15 | [Discovery](15-discovery.md) | 14, 18 | 21 | L | Peers found on the local network and through a topic only members derive |
+| 15 | [Discovery](15-discovery.md) | 14, 17 | | L | Peers found on the local network and through a topic only members derive |
 | 16 | [Strong commands in the mesh](16-strong-commands-in-the-mesh.md) | 8, 14, 19 | | L | A command reaches an executor the caller never met, forwarded where no route exists; takeover under two issuers |
 | 17 | [Kotlin/Native binding](17-kotlin-native-binding.md) | none | 2, 4 | L | `rocky-core`, `rocky-sqlite` and `rocky-room` compile and pass their checks on iOS targets |
 | 18 | [iOS packaging, Keychain and lifecycle](18-ios-packaging-keychain-lifecycle.md) | 2, 17 | | L | A packaged artifact an iOS consumer uses without Rust; Keychain secrets; resume from durable state |
@@ -122,8 +123,7 @@ flowchart LR
     P9 --> P14
     P10 -.-> P14
     P14 --> P15
-    P18 --> P15
-    P21 -.-> P15
+    P17 --> P15
     P8 --> P16
     P14 --> P16
     P19 --> P16
@@ -192,7 +192,6 @@ Phase 12 starts in wave 3 beside phase 10 and merges after it.
 | Exported `sdks/native` surface | 5, 6, 7, 9, 12, 14, 15, 18 | Once 17 has landed, each regenerates both bindings and runs the iOS simulator check |
 | CI workflows, `scripts/check` | 1 (restructuring), 17, 18, 19, 21 (new jobs) | 1, then the others |
 | Command protocol | 16 (forwarding) | 16 alone |
-| Example `iosApp`s | 21 (created), 15 (local-network permissions) | 21, then 15 |
 | Shopping `shared` module | 12 (stops using `keys` rows), 20 (roster removed), 21 (iOS target) | 12 before 20; 21 at any point, the later of two rerunning the earlier one's checks |
 
 The session has one version constant from phase 9 on, behind both the

@@ -16,7 +16,7 @@ permissions:
 jobs:
   lint:
     # Any architecture.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'unix-any-arch' }}
     timeout-minutes: 5
     steps:
       # A pull request is checked by its base's rules, so it cannot relax them.

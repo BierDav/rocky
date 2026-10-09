@@ -29,8 +29,8 @@ the whole on real devices and real networks and records evidence.
 - Each revoked-device refusal is owned by the phase of its entry point: the
   session by 9, the mailbox by 12, the contact request by 14, the discovery
   topic by 15 and command delivery by 16.
-- The iPhone runs a development build with the local-network permission
-  allowed; local discovery there is qualified for development builds only.
+- The iPhone has no local discovery in this roadmap. It joins by contacts,
+  by the topic and through the relay.
 
 ## Devices and networks
 
@@ -49,8 +49,9 @@ the whole on real devices and real networks and records evidence.
    run. An item without a command is reported, not written here.
 2. The release gate on the two phones, item by item, each phone enrolled by
    a different trusted node.
-3. Networks. The two phones on one LAN with discovery alone, no contact
-   exchanged. The pair on two networks through a relay.
+3. Networks. The Android phone and a desktop process on one LAN with
+   discovery alone, no contact exchanged. The iPhone on the same LAN joining
+   by contact and by the topic. The pair on two networks through a relay.
    One phone moving between the networks mid-sync. Record what the relay and
    a LAN observer see.
 4. The outstanding entries of the audit: the two-phone runs of the gate,
@@ -92,4 +93,4 @@ the whole on real devices and real networks and records evidence.
 
 Two physical phones of the same platform, more than two physical devices,
 cellular-only operation without a relay, physical power loss, store builds
-and local discovery in a store build. State each in the evidence.
+and local discovery on a physical iOS device. State each in the evidence.

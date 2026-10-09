@@ -60,10 +60,10 @@ The same Kotlin API on iOS, with the platform pieces
   common code compiling against both is the check that they agree.
 - **Paths are strings.** Public openers take a `String` path on every target;
   the JVM keeps a `File` overload.
-- **Local-network discovery on iOS, for development builds.** The
-  applications carry the usage description, the Bonjour service name and the
-  multicast entitlement in their development profile
-  ([phase 15](15-discovery.md)). What a store build needs is not qualified.
+- **Local-network discovery on iOS runs on the simulator only.** It uses the
+  same mDNS crate as every other platform ([phase 15](15-discovery.md)). On
+  a physical iPhone the path is reported as unavailable until a build carries
+  the multicast entitlement, requested from Apple on 2026-10-10.
 
 ## Not requested
 
@@ -74,6 +74,8 @@ The same Kotlin API on iOS, with the platform pieces
 - App Store distribution, signing automation and privacy manifests beyond
   what a development build on the attached iPhone needs.
 - iCloud Keychain synchronization of secrets. Items stay on the device.
+- Qualified local-network discovery on a physical iOS device, and a second
+  discovery mechanism for iOS.
 
 ## Known platform constraints
 
@@ -83,9 +85,9 @@ Verify each against the current SDK before relying on it:
   protocol and command handlers) and async calls are the difficult part of
   the binding.
 - Local-network access needs a usage description and prompts the user; raw
-  multicast needs an entitlement. [Phase 15](15-discovery.md) sets both for
-  development builds and reports the path as unavailable where either is
-  missing.
+  multicast needs an entitlement; the simulator needs neither. That is why
+  [phase 15](15-discovery.md) qualifies local discovery on the simulator and
+  reports it as unavailable on a device.
 - The simulator shares the host's network; a physical iPhone does not reach
   the host's loopback, so device runs need a LAN route or a relay.
 - iOS builds and checks run only on macOS hosts.

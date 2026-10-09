@@ -17,9 +17,9 @@ repeating them:
 Defects outside these phases are in [fix later](../fix_later/README.md).
 
 Deferred: a Swift surface, [rotating pseudonyms](../ideas/pseudonym_rotation.md)
-(the registry format allows for it), local-network discovery on iOS,
-forwarding a command through a peer, the 4,096-command market soak on devices
-and a live public coordination service.
+(the registry format allows for it), local-network discovery in an iOS store
+build, the 4,096-command market soak on devices and a live public
+coordination service.
 
 ## Destination
 
@@ -65,8 +65,8 @@ budget, not a schedule.
 | 12 | [Direct key delivery](12-direct-key-delivery.md) | 8, 9 | 10 | L | Envelopes reach their recipient through the session or a mailbox, never a replicated table |
 | 13 | [Relayed horizon](13-relayed-horizon.md) | 5, 10 | | L | A horizon finalizes with participants that met only a custody peer |
 | 14 | [Contacts and partner choice](14-contacts-and-partner-choice.md) | 2, 9 | 10 | M | Peers hand over contacts; partners ranked; an unreachable peer costs no round |
-| 15 | [Discovery](15-discovery.md) | 14 | | L | Peers found on the local network and through a topic only members derive |
-| 16 | [Strong commands in the mesh](16-strong-commands-in-the-mesh.md) | 8, 14, 19 | | M | A command reaches an executor the caller never met; takeover under two issuers |
+| 15 | [Discovery](15-discovery.md) | 14, 18 | 21 | L | Peers found on the local network and through a topic only members derive |
+| 16 | [Strong commands in the mesh](16-strong-commands-in-the-mesh.md) | 8, 14, 19 | | L | A command reaches an executor the caller never met, forwarded where no route exists; takeover under two issuers |
 | 17 | [Kotlin/Native binding](17-kotlin-native-binding.md) | none | 2, 4 | L | `rocky-core`, `rocky-sqlite` and `rocky-room` compile and pass their checks on iOS targets |
 | 18 | [iOS packaging, Keychain and lifecycle](18-ios-packaging-keychain-lifecycle.md) | 2, 17 | | L | A packaged artifact an iOS consumer uses without Rust; Keychain secrets; resume from durable state |
 | 19 | [Market example](19-market-example.md) | 4 | | L | A packaged Kotlin market application and its harness against three voters |
@@ -96,7 +96,7 @@ flowchart LR
     P13["13 Relayed horizon (L)"]
     P14["14 Contacts, partner choice (M)"]
     P15["15 Discovery (L)"]
-    P16["16 Strong commands in the mesh (M)"]
+    P16["16 Strong commands in the mesh (L)"]
     P17["17 Kotlin/Native binding (L)"]
     P18["18 iOS packaging (L)"]
     P19["19 Market example (L)"]
@@ -122,6 +122,8 @@ flowchart LR
     P9 --> P14
     P10 -.-> P14
     P14 --> P15
+    P18 --> P15
+    P21 -.-> P15
     P8 --> P16
     P14 --> P16
     P19 --> P16
@@ -147,14 +149,14 @@ flowchart LR
 ### Critical path
 
 5 → 7 → 8 → 10 → 13 → 20 → 22 and 6 → 7 → 8 → 10 → 13 → 20 → 22 each weigh
-19 of 55. Phases 5 and 6 share no code path but both rewrite `identity.json`;
+19 of 56. Phases 5 and 6 share no code path but both rewrite `identity.json`;
 they are the two wave 0 phases the rest of the mesh waits for. Phase 8 is the
 largest single risk: every later mesh phase names its epoch identity. Its
 decision record may be drafted while phase 7 implements. The iOS track
 (17 → 18 → 21 → 22, weight 11) shares no format with the mesh and never waits
 for it; phase 17 grows to XL if its preferred binding mechanism fails.
 
-The roadmap weighs 55 against 32 for the previous one. Phases 11, 15 and 16
+The roadmap weighs 56 against 32 for the previous one. Phases 11, 15 and 16
 are the candidates to move out if it must shrink; the mesh goal survives
 without them, with the limits each brief names.
 
@@ -167,7 +169,7 @@ without them, with the limits each brief names.
 | 2 | 8, 21 | 5 |
 | 3 | 10, 11, 12 | 7 |
 | 4 | 13, 14 | 5 |
-| 5 | 15, 16, 20 | 8 |
+| 5 | 15, 16, 20 | 9 |
 | 6 | 22 | 3 |
 
 Phase 12 starts in wave 3 beside phase 10 and merges after it.
@@ -189,12 +191,15 @@ Phase 12 starts in wave 3 beside phase 10 and merges after it.
 | Kotlin `rocky-core` native sources | 2, 4 (small edits), 17 (moved behind the platform boundary) | 2 and 4, then 17 |
 | Exported `sdks/native` surface | 5, 6, 7, 9, 12, 14, 15, 18 | Once 17 has landed, each regenerates both bindings and runs the iOS simulator check |
 | CI workflows, `scripts/check` | 1 (restructuring), 17, 18, 19, 21 (new jobs) | 1, then the others |
+| Command protocol | 16 (forwarding) | 16 alone |
+| Example `iosApp`s | 21 (created), 15 (local-network permissions) | 21, then 15 |
 | Shopping `shared` module | 12 (stops using `keys` rows), 20 (roster removed), 21 (iOS target) | 12 before 20; 21 at any point, the later of two rerunning the earlier one's checks |
 
 The session has one version constant from phase 9 on, behind both the
 transport name and the signing label. A phase that adds messages bumps it
 when it lands; nothing is negotiated and any other version is refused.
-`rocky/command/1` and the coordinator protocol do not change in this roadmap.
+The command protocol takes its next name in phase 16; the coordinator
+protocol does not change in this roadmap.
 
 ## Reserved decision records
 
@@ -211,8 +216,9 @@ when it lands; nothing is negotiated and any other version is refused.
 | 0056 | 14 | Contact handover, contact requests and the discovery value |
 | 0057 | 15 | Discovery capability and topic |
 | 0058 | 17 | Kotlin/Native binding |
+| 0059 | 16 | Command forwarding |
 
-Phases 7 and 16 change no format and take no record. A phase that needs a
+Phase 7 changes no format and takes no record. A phase that needs a
 further record takes the next unreserved one.
 
 ## Agent execution contract

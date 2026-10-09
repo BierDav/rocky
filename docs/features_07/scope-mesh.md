@@ -128,7 +128,7 @@ The owning brief repeats each under "Settled" with its consequences.
 | What proves a holding | A value derived from any epoch of the partition the answering peer retains; toward a keyless custody peer, knowledge of the partition tuple | [10](10-holdings-after-authentication.md) |
 | What a mailbox is | Any admitted peer with a custody grant, and every issuer, whatever the partition. The sender deposits. The mailbox sees the recipient's node key and neither the group nor the secret; bounded per recipient | [12](12-direct-key-delivery.md) |
 | Whether the discovery topic changes on revocation | Yes. It derives from values that travel with revocation statements inside admitted sessions, never with renewal and never to the revoked device. A device also answers the previous topic for a bounded window | [14](14-contacts-and-partner-choice.md), [15](15-discovery.md) |
-| How a caller finds the executor | It asks the peers it meets for the executor's contact and dials it, through a relay where needed. Nothing is forwarded | [14](14-contacts-and-partner-choice.md), [16](16-strong-commands-in-the-mesh.md) |
+| How a caller finds the executor | It asks the peers it meets for the executor's contact and dials it. Where no route exists an admitted peer forwards the signed command and its answer, one hop, without being able to alter either | [14](14-contacts-and-partner-choice.md), [16](16-strong-commands-in-the-mesh.md) |
 | How many devices a domain holds | 256 in the registry; a horizon still names at most 64 participants | [5](05-issuer-registry.md), [13](13-relayed-horizon.md) |
 
 ## Not requested
@@ -147,7 +147,7 @@ The owning brief repeats each under "Settled" with its consequences.
   that [rotation](../ideas/pseudonym_rotation.md) needs no format change.
 - **Retraction.** A revoked device keeps what it decrypted.
 - **Multi-hop forwarding of rows** beyond what custody already does, and
-  forwarding of a command or its result through a peer.
+  forwarding a command over more than one hop.
 - **A gossip overlay.** Discovery publishes and resolves records; it relays
   no application data.
 - **Readmission.** A revoked user stays revoked; enrolling it again needs a

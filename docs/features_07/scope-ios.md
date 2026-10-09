@@ -60,10 +60,10 @@ The same Kotlin API on iOS, with the platform pieces
   common code compiling against both is the check that they agree.
 - **Paths are strings.** Public openers take a `String` path on every target;
   the JVM keeps a `File` overload.
-- **No local-network discovery on iOS in this roadmap.** It needs a multicast
-  entitlement Apple grants on request, or a Bonjour bridge. The transport
-  reports it as unavailable; an iPhone finds peers by contacts and by the
-  discovery topic ([phase 15](15-discovery.md)).
+- **Local-network discovery on iOS, for development builds.** The
+  applications carry the usage description, the Bonjour service name and the
+  multicast entitlement in their development profile
+  ([phase 15](15-discovery.md)). What a store build needs is not qualified.
 
 ## Not requested
 
@@ -74,7 +74,6 @@ The same Kotlin API on iOS, with the platform pieces
 - App Store distribution, signing automation and privacy manifests beyond
   what a development build on the attached iPhone needs.
 - iCloud Keychain synchronization of secrets. Items stay on the device.
-- The local-network usage description, prompt and multicast entitlement.
 
 ## Known platform constraints
 
@@ -84,8 +83,9 @@ Verify each against the current SDK before relying on it:
   protocol and command handlers) and async calls are the difficult part of
   the binding.
 - Local-network access needs a usage description and prompts the user; raw
-  multicast needs an entitlement. That is why
-  [phase 15](15-discovery.md) reports local discovery as unavailable on iOS.
+  multicast needs an entitlement. [Phase 15](15-discovery.md) sets both for
+  development builds and reports the path as unavailable where either is
+  missing.
 - The simulator shares the host's network; a physical iPhone does not reach
   the host's loopback, so device runs need a LAN route or a relay.
 - iOS builds and checks run only on macOS hosts.

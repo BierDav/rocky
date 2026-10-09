@@ -28,12 +28,11 @@ from the same sources and run them on the simulator and the iPhone.
   second. If phase 20 has landed, this phase writes them on its schema; if
   not, this phase pairs by the existing flow only as far as its own steps
   need, and phase 20 writes the rest.
-- Local discovery is reported as unavailable on iOS in this roadmap
-  ([phase 15](15-discovery.md)). Rocky needs no local-network usage
-  description, prompt or multicast entitlement, and the applications request
-  none. iOS devices find peers by contacts and, once phase 15 lands, by the
-  topic.
-- The only permission the applications request is the camera.
+- Local discovery on iOS belongs to [phase 15](15-discovery.md), which adds
+  the local-network usage description, the Bonjour service name and the
+  multicast entitlement to both `iosApp`s when it lands. Until then iOS
+  devices find peers by contacts.
+- The only permission the applications request in this phase is the camera.
 
 ## Ordered slices
 
@@ -67,8 +66,6 @@ from the same sources and run them on the simulator and the iPhone.
   foregrounding, with no user action.
 - No source file of either `shared` module is duplicated for iOS; the
   platform code added is listed with its reason.
-- Neither `Info.plist` holds a local-network usage description or a Bonjour
-  service list.
 - The JVM and Android applications pass their existing checks, and the
   harness scenarios of both examples pass.
 - [Shopping on devices](../runtime/shopping-devices.md) holds the iOS
@@ -78,7 +75,8 @@ from the same sources and run them on the simulator and the iPhone.
 
 - The physical cross-platform pair across networks
   ([phase 22](22-qualification.md)).
-- Local discovery on iOS, a Bonjour bridge or the multicast entitlement.
+- Local discovery on iOS and its permissions
+  ([phase 15](15-discovery.md)).
 - A native SwiftUI screen, store distribution or signing automation.
 - A new dependency-injection or QR library where the present one compiles.
 - Schema or flow changes to shopping; those are phase 20's.

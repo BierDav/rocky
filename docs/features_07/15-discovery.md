@@ -2,8 +2,10 @@
 
 Status: not started.
 Owner: `rocky_core::net` transport port; `rocky-iroh`; `rocky-sdk` transport
-options; `sdks/native`; Kotlin `PeerTransport` and `RockyEndpoint`. Depends
-on [phase 14](14-contacts-and-partner-choice.md). Wave 5.
+options; `sdks/native`; Kotlin `PeerTransport` and `RockyEndpoint`; the `iosApp` of
+both examples. Depends on [phase 14](14-contacts-and-partner-choice.md) and
+[phase 18](18-ios-packaging-keychain-lifecycle.md); lands after
+[phase 21](21-shopping-and-market-on-ios.md) on the examples. Wave 5.
 Follow the [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
@@ -31,9 +33,12 @@ network and beyond it, and run the first relay check.
 - Local network: an mDNS address lookup. iroh 1.3 ships none, so this adds
   one crate; `iroh-mdns-address-lookup` is the candidate and record 0057
   names the one taken.
-- iOS reports local discovery as unavailable. No multicast entitlement is
-  requested and no Bonjour bridge is built; an iPhone finds peers by the
-  topic and by contacts.
+- iOS has local discovery, for development builds. The applications carry
+  the local-network usage description and the Bonjour service name, and the
+  development profile carries the multicast entitlement the mDNS crate
+  needs on a physical device. A build without the entitlement, or a user
+  who declines the prompt, gets the path reported as unavailable with that
+  reason, never silently absent. Store distribution is not qualified.
 - Whatever is found is a hint that enters phase 14's contact list with its
   source. The session authenticates whoever answers.
 - This phase changes no session message.
@@ -58,7 +63,9 @@ network and beyond it, and run the first relay check.
    name derives from the topic; where the crate fixes the service name,
    members filter by a topic-derived tag. A peer found here is marked local
    for the ranking. The Android artifact holds the multicast lock while the
-   path is on.
+   path is on. On iOS the path starts when the application is in the
+   foreground and stops with `enterBackground`; both example `iosApp`s gain
+   the usage description, the service name and the entitlement.
 5. Wider network: each member merges its own contact into the rendezvous
    record, encrypted under a topic-derived key, and republishes within a
    stated interval. The record is bounded by the service's size limit and
@@ -85,8 +92,12 @@ network and beyond it, and run the first relay check.
   services are the same before and after a database attaches and detaches.
 - No replicated table holds a discovered route; the replica is searched.
 - The relay run passes in CI with direct paths disabled.
-- The iOS simulator check reports local discovery unavailable with its
-  reason; the Android check holds and releases the multicast lock.
+- In the iOS simulator check two simulators, or a simulator and a host
+  process, find each other over mDNS; a build without the entitlement
+  setting reports the path unavailable with its reason. The Android check
+  holds and releases the multicast lock.
+- On the attached iPhone a development build shows the local-network prompt
+  once and, after it is allowed, finds a desktop peer on the same LAN.
 - [SDK transports](../runtime/sdk-transports.md) states what a LAN observer,
   the lookup service and a relay each learn from every path, and its
   qualification section no longer says that nothing is qualified.
@@ -94,7 +105,8 @@ network and beyond it, and run the first relay check.
 ## Not in this phase
 
 - A gossip or pub-sub overlay, a DHT, or hosting a relay or lookup service.
-- Local discovery on iOS, a multicast entitlement or a Bonjour bridge.
+- A Bonjour bridge through the system's service browser, and the
+  entitlement approval or review a store build needs.
 - Discovery for TCP or custom transports.
 - Changing the session, the contact list bounds or the ranking of phase 14.
 - NAT traversal qualification on real networks and phones

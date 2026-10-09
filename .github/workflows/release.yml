@@ -34,10 +34,11 @@ jobs:
     name: Version
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
-    timeout-minutes: 10
+    # Includes waiting for the commit's push checks.
+    timeout-minutes: 120
     permissions:
       contents: read
-      # The shopping gate reads earlier check runs of this commit.
+      # Waiting and the shopping gate read the check runs of this commit.
       actions: read
     outputs:
       release: ${{ steps.changes.outputs.release }}
@@ -78,6 +79,24 @@ jobs:
             fi
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
+
+      # A push run of this commit that is still going would otherwise build and
+      # test the commit a second time in parallel; once it is done, the checks
+      # below reuse its passing tree, or run again if it did not pass.
+      - name: Wait for the checks of this commit
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          while :; do
+            pending="$(curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
+              | jq '[.workflow_runs[] | select((.path | test("(^|/)check\\.yml(@|$)")) and .status != "completed")] | length')"
+            [ "${pending}" -gt 0 ] || break
+            echo "Waiting for ${pending} check run(s) of ${GITHUB_SHA}"
+            sleep 30
+          done
 
       # Releases do not wait for the shopping qualification, but the latest
       # completed run of it for this commit must not have failed.

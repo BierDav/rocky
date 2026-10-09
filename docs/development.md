@@ -165,8 +165,9 @@ The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
 baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
 commit whose completed run of it failed.
 
-A release calls the baseline workflow, so a commit is built once: when `check`
-already passed for its tree, the release's `build` and `check` skip. A job whose
+A release calls the baseline workflow, so a commit is built once: it first waits
+for any push run of the commit's checks still going, and when `check` passed for
+its tree, the release's `build` and `check` skip. A job whose
 build artifact is missing, for example after its one-day retention, builds what
 it runs itself; a release of an unchecked tree runs the build and checks.
 

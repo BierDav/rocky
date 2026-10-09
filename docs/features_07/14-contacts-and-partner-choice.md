@@ -96,7 +96,8 @@ on, ask for one, choose the best partners, and hold the value from which
 - Announcing or looking up anything on a network, the transport port and
   `rocky-iroh` ([phase 15](15-discovery.md)).
 - Changing the enrollment, invitation or renewal formats.
-- Forwarding rows or commands for a peer, and multi-hop routing.
+- Forwarding rows for a peer and multi-hop routing; forwarding a command is
+  [phase 16](16-strong-commands-in-the-mesh.md).
 - Persisting or replicating which peer holds what.
 - Raising the contact or per-pass limits of phase 9.
 - Electing a preferred peer, or discovering coordinators.

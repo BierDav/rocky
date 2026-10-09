@@ -64,7 +64,8 @@ dependencies { implementation("rocky:rocky-core-jvm:0.1.0-alpha.1") }
 
 ## Pipeline
 
-1. Version: decides whether to release and computes the version and notes. It refuses a commit
+1. Version: decides whether to release and computes the version and notes. It waits for the
+   commit's push checks still running, so the release reuses them, and refuses a commit
    whose latest completed `shopping` qualification in the baseline workflow failed.
 2. The [baseline workflow](development.md#ci) without the soak tests and the shopping
    qualification; it skips a tree whose checks already passed. Both images are built for amd64

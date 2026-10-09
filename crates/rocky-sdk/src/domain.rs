@@ -143,6 +143,17 @@ impl Domain {
             .iter()
             .map(|(name, scope)| (name.as_str(), *scope))
     }
+    /// Whether `scope` is a partitioned table's own scope, which holds no
+    /// rows: each partition has its own scope and checkpoint.
+    pub fn partitioned_table(&self, scope: &ResourceScope) -> bool {
+        let logical = self.logical();
+        self.scopes().any(|(name, own)| {
+            own == *scope
+                && logical
+                    .table(name)
+                    .is_some_and(|table| !table.partition_by.is_empty())
+        })
+    }
     pub fn readers(&self) -> BTreeMap<String, Commitment> {
         self.tables
             .iter()

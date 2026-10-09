@@ -12,7 +12,7 @@ use sqlparser::{
     dialect::SQLiteDialect,
     parser::Parser,
 };
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -951,6 +951,66 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
     }
     writer.close().await;
     reader.close().await;
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn room_reads_each_reference_action_when_references_share_a_partition_column()
+-> Result<(), Failure> {
+    const GROUPED: &str = r#"{"format":4,"application":"grouped","version":1,"tables":[
+ {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
+  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
+ {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
+ {"name":"items","class":"mergeable","columns":[
+   {"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+  "foreign_keys":[{"columns":["list","category"],"table":"categories","on_delete":"set_null"},
+   {"columns":["list"],"table":"lists","on_delete":"cascade"}]}
+]}"#;
+    let root = tempfile::tempdir()?;
+    let database = Database::create(
+        Open {
+            directory: root.path(),
+            schema: GROUPED,
+            secrets: None,
+            network: None,
+            commands: None,
+        },
+        None,
+    )?
+    .database;
+    let reader = database
+        .connect(ConnectionOptions {
+            profile: Some("room-2.8.4".parse()?),
+            ..READER
+        })
+        .await?;
+    // Rows of one key share its id: (id, seq, table, from, to, on_update, on_delete, match).
+    let mut keys = BTreeMap::<i64, (SqlValue, Vec<SqlValue>, SqlValue)>::new();
+    for row in all(&reader, "PRAGMA foreign_key_list(`items`)", vec![]).await? {
+        let SqlValue::Integer(id) = row[0] else {
+            return Err("foreign key id".into());
+        };
+        let key = keys
+            .entry(id)
+            .or_insert_with(|| (row[2].clone(), Vec::new(), row[6].clone()));
+        key.1.push(row[3].clone());
+    }
+    let mut keys: Vec<_> = keys.into_values().collect();
+    keys.sort_by_key(|(table, _, _)| format!("{table:?}"));
+    assert_eq!(
+        keys,
+        [
+            (
+                text("categories"),
+                vec![text("list"), text("category")],
+                text("SET NULL")
+            ),
+            (text("lists"), vec![text("list")], text("CASCADE")),
+        ]
+    );
     database.close().await?;
     Ok(())
 }

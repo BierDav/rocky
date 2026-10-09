@@ -895,38 +895,7 @@ impl Settings {
             publisher,
             manifest: domain.manifest().hash(),
         };
-        let logical = domain.logical();
-        let partitions = grants
-            .iter()
-            .filter_map(|grant| {
-                let table = logical
-                    .mergeable()
-                    .find(|table| logical.table_id(table) == grant.scope.table)?;
-                if table.partition_by.is_empty() {
-                    return None;
-                }
-                Some(rocky_credentials::PartitionGrant {
-                    domain: grant.scope.domain,
-                    table: grant.scope.table,
-                    selector: rocky_core::PartitionSelector(
-                        table
-                            .partition_by
-                            .iter()
-                            .filter_map(|name| table.column(name))
-                            .map(|column| {
-                                (
-                                    logical.field_id(table, column),
-                                    rocky_core::PartitionSelection::Any,
-                                )
-                            })
-                            .collect(),
-                    ),
-                    rows: grant.rows.clone(),
-                    rights: grant.rights.clone(),
-                    fields: grant.fields.clone(),
-                })
-            })
-            .collect();
+        let partitions = whole_partitions(domain, &grants);
         Ok(authority.issue_partition_terms(
             user,
             grants,
@@ -1162,9 +1131,10 @@ impl Settings {
             publisher: &publisher,
             manifest: domain.manifest().hash(),
         }
-        .issue_terms(
+        .issue_partition_terms(
             device.user,
             grants.clone(),
+            whole_partitions(&domain, &grants),
             (terms.delegations.unwrap_or(1), authors),
             self.policy.statement.epoch,
             (time, ttl, SKEW),
@@ -2632,6 +2602,46 @@ pub fn route_enrollment(uri: &str, custody_contact: &str) -> Result<String, Fail
             BASE64URL_NOPAD.encode(&serde_json::to_vec(&issuer)?)
         ))
     }
+}
+
+/// Every partition of each partitioned table `grants` name, as enrollment
+/// grants a profile: an `Any` selector beside the table grant.
+fn whole_partitions(
+    domain: &Domain,
+    grants: &[ResourceGrant],
+) -> Vec<rocky_credentials::PartitionGrant> {
+    let logical = domain.logical();
+    grants
+        .iter()
+        .filter_map(|grant| {
+            let table = logical
+                .mergeable()
+                .find(|table| logical.table_id(table) == grant.scope.table)?;
+            if table.partition_by.is_empty() {
+                return None;
+            }
+            Some(rocky_credentials::PartitionGrant {
+                domain: grant.scope.domain,
+                table: grant.scope.table,
+                selector: rocky_core::PartitionSelector(
+                    table
+                        .partition_by
+                        .iter()
+                        .filter_map(|name| table.column(name))
+                        .map(|column| {
+                            (
+                                logical.field_id(table, column),
+                                rocky_core::PartitionSelection::Any,
+                            )
+                        })
+                        .collect(),
+                ),
+                rows: grant.rows.clone(),
+                rights: grant.rights.clone(),
+                fields: grant.fields.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

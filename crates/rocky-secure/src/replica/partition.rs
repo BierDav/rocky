@@ -74,7 +74,17 @@ impl<A: RowApplication> Inner<A> {
         if let Some(tuple) = tuple {
             return self.check_tuple(scope, tuple);
         }
-        if self.typed.as_ref().is_some_and(|typed| {
+        if self.partitioned(scope) {
+            return Err(denied(
+                "partitioned table requires an authenticated partition tuple",
+            ));
+        }
+        Ok(())
+    }
+    /// Whether `scope` names a partitioned table; its rows live only in
+    /// the scopes of its partitions, never in the table's own scope.
+    pub(super) fn partitioned(&self, scope: ResourceScope) -> bool {
+        self.typed.as_ref().is_some_and(|typed| {
             typed.rows.table(&scope.table).is_some_and(|table| {
                 typed
                     .rows
@@ -82,12 +92,7 @@ impl<A: RowApplication> Inner<A> {
                     .table(&table.sql_name)
                     .is_some_and(|logical| !logical.partition_by.is_empty())
             })
-        }) {
-            return Err(denied(
-                "partitioned table requires an authenticated partition tuple",
-            ));
-        }
-        Ok(())
+        })
     }
     fn check_tuple(&self, scope: ResourceScope, tuple: &PartitionTuple) -> Result<(), Error> {
         if tuple

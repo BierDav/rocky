@@ -386,17 +386,15 @@ impl<A: RowApplication> SecureSql<A> {
             let inner = self.session.replica.inner.lock().await;
             inner.check_authority(Some(self.session.authority))?;
             // SQLite defers the check; Rocky performs the declared action.
-            let actions: BTreeMap<String, String> = inner
+            // References may share a column, such as a partition column, so
+            // each is named by its parent and its whole column set.
+            let actions: BTreeMap<(String, BTreeSet<String>), String> = inner
                 .typed
                 .as_ref()
                 .and_then(|typed| typed.rows.schema().table(&found).cloned())
                 .into_iter()
                 .flat_map(|table| table.foreign_keys)
-                .flat_map(|key| {
-                    key.columns
-                        .into_iter()
-                        .map(move |column| (column, key.on_delete.clone()))
-                })
+                .map(|key| (foreign_key_name(&key.table, &key.columns), key.on_delete))
                 .collect();
             (inner.path().to_path_buf(), actions)
         };
@@ -414,12 +412,33 @@ impl<A: RowApplication> SecureSql<A> {
         })
         .await
         .map_err(|_| Error::Corrupt("describe failed".into()))??;
+        let rows = rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(crate::storage::sql_value)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Each foreign key spans the rows sharing its id: (id, seq, table, from, ...).
+        let mut keys: BTreeMap<i64, (String, Vec<String>)> = BTreeMap::new();
+        if pragma == Describe::ForeignKeyList {
+            for row in &rows {
+                if let (
+                    Some(SqlValue::Integer(id)),
+                    Some(SqlValue::Text(table)),
+                    Some(SqlValue::Text(column)),
+                ) = (row.first(), row.get(2), row.get(3))
+                {
+                    let key = keys
+                        .entry(*id)
+                        .or_insert_with(|| (table.clone(), Vec::new()));
+                    key.1.push(column.clone());
+                }
+            }
+        }
         let mut result = Vec::with_capacity(rows.len());
         for row in rows {
-            let row = row
-                .into_iter()
-                .map(crate::storage::sql_value)
-                .collect::<Result<Vec<_>, _>>()?;
             // A created index the catalog does not list is Rocky's own.
             if pragma == Describe::IndexList
                 && matches!((&row[1], &row[3]), (SqlValue::Text(index), SqlValue::Text(origin))
@@ -429,8 +448,9 @@ impl<A: RowApplication> SecureSql<A> {
             }
             let mut row = row;
             if pragma == Describe::ForeignKeyList
-                && let Some(SqlValue::Text(column)) = row.get(3)
-                && let Some(action) = actions.get(column)
+                && let Some(SqlValue::Integer(id)) = row.first()
+                && let Some((table, columns)) = keys.get(id)
+                && let Some(action) = actions.get(&foreign_key_name(table, columns))
             {
                 row[6] = SqlValue::Text(action.clone());
             }
@@ -441,4 +461,14 @@ impl<A: RowApplication> SecureSql<A> {
             rows: result,
         })
     }
+}
+/// A foreign key of one table, case-insensitively by parent and column set.
+fn foreign_key_name(table: &str, columns: &[String]) -> (String, BTreeSet<String>) {
+    (
+        table.to_ascii_lowercase(),
+        columns
+            .iter()
+            .map(|column| column.to_ascii_lowercase())
+            .collect(),
+    )
 }

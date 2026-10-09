@@ -1574,11 +1574,15 @@ impl Node {
                 return Err(refused("bootstrap intent names an ungranted scope"));
             }
             // Keyless custody scopes cannot import a checkpoint; they sync rows.
+            // Nor can a partitioned table's own scope, which holds no rows.
             let pending: Vec<ResourceScope> = {
                 let settings = self.settings.lock().await;
                 pending
                     .into_iter()
-                    .filter(|scope| settings.reads_whole(&self.domain, scope))
+                    .filter(|scope| {
+                        settings.reads_whole(&self.domain, scope)
+                            && !self.domain.partitioned_table(scope)
+                    })
                     .collect()
             };
             // `None`: this peer offers no checkpoint; intent stays for another.

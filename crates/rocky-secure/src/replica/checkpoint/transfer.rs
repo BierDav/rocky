@@ -216,6 +216,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let may_sign = {
             let mut inner = self.inner.lock().await;
             inner.authorize_peer(peer, credentials, scope)?;
+            // A partitioned table's own scope holds no rows; each partition
+            // scope has its checkpoint.
+            if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
+                return Ok(None);
+            }
             // A keyless custody replica holds only ciphertext: no offer.
             if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
                 return Ok(None);

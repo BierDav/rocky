@@ -107,3 +107,55 @@ fn contact_versions_are_independent_of_routing_flags() {
         );
     }
 }
+
+#[test]
+fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = issuer.vault(&store);
+    let (user, node) = (PrivateKey::new(), PrivateKey::new());
+    let device = DeviceKeys {
+        user: user.public_key(),
+        node: node.public_key(),
+    };
+    let supplied = issuer.grant(
+        &vault,
+        device,
+        Profile::Reader {
+            scopes: ["lists".into()].into(),
+        },
+        Terms::default(),
+        None,
+    )?;
+    let domain = issuer.domain()?;
+    let capability = supplied
+        .credentials
+        .chain
+        .0
+        .first()
+        .cloned()
+        .ok_or("capability")?;
+    let chain = device_chain(capability, &user, node.public_key())?;
+    let (_, selectors) = chain.verify_selectors(
+        issuer.publisher,
+        domain.manifest().hash(),
+        node.public_key(),
+        &issuer.policy.statement,
+        now()?,
+    )?;
+    let lists = domain.logical().table("lists").ok_or("lists")?;
+    assert_eq!(selectors.len(), 1);
+    assert_eq!(selectors[0].table, domain.logical().table_id(lists));
+    assert!(
+        selectors[0]
+            .selector
+            .0
+            .values()
+            .all(|selection| *selection == rocky_core::PartitionSelection::Any)
+    );
+    assert!(selectors[0].rights.contains(&Right::Read));
+    Ok(())
+}

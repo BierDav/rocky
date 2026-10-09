@@ -56,8 +56,10 @@ Table scopes, logs, checkpoints, grants and pseudonyms stay per table; the key
 comes from the [group secret](#group-secrets). Native partition-complete
 `LatestWins` indexes resolve per partition;
 [mergeable constraints](mergeable-constraints.md) describes their identities and
-rebuild boundary. Partitioned `SetNull` indexes, references, existence logs and
-command control remain refused. Kotlin/Room policy admission remains phase 7.
+rebuild boundary. In-group references and references to an unpartitioned
+logged parent are admitted. Partitioned `SetNull` indexes, references across
+groups, existence logs and command control remain refused, by the Kotlin builder
+and Room import as natively.
 
 Changing an existing table's group or renaming a group is refused by generation
 admission; a new table may join an existing group. Removing a table remains
@@ -93,6 +95,15 @@ a non-current epoch and an unfinished revocation. A grant never delivers a key;
 an envelope never grants authority. A recipient without B's grant cannot
 request B's range or checkpoint, register its key or admit its frames. A key
 reveals a whole partition, including earlier ciphertext under that epoch.
+
+**Sharing with an enrolled device.** A profile reads every partition of its
+tables, whether paired or supplied through `grant`, so one `share` and one
+`install` open a list to it. A partitioned table's own scope holds no rows: it
+offers no checkpoint, and a join's bootstrap skips it. A device that does not
+hold the list yet calls `bootstrap` after its join's bootstrap has finished, so
+it starts from a peer's checkpoint and needs no earlier epoch or revoked
+author; a device that holds it only installs the new epoch. The
+[shopping example](../../examples/shoppinglist-app/README.md) shares this way.
 
 **Revocation.** One saved intent rotates: each group partition the device could
 read gets one new secret, so its members advance to one epoch together, also

@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_HOME: /Users/gitea-runner/.cargo
+  RUSTUP_HOME: /Users/gitea-runner/.rustup
+  PATH: /Users/gitea-runner/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
 concurrency:
   group: gitea-nightly-release
   cancel-in-progress: false
@@ -47,6 +52,12 @@ jobs:
             else
               echo 'release=false' >> "$GITHUB_OUTPUT"
             fi
+          fi
+      - name: Install cargo-nextest
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          if ! cargo nextest --version >/dev/null 2>&1; then
+            cargo install cargo-nextest --locked
           fi
       - name: Prepare version and notes
         if: steps.changes.outputs.release == 'true'
@@ -93,12 +104,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-nextest
-        run: |
-          if ! cargo nextest --version >/dev/null 2>&1; then
-            cargo install cargo-nextest --locked
-          fi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
@@ -115,12 +120,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-nextest
-        run: |
-          if ! cargo nextest --version >/dev/null 2>&1; then
-            cargo install cargo-nextest --locked
-          fi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target

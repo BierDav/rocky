@@ -102,6 +102,8 @@ pub struct CheckpointStatement {
     pub finalized: Option<Box<rocky_credentials::SignedHorizon>>,
     pub partition: Option<rocky_core::PartitionTuple>,
     pub identities: Vec<IdentityMark>,
+    /// Opaque move links, also committed by the corresponding materialized rows.
+    pub moves: SetSummary,
     pub definition: Commitment,
     pub schema: u32,
     pub handler: u32,
@@ -1154,7 +1156,15 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 created |= current.is_none();
-                let (_, mut record) = apply::merge_row(&write, current, &operation)?;
+                let (_, mut record) = apply::merge_row(
+                    &write,
+                    current,
+                    &operation,
+                    payload.carried(&write.change.row),
+                )?;
+                if write.change.before.is_none() && payload.carried(&write.change.row).is_none() {
+                    record.proof = payload.proof(&write.change.row).cloned();
+                }
                 self.release_protection(&mut record, &write, &operation)?;
                 record.key = Some(write.change.row);
                 record.identity = self

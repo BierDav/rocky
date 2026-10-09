@@ -45,6 +45,25 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
         payload: impl FnOnce(u64) -> Result<Vec<u8>, Error>,
     ) -> Result<EncryptedFrame, Error> {
+        Box::pin(self.author_frame_carried(
+            writes,
+            dependencies,
+            time,
+            &BTreeMap::new(),
+            false,
+            payload,
+        ))
+        .await
+    }
+    pub(super) async fn author_frame_carried(
+        &self,
+        writes: &[RowWrite],
+        dependencies: &[Hash],
+        time: u64,
+        carried: &BTreeMap<Commitment, moves::Carried>,
+        allocated: bool,
+        payload: impl FnOnce(u64) -> Result<Vec<u8>, Error>,
+    ) -> Result<EncryptedFrame, Error> {
         let scope = writes
             .first()
             .ok_or_else(|| denied("empty mutation"))?
@@ -113,14 +132,16 @@ impl<A: RowApplication> Inner<A> {
             let mut inserted: Vec<_> = writes
                 .iter()
                 .zip(&identity_aware)
-                .filter(|(write, _)| write.change.before.is_none())
+                .filter(|(write, _)| {
+                    write.change.before.is_none() && !carried.contains_key(&write.change.row)
+                })
                 .filter_map(|(_, identity)| *identity)
                 .collect();
             inserted.sort();
             let mut highest = self
                 .highest_identity(self.identity_allocation_scope(scope), author.number)
                 .await?;
-            for identity in inserted {
+            for identity in inserted.into_iter().filter(|_| !allocated) {
                 let expected = rocky_core::RowIdentity::next(author.number, highest)
                     .map_err(|error| denied(&error.to_string()))?;
                 if identity != expected {
@@ -156,6 +177,11 @@ impl<A: RowApplication> Inner<A> {
             ),
             None => (0, None, 0),
         };
+        clock = carried
+            .values()
+            .flat_map(|carried| carried.stamps.values())
+            .map(|stamp| stamp.clock)
+            .fold(clock, u64::max);
         let basis = self.finalized_basis(scope).await?;
         let finalized = basis.is_some();
         let mut witnesses = BTreeMap::new();
@@ -232,11 +258,39 @@ impl<A: RowApplication> Inner<A> {
         if previous.len() > 64 {
             return Err(denied("dependency quota"));
         }
+        let stamp = Stamp {
+            clock: clock
+                .checked_add(1)
+                .ok_or_else(|| denied("logical clock exhausted"))?,
+            author: signing_key.public_key(),
+            sequence,
+        };
+        let mut proofs = BTreeMap::new();
+        for write in writes.iter().filter(|write| {
+            write.change.before.is_none() && !carried.contains_key(&write.change.row)
+        }) {
+            if let Some(id) = self
+                .app
+                .row_identity(&write.change)
+                .map_err(|message| denied(&message))?
+            {
+                proofs.insert(
+                    write.change.row,
+                    moves::CreationProof::sign(
+                        self.manifest,
+                        scope.table,
+                        id,
+                        stamp.clone(),
+                        signer.ok_or_else(|| denied("creation proof needs a table author"))?,
+                    )?,
+                );
+            }
+        }
         let frame = author(
             signing_key,
             Extensions {
                 author: signer.map(|author| author.number),
-                row_format: 5,
+                row_format: 6,
                 partition,
                 manifest: self.manifest,
                 scope,
@@ -253,7 +307,7 @@ impl<A: RowApplication> Inner<A> {
             ),
             previous.into_iter().collect(),
             &RowPayload::witness(
-                payload(sequence)?,
+                RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,
                 witnesses.into_iter().collect(),
                 basis,
                 releases.into_iter().collect(),

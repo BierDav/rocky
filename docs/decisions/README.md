@@ -13,6 +13,7 @@ naturally holds.
 | [0018](0018-secure-transaction-bundles.md) | Secure transaction bundles, session authority, typed secure storage |
 | [0028](0028-generation-lineage-and-signed-backups.md) | Generation lineage, projection plans, signed backups |
 | [0037](0037-partition-groups.md) | Explicit partition groups, positional addresses and secret boundary |
+| [0038](0038-row-moves.md) | Draft: creation proofs, atomic row moves and author-issued following |
 | [0039](0039-single-current-formats.md) | One current persisted and wire format |
 | [0040](0040-group-secrets.md) | Group secrets, derived table keys, group envelopes and rotation |
 | [0041](0041-partition-constraint-state.md) | Partition constraint identities, current private state and catalog verification |

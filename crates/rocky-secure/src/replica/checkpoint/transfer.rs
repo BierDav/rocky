@@ -626,7 +626,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signed = staging.signed;
         signed.verify_authority(&inner, time)?;
         let statement = signed.statement.clone();
-        if staging.sets.rows_summary() != statement.rows
+        if inner.rebootstrap_moves(id).await? != statement.moves
+            || staging.sets.rows_summary() != statement.rows
             || staging.sets.tombstones != statement.tombstones
             || staging.sets.creations_summary() != statement.creations
             || generation != statement.key_epoch
@@ -754,7 +755,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?
                     .ok_or_else(|| Error::Corrupt("retained operation".into()))?;
                 match inner.apply_frame(&frame, time).await? {
-                    incoming::Outcome::Applied => report.reapplied.push(hash),
+                    incoming::Outcome::Applied => match inner.consumed(hash).await? {
+                        Some(reason) => report.rejected.push((hash, reason)),
+                        None => report.reapplied.push(hash),
+                    },
                     incoming::Outcome::Rejected(reason) => report.rejected.push((hash, reason)),
                     incoming::Outcome::Waiting => report.pending.push(hash),
                 }

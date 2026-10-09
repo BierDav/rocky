@@ -7,6 +7,7 @@ use p2panda_core::{Body, Header, Operation, validate_operation};
 use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowChange, RowWrite};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageKind {
@@ -35,7 +36,9 @@ pub(crate) struct Extensions {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedFrame {
+    #[serde(with = "serde_bytes")]
     pub(crate) header: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub(crate) body: Vec<u8>,
 }
 impl EncryptedFrame {
@@ -59,7 +62,7 @@ impl EncryptedFrame {
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
-        if header.extensions.row_format != 5 {
+        if header.extensions.row_format != 6 {
             return Err(denied("unsupported row frame format"));
         }
         let extension = &header.extensions;
@@ -166,12 +169,15 @@ pub(crate) struct Membership {
 #[derive(Serialize, Deserialize)]
 struct BundleBody {
     version: u8,
+    proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+    carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
     writes: Vec<RowWrite>,
 }
 #[derive(Serialize, Deserialize)]
 struct WitnessBody {
     version: u8,
+    #[serde(with = "serde_bytes")]
     body: Vec<u8>,
     creations: Vec<(Commitment, Commitment)>,
     basis: Option<(u64, Commitment)>,
@@ -180,6 +186,8 @@ struct WitnessBody {
 /// A current row payload, always protected by a creation witness envelope.
 #[derive(Clone)]
 pub(crate) struct RowPayload {
+    proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+    carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
     writes: Vec<RowWrite>,
     creations: Vec<(Commitment, Commitment)>,
@@ -191,6 +199,7 @@ impl RowPayload {
         #[derive(Deserialize)]
         struct Envelope {
             version: u8,
+            #[serde(with = "serde_bytes")]
             body: Vec<u8>,
         }
         #[derive(Deserialize)]
@@ -204,7 +213,7 @@ impl RowPayload {
         }
         let body: Version = p2panda_core::cbor::decode_cbor(envelope.body.as_slice())
             .map_err(|_| denied("unsupported bundle version"))?;
-        if body.version != 2 {
+        if body.version != 3 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(())
@@ -227,10 +236,12 @@ impl RowPayload {
             return Err(denied("invalid creation witness envelope"));
         }
         let body: BundleBody = decode(&envelope.body)?;
-        if body.version != 2 {
+        if body.version != 3 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(Self {
+            proofs: body.proofs,
+            carried: body.carried,
             membership: body.membership,
             writes: body.writes,
             creations: envelope.creations,
@@ -240,14 +251,18 @@ impl RowPayload {
     }
     pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 2,
+            version: 3,
+            proofs: BTreeMap::new(),
+            carried: BTreeMap::new(),
             membership: None,
             writes: changes.iter().cloned().map(RowWrite::changed).collect(),
         })
     }
     pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 2,
+            version: 3,
+            proofs: BTreeMap::new(),
+            carried: BTreeMap::new(),
             membership: Some(membership),
             writes,
         })
@@ -265,6 +280,22 @@ impl RowPayload {
             basis,
             releases,
         })
+    }
+    pub(crate) fn stamp_body(
+        bytes: &[u8],
+        proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+        carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
+    ) -> Result<Vec<u8>, Error> {
+        let mut body: BundleBody = decode(bytes)?;
+        body.proofs = proofs;
+        body.carried = carried;
+        encode(&body)
+    }
+    pub(crate) fn proof(&self, row: &Commitment) -> Option<&crate::replica::moves::CreationProof> {
+        self.proofs.get(row)
+    }
+    pub(crate) fn carried(&self, row: &Commitment) -> Option<&crate::replica::moves::Carried> {
+        self.carried.get(row)
     }
     pub(crate) fn protection(&self) -> (Option<Commitment>, &[Commitment]) {
         (self.basis.map(|(_, hash)| hash), &self.releases)

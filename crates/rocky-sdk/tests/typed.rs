@@ -1233,7 +1233,7 @@ async fn trusted_partition_ids_and_agreed_statements() {
         .unwrap();
         sql.run("COMMIT", vec![]).await.unwrap();
     }
-    assert_eq!(ids[0], ids[1]);
+    assert_ne!(ids[0], ids[1]);
     sync(&[&a, &b]).await;
     for device in [&a, &b] {
         assert_eq!(
@@ -1262,7 +1262,7 @@ async fn trusted_partition_ids_and_agreed_statements() {
                     ids[0],
                     &[("amount", SqlValue::Integer(7))]
                 )
-                .is_err()
+                .is_ok()
         );
         assert!(
             device
@@ -1279,4 +1279,53 @@ async fn trusted_partition_ids_and_agreed_statements() {
     }
     a.close().await;
     b.close().await;
+}
+
+#[tokio::test]
+async fn trusted_move_keeps_foreign_identity_and_follows_original_stamp_once() {
+    let definition = serde_json::json!({"format":4,"publisher":"11".repeat(32),"application":"trusted-moves","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","id"],"partition_by":["list"]}]});
+    let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let a = Device::open(directory.path(), 1, &schema).await.unwrap();
+    let b = Device::open(directory.path(), 2, &schema).await.unwrap();
+    let original = a
+        .commit(
+            a.insert("items", &[("list", text("A")), ("title", text("old"))], &[])
+                .unwrap(),
+        )
+        .await;
+    sync(&[&a, &b]).await;
+    let rows = b.rows().await;
+    let id = rows[0].identity.unwrap();
+    a.commit(
+        a.update("items", original, &[("title", text("ticked"))])
+            .unwrap(),
+    )
+    .await;
+    b.commit(
+        b.app
+            .move_row(&rows, "items", id, &[text("A")], &[text("B")])
+            .unwrap(),
+    )
+    .await;
+    sync(&[&a, &b]).await;
+    for device in [&a, &b] {
+        let rows = device.rows().await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity, Some(id));
+        assert_eq!(rows[0].key[0], text("B"));
+        assert!(rows[0].values.contains(&("title".into(), text("ticked"))));
+    }
+    let count = a.operations().await.len();
+    sync(&[&a, &b]).await;
+    assert_eq!(a.operations().await.len(), count);
+    a.close().await;
+    let a = Device::open(directory.path(), 1, &schema).await.unwrap();
+    sync(&[&a, &b]).await;
+    assert_eq!(a.operations().await.len(), count);
+    b.close().await;
+    a.close().await;
 }

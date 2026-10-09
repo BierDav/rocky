@@ -400,7 +400,7 @@ impl<A: RowApplication> Inner<A> {
         if outcome.pass.is_some() {
             return Ok(());
         }
-        match self.apply_pending(time, GROUP_REQUESTS).await {
+        match Box::pin(self.apply_pending(time, GROUP_REQUESTS)).await {
             Ok(more) => outcome.more |= more,
             Err(error) if retryable(&error) => return Err(error),
             Err(error) => outcome.pass = Some(error),

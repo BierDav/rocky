@@ -11,14 +11,14 @@ compatibility clauses in earlier decisions.
   partition and liveness fields explicitly; replicated shapes carry their class
   and constraints explicitly. Key reuse is a row-incarnation feature, with no
   inert schema flag. Kotlin and native producers use the same format.
-- Secure frames use row format 5, with optional author and partition metadata.
-  Every row payload has a creation-witness envelope (1) and bundle body (2);
+- Secure frames use row format 6 ([row moves](0038-row-moves.md)), with optional author and partition metadata.
+  Every row payload has a creation-witness envelope (1) and bundle body (3);
   an optional membership distinguishes a single scope from a transaction bundle.
 - Checkpoints use format 6, with independent optional partition, admitted-horizon
-  and finalized-horizon fields. Admission never invents a finalized cut.
+  and finalized-horizon fields and a required row-move summary. Admission never invents a finalized cut.
   Existence records use 2 with optional partition metadata.
 - SQLite files use one application-id tag, `0x524b5901`, checked read-only before
-  locks or initialization writes. Secure identity v7 ([partition horizons](0043-partition-horizon-state.md)), stored descriptors and
+  locks or initialization writes. Secure identity v8 ([row moves](0038-row-moves.md)), stored descriptors and
   checkpoint tags are likewise checked before an encrypted writer opens.
   Fresh checkpoint metadata belongs to resumable bootstrap, not open-time adoption.
 - Credential extensions and horizons use 2, client evidence caches use 3,

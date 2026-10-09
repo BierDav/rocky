@@ -7,7 +7,7 @@ async fn peer(replica: &EncryptedReplica<TypedRows>) -> (PublicKey, CredentialCh
         inner.config.credentials.clone(),
     )
 }
-async fn restore_scope(
+pub(super) async fn restore_scope(
     from: &EncryptedReplica<TypedRows>,
     to: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
@@ -164,8 +164,8 @@ async fn group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step() 
         cat.clone(),
         f.write("items", a, 1, Some(category)),
         f.write("items", a, 2, Some(category)),
-        f.write("items", b, 1, None),
-        f.write("items", b, 2, None),
+        f.write("items", b, 3, None),
+        f.write("items", b, 4, None),
     ];
     for (index, write) in writes.into_iter().enumerate() {
         for frame in writer
@@ -500,7 +500,7 @@ async fn partition_checkpoint_rebuilds_keyless_support_and_base_import_preserves
         f.write("categories", 30, 1, None),
         f.write("items", 10, 1, Some(live)),
         f.write("items", 10, 2, Some(dead)),
-        f.write("items", 20, 1, Some(live)),
+        f.write("items", 20, 3, Some(live)),
     ]
     .into_iter()
     .enumerate()

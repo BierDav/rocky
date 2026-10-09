@@ -26,6 +26,8 @@ class RockyClient(private val transport: Transport) {
     /** Requires an open SQL transaction and an installed table pseudonym. */
     suspend fun nextId(table: String): String = call(request("next_id") { put("table", table) }).getValue("id").jsonPrimitive.content
     suspend fun nextId(table: String, partitionValues: JsonArray): String = call(request("next_id") { put("table", table); put("partition_values", partitionValues) }).getValue("id").jsonPrimitive.content
+    suspend fun moveRow(handle: JsonArray, table: String, id: String, from: JsonArray, to: JsonArray): JsonObject =
+        call(request("move_row") { put("handle", handle); put("table", table); put("id", id); put("from", from); put("to", to) })
     val partitions: Partitions get() = Partitions(this)
     val horizons: Horizons get() = Horizons(this)
     suspend fun sql(statement: String, values: JsonArray = JsonArray(emptyList())): JsonObject =

@@ -75,6 +75,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 number,
             },
         );
+        inner.process_pending(now()?).await?;
         Ok(())
     }
 }
@@ -143,6 +144,22 @@ impl<A: RowApplication> Inner<A> {
         row: &[u8],
         record: &Materialized,
     ) -> Result<(), Error> {
+        if record.moved_from.is_some() && !record.deleted {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO secure_move_rows VALUES(?,?)",
+                    [scope.to_vec(), row.to_vec()],
+                )
+                .await?;
+        } else {
+            self.conn
+                .execute(
+                    "DELETE FROM secure_move_rows WHERE scope=? AND row=?",
+                    [scope.to_vec(), row.to_vec()],
+                )
+                .await?;
+        }
+
         let key = record
             .key
             .map(|key| key.to_vec())
@@ -187,7 +204,7 @@ impl<A: RowApplication> Inner<A> {
                         .rows
                         .schema()
                         .table(&table.table.sql_name)
-                        .filter(|logical| logical.partition_by == ["id"])
+                        .filter(|logical| !logical.partition_by.is_empty())
                         .map(|_| table.scope)
                 })
             })

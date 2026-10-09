@@ -287,6 +287,7 @@ impl<A: RowApplication> Inner<A> {
                 horizon,
                 partition: inner.partitions.get(&scope).cloned(),
                 identities: capture.identities,
+                moves: inner.checkpoint_moves(id).await?,
                 definition: inner.manifest,
                 schema: manifest.schema,
                 handler: manifest.handler,

@@ -10,6 +10,7 @@ use rocky_core::{
     Stamp, StoredApplication, UpdatePolicy, Versions, bind_rule, key_components, key_values,
 };
 use rocky_runtime::Mutation;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -17,11 +18,13 @@ use std::{
 
 /// Incarnations one insert may replace or one delete may observe.
 pub const MAX_OBSERVED: usize = 16;
-const DEFINITION: &str = "rocky.sdk.typed.v1";
-const SCHEMA: [&str; 3] = [
-    "CREATE TABLE rocky_incarnations(tbl BLOB NOT NULL,row_key BLOB NOT NULL,node BLOB NOT NULL,sequence INTEGER NOT NULL,tombstoned INTEGER NOT NULL,state BLOB,PRIMARY KEY(tbl,row_key,node,sequence)) WITHOUT ROWID",
+const DEFINITION: &str = "rocky.sdk.typed.v2";
+const SCHEMA: [&str; 5] = [
+    "CREATE TABLE rocky_incarnations(tbl BLOB NOT NULL,row_key BLOB NOT NULL,node BLOB NOT NULL,sequence INTEGER NOT NULL,tombstoned INTEGER NOT NULL,state BLOB,target_node BLOB,target_sequence INTEGER,PRIMARY KEY(tbl,row_key,node,sequence)) WITHOUT ROWID",
     "CREATE TABLE rocky_identity_marks(tbl BLOB NOT NULL,author INTEGER NOT NULL,sequence INTEGER NOT NULL,PRIMARY KEY(tbl,author)) WITHOUT ROWID",
     "CREATE INDEX rocky_incarnations_id ON rocky_incarnations(node,sequence)",
+    "CREATE TABLE rocky_follow_fields(source_node BLOB NOT NULL,source_sequence INTEGER NOT NULL,original_node BLOB NOT NULL,original_sequence INTEGER NOT NULL,field BLOB NOT NULL,PRIMARY KEY(source_node,source_sequence,original_node,original_sequence,field)) WITHOUT ROWID",
+    "CREATE INDEX rocky_follow_fields_author ON rocky_follow_fields(original_node,source_node,source_sequence)",
 ];
 const SELECT_ALL: &str = "SELECT tbl,row_key,node,sequence,tombstoned,state FROM rocky_incarnations UNION ALL SELECT tbl,NULL,NULL,sequence,author,NULL FROM rocky_identity_marks ORDER BY tbl,row_key,node,sequence";
 const LIVE_AT_KEY: &str = "SELECT tbl,row_key,node,sequence,tombstoned,state FROM rocky_incarnations WHERE tbl=? AND row_key=? AND tombstoned=0";
@@ -90,6 +93,7 @@ pub struct TypedApp(Arc<Plan>, Arc<BTreeMap<(NodeId, String), u32>>);
 
 #[derive(Clone, PartialEq)]
 struct Live {
+    birth: Stamp,
     lamport: LamportTime,
     /// The key as this incarnation spelled it.
     key: Vec<SqlValue>,
@@ -99,6 +103,7 @@ struct Live {
 enum Incarnation {
     Tombstone(Option<i64>),
     Live(Live),
+    Moved(Moved),
 }
 type RowId = (Commitment, Vec<u8>, OperationId);
 /// Register values by field identity, sorted.
@@ -119,6 +124,8 @@ pub struct TypedRow {
     pub key: Vec<SqlValue>,
     /// Register columns by SQL name.
     pub values: Vec<(String, SqlValue)>,
+    pub stamps: Vec<(String, Stamp)>,
+    pub birth: Stamp,
 }
 /// The incarnations a replica holds at one business key.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -128,6 +135,19 @@ pub struct Located {
 }
 
 enum Action {
+    Move {
+        table: Commitment,
+        identity: i64,
+        key: Vec<SqlValue>,
+        values: Vec<(Commitment, SqlValue, Stamp)>,
+        birth: Stamp,
+    },
+    Follow {
+        table: Commitment,
+        identity: i64,
+        source: OperationId,
+        set: Vec<(Commitment, SqlValue, Stamp)>,
+    },
     Insert {
         table: Commitment,
         key: Vec<SqlValue>,
@@ -205,6 +225,36 @@ impl Action {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         match self {
+            Self::Move {
+                table,
+                identity,
+                key,
+                values,
+                birth,
+            } => {
+                bytes.push(6);
+                bytes.extend(table);
+                bytes.extend(identity.to_le_bytes());
+                bytes.push(key.len() as u8);
+                for value in key {
+                    value.encode(&mut bytes);
+                }
+                stamp_bytes(&mut bytes, *birth);
+                put_stamped(&mut bytes, values);
+            }
+            Self::Follow {
+                table,
+                identity,
+                source,
+                set,
+            } => {
+                bytes.push(7);
+                bytes.extend(table);
+                bytes.extend(identity.to_le_bytes());
+                bytes.extend(source.node.0);
+                bytes.extend(source.sequence.get().to_le_bytes());
+                put_stamped(&mut bytes, set);
+            }
             Self::Insert {
                 table,
                 key,
@@ -248,6 +298,27 @@ impl Action {
         let tag = reader.array::<1>()?[0];
         let table = reader.array()?;
         let action = match tag {
+            6 => {
+                let identity = i64::from_le_bytes(reader.array()?);
+                let count = reader.array::<1>()?[0];
+                let key = (0..count)
+                    .map(|_| reader.value())
+                    .collect::<Result<_, _>>()?;
+                let birth = reader.stamp()?;
+                Self::Move {
+                    table,
+                    identity,
+                    key,
+                    values: reader.stamped()?,
+                    birth,
+                }
+            }
+            7 => Self::Follow {
+                table,
+                identity: i64::from_le_bytes(reader.array()?),
+                source: reader.operation()?,
+                set: reader.stamped()?,
+            },
             1 => {
                 let count = reader.array::<1>()?[0];
                 let key = (0..count)
@@ -294,12 +365,8 @@ fn statement(sql: &'static str, values: Vec<SqlValue>) -> ProjectionStatement {
 fn quoted(name: &str) -> String {
     format!("\"{name}\"")
 }
-fn creation(id: OperationId, live: &Live) -> Stamp {
-    Stamp {
-        lamport: live.lamport,
-        node: id.node,
-        sequence: id.sequence,
-    }
+fn creation(_id: OperationId, live: &Live) -> Stamp {
+    live.birth
 }
 fn stamp_bytes(bytes: &mut Vec<u8>, stamp: Stamp) {
     bytes.extend(stamp.lamport.get().to_le_bytes());
@@ -310,6 +377,7 @@ impl Live {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = vec![1];
         bytes.extend(self.lamport.get().to_le_bytes());
+        stamp_bytes(&mut bytes, self.birth);
         bytes.push(self.key.len() as u8);
         for value in &self.key {
             value.encode(&mut bytes);
@@ -327,6 +395,7 @@ impl Live {
             return refuse("unknown incarnation state");
         }
         let lamport = LamportTime::new(u64::from_le_bytes(reader.array()?)).map_err(failed)?;
+        let birth = reader.stamp()?;
         let count = reader.array::<1>()?[0];
         let key = (0..count)
             .map(|_| reader.value())
@@ -347,6 +416,7 @@ impl Live {
             return refuse("trailing incarnation state");
         }
         Ok(Self {
+            birth,
             lamport,
             key,
             registers,
@@ -407,22 +477,17 @@ impl Table {
         if values.len() != self.partitions.len() {
             return refuse("partition value count for identity allocation");
         }
-        if self.partitions.is_empty() {
-            return Ok(self.id);
+        if !self.partitions.is_empty() {
+            let columns: Vec<_> = self
+                .partitions
+                .iter()
+                .map(|position| self.key[*position])
+                .collect();
+            key_components(&columns, values).map_err(failed)?;
         }
-        let columns: Vec<_> = self
-            .partitions
-            .iter()
-            .map(|position| self.key[*position])
-            .collect();
-        let components = key_components(&columns, values).map_err(failed)?;
-        let mut context = self.id.to_vec();
-        context.extend(components);
-        Ok(rocky_core::commitment(
-            "rocky.trusted-partition-identities.v1",
-            &context,
-        ))
+        Ok(self.id)
     }
+
     fn allocation_at(&self, key: &[SqlValue]) -> Result<Commitment, TypedError> {
         self.allocation(
             &self
@@ -448,6 +513,7 @@ impl TypedApp {
         let mut checkpoint = vec![
             Sql::Borrowed("rocky_incarnations"),
             Sql::Borrowed("rocky_identity_marks"),
+            Sql::Borrowed("rocky_follow_fields"),
         ];
         let (mut tables, mut views) = (Vec::new(), Vec::new());
         statements.extend(
@@ -663,6 +729,61 @@ impl TypedApp {
             .validate_dependencies(matches!(action, Action::Insert { .. }))
             .map_err(failed)?;
         match &action {
+            Action::Move {
+                table,
+                identity,
+                key,
+                values,
+                birth,
+            } => {
+                let plan = self.by_id(table)?;
+                let id = rocky_core::RowIdentity::from_integer(*identity).map_err(failed)?;
+                if plan.partitions.is_empty()
+                    || plan
+                        .partitions
+                        .iter()
+                        .any(|position| plan.key_names[*position] == "id")
+                {
+                    return refuse("table cannot move");
+                }
+                plan.components(key)?;
+                if *birth > Stamp::from(envelope)
+                    || self.1.get(&(birth.node, plan.name.clone())) != Some(&id.author())
+                    || values.len() != plan.fields.len()
+                {
+                    return refuse("move creation proof or field width");
+                }
+                for (field, (id, value, stamp)) in plan.fields.iter().zip(values) {
+                    if field.id != *id || *stamp > Stamp::from(envelope) {
+                        return refuse("move stamp or field ordering");
+                    }
+                    Table::stored(field, value)?;
+                }
+            }
+            Action::Follow {
+                table,
+                identity,
+                set,
+                ..
+            } => {
+                let plan = self.by_id(table)?;
+                rocky_core::RowIdentity::from_integer(*identity).map_err(failed)?;
+                if set.is_empty() {
+                    return refuse("follow sets nothing");
+                }
+                for (id, value, stamp) in set {
+                    let field = plan
+                        .field(id)
+                        .ok_or_else(|| TypedError("unknown follow field".into()))?;
+                    if ["id", "row_kind"].contains(&plan.fields[field].name.as_str())
+                        || stamp.node != envelope.id.node
+                        || *stamp > Stamp::from(envelope)
+                    {
+                        return refuse("follow is not signed by its original author");
+                    }
+                    Table::stored(&plan.fields[field], value)?;
+                }
+            }
             Action::Insert {
                 table,
                 key,
@@ -1063,6 +1184,7 @@ impl TypedApp {
                 (1, identity.map_or(SqlValue::Null, SqlValue::Integer))
             }
             Incarnation::Live(live) => (0, SqlValue::Blob(live.encode())),
+            Incarnation::Moved(moved) => (3, SqlValue::Blob(moved.encode())),
         };
         vec![
             SqlValue::Blob(id.0.to_vec()),
@@ -1102,7 +1224,7 @@ impl Application for TypedApp {
             | Action::Delete {
                 table, identity, ..
             } => (table, identity),
-            Action::Insert { .. } => return false,
+            Action::Insert { .. } | Action::Move { .. } | Action::Follow { .. } => return false,
         };
         match state.entity(envelope.entity) {
             None => true,
@@ -1123,6 +1245,143 @@ impl Application for TypedApp {
         let local = boundary == AdmissionBoundary::Local;
         let stamp = Stamp::from(envelope);
         match self.action(envelope)? {
+            Action::Move {
+                table,
+                identity,
+                key,
+                values,
+                birth,
+            } => {
+                let plan = self.by_id(&table)?;
+                let source = state
+                    .entity(envelope.entity)
+                    .cloned()
+                    .ok_or_else(|| TypedError("move source missing".into()))?;
+                let entry = state
+                    .0
+                    .get(&source)
+                    .cloned()
+                    .ok_or_else(|| TypedError("move source missing".into()))?;
+                if source.0 != table || plan.incarnation_identity(&entry)? != Some(identity) {
+                    return refuse("move source identity");
+                }
+                let old_key = key_values(&source.1).map_err(failed)?;
+                for (position, (old, new)) in old_key.iter().zip(&key).enumerate() {
+                    if !plan.partitions.contains(&position) && old != new {
+                        return refuse("move changes immutable key");
+                    }
+                }
+                let components = plan.components(&key)?;
+                if components == source.1 {
+                    return refuse("move destination equals source");
+                }
+                if local
+                    && (state.visible(&source.0, &source.1).map(|(id, _)| id)
+                        != Some(envelope.entity)
+                        || state.live(&table, &components).next().is_some())
+                {
+                    return refuse("move source missing or destination occupied");
+                }
+                let mut pending = Vec::new();
+                match &entry {
+                    Incarnation::Live(live) => {
+                        if live.birth != birth {
+                            return refuse("move changes creation proof");
+                        }
+                        for (field, ((value, original), (_, _, carried))) in
+                            plan.fields.iter().zip(live.registers.iter().zip(&values))
+                        {
+                            if original > carried {
+                                pending.push((field.id, value.clone(), *original));
+                            }
+                        }
+                    }
+                    Incarnation::Moved(moved) if !local && moved.birth == birth => {
+                        pending.clone_from(&moved.pending);
+                    }
+                    _ => return refuse("move source deleted"),
+                }
+                state
+                    .0
+                    .entry((table, components, envelope.id))
+                    .or_insert_with(|| {
+                        Incarnation::Live(Live {
+                            birth,
+                            lamport: envelope.lamport,
+                            key,
+                            registers: values
+                                .into_iter()
+                                .map(|(_, value, stamp)| (value, stamp))
+                                .collect(),
+                        })
+                    });
+                if !matches!(entry, Incarnation::Moved(ref moved) if moved.at > stamp) {
+                    state.0.insert(
+                        source,
+                        Incarnation::Moved(Moved {
+                            at: stamp,
+                            birth,
+                            identity,
+                            target: envelope.id,
+                            pending,
+                        }),
+                    );
+                }
+            }
+            Action::Follow {
+                table,
+                identity,
+                source,
+                set,
+            } => {
+                let destination = state
+                    .entity(envelope.entity)
+                    .cloned()
+                    .ok_or_else(|| TypedError("follow destination missing".into()))?;
+                if destination.0 != table
+                    || self
+                        .by_id(&table)?
+                        .incarnation_identity(&state.0[&destination])?
+                        != Some(identity)
+                {
+                    return refuse("follow destination identity");
+                }
+                let Some(source_row) = state.entity(source).cloned() else {
+                    return refuse("follow source missing");
+                };
+                let Some(Incarnation::Moved(moved)) = state.0.get(&source_row) else {
+                    return refuse("follow source is not moved");
+                };
+                if moved.identity != identity || source_row.0 != table {
+                    return refuse("follow source identity");
+                }
+                let plan = self.by_id(&table)?;
+                match state.0.get_mut(&destination) {
+                    Some(Incarnation::Live(live)) => {
+                        for (field, value, original) in &set {
+                            let register = &mut live.registers[plan
+                                .field(field)
+                                .ok_or_else(|| TypedError("follow field missing".into()))?];
+                            if *original > register.1 {
+                                *register = (value.clone(), *original);
+                            }
+                        }
+                    }
+                    Some(Incarnation::Moved(moved)) => {
+                        for (field, value, original) in &set {
+                            remember(&mut moved.pending, *field, value.clone(), *original);
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(Incarnation::Moved(moved)) = state.0.get_mut(&source_row) {
+                    moved.pending.retain(|(field, _, original)| {
+                        !set.iter().any(|(followed, _, stamp)| {
+                            field == followed && original.node == stamp.node && original <= stamp
+                        })
+                    });
+                }
+            }
             Action::Insert {
                 table,
                 key,
@@ -1176,6 +1435,7 @@ impl Application for TypedApp {
                     .entry((table, components.clone(), envelope.id))
                     .or_insert_with(|| {
                         Incarnation::Live(Live {
+                            birth: stamp,
                             lamport: envelope.lamport,
                             key,
                             registers: values
@@ -1234,6 +1494,11 @@ impl Application for TypedApp {
                             }
                         }
                     }
+                    Some(Incarnation::Moved(moved)) if !local => {
+                        for (field, value) in set {
+                            remember(&mut moved.pending, field, value, stamp);
+                        }
+                    }
                     _ if local => return refuse("row no longer exists"),
                     // A late update cannot resurrect a deleted incarnation.
                     _ => {}
@@ -1290,6 +1555,7 @@ impl Table {
     fn incarnation_identity(&self, entry: &Incarnation) -> Result<Option<i64>, TypedError> {
         match entry {
             Incarnation::Tombstone(identity) => Ok(*identity),
+            Incarnation::Moved(moved) => Ok(Some(moved.identity)),
             Incarnation::Live(live) => {
                 let values = self
                     .fields
@@ -1500,6 +1766,77 @@ impl StoredApplication for TypedApp {
     fn sql_writes(&self) -> Option<&dyn SqlWrites<Self>> {
         Some(self)
     }
+    fn following_queries(&self, node: NodeId) -> Vec<ProjectionStatement> {
+        vec![statement(
+            "WITH RECURSIVE paths(node,sequence) AS (SELECT source_node,source_sequence FROM rocky_follow_fields WHERE original_node=? UNION SELECT i.target_node,i.target_sequence FROM rocky_incarnations i JOIN paths p ON i.node=p.node AND i.sequence=p.sequence WHERE i.target_node IS NOT NULL) SELECT i.tbl,i.row_key,i.node,i.sequence,i.tombstoned,i.state FROM rocky_incarnations i JOIN paths p ON i.node=p.node AND i.sequence=p.sequence",
+            vec![SqlValue::Blob(node.0.to_vec())],
+        )]
+    }
+    fn following_intents(
+        &self,
+        rows: Vec<Vec<SqlValue>>,
+        node: NodeId,
+    ) -> Result<Vec<rocky_core::AuthoredFollow>, TypedError> {
+        let state = self.window(rows)?;
+        let mut follows = Vec::new();
+        for ((table, _, source), entry) in &state.0 {
+            let Incarnation::Moved(moved) = entry else {
+                continue;
+            };
+            let mut target = moved.target;
+            let mut visited = BTreeSet::from([*source]);
+            let destination = loop {
+                if !visited.insert(target) {
+                    return refuse("move link cycle");
+                }
+                let Some(row) = state.entity(target) else {
+                    break None;
+                };
+                match &state.0[row] {
+                    Incarnation::Live(_) => break Some(target),
+                    Incarnation::Moved(next) => target = next.target,
+                    _ => break None,
+                }
+            };
+            let Some(destination) = destination else {
+                continue;
+            };
+            let mut grouped: BTreeMap<OperationId, Vec<_>> = BTreeMap::new();
+            for (field, value, stamp) in &moved.pending {
+                if stamp.node == node {
+                    grouped
+                        .entry(OperationId {
+                            node,
+                            sequence: stamp.sequence,
+                        })
+                        .or_default()
+                        .push((*field, value.clone(), *stamp));
+                }
+            }
+            for (original, set) in grouped {
+                let mut handle = Vec::from(&b"rocky.typed.follow.v1"[..]);
+                for operation in [*source, original, destination] {
+                    handle.extend(operation.node.0);
+                    handle.extend(operation.sequence.get().to_le_bytes());
+                }
+                follows.push(rocky_core::AuthoredFollow {
+                    handle: Sha256::digest(&handle).into(),
+                    original,
+                    intent: Intent {
+                        entity: Some(destination),
+                        payload: Action::Follow {
+                            table: *table,
+                            identity: moved.identity,
+                            source: *source,
+                            set,
+                        }
+                        .encode(),
+                    },
+                });
+            }
+        }
+        Ok(follows)
+    }
     fn projection_rows(&self, state: &State) -> Vec<Vec<SqlValue>> {
         state
             .0
@@ -1523,6 +1860,26 @@ impl StoredApplication for TypedApp {
             statement(ONE_WITH, values)
         };
         match Action::decode(&envelope.payload) {
+            Ok(Action::Move { table, key, .. }) => {
+                let Ok(components) = self.by_id(&table).and_then(|plan| plan.components(&key))
+                else {
+                    return Vec::new();
+                };
+                let mut at = vec![SqlValue::Blob(table.to_vec()), SqlValue::Blob(components)];
+                let mut queries = vec![
+                    statement(ENTITY, entity.to_vec()),
+                    statement(LIVE_WITH, entity.to_vec()),
+                    statement(LIVE_AT_KEY, at.clone()),
+                ];
+                at.extend(id_values(envelope.id));
+                queries.push(statement(ONE_AT_KEY, at));
+                queries
+            }
+            Ok(Action::Follow { source, .. }) => vec![
+                statement(ENTITY, entity.to_vec()),
+                statement(LIVE_WITH, entity.to_vec()),
+                statement(ENTITY, id_values(source).to_vec()),
+            ],
             Ok(Action::Insert {
                 table,
                 key,
@@ -1629,6 +1986,7 @@ impl StoredApplication for TypedApp {
                     rocky_core::RowIdentity::from_integer(*identity).map_err(failed)?;
                     Incarnation::Tombstone(Some(*identity))
                 }
+                (3, SqlValue::Blob(bytes)) => Incarnation::Moved(Moved::decode(bytes)?),
                 (0, SqlValue::Blob(bytes)) => {
                     let live = Live::decode(bytes)?;
                     if plan.components(&live.key)? != *key
@@ -1659,6 +2017,27 @@ impl StoredApplication for TypedApp {
             .iter()
             .map(|(id, entry)| statement(STORE, self.row(id, entry)))
             .collect();
+        for ((_, _, source), entry) in &state.0 {
+            if let Incarnation::Moved(moved) = entry {
+                statements.push(statement("UPDATE rocky_incarnations SET target_node=?,target_sequence=? WHERE node=? AND sequence=?", vec![SqlValue::Blob(moved.target.node.0.to_vec()), SqlValue::Integer(moved.target.sequence.get() as i64), SqlValue::Blob(source.node.0.to_vec()), SqlValue::Integer(source.sequence.get() as i64)]));
+                statements.push(statement(
+                    "DELETE FROM rocky_follow_fields WHERE source_node=? AND source_sequence=?",
+                    id_values(*source).to_vec(),
+                ));
+                for (field, _, stamp) in &moved.pending {
+                    statements.push(statement(
+                        "INSERT INTO rocky_follow_fields VALUES(?,?,?,?,?)",
+                        vec![
+                            SqlValue::Blob(source.node.0.to_vec()),
+                            SqlValue::Integer(source.sequence.get() as i64),
+                            SqlValue::Blob(stamp.node.0.to_vec()),
+                            SqlValue::Integer(stamp.sequence.get() as i64),
+                            SqlValue::Blob(field.to_vec()),
+                        ],
+                    ));
+                }
+            }
+        }
         statements.extend(state.1.iter().map(|((table, author), sequence)| statement("INSERT INTO rocky_identity_marks VALUES(?,?,?) ON CONFLICT(tbl,author) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)", vec![SqlValue::Blob(table.to_vec()), SqlValue::Integer(i64::from(*author)), SqlValue::Integer(i64::from(*sequence))])));
         let keys: BTreeSet<_> = state.0.keys().map(|(table, key, _)| (table, key)).collect();
         for (table, key) in keys {
@@ -1701,6 +2080,13 @@ impl StoredApplication for TypedApp {
                     .map_err(failed)?,
                 visible: state.visible(table, key).map(|(id, _)| id) == Some(*id),
                 key: live.key.clone(),
+                birth: live.birth,
+                stamps: plan
+                    .fields
+                    .iter()
+                    .zip(&live.registers)
+                    .map(|(field, (_, stamp))| (field.name.clone(), *stamp))
+                    .collect(),
                 values: plan
                     .fields
                     .iter()
@@ -1730,5 +2116,176 @@ impl StoredApplication for TypedApp {
     ) -> Result<Vec<ReadView>, TypedError> {
         self.admit_read(context.scope, context.caller, policy)?;
         Ok(self.0.views.clone())
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct Moved {
+    at: Stamp,
+    birth: Stamp,
+    identity: i64,
+    target: OperationId,
+    pending: Vec<(Commitment, SqlValue, Stamp)>,
+}
+fn put_stamped(bytes: &mut Vec<u8>, fields: &[(Commitment, SqlValue, Stamp)]) {
+    bytes.extend((fields.len() as u16).to_le_bytes());
+    for (field, value, stamp) in fields {
+        bytes.extend(field);
+        value.encode(bytes);
+        stamp_bytes(bytes, *stamp);
+    }
+}
+impl Reader<'_> {
+    fn stamp(&mut self) -> Result<Stamp, TypedError> {
+        Ok(Stamp {
+            lamport: LamportTime::new(u64::from_le_bytes(self.array()?)).map_err(failed)?,
+            node: NodeId(self.array()?),
+            sequence: AuthorSequence::new(u64::from_le_bytes(self.array()?)).map_err(failed)?,
+        })
+    }
+    fn operation(&mut self) -> Result<OperationId, TypedError> {
+        Ok(OperationId {
+            node: NodeId(self.array()?),
+            sequence: AuthorSequence::new(u64::from_le_bytes(self.array()?)).map_err(failed)?,
+        })
+    }
+    fn stamped(&mut self) -> Result<Vec<(Commitment, SqlValue, Stamp)>, TypedError> {
+        let count = u16::from_le_bytes(self.array()?);
+        (0..count)
+            .map(|_| Ok((self.array()?, self.value()?, self.stamp()?)))
+            .collect()
+    }
+}
+impl Moved {
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = vec![1];
+        stamp_bytes(&mut bytes, self.at);
+        stamp_bytes(&mut bytes, self.birth);
+        bytes.extend(self.identity.to_le_bytes());
+        bytes.extend(self.target.node.0);
+        bytes.extend(self.target.sequence.get().to_le_bytes());
+        put_stamped(&mut bytes, &self.pending);
+        bytes
+    }
+    fn decode(bytes: &[u8]) -> Result<Self, TypedError> {
+        let mut reader = Reader(bytes);
+        if reader.array::<1>()? != [1] {
+            return refuse("unsupported move state");
+        }
+        let at = reader.stamp()?;
+        let birth = reader.stamp()?;
+        let identity = i64::from_le_bytes(reader.array()?);
+        rocky_core::RowIdentity::from_integer(identity).map_err(failed)?;
+        let target = reader.operation()?;
+        let pending = reader.stamped()?;
+        if !reader.0.is_empty() {
+            return refuse("trailing move state");
+        }
+        Ok(Self {
+            at,
+            birth,
+            identity,
+            target,
+            pending,
+        })
+    }
+}
+impl TypedApp {
+    /// Moves a held incarnation without changing its identity or field ordering.
+    pub fn move_row(
+        &self,
+        rows: &[TypedRow],
+        table: &str,
+        id: rocky_core::RowIdentity,
+        from: &[SqlValue],
+        to: &[SqlValue],
+    ) -> Result<Mutation, TypedError> {
+        let plan = self.by_name(table)?;
+        if plan.partitions.is_empty()
+            || plan
+                .partitions
+                .iter()
+                .any(|position| plan.key_names[*position] == "id")
+        {
+            return refuse("move requires a table partitioned independently of its id");
+        }
+        if from.len() != plan.partitions.len() || to.len() != from.len() || from == to {
+            return refuse("move partition tuple");
+        }
+        let columns: Vec<_> = plan
+            .partitions
+            .iter()
+            .map(|position| plan.key[*position])
+            .collect();
+        let source = key_components(&columns, from).map_err(failed)?;
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.table == table
+                    && row.identity == Some(id)
+                    && row.visible
+                    && key_components(
+                        &columns,
+                        &plan
+                            .partitions
+                            .iter()
+                            .map(|position| row.key[*position].clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .ok()
+                        == Some(source.clone())
+            })
+            .ok_or_else(|| TypedError("move source is not visible".into()))?;
+        let mut key = row.key.clone();
+        for (position, value) in plan.partitions.iter().zip(to) {
+            key[*position] = value.clone();
+        }
+        plan.components(&key)?;
+        let values = plan
+            .fields
+            .iter()
+            .map(|field| {
+                let value = row
+                    .values
+                    .iter()
+                    .find(|(name, _)| *name == field.name)
+                    .map(|(_, value)| value.clone())
+                    .ok_or_else(|| TypedError("move field missing".into()))?;
+                let stamp = row
+                    .stamps
+                    .iter()
+                    .find(|(name, _)| *name == field.name)
+                    .map(|(_, stamp)| *stamp)
+                    .ok_or_else(|| TypedError("move stamp missing".into()))?;
+                Ok((field.id, value, stamp))
+            })
+            .collect::<Result<Vec<_>, TypedError>>()?;
+        Ok(Self::mutation(
+            Some(row.incarnation),
+            Action::Move {
+                table: plan.id,
+                identity: id.integer(),
+                key,
+                values,
+                birth: row.birth,
+            },
+        ))
+    }
+}
+
+fn remember(
+    pending: &mut Vec<(Commitment, SqlValue, Stamp)>,
+    field: Commitment,
+    value: SqlValue,
+    stamp: Stamp,
+) {
+    if let Some((_, old, original)) = pending.iter_mut().find(|(id, _, _)| *id == field) {
+        if stamp > *original {
+            *old = value;
+            *original = stamp;
+        }
+    } else {
+        pending.push((field, value, stamp));
+        pending.sort_by_key(|(field, _, _)| *field);
     }
 }

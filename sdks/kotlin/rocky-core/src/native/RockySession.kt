@@ -53,6 +53,10 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             throw error
         }
     }
+    /** Moves a parent and its cascade children in one commit, outside an open SQL/Room transaction. */
+    suspend fun moveRow(handle: String, table: String, id: Long, from: List<Any?>, to: List<Any?>): JsonObject = writing.withLock {
+        client.moveRow(handleBytes(handle), table, id.toString(), JsonArray(from.map(::cell)), JsonArray(to.map(::cell)))
+    }
     /** A fresh invitation for one device with `profile`, replacing the previous one. Only an issuer invites. */
     suspend fun pairing(profile: GrantProfile): PairingInvitation {
         val result = client.call(request("pairing") { put("profile", profile.json()) })

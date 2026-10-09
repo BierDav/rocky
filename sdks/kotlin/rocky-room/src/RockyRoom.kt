@@ -31,3 +31,13 @@ suspend fun RoomDatabase.followRocky(database: RockyDatabase) {
         invalidationTracker.refreshAsync()
     }
 }
+
+
+/** Moves through Rocky's atomic write surface and refreshes this Room projection after commit. */
+suspend fun RoomDatabase.moveRockyRow(
+    database: RockyDatabase, handle: String, table: String, id: Long,
+    from: List<Any?>, to: List<Any?>,
+) {
+    database.moveRow(handle, table, id, from, to)
+    invalidationTracker.refreshAsync()
+}

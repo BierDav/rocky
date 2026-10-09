@@ -100,14 +100,14 @@ reverse a parent's retirement at the same cut.
 | Boundary | Current |
 | --- | --- |
 | Horizon statement | Format 2, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
-| Checkpoint | Format 6 carries independent optional admitted and finalized declarations and bases; an admitted cut is never treated as finalized |
-| Row frame | 5, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v7` |
+| Checkpoint | Format 6 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
+| Row frame | 6, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
+| File identity | `rocky.encrypted-replica.v8` |
 | Native session | `rocky.native-session.v5` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 2, with an explicit existence-base list.
-Checkpoint 6, frame 5 and replica identity v7 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Checkpoint 6, frame 6 and replica identity v8 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.

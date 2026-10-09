@@ -2,6 +2,7 @@
 //! capabilities and policies, the identities they bind, key providers,
 //! issuance and the enrollment and renewal messages. A runtime enforces
 //! what these verify. See `docs/runtime/credentials.md`.
+mod author_binding;
 mod coordination;
 mod enroll;
 mod group;
@@ -13,6 +14,7 @@ mod partition;
 mod pseudonym;
 mod signed;
 
+pub use author_binding::AuthorBinding;
 pub use coordination::{
     CoordinationGrant, MAX_APPLICATION_NAME, SignedCoordinationGrant, SignedTenantAdmission,
     TenantAdmission,

@@ -155,6 +155,22 @@ impl<A: RowApplication> SecureSession<A> {
 }
 
 impl<A: RowApplication> SecureSql<A> {
+    /// Commits a move as its own atomic bundle; an active SQL transaction must end first.
+    pub async fn move_row(
+        &self,
+        handle: Commitment,
+        table: &str,
+        id: rocky_core::RowIdentity,
+        from: &[SqlValue],
+        to: &[SqlValue],
+    ) -> Result<SecureCommit, Error> {
+        let lease = self.lease.lock().await;
+        if lease.held.is_some() || lease.aborted.is_some() {
+            return Err(denied("move requires an idle SQL session"));
+        }
+        let frames = self.session.move_row(handle, table, id, from, to).await?;
+        Ok(SecureCommit { handle, frames })
+    }
     /// Reserves a row id in an active transaction, before inserting it.
     /// Rollback releases reservations; a committed insert must use the next
     /// sequence of the table author's creation log.

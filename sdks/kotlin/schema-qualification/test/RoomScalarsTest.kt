@@ -91,7 +91,7 @@ class RoomScalarsTest {
                         execute("INSERT INTO partition_samples(sensor,sequence,reading,id) VALUES(?,?,?,?)", sensor, 1L, reading, id)
                     }
                 }
-                assertEquals(ids[0], ids[1])
+                assertEquals(ids[0] + 1, ids[1])
                 RockySQLiteDriver(database).open("partitions").use { connection ->
                     connection.prepare("SELECT SUM(reading) FROM partial_partition_samples").use { statement ->
                         assertTrue(statement.step()); assertEquals(30L, statement.getLong(0))

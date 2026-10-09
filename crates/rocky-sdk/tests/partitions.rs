@@ -75,7 +75,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO items(list,key,amount,id) VALUES(?,?,?,?)","values":[{"type":"text","value":name},{"type":"text","value":"key"},{"type":"integer","value":amount},{"type":"integer","value":id}]})).await;
         call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
     }
-    assert_eq!(ids[0], ids[1], "sequences are independent per partition");
+    assert_ne!(ids[0], ids[1], "one creation log per author and table");
     let driver = db
         .connect(rocky_sdk::ConnectionOptions {
             read_only: false,
@@ -104,7 +104,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         )
         .await
         .unwrap();
-    assert_eq!(a_id.rows, b_id.rows);
+    assert_ne!(a_id.rows, b_id.rows);
     driver
         .execute(driver.statement(), "ROLLBACK".into(), vec![])
         .await
@@ -176,9 +176,21 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     .await;
     assert_eq!(
         id["id"].as_str().unwrap().parse::<i64>().unwrap(),
-        ids[0].as_str().unwrap().parse::<i64>().unwrap() + 1
+        ids[0].as_str().unwrap().parse::<i64>().unwrap() + 2
     );
     call(&session, &scope, json!({"type":"sql","sql":"ROLLBACK"})).await;
+    call(
+        &session,
+        &scope,
+        json!({"type":"partition_create","table":"items","values":values("C")}),
+    )
+    .await;
+    let request = json!({"type":"move_row","table":"items","id":ids[0],"from":values("A"),"to":values("C"),"handle":vec![89u8;32]});
+    let moved = call(&session, &scope, request.clone()).await;
+    assert_eq!(moved["committed"]["frames"], 2);
+    assert_eq!(call(&session, &scope, request).await, moved);
+    let moved_rows = call(&session, &scope, json!({"type":"read","query":{"sql":"SELECT list,id FROM items WHERE list='C' AND row_kind=0","values":[],"max_rows":2}})).await;
+    assert_eq!(moved_rows["rows"][0][1]["value"], ids[0]);
     let revoked = call(
         &session,
         &scope,
@@ -260,5 +272,89 @@ async fn own_id_partitions_continue_the_table_log() {
         call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO lists(id,title) VALUES(?,?)","values":[{"type":"integer","value":id.to_string()},{"type":"text","value":"list"}]})).await;
         call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
     }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("writer");
+    let db = Database::create(open(&path), None).unwrap().database;
+    let scope: Value = serde_json::from_str(&db.scope()).unwrap();
+    let session = db.session();
+    for name in ["A", "B"] {
+        call(
+            &session,
+            &scope,
+            json!({"type":"partition_create","table":"items","values":values(name)}),
+        )
+        .await;
+    }
+    let requested = call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_request","collection":"items"}),
+    )
+    .await;
+    let assigned = call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_assign","request":requested["request"]}),
+    )
+    .await;
+    call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
+    )
+    .await;
+    call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
+    let id = call(
+        &session,
+        &scope,
+        json!({"type":"next_id","table":"items","partition_values":values("A")}),
+    )
+    .await["id"]
+        .clone();
+    call(&session, &scope, json!({"type":"sql","sql":"INSERT INTO items(list,key,amount,id) VALUES('A','kept',10,?)","values":[{"type":"integer","value":id}]})).await;
+    call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
+    db.close().await.unwrap();
+    let mut definition: Value = serde_json::from_str(SCHEMA).unwrap();
+    definition["version"] = json!(2);
+    definition["tables"][0]["columns"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"note","type":"text","not_null":false}));
+    let schema = definition.to_string();
+    let db = Database::open(Open {
+        schema: &schema,
+        ..open(&path)
+    })
+    .unwrap()
+    .database;
+    let session = db.session();
+    let requested = call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_request","collection":"items"}),
+    )
+    .await;
+    let assigned = call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_assign","request":requested["request"]}),
+    )
+    .await;
+    call(
+        &session,
+        &scope,
+        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
+    )
+    .await;
+
+    call(&session, &scope, json!({"type":"move_row","handle":vec![92u8;32],"table":"items","id":id,"from":values("A"),"to":values("B")})).await;
+    let rows = call(&session, &scope, json!({"type":"read","query":{"sql":"SELECT id,note FROM items WHERE list='B' AND row_kind=0","values":[],"max_rows":2}})).await;
+    assert_eq!(rows["rows"][0][0]["value"], id);
+    assert_eq!(rows["rows"][0][1]["type"], "null");
     db.close().await.unwrap();
 }

@@ -151,7 +151,8 @@ identity marks; rebootstrap rebuilds its group partition and leaves other
 partitions unchanged. See [decision 0043](../decisions/0043-partition-horizon-state.md).
 
 Partition, admitted horizon and finalized horizon are independent optional
-fields; an admitted cut is never treated as finalized. Other formats are
+fields; an admitted cut is never treated as finalized. The required additive
+`moves` field retains format 6 after [decision 0038](../decisions/0038-row-moves.md). Other formats are
 refused before writes.
 
 | Field | Binds |
@@ -161,6 +162,7 @@ refused before writes.
 | `sequence`, `previous` | Position in the scope's checkpoint chain and the prior identity |
 | `frontier`, `clock`, `operations` | Per author applied sequence, tip hash and clock, ordered by author; highest clock; applied count |
 | `identities` | Per-author identity high-water marks |
+| `moves` | Count and digest of opaque move links carried in the authenticated row records |
 | `rows`, `tombstones` | Count and digest of every stored row record, tombstones and creation hashes included |
 | `creations`, `handles` | Count and digest of (creation hash, clock) of stored rows, and of retained mutation handles |
 | `strong` | Base sequence/head and command-row commitment; retained results, commands, preparations and observations by identity |

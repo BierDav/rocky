@@ -5,6 +5,9 @@ requests, Kotlin client wrappers and the [SQL driver](sql-driver.md).
 Transaction semantics follow the trusted [SQL sessions](sql-sessions.md); a
 commit is one [secure bundle](secure-sessions.md#bundles).
 
+A [row move](row-moves.md) uses `SecureSql::move_row` as a dedicated atomic
+mutation, carrying children, identity proofs and field stamps.
+
 ## Install typed tables
 
 The replica's application is `rocky_core::TypedRows` over a

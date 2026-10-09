@@ -585,6 +585,7 @@ impl<A: RowApplication> Inner<A> {
     /// change of `secure_rows`.
     pub(super) async fn reproject(&self, scope: ResourceScope) -> Result<(), Error> {
         self.index_row_keys().await?;
+        self.reindex_move_scope(scope).await?;
         self.restart_plan(scope).await?;
         let Some(typed) = self.typed.clone() else {
             return Ok(());

@@ -283,11 +283,11 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .unwrap()
         .remove(0);
     let fb = a
-        .author_bundle([2; 32], vec![f.write("B", 1, 20)], vec![])
+        .author_bundle([2; 32], vec![f.write("B", 2, 20)], vec![])
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 5);
+    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 6);
     assert_eq!(
         reader.receive(fa.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -612,7 +612,7 @@ async fn measure_200_partitions() {
             writer
                 .author_bundle(
                     [index; 32],
-                    vec![f.write(&name, 1, i64::from(index))],
+                    vec![f.write(&name, u32::from(index) + 1, i64::from(index))],
                     vec![],
                 )
                 .await
@@ -727,7 +727,7 @@ async fn measure_200_partitions() {
 }
 
 #[tokio::test]
-async fn horizon_preserves_identity_sequences_independently_in_each_partition() {
+async fn horizon_preserves_table_identity_allocation_across_partitions() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new();
     let writer = f
@@ -743,7 +743,8 @@ async fn horizon_preserves_identity_sequences_independently_in_each_partition() 
             .await;
     }
     for (handle, name) in [(1, "A"), (2, "B")] {
-        let write = f.write(name, 1, 10);
+        let birth = if name == "A" { 1 } else { 3 };
+        let write = f.write(name, birth, 10);
         writer
             .author_bundle([handle; 32], vec![write.clone()], vec![])
             .await
@@ -764,10 +765,10 @@ async fn horizon_preserves_identity_sequences_independently_in_each_partition() 
         .unwrap();
         writer.receive_horizon(signed).await.unwrap();
         let checkpoint = writer.finalize_horizon(f.scope(name)).await.unwrap();
-        assert_eq!(checkpoint.statement.identities[0].sequence, 1);
+        assert_eq!(checkpoint.statement.identities[0].sequence, birth);
         assert_eq!(checkpoint.statement.rows.count, 0);
         writer
-            .author_bundle([handle + 4; 32], vec![f.write(name, 2, 20)], vec![])
+            .author_bundle([handle + 4; 32], vec![f.write(name, birth + 1, 20)], vec![])
             .await
             .unwrap();
         assert_eq!(
@@ -778,7 +779,7 @@ async fn horizon_preserves_identity_sequences_independently_in_each_partition() 
                 .statement
                 .identities[0]
                 .sequence,
-            2
+            birth + 1
         );
         writer.audit(f.scope(name)).await.unwrap();
     }
@@ -824,7 +825,7 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
     let early = a
         .author_bundle(
             [1; 32],
-            vec![f.titled("A", 1, 1, "Milk"), f.titled("B", 1, 1, "Milk")],
+            vec![f.titled("A", 1, 1, "Milk"), f.titled("B", 2, 1, "Milk")],
             vec![],
         )
         .await
@@ -832,7 +833,7 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
     let clock = b
         .author_bundle(
             [2; 32],
-            vec![f.titled("A", 1, 2, "other"), f.titled("B", 1, 2, "other")],
+            vec![f.titled("A", 1, 2, "other"), f.titled("B", 2, 2, "other")],
             vec![],
         )
         .await
@@ -840,7 +841,7 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
     let late = b
         .author_bundle(
             [3; 32],
-            vec![f.titled("A", 2, 2, "MILK"), f.titled("B", 2, 2, "MILK")],
+            vec![f.titled("A", 3, 2, "MILK"), f.titled("B", 4, 2, "MILK")],
             vec![],
         )
         .await
@@ -878,7 +879,9 @@ async fn partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen()
         assert_eq!(
             visible,
             vec![vec![SqlValue::Integer(
-                RowIdentity::new(2, 2).unwrap().integer()
+                RowIdentity::new(2, if name == "A" { 3 } else { 4 })
+                    .unwrap()
+                    .integer()
             )]]
         );
         let state = constraint_state(&a, name).await;
@@ -984,8 +987,8 @@ async fn partitioned_equal_stamps_break_ties_by_partition_and_id() {
         vec![
             f.titled("A", 1, 1, "milk"),
             f.titled("A", 2, 1, "MILK"),
-            f.titled("B", 1, 1, "milk"),
-            f.titled("B", 2, 1, "MILK"),
+            f.titled("B", 3, 1, "milk"),
+            f.titled("B", 4, 1, "MILK"),
         ],
         vec![],
     )

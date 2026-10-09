@@ -15,6 +15,7 @@ pub use horizon::HorizonProgress;
 mod incoming;
 mod keys;
 pub(crate) mod migrate;
+pub(crate) mod moves;
 mod offload;
 mod partition;
 mod queries;
@@ -130,13 +131,15 @@ pub struct CiphertextPage {
     pub pruned: Vec<ResourceScope>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-struct Stamp {
-    clock: u64,
-    author: PublicKey,
-    sequence: u64,
+pub(crate) struct Stamp {
+    pub(crate) clock: u64,
+    pub(crate) author: PublicKey,
+    pub(crate) sequence: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Materialized {
+    proof: Option<moves::CreationProof>,
+    moved_from: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protected: Option<protection::Protected>,
     fields: RowFields,
@@ -330,6 +333,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
+        moves::SCHEMA,
         partition::SCHEMA,
         checkpoint::SCHEMA,
         roles::SCHEMA,
@@ -370,7 +374,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v7" {
+    if label != "rocky.encrypted-replica.v8" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));

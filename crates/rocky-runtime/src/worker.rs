@@ -1057,10 +1057,76 @@ where
                 self.unpublished
                     .changed(changed, crate::observe::Cause::Local);
                 self.notify(true);
+                self.process_following().await?;
                 Ok(op)
             }
             Err(committed) => Ok(committed),
         }
+    }
+    pub(super) async fn process_following(&mut self) -> Result<bool, Error> {
+        let mut loaded = Vec::new();
+        for query in self.app.following_queries(self.identity.node) {
+            loaded.extend(
+                storage::collect_rows(
+                    self.conn()
+                        .query(&query.sql, bindings(query.values))
+                        .await?,
+                )
+                .await?,
+            );
+        }
+        let follows = self
+            .app
+            .following_intents(loaded, self.identity.node)
+            .map_err(application)?;
+        let mut changed = false;
+        for follow in follows {
+            if follow.original.node != self.identity.node
+                || self.retention.below_horizon(follow.original)
+            {
+                continue;
+            }
+            let mutation = Mutation {
+                entity: follow.intent.entity,
+                payload: follow.intent.payload,
+            };
+            let result = self
+                .transaction(async |worker| {
+                    match worker
+                        .prepare(crate::MutationHandle(follow.handle), &mutation, None)
+                        .await?
+                    {
+                        Ok(prepared) => {
+                            let changed = worker
+                                .write_mutation(
+                                    prepared.handle,
+                                    prepared.request_hash,
+                                    &prepared.op,
+                                    &prepared.bytes,
+                                    prepared.statements,
+                                    prepared.revision,
+                                )
+                                .await?;
+                            Ok(Some((
+                                prepared.op,
+                                prepared.bytes.len(),
+                                prepared.revision,
+                                changed,
+                            )))
+                        }
+                        Err(_) => Ok(None),
+                    }
+                })
+                .await?;
+            if let Some((op, bytes, revision, views)) = result {
+                self.adopt(&op, bytes, revision);
+                self.unpublished
+                    .changed(views, crate::observe::Cause::Local);
+                self.notify(true);
+                changed = true;
+            }
+        }
+        Ok(changed)
     }
     /// Statements for one prepared mutation inside the caller's transaction.
     async fn write_mutation(

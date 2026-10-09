@@ -594,7 +594,7 @@ where
             .transaction(async |worker| worker.apply_pending().await)
             .await?;
         let Some(pass) = pass else {
-            return Ok(false);
+            return self.process_following().await;
         };
         for id in &pass.applied {
             self.frontier.insert(id.node, id.sequence);
@@ -607,7 +607,10 @@ where
         }
         match pass.rejection {
             Some(error) => Err(Error::Rejected(error)),
-            None => Ok(true),
+            None => {
+                self.process_following().await?;
+                Ok(true)
+            }
         }
     }
     /// One bounded pass inside the caller's transaction. Each ready operation

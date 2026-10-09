@@ -1080,14 +1080,9 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     let later: Extension = serde_json::from_value(serde_json::json!(bytes)).expect("later");
     let mut capability = root.capability.clone();
     capability.extension = later;
-    let refused = CredentialChain(vec![
-        SignedCapability::sign(capability, &domain.publisher).expect("signed"),
-    ])
-    .complete(&holder, node.public_key());
-    let message = match refused.map(|chain| verify(&chain)) {
-        Err(error) | Ok(Err(error)) => error.to_string(),
-        Ok(Ok(_)) => String::new(),
-    };
+    let message = SignedCapability::sign(capability, &domain.publisher)
+        .expect_err("unsupported extension must refuse before signing its portable binding")
+        .to_string();
     assert!(
         message.contains("unsupported credential extension version"),
         "{message}"

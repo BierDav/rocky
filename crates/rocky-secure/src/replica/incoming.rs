@@ -57,13 +57,17 @@ impl<A: RowApplication> Inner<A> {
                         header: header.clone(),
                         body: body.clone(),
                     };
-                    if !matches!(self.apply_frame(&frame, time).await?, Outcome::Waiting) {
+                    if !matches!(
+                        Box::pin(self.apply_frame(&frame, time)).await?,
+                        Outcome::Waiting
+                    ) {
                         changed += 1;
                         advanced = true;
                     }
                 }
             }
             if !advanced {
+                Box::pin(self.follow_moves(time)).await?;
                 return Ok(false);
             }
         }
@@ -129,7 +133,7 @@ impl<A: RowApplication> Inner<A> {
         if let Ok(payload) = &payload
             && let Some(membership) = payload.membership()
         {
-            return self.apply_bundle(&operation, membership, time).await;
+            return Box::pin(self.apply_bundle(&operation, membership, time)).await;
         }
         self.conn.execute("SAVEPOINT pending", ()).await?;
         let materialized = match payload {

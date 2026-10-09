@@ -186,9 +186,9 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0040](../decisions/0040-group-secrets.md)) |
-| Frame | Row format 5 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
+| Frame | Row format 6 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
-| Bundle | Body unchanged; each opening commits to its frame header and tuple |
+| Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |
 
 Readers recompute the tuple from both row images and refuse a mismatch before
 projection. Custodians verify the signed scope and partition grant without

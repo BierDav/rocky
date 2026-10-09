@@ -111,6 +111,65 @@ impl<A: RowApplication> Inner<A> {
         dependencies: &[Hash],
         time: u64,
     ) -> Result<Vec<EncryptedFrame>, Error> {
+        Box::pin(self.author_bundle_carried(
+            handle,
+            input,
+            writes,
+            dependencies,
+            time,
+            &BTreeMap::new(),
+        ))
+        .await
+    }
+    pub(super) async fn author_bundle_carried(
+        &mut self,
+        handle: Commitment,
+        input: Commitment,
+        writes: &[RowWrite],
+        dependencies: &[Hash],
+        time: u64,
+        carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
+    ) -> Result<Vec<EncryptedFrame>, Error> {
+        let mut births = BTreeMap::<Commitment, Vec<rocky_core::RowIdentity>>::new();
+        for write in writes.iter().filter(|write| {
+            write.change.before.is_none()
+                && !carried.contains_key(&(write.change.scope, write.change.row))
+        }) {
+            if let Some(id) = self
+                .app
+                .row_identity(&write.change)
+                .map_err(|error| denied(&error))?
+            {
+                births.entry(write.change.scope.table).or_default().push(id);
+            }
+        }
+        for (table, mut ids) in births {
+            ids.sort();
+            let author = self
+                .row_authors
+                .get(&table)
+                .ok_or_else(|| denied("birth requires a table author"))?;
+            let scope = writes
+                .iter()
+                .find(|write| write.change.scope.table == table)
+                .ok_or_else(|| denied("birth table missing"))?
+                .change
+                .scope;
+            let mut highest = self
+                .highest_identity(self.identity_allocation_scope(scope), author.number)
+                .await?;
+            for id in ids {
+                if rocky_core::RowIdentity::next(author.number, highest)
+                    .map_err(|error| denied(&error.to_string()))?
+                    != id
+                {
+                    return Err(denied(
+                        "insert id must continue the device's own table creation log",
+                    ));
+                }
+                highest = id.sequence();
+            }
+        }
         let mut ordered = writes
             .iter()
             .map(|write| {
@@ -198,14 +257,28 @@ impl<A: RowApplication> Inner<A> {
                 index: index as u16,
                 members: members.clone(),
             };
-            let frame = self
-                .author_frame(writes, &dependencies, time, |sequence| {
+            let stamped = writes
+                .iter()
+                .filter_map(|write| {
+                    carried
+                        .get(&(write.change.scope, write.change.row))
+                        .map(|carried| (write.change.row, carried.clone()))
+                })
+                .collect();
+            let frame = Box::pin(self.author_frame_carried(
+                writes,
+                &dependencies,
+                time,
+                &stamped,
+                true,
+                |sequence| {
                     if sequence != opening.sequence {
                         return Err(Error::Corrupt("bundle sequence plan".into()));
                     }
                     RowPayload::bundle(membership, writes.clone())
-                })
-                .await?;
+                },
+            ))
+            .await?;
             authored.push(frame);
         }
         self.verify_sql_projection(&writes).await?;

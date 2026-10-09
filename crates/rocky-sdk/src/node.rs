@@ -602,7 +602,7 @@ impl Node {
             }
             "network" => Ok(self.network_status().await),
             "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
-            "sql" | "next_id" => self.sql_call(client, kind, request).await,
+            "sql" | "next_id" | "move_row" => self.sql_call(client, kind, request).await,
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "devices" => self.devices().await,
             "grant" | "delegate" => self.grant(request).await,
@@ -2220,6 +2220,33 @@ impl Node {
             Some(reader) => reader,
             None => self.reader(client).await?,
         };
+        if kind == "move_row" {
+            let table = request["table"]
+                .as_str()
+                .ok_or_else(|| refused("table must be a string"))?;
+            let id: rocky_core::RowIdentity = serde_json::from_value(request["id"].clone())?;
+            let tuple = |name: &str| -> Result<Vec<SqlValue>, Failure> {
+                let values: Vec<Cell> = serde_json::from_value(request[name].clone())?;
+                values.into_iter().map(Cell::sql).collect()
+            };
+            let handle: Vec<u8> = serde_json::from_value(request["handle"].clone())?;
+            let handle: [u8; 32] = handle
+                .try_into()
+                .map_err(|_| refused("handle must be 32 bytes"))?;
+            let committed = reader
+                .sql
+                .move_row(
+                    secure_handle(&handle),
+                    table,
+                    id,
+                    &tuple("from")?,
+                    &tuple("to")?,
+                )
+                .await?;
+            return Ok(
+                json!({"committed": {"handle": HEXLOWER.encode(&committed.handle), "frames": committed.frames.len()}}),
+            );
+        }
         if kind == "next_id" {
             let table = request["table"]
                 .as_str()

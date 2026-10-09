@@ -1357,7 +1357,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v7");
+    assert_eq!(identity, "rocky.encrypted-replica.v8");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -2882,7 +2882,7 @@ async fn horizon_old_inserts_stay_dropped_across_successors_and_future_frames_wa
         target: &Device,
         scope: ResourceScope,
         signed: crate::SignedCheckpoint,
-    ) {
+    ) -> crate::RebootstrapReport {
         for descriptor in &signed.statement.finalized.as_ref().unwrap().statement.bases {
             let base = source
                 .replica
@@ -2945,8 +2945,8 @@ async fn horizon_old_inserts_stay_dropped_across_successors_and_future_frames_wa
             }
         }
         let report = target.replica.finish_rebootstrap(scope).await.unwrap();
-        assert!(report.rejected.is_empty());
         assert!(report.pending.is_empty());
+        report
     }
     let erp = Erp::new();
     let dir = TempDir::new().unwrap();
@@ -2980,7 +2980,16 @@ async fn horizon_old_inserts_stay_dropped_across_successors_and_future_frames_wa
     .unwrap();
     a.replica.receive_horizon(signed).await.unwrap();
     let first = a.replica.finalize_horizon(scope).await.unwrap();
-    import(&a, &b, scope, first.clone()).await;
+    let report = import(&a, &b, scope, first.clone()).await;
+    assert!(
+        report
+            .rejected
+            .iter()
+            .any(|(hash, reason)| *hash == stale[0].id().unwrap()
+                && (reason.contains("basis") || reason.contains("horizon"))),
+        "unsent birth must be reported: {report:?}"
+    );
+    assert!(!report.reapplied.contains(&stale[0].id().unwrap()));
     import(&a, &c, scope, first).await;
     assert_eq!(
         c.replica.receive(stale[0].clone()).await.unwrap(),

@@ -3215,6 +3215,7 @@ dependencies = [
  "rocky-credentials",
  "rocky-storage",
  "serde",
+ "serde_bytes",
  "tokio",
 ]
 

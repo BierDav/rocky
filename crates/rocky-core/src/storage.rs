@@ -66,6 +66,13 @@ pub struct ApplicationDescriptor {
     pub operations: crate::Versions,
     pub projection: u32,
 }
+/// An original author's deterministic retry of an application-defined transition.
+pub struct AuthoredFollow {
+    pub handle: crate::Commitment,
+    pub original: crate::OperationId,
+    pub intent: crate::Intent,
+}
+
 /// Projection adapter. Runtime owns execution and transaction completion.
 pub trait StoredApplication: Application + ProjectionSchema + Sized + Send + 'static {
     /// Stable installed reducer/projection definition. Change when semantics change.
@@ -93,6 +100,17 @@ pub trait StoredApplication: Application + ProjectionSchema + Sized + Send + 'st
     /// the physical tables against it, persists it and exposes it.
     fn logical_schema(&self) -> Option<&crate::LogicalSchema> {
         None
+    }
+    /// Indexed rows needed to recover this node's application-defined follows.
+    fn following_queries(&self, _node: crate::NodeId) -> Vec<ProjectionStatement> {
+        Vec::new()
+    }
+    fn following_intents(
+        &self,
+        _rows: Vec<Vec<SqlValue>>,
+        _node: crate::NodeId,
+    ) -> Result<Vec<AuthoredFollow>, Self::Error> {
+        Ok(Vec::new())
     }
     /// Every stored row of `state`, in `projection_query` shape and order.
     fn projection_rows(&self, state: &Self::State) -> Vec<Vec<SqlValue>>;

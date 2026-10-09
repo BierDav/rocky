@@ -5796,6 +5796,7 @@ dependencies = [
  "rocky-storage",
  "rusqlite",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tempfile",
  "tokio",

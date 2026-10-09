@@ -49,7 +49,7 @@ enter the descriptor and its fingerprints. Applications read and write
 | --- | --- | --- |
 | High bit | 1 | Zero |
 | Author number | 31 | Of the table pseudonym; 0 is reserved |
-| Sequence | 32 | 1 to 2^32-1 per author, table and scope; exhaustion is an error |
+| Sequence | 32 | 1 to 2^32-1 per author and table across its partitions; exhaustion is an error |
 
 There is no timestamp. `RowIdentity` crosses JSON as a canonical decimal
 string; SQL binds the positive 63-bit integer. Numeric JSON, leading zeros,
@@ -65,7 +65,7 @@ signs and zero are refused.
   table's author to its admitted `NodeId` with `TypedApp::with_row_author`,
   the same binding on every replica.
 - Receivers check the `id`'s author against the frame signer (secure) and
-  admit only sequences above the permanent author/table/scope mark. The mark
+  admit only sequences above the permanent partition mark, while local allocation uses the table-wide mark. The mark
   commits with the frame, projection and outbox; refused operations never move
   it, duplicates settle first, and pruning, rebuild and checkpoints keep it.
 - An insert creates an incarnation; updates and deletes name its `id`. Grants
@@ -73,6 +73,10 @@ signs and zero are refused.
 - The typed table shows, per natural key, the live incarnation with the
   greatest creation stamp. Hidden incarnations and tombstones are retained
   until the [horizon](mergeable-horizon.md).
+
+Moving an independently partitioned row keeps its `id`, original birth proof
+and field stamps. Use the dedicated [row-move surface](row-moves.md), rather
+than expressing a move as an ordinary delete and insert.
 
 ## Install and inspect (trusted)
 

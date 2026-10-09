@@ -1,6 +1,9 @@
 # 8. Row moves
 
-Status: not started.
+Status: complete; all ordered slices and completion gates passed on 2026-10-09.
+Decision 0038 is drafted.
+The change is based on qualified phase 6 commit `9a5368df`, preserving the
+shared-format order 1 → 6 → 8. Checkpoint format 6 has an additive `moves` field.
 Owner: `rocky-secure` frames, apply and constraint resolution; `rocky-sdk`
 and the Kotlin write surface. Depends on phases
 [4](04-partition-aware-constraints.md) and [5](05-partitioned-foreign-keys.md);
@@ -51,11 +54,11 @@ row store; a move must carry them.
    admissible in B.
 7. SDK, SQL and Kotlin surface for a move, including Room.
 
-Known gap: `rocky-secure/src/replica/apply.rs` drops an insert with an older
-or missing basis with `continue` and no signal to its author. A move is a
-delete and an insert, so a late update could vanish unseen. Report consumed
-operations, and confirm `RebootstrapReport.rejected` names a behind device's
-unsent inserts.
+Resolved gap: `rocky-secure/src/replica/apply.rs` previously consumed an insert
+with an older or missing basis without a result for its author. Consumed
+operations now retain their hash and reason, and `RebootstrapReport.rejected`
+names the behind device's unsent inserts instead of counting them as reapplied.
+A move or follow behind the horizon refuses the complete bundle.
 
 ## Completion gate
 
@@ -67,3 +70,38 @@ deterministic and multi-process, and:
 - A followed update is issued once, also after reopen and repeated sync.
 - A device holding only A learns nothing about B from the move.
 - A row moved A → B → C receives an update authored against A.
+
+## Implementation evidence
+
+The secure tests cover the six acceptance cases, bundle interruption and fault
+rollback, original-author follows once after reopen/repeated sync, A → B → C,
+creation-proof refusal/replay, future-stamp refusal, source finalization and
+the destination horizon. The process-isolated orchestrator reopens each device
+in a separate process for every operation and runs all six cases, including a
+B-only attachment reader and category nulling.
+
+The Trusted reducer preserves birth identity and field stamps and derives own
+follows through indexed adapter queries. The public SDK test moves across
+partitions and retries its stable handle. Kotlin's Room move consumer checks
+DAO visibility and kept identity; the packaged consumer exercises the same
+surface using packaged artifacts. A public SDK regression moves a row after an
+application generation adds a nullable field, preserving the historical birth
+proof and assigning the new field its birth stamp. The existing rebootstrap
+regression checks that the behind device's unsent birth is rejected by hash and
+reason.
+
+The native runtime was republished from this workspace before SDK qualification.
+The final native gate passed 2 tests. `./kotlin check` passed 52 tests; the
+explicit Room gate passed 13 tests. Schema qualification passed seven hand/import
+descriptor and fingerprint pairs, installing and reopening every SDK schema.
+The packaged consumer program passed. `./scripts/check` passed: the workspace
+run had 666 passed and 12 ignored; the SDK run without default features had
+130 passed and 4 ignored. Both had zero failures. Formatting, strict
+workspace Clippy and commitlint passed. Final gate logs are retained under
+`local/phase08-gates/final/` in the implementation workspace.
+
+The qualified boundary is the dedicated move commit outside an open SQL/Room
+transaction. Following a chain requires access to its intervening source links.
+Creation proofs establish provenance, not global exclusion of authorized
+concurrent moves into disjoint destinations. Trusted retains its existing
+schema capability restrictions; the secure profile qualifies child closure.

@@ -1,5 +1,6 @@
 use super::*;
 use crate::storage::rows;
+use std::collections::BTreeMap;
 
 #[tokio::test]
 async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
@@ -48,7 +49,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    for version in [0, 1, 2, 3, 4, 5, 6, 8] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();
@@ -118,7 +119,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 6] {
+    for version in [0, 1, 2, 3, 4, 5, 7] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
@@ -153,12 +154,15 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     #[derive(Serialize)]
     struct Body {
         version: u8,
+        proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
+        carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
         membership: Option<crate::wire::Membership>,
         writes: Vec<RowWrite>,
     }
     #[derive(Serialize)]
     struct Envelope {
         version: u8,
+        #[serde(with = "serde_bytes")]
         body: Vec<u8>,
         creations: Vec<(Commitment, Commitment)>,
         basis: Option<(u64, Commitment)>,
@@ -174,26 +178,30 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     )
     .await
     .unwrap();
+    let sender = PrivateKey::new();
     let extensions = crate::wire::Extensions {
         manifest: f.app().definition().hash(),
         scope: f.public,
         generation: 1,
-        credentials: f.credentials(&node, f.full()),
+        credentials: f.credentials(&sender, f.full()),
         author: None,
-        row_format: 5,
+        row_format: 6,
         partition: None,
     };
     for (envelope_version, body_version, message) in [
-        (0, 2, "unsupported creation witness format"),
-        (2, 2, "unsupported creation witness format"),
+        (0, 3, "unsupported creation witness format"),
+        (2, 3, "unsupported creation witness format"),
         (1, 0, "unsupported bundle version"),
         (1, 1, "unsupported bundle version"),
-        (1, 3, "unsupported bundle version"),
+        (1, 2, "unsupported bundle version"),
+        (1, 4, "unsupported bundle version"),
     ] {
         let plaintext = encode(&Envelope {
             version: envelope_version,
             body: encode(&Body {
                 version: body_version,
+                proofs: BTreeMap::new(),
+                carried: BTreeMap::new(),
                 membership: None,
                 writes: vec![],
             })
@@ -204,7 +212,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         })
         .unwrap();
         let frame = crate::wire::author(
-            &node,
+            &sender,
             extensions.clone(),
             &[11; 32],
             (0, None, 1),

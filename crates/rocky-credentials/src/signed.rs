@@ -104,6 +104,8 @@ impl Capability {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedCapability {
+    /// Portable assignment provenance; carries no partition tuples.
+    pub author_binding: crate::AuthorBinding,
     pub issuer: PublicKey,
     pub capability: Capability,
     signature: Signature,
@@ -112,6 +114,7 @@ impl SignedCapability {
     pub fn sign(capability: Capability, issuer: &PrivateKey) -> Result<Self, Error> {
         let signature = issuer.sign(&signing_bytes("rocky.capability.v1", &capability)?);
         Ok(Self {
+            author_binding: crate::AuthorBinding::sign(&capability, issuer)?,
             issuer: issuer.public_key(),
             capability,
             signature,

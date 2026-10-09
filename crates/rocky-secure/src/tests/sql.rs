@@ -1595,7 +1595,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 5);
+    assert_eq!(operation.header.extensions.row_format, 6);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
         .await

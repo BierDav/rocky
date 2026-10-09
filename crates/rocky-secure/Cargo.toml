@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time", "net", "io-
 p2panda-core = "=0.5.2"
 p2panda-store = { version = "=0.5.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 chacha20poly1305 = "=0.10.1"
 rand = "=0.8.8"
 

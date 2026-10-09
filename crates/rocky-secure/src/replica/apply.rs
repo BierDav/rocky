@@ -26,6 +26,11 @@ impl<A: RowApplication> Inner<A> {
         let basis = self.finalized_basis(scope).await?;
         let finalized = basis.is_some();
         let payload = self.row_payload(frame)?;
+        let ceiling = Stamp {
+            clock: operation.header.timestamp,
+            author: operation.header.public_key,
+            sequence: operation.header.seq_num,
+        };
         for write in writes {
             if self
                 .app
@@ -61,6 +66,27 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
             let current = self.row(scope, self.storage_row(change)?).await?;
+            let carried = payload.carried(&change.row);
+            if let Some(carried) = carried {
+                if payload.membership().is_none() {
+                    return Err(denied("a move or follow requires a transaction bundle"));
+                }
+                self.check_carried(write, carried, &ceiling)?;
+                if change.before.is_some()
+                    && let Some(id) = self.find_scope_id(scope).await?
+                    && let Some(checkpoint) = self
+                        .checkpoint_record(id, true)
+                        .await?
+                        .and_then(|record| record.signed)
+                    && checkpoint.statement.finalized.is_some()
+                    && carried
+                        .stamps
+                        .values()
+                        .any(|stamp| stamp.clock <= checkpoint.statement.clock)
+                {
+                    return Err(denied("followed update is behind the destination horizon"));
+                }
+            }
             if let Some(identity) = self
                 .app
                 .row_identity(change)
@@ -68,10 +94,14 @@ impl<A: RowApplication> Inner<A> {
                 && change.before.is_none()
             {
                 let mark = marks.iter().find(|mark| mark.author == identity.author());
-                if extension.author != Some(identity.author())
+                if (carried.is_none() && extension.author != Some(identity.author()))
                     || mark.is_some_and(|mark| {
-                        mark.signer != operation.header.public_key
-                            || (identity.sequence() <= mark.sequence
+                        let signer = carried.map_or(operation.header.public_key, |carried| {
+                            carried.proof.stamp().author
+                        });
+                        mark.signer != signer
+                            || (carried.is_none()
+                                && identity.sequence() <= mark.sequence
                                 && !(finalized && current.is_some()))
                     })
                     || !identities.insert(identity)
@@ -83,12 +113,28 @@ impl<A: RowApplication> Inner<A> {
                 && ((change.before.is_some() && current.is_none())
                     || (change.before.is_none() && current.is_some()))
             {
+                if carried.is_some() {
+                    return Err(denied("move or follow is behind the horizon"));
+                }
+                self.consume(
+                    operation.hash,
+                    "row is unavailable behind the finalized horizon",
+                )
+                .await?;
                 continue;
             }
             if finalized
                 && change.before.is_none()
                 && self.protected_conflict(change, &payload).await?
             {
+                if carried.is_some() {
+                    return Err(denied("move or follow is behind the horizon"));
+                }
+                self.consume(
+                    operation.hash,
+                    "row is unavailable behind the finalized horizon",
+                )
+                .await?;
                 continue;
             }
             if change.before.is_none()
@@ -98,13 +144,43 @@ impl<A: RowApplication> Inner<A> {
                     .basis()
                     .is_none_or(|(authored, _)| authored < sequence)
                 {
+                    if carried.is_some() {
+                        return Err(denied("move insert is behind the destination horizon"));
+                    }
+                    self.consume(
+                        operation.hash,
+                        "insert has an older or missing finalized basis",
+                    )
+                    .await?;
                     continue;
                 }
                 if payload.basis() != Some((sequence, hash)) {
                     return Err(denied("insert does not bind the current finalized horizon"));
                 }
             }
-            let (actual, mut record) = merge_row(write, current, &operation)?;
+            let (actual, mut record) = merge_row(write, current, &operation, carried)?;
+            if change.before.is_none()
+                && carried.is_none()
+                && let Some(identity) = self
+                    .app
+                    .row_identity(change)
+                    .map_err(|error| denied(&error))?
+            {
+                let proof = payload
+                    .proof(&change.row)
+                    .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
+                proof.verify(
+                    self.config.publisher,
+                    extension.manifest,
+                    scope.table,
+                    identity,
+                    &ceiling,
+                )?;
+                if proof.stamp() != &ceiling {
+                    return Err(denied("birth proof must name its creating frame stamp"));
+                }
+                record.proof = Some(proof.clone());
+            }
             self.release_protection(&mut record, write, &operation)?;
             record.key = Some(change.row);
             record.identity = self
@@ -137,10 +213,11 @@ impl<A: RowApplication> Inner<A> {
         materialized: Vec<(RowChange, Materialized)>,
     ) -> Result<(), Error> {
         let operation = frame.operation()?;
+        let payload = self.row_payload(frame)?;
         let scope = operation.header.extensions.scope;
         let id = self.scope_id(scope).await?;
         // Consumed births reserve identities even when their row is definitely dropped.
-        for write in self.row_payload(frame)?.into_writes() {
+        for write in payload.clone().into_writes() {
             if write.change.before.is_none()
                 && let Some(identity) = self
                     .app
@@ -151,7 +228,11 @@ impl<A: RowApplication> Inner<A> {
                     scope,
                     &checkpoint::IdentityMark {
                         author: identity.author(),
-                        signer: operation.header.public_key,
+                        signer: payload
+                            .carried(&write.change.row)
+                            .map_or(operation.header.public_key, |carried| {
+                                carried.proof.stamp().author
+                            }),
                         sequence: identity.sequence(),
                     },
                 )
@@ -169,6 +250,7 @@ impl<A: RowApplication> Inner<A> {
                 None => change.row,
             };
             if record.creation == operation.hash
+                && payload.carried(&change.row).is_none()
                 && let Some(identity) = record.identity
             {
                 let identity = rocky_core::RowIdentity::from_integer(identity)
@@ -246,6 +328,7 @@ pub(super) fn merge_row(
     write: &RowWrite,
     current: Option<Materialized>,
     operation: &p2panda_core::Operation<Extensions>,
+    carried: Option<&moves::Carried>,
 ) -> Result<(RowChange, Materialized), Error> {
     let change = &write.change;
     if change.before.is_some() {
@@ -260,6 +343,8 @@ pub(super) fn merge_row(
         }
     }
     let mut record = current.clone().unwrap_or(Materialized {
+        proof: None,
+        moved_from: None,
         protected: None,
         fields: BTreeMap::new(),
         stamps: BTreeMap::new(),
@@ -298,7 +383,10 @@ pub(super) fn merge_row(
             .as_ref()
             .ok_or_else(|| denied("missing after image"))?;
         for field in write.published_fields() {
-            if record.stamps.get(&field).is_none_or(|old| stamp > *old) {
+            let stamp = carried
+                .and_then(|carried| carried.stamps.get(&field))
+                .unwrap_or(&stamp);
+            if record.stamps.get(&field).is_none_or(|old| stamp > old) {
                 record.stamps.insert(field, stamp.clone());
                 if let Some(value) = after.get(&field) {
                     record.fields.insert(field, value.clone());
@@ -307,6 +395,13 @@ pub(super) fn merge_row(
                 }
             }
         }
+    }
+    if let Some(carried) = carried
+        && change.before.is_none()
+    {
+        record.proof = Some(carried.proof.clone());
+        record.created = Some(carried.proof.stamp().clone());
+        record.moved_from = carried.moved_from.clone();
     }
     let actual = RowChange {
         scope: change.scope,

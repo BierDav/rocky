@@ -42,7 +42,7 @@ evidence of a SQL transaction ([SQL sessions](runtime/sql-sessions.md)).
 `DatabaseBinding` names the tables one session sees and the domain of each
 ([database bindings](runtime/database-bindings.md)). `RowWrite` adds the
 write mask to a secure row change, and `TypedRows` is the secure row contract
-of a logical schema's typed tables ([secure SQL](runtime/secure-sql.md)).
+of a logical schema's typed tables ([secure SQL](runtime/secure-sql.md), [row moves](runtime/row-moves.md)).
 `ProjectionSchema` is the owned SQL an installation creates; compiled adapters
 supply it through `CompiledSchema`. `LogicalSchema` is the canonical descriptor
 of typed tables with its fingerprints, the scalar codec and the canonical

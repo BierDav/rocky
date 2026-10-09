@@ -286,7 +286,9 @@ impl Fixture {
     pub(super) fn write(&self, name: &str, partition: i64) -> RowWrite {
         let app = self.app();
         let table = app.tables().find(|table| table.sql_name == name).unwrap();
-        let id = RowIdentity::new(1, 1).unwrap().integer();
+        // Partitioned tables continue one creation log per author and table.
+        let sequence = u32::try_from(partition.max(1)).unwrap();
+        let id = RowIdentity::new(1, sequence).unwrap().integer();
         let mut values = if name == "products" {
             vec![SqlValue::Text("Product".into())]
         } else {
@@ -299,7 +301,7 @@ impl Fixture {
             values.push(SqlValue::Text(name.into()));
         }
         if name == "order_lines" {
-            values.push(SqlValue::Integer(id));
+            values.push(SqlValue::Integer(RowIdentity::new(1, 1).unwrap().integer()));
         }
         values.extend([SqlValue::Integer(id), SqlValue::Integer(0)]);
         RowWrite::changed(RowChange {

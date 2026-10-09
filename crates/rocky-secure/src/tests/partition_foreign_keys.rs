@@ -33,6 +33,14 @@ impl Fixture {
         if !logged {
             definition["tables"][2]["indexes"] = serde_json::json!([{"name":"items_title","columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"unique":true,"on_conflict":"latest_wins"}]);
         }
+        if !logged {
+            definition["tables"].as_array_mut().unwrap().push(serde_json::json!({
+                "name":"attachments","class":"mergeable",
+                "columns":[{"name":"list","type":"integer","not_null":true},{"name":"item","type":"integer","not_null":true},{"name":"title","type":"text"}],
+                "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+                "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"}]
+            }));
+        }
         if logged {
             definition["tables"] = serde_json::json!([
                 {"name":"products","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"existence_log":true},
@@ -368,7 +376,7 @@ async fn group_references_hold_cascade_and_null_only_category_per_partition() {
         .await
         .unwrap();
     let items = writer
-        .author_bundle([3; 32], vec![item, f.write("items", b_id, 1, None)], vec![])
+        .author_bundle([3; 32], vec![item, f.write("items", b_id, 2, None)], vec![])
         .await
         .unwrap();
     for frame in &items {
@@ -527,7 +535,7 @@ async fn partitioned_children_follow_keyless_parent_liveness_and_restore() {
     let frames = writer
         .author_bundle(
             [2; 32],
-            vec![item.clone(), f.write("items", 20, 1, Some(product_id))],
+            vec![item.clone(), f.write("items", 20, 2, Some(product_id))],
             vec![],
         )
         .await
@@ -717,3 +725,6 @@ fn in_group_identity_accepts_text_partition_slots_and_refuses_wrong_slot_mapping
         rocky_core::Incompatibility::Reference(_)
     ));
 }
+
+#[path = "row_moves.rs"]
+mod row_moves;

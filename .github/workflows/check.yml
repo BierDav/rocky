@@ -111,17 +111,9 @@ jobs:
   build:
     # Compiles once: clippy, the test binaries as nextest archives and the custody
     # peer, which `check`, `slow` and `shopping` run instead of building again.
-    runs-on: macos-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 45
     steps:
-      # The Gitea macOS runner is a service without a login environment.
-      - name: Use the Gitea runner's tools
-        if: github.server_url != 'https://github.com'
-        run: |
-          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
-          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
-
       - name: Download the exact source revision
         id: source
         env:
@@ -176,7 +168,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
             | tar -xzf - -C "$RUNNER_TEMP/nextest"
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
@@ -201,17 +193,9 @@ jobs:
 
   check:
     needs: build
-    runs-on: macos-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 30
     steps:
-      # The Gitea macOS runner is a service without a login environment.
-      - name: Use the Gitea runner's tools
-        if: github.server_url != 'https://github.com'
-        run: |
-          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
-          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
-
       - name: Download the exact source revision
         id: source
         env:
@@ -266,7 +250,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
             | tar -xzf - -C "$RUNNER_TEMP/nextest"
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
@@ -303,17 +287,9 @@ jobs:
     # Soak tests: on pushes to the default branch only; releases do not wait for them.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: macos-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 60
     steps:
-      # The Gitea macOS runner is a service without a login environment.
-      - name: Use the Gitea runner's tools
-        if: github.server_url != 'https://github.com'
-        run: |
-          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
-          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
-
       - name: Download the exact source revision
         id: source
         env:
@@ -367,7 +343,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/nextest"
-          curl --fail --silent --show-error --location https://get.nexte.st/latest/mac \
+          curl --fail --silent --show-error --location https://get.nexte.st/latest/linux \
             | tar -xzf - -C "$RUNNER_TEMP/nextest"
           echo "$RUNNER_TEMP/nextest" >> "$GITHUB_PATH"
 
@@ -405,17 +381,9 @@ jobs:
     # Releases skip it; the release refuses a commit whose run of it failed.
     needs: build
     if: ${{ !inputs.release }}
-    runs-on: macos-latest
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 45
     steps:
-      # The Gitea macOS runner is a service without a login environment.
-      - name: Use the Gitea runner's tools
-        if: github.server_url != 'https://github.com'
-        run: |
-          echo "CARGO_HOME=/Users/gitea-runner/.cargo" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=/Users/gitea-runner/.rustup" >> "$GITHUB_ENV"
-          printf '%s\n' /opt/homebrew/bin /Users/gitea-runner/node/bin /Users/gitea-runner/.cargo/bin >> "$GITHUB_PATH"
-
       - name: Download the exact source revision
         id: source
         env:

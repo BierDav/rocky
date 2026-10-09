@@ -127,8 +127,10 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 ## CI
 
 The baseline workflow's `lint` job runs `scripts/tools` and `scripts/lint` on
-Linux; it needs no build and fails within minutes. The `build` job runs on
-macOS, matching the first desktop target. It downloads an archive of the exact
+Linux; it needs no build and fails within minutes. The `build`, `check`, `slow`
+and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
+On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-latest-any-arch`.
+The `build` job downloads an archive of the exact
 event revision and runs `scripts/check --build`: strict workspace Clippy, then
 the test binaries as nextest archives, uploaded with the custody peer binary.
 `check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
@@ -185,9 +187,6 @@ The Gitea mirror runs the same `.github/workflows`; it has no `.gitea` directory
 which would replace them. The workflows call the REST endpoints both forges serve
 and never `gh`. Where they differ, steps branch on `github.server_url`:
 
-- macOS jobs run on a dedicated launchd runner without a login environment; a
-  first step points `CARGO_HOME`, `RUSTUP_HOME` and `PATH` at `/Users/gitea-runner`.
-  Its Actions cache is stored on `/Volumes/david-mm-linz-ext-1/gitea-runner`.
 - Linux jobs run in the runner image, which lacks rustup and the Android SDK; the
   jobs install them. Linux jobs use GitHub's labels, `ubuntu-latest` (x64) and
   `ubuntu-24.04-arm`, which the Gitea runners must carry. Jobs that need no
@@ -195,6 +194,8 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
   arm64 Linux host.
+- The release job that produces the `darwin-aarch64` JVM SDK still uses macOS
+  because it builds a macOS native library. Other release jobs use Linux.
 - Images and Maven artifacts go to the instance's registries with the
   `PACKAGE_TOKEN` secret; releases are created through the Gitea API.
 

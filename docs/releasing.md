@@ -64,9 +64,10 @@ dependencies { implementation("rocky:rocky-core-jvm:0.1.0-alpha.1") }
 
 ## Pipeline
 
-1. Version: decides whether to release and computes the version and notes.
-2. The [shared checks](development.md#shared-checks), without the soak tests; the images
-   wait for them.
+1. Version: decides whether to release and computes the version and notes. It refuses a commit
+   whose latest completed `shopping` qualification in the baseline workflow failed.
+2. The [shared checks](development.md#shared-checks), without the soak tests and the shopping
+   qualification; the images wait for them.
 3. In parallel: both images, the JVM SDK packaged and qualified per platform, and the Android
    runtime and SDK built at the release version (`-ProckyVersion`, `ROCKY_VERSION`).
 4. Publish: merges the JVM natives into one jar (`scripts/release/jvm-maven`), uploads every Maven

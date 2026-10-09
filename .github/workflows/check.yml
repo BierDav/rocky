@@ -7,8 +7,13 @@ name: Baseline checks
 on:
   push:
   pull_request:
-  # The release workflow gates every release on these checks, without `slow`.
+  # The release workflow gates every release on these checks, without `slow`
+  # and `shopping`.
   workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,8 +31,8 @@ env:
 jobs:
   lint:
     # Formatting and static lint checks need no build, so they fail fast; see docs/linting.md.
-    # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Any architecture.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 15
     steps:
       - name: Download the exact source revision
@@ -273,6 +278,8 @@ jobs:
 
   shopping:
     # Multi-process shopping qualification: device JVMs and the packaged custody peer.
+    # Releases skip it; the release refuses a commit whose run of it failed.
+    if: ${{ !inputs.release }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:

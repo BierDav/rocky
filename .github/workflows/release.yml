@@ -32,9 +32,13 @@ concurrency:
 jobs:
   version:
     name: Version
-    # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Any architecture.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # The shopping gate reads earlier check runs of this commit.
+      actions: read
     outputs:
       release: ${{ steps.changes.outputs.release }}
       version: ${{ steps.version.outputs.version }}
@@ -74,6 +78,34 @@ jobs:
             fi
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
+
+      # Releases do not wait for the shopping qualification, but the latest
+      # completed run of it for this commit must not have failed.
+      - name: Refuse a failed shopping qualification
+        if: steps.changes.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/$1"
+          }
+          # GitHub names the path `.github/workflows/check.yml`, Gitea `check.yml@<ref>`.
+          runs="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
+            | jq -r '.workflow_runs[] | select(.path | test("(^|/)check\\.yml(@|$)")) | .id')"
+          for run in ${runs}; do
+            result="$(api "actions/runs/${run}/jobs?per_page=100" \
+              | jq -r '[.jobs[] | select(.name == "shopping" and .status == "completed")] | .[0].conclusion // ""')"
+            case "${result}" in
+            "" | skipped | cancelled) continue ;;
+            failure)
+              echo "::error::The shopping qualification failed for ${GITHUB_SHA} in run ${run}."
+              exit 1
+              ;;
+            *) break ;;
+            esac
+          done
 
       - uses: taiki-e/install-action@v2
         if: steps.changes.outputs.release == 'true'
@@ -120,6 +152,8 @@ jobs:
     needs: version
     if: needs.version.outputs.release == 'true'
     uses: ./.github/workflows/check.yml
+    with:
+      release: true
 
   coordinator-image:
     name: Coordinator image
@@ -360,8 +394,8 @@ jobs:
   publish:
     name: Publish
     needs: [version, check, coordinator-image, peer-image, jvm, android]
-    # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Any architecture.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 20
     permissions:
       contents: write

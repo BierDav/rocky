@@ -155,7 +155,8 @@ Required status checks are a hosting setting; the workflow file does not configu
 branch protection. No remotely hosted CI run has been verified by this baseline.
 
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
-baseline; it has not run on a hosted runner yet.
+baseline; it has not run on a hosted runner yet. Releases skip it, but refuse a
+commit whose completed run of it failed.
 
 The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on
@@ -174,7 +175,8 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
 - Linux jobs run in the runner image, which lacks rustup and the Android SDK; the
   jobs install them. Linux jobs use GitHub's labels, `ubuntu-latest` (x64) and
   `ubuntu-24.04-arm`, which the Gitea runners must carry. Jobs that need no
-  particular architecture use the arm64 label on Gitea. Only the Android builds,
+  particular architecture use `ubuntu-latest-any-arch` on Gitea, carried by
+  runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
   arm64 Linux host.
 - Images and Maven artifacts go to the instance's registries with the

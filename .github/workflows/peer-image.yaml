@@ -139,8 +139,8 @@ jobs:
     name: Publish manifest
     needs: build
     if: github.event_name != 'pull_request'
-    # Any architecture; Gitea has more arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Any architecture.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 15
     # New GHCR packages are private. Set this package's visibility to public
     # once (Package settings), or the cluster cannot pull it anonymously.

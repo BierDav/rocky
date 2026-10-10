@@ -142,7 +142,10 @@ with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 `check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
 the tests and doc tests, without compiling the test binaries again. `slow`,
 `shopping` and `android` also start after `build`; the first two run its
-archives and peer binary.
+archives and peer binary. The upload is best-effort: Gitea's artifact service
+sometimes fails to finalize it, and `check` then runs `scripts/check
+--no-clippy` so it rebuilds the test binaries from the dependency cache instead
+of repeating the Clippy the `build` job already ran.
 It needs no version-control CLI or repository history, and never invokes Git.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
 lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,

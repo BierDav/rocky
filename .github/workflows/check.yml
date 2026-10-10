@@ -190,7 +190,7 @@ jobs:
   check:
     needs: build
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Download the exact source revision
         id: source
@@ -267,7 +267,8 @@ jobs:
           if [ -d "$RUNNER_TEMP/build" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
-            ./scripts/check
+            # The build job already ran clippy; only its archives are missing.
+            ./scripts/check --no-clippy
           fi
 
       - name: Record the passing tree

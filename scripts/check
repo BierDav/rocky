@@ -7,6 +7,8 @@
 #   scripts/check [--slow] --from DIR
 #                                   the same checks with DIR's test binaries,
 #                                   without clippy, which --build ran
+#   scripts/check --no-clippy       every test, without clippy, when --build
+#                                   already ran clippy but its archives are gone
 #
 # CI builds once with --build and runs the other jobs --from its archives.
 set -eu
@@ -18,11 +20,13 @@ usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 mode=all
 archives=
+clippy=true
 while [ $# -gt 0 ]; do
     case "$1" in
     --slow) mode=slow ;;
     --build) mode=build && archives=${2:-} && shift ;;
     --from) archives=${2:-} && shift ;;
+    --no-clippy) clippy=false ;;
     *) usage ;;
     esac
     shift
@@ -84,7 +88,7 @@ build)
 esac
 
 cargo fmt --all -- --check
-[ -n "$archives" ] || cargo clippy --workspace --all-targets --locked -- -D warnings
+[ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
 run_tests workspace
 # nextest does not run doc tests.
 if $nextest; then

@@ -298,6 +298,10 @@ impl<A: RowApplication> Inner<A> {
                 bytes += *size;
                 step.pruned += 1;
             }
+            // With its last operation, in the same transaction, goes a chain.
+            if step.pruned > 0 {
+                inner.sweep_chains().await?;
+            }
             if step.pruned > 0 {
                 inner
                     .conn

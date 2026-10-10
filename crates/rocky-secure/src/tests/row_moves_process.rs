@@ -150,24 +150,12 @@ async fn peer_worker() {
             snapshots.push((scope, snapshot.rows));
         }
     }
-    let inner = replica.inner.lock().await;
-    let frames = crate::storage::rows(
-        &inner.conn,
+    let frames = crate::tests::stored_frames(
+        &replica,
         "SELECT header,body FROM secure_operations ORDER BY sequence",
     )
-    .await
-    .unwrap()
-    .into_iter()
-    .map(|row| {
-        let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
-            panic!("frame");
-        };
-        EncryptedFrame {
-            header: header.clone(),
-            body: body.clone(),
-        }
-    })
-    .collect();
+    .await;
+    let inner = replica.inner.lock().await;
     let follows = crate::storage::rows(&inner.conn, "SELECT * FROM secure_followed")
         .await
         .unwrap()

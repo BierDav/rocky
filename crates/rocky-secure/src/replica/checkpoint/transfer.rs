@@ -14,18 +14,122 @@ pub struct CheckpointPage {
     pub scope: ResourceScope,
     pub checkpoint: Commitment,
     pub after: Option<Commitment>,
+    #[serde(with = "sealed")]
     pub rows: EncryptedPackage,
     pub next: Option<Commitment>,
+    /// The credential chains of the latest confirmed command, on the first
+    /// page only. They travel beside the sealed rows, in a message of their
+    /// own on a native session; the strong state names each by digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chains: Vec<CredentialChain>,
 }
-/// Row, stored record and the clock of the row's creation operation.
-type PageRow = (Commitment, Vec<u8>, u64);
+/// The sealed rows with their ciphertext as one CBOR byte string.
+mod sealed {
+    use super::*;
+    #[derive(Serialize, Deserialize)]
+    struct Sealed {
+        scope: ResourceScope,
+        generation: rocky_core::KeyEpoch,
+        kind: PackageKind,
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    }
+    pub(super) fn serialize<S: serde::Serializer>(
+        package: &EncryptedPackage,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Sealed {
+            scope: package.scope,
+            generation: package.generation,
+            kind: package.kind.clone(),
+            bytes: package.bytes.clone(),
+        }
+        .serialize(serializer)
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<EncryptedPackage, D::Error> {
+        let sealed = Sealed::deserialize(deserializer)?;
+        Ok(EncryptedPackage {
+            scope: sealed.scope,
+            generation: sealed.generation,
+            kind: sealed.kind,
+            bytes: sealed.bytes,
+        })
+    }
+}
+/// A stored row record and the clock of the row's creation operation.
+#[derive(Serialize, Deserialize)]
+struct PageRow {
+    #[serde(with = "serde_bytes")]
+    row: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    fields: Vec<u8>,
+    clock: u64,
+}
+/// Encoded bytes of a page row beyond its stored record.
+const ROW_OVERHEAD: usize = 64;
 #[derive(Serialize, Deserialize)]
 struct PagePlain {
     checkpoint: Commitment,
     after: Option<Commitment>,
     next: Option<Commitment>,
     rows: Vec<PageRow>,
-    strong: Option<crate::command::history::StrongState>,
+    strong: Option<PageStrong>,
+}
+/// A scope's strong state as the first page carries it: the latest command
+/// names its chains by digest, and the importer supplies the checkpoint.
+#[derive(Serialize, Deserialize)]
+struct PageStrong {
+    head: Option<(u64, Commitment)>,
+    rows: BTreeMap<Commitment, RowFields>,
+    latest: Option<crate::command::DetachedCommand>,
+}
+impl PageStrong {
+    fn detach(
+        state: &crate::command::history::StrongState,
+    ) -> Result<(Self, Vec<CredentialChain>), Error> {
+        let (latest, chains) = match &state.latest {
+            Some(result) => {
+                let (latest, chains) = result.detach()?;
+                (Some(latest), chains)
+            }
+            None => (None, Vec::new()),
+        };
+        Ok((
+            Self {
+                head: state.head,
+                rows: state.rows.clone(),
+                latest,
+            },
+            chains,
+        ))
+    }
+    /// The strong state with the chains sent beside the page. One that is
+    /// not named, or does not match its digest, refuses the page.
+    fn attach(
+        self,
+        chains: &[CredentialChain],
+    ) -> Result<crate::command::history::StrongState, Error> {
+        let chains = chains
+            .iter()
+            .cloned()
+            .map(crate::wire::Chain::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        let named = self.latest.as_ref().map_or(0, |latest| latest.chains());
+        if chains.len() != named {
+            return Err(denied(crate::command::CHAIN_MISMATCH));
+        }
+        Ok(crate::command::history::StrongState {
+            head: self.head,
+            rows: self.rows,
+            latest: self
+                .latest
+                .map(|latest| ConfirmedCommand::attach(latest, &chains))
+                .transpose()?,
+            checkpoint: None,
+        })
+    }
 }
 /// What a rebootstrap did with the operations this replica held.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +240,34 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         Ok(Some((id, signed)))
+    }
+}
+
+#[cfg(test)]
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Encoded bytes of the checkpoint's strong state as the first page
+    /// carried it with its chains embedded, and as it carries it now.
+    pub(crate) async fn strong_page_bytes(&self, scope: ResourceScope) -> (usize, usize) {
+        let inner = self.inner.lock().await;
+        let id = inner.find_scope_id(scope).await.unwrap().unwrap();
+        let record = rows(
+            &inner.conn,
+            &format!("SELECT state FROM secure_checkpoint_strong WHERE scope={id}"),
+        )
+        .await
+        .unwrap();
+        let [SqlValue::Blob(bytes)] = record[0].as_slice() else {
+            panic!("strong state")
+        };
+        let mut state: crate::command::history::StrongState = decode(bytes).unwrap();
+        if let Some(result) = &mut state.latest {
+            result.parts.retain(|part| part.scope == scope);
+        }
+        let (page, _) = PageStrong::detach(&state).unwrap();
+        (
+            encode(&Some(state)).unwrap().len(),
+            encode(&Some(page)).unwrap().len(),
+        )
     }
 }
 
@@ -308,15 +440,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if let Some(result) = &mut state.latest {
                 result.parts.retain(|part| part.scope == scope);
             }
-            Some(state)
+            Some(PageStrong::detach(&state)?)
         } else {
             None
         };
+        let (strong, chains) = match strong {
+            Some((strong, chains)) => (Some(strong), chains),
+            None => (None, Vec::new()),
+        };
         let strong_bytes = encode(&strong)?.len();
-        // Byte strings encode as integer arrays of at most two bytes per byte, once
-        // in the sealed plaintext and again as the page's ciphertext. The plaintext
-        // must also fit one package.
-        let budget = ((byte_quota - 2048) / 2).min(rocky_core::MAX_PAYLOAD_BYTES - 1024);
+        // Stored bytes are CBOR byte strings in the sealed plaintext, and the
+        // ciphertext is one in the page. The plaintext must fit one package.
+        let budget = (byte_quota - 2048).min(rocky_core::MAX_PAYLOAD_BYTES - 1024);
         if strong_bytes > budget {
             return Err(denied("byte quota smaller than checkpoint strong state"));
         }
@@ -347,9 +482,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                 return Err(Error::Corrupt("checkpoint row".into()));
             };
-            let weight = 2 * (48 + fields.len());
+            let weight = ROW_OVERHEAD + fields.len();
             if plain.rows.len() == STEP_ROWS || used + weight > budget {
-                plain.next = plain.rows.last().map(|(row, _, _)| *row);
+                plain.next = plain
+                    .rows
+                    .last()
+                    .map(|last| row_of(&last.row))
+                    .transpose()?;
                 break;
             }
             used += weight;
@@ -358,7 +497,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .stub(creation)
                 .await?
                 .ok_or_else(|| Error::Corrupt("checkpoint row creation is unknown".into()))?;
-            plain.rows.push((row_of(row)?, fields.clone(), clock));
+            row_of(row)?;
+            plain.rows.push(PageRow {
+                row: row.clone(),
+                fields: fields.clone(),
+                clock,
+            });
         }
         if plain.rows.is_empty() && !records.is_empty() {
             return Err(denied("byte quota smaller than one checkpoint row"));
@@ -375,11 +519,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 &key,
                 &encode(&plain)?,
             )?,
+            chains: Vec::new(),
         };
         if encode(&page)?.len() > byte_quota {
             return Err(denied("checkpoint page exceeds the byte quota"));
         }
-        Ok(page)
+        // The chains are beside the page: the quota bounds the page alone.
+        Ok(CheckpointPage { chains, ..page })
     }
     /// Starts importing a peer's signed checkpoint for a scope this replica
     /// reads in whole. Nothing changes until `finish_rebootstrap`.
@@ -486,24 +632,31 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("checkpoint page binding mismatch"));
         }
+        // Chains beside the page are verified against the digests the
+        // strong state names before anything is staged.
+        let strong = match (plain.strong, page.after) {
+            (Some(state), None) => {
+                let state = state.attach(&page.chains)?;
+                state.binds(&staging.signed)?;
+                Some(state)
+            }
+            (None, Some(_)) if page.chains.is_empty() => None,
+            _ => return Err(denied("checkpoint strong page binding mismatch")),
+        };
         transaction!(inner, |inner| {
-            match (&plain.strong, page.after) {
-                (Some(state), None) => {
-                    state.binds(&staging.signed)?;
-                    inner
-                        .conn
-                        .execute(
-                            "INSERT INTO secure_rebootstrap_strong VALUES(?,?)",
-                            bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(state)?)]),
-                        )
-                        .await?;
-                }
-                (None, Some(_)) => {}
-                _ => return Err(denied("checkpoint strong page binding mismatch")),
+            if let Some(state) = &strong {
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_rebootstrap_strong VALUES(?,?)",
+                        bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(state)?)]),
+                    )
+                    .await?;
             }
             let mut sets = staging.sets.clone();
             let mut cursor = staging.cursor;
-            for (row, fields, clock) in &plain.rows {
+            for PageRow { row, fields, clock } in &plain.rows {
+                let row = &row_of(row)?;
                 if cursor.is_some_and(|cursor| *row <= cursor) {
                     return Err(denied("checkpoint rows out of order"));
                 }
@@ -902,6 +1055,9 @@ impl<A: RowApplication> Inner<A> {
                 [report.superseded as i64, bytes],
             )
             .await?;
+        if report.superseded > 0 {
+            self.sweep_chains().await?;
+        }
         reapply.sort();
         Ok(reapply.into_iter().map(|(_, hash)| hash).collect())
     }

@@ -1543,6 +1543,12 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
         .register_row_author(key.clone(), credentials.clone())
         .await
         .unwrap();
+    // A registered row author keeps its chain stored before any operation
+    // names it.
+    let author_chain = crate::wire::Chain::new(credentials.clone())
+        .unwrap()
+        .digest();
+    assert_eq!(replica.chain_census().await, ([author_chain].into(), 0));
     let session_sql = sql(&replica, &[fixture.items]).await;
     assert!(
         session_sql
@@ -1575,7 +1581,8 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 7);
+    assert_eq!(operation.header.extensions.row_format, 8);
+    assert_eq!(operation.header.extensions.chain, author_chain);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
         .await
@@ -1778,6 +1785,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     let forged = crate::wire::author(
         &key,
         extensions,
+        frame.chain().unwrap().clone(),
         &fixture.key(fixture.items).key,
         (
             operation.header.seq_num,
@@ -1829,6 +1837,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     let reused = crate::wire::author(
         &key,
         operation.header.extensions.clone(),
+        frame.chain().unwrap().clone(),
         &fixture.key(fixture.items).key,
         (
             operation.header.seq_num + 1,

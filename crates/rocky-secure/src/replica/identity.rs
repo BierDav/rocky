@@ -10,6 +10,8 @@ pub(super) const SCHEMA: &[&str] = &[
 pub(super) struct RowAuthor {
     pub(super) key: PrivateKey,
     pub(super) credentials: CredentialChain,
+    /// `credentials` with the digest this author's frames name.
+    pub(super) chain: Chain,
     pub(super) number: u32,
 }
 
@@ -67,11 +69,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("row author exceeds this device's authority"));
         }
+        // The stored chain is kept while the author stays registered.
+        let chain = Chain::new(credentials.clone())?;
+        if !inner.chain_kept(chain.digest()).await? {
+            transaction!(inner, |inner| inner.keep_chain(&chain).await)?;
+        }
         inner.row_authors.insert(
             table,
             RowAuthor {
                 key,
                 credentials,
+                chain,
                 number,
             },
         );

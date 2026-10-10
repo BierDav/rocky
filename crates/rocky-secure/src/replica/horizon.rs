@@ -11,7 +11,7 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_mergeable_horizon(scope BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_pending(dependency BLOB NOT NULL,scope BLOB NOT NULL,PRIMARY KEY(dependency,scope)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_horizon_pending_scope ON secure_horizon_pending(scope)",
-    "CREATE TABLE IF NOT EXISTS secure_horizon_credentials(node BLOB PRIMARY KEY,credentials BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_horizon_credentials(node BLOB PRIMARY KEY,chain BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_rejoined(scope BLOB NOT NULL,node BLOB NOT NULL,horizon BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_ack(scope BLOB NOT NULL,node BLOB NOT NULL,ack BLOB NOT NULL,PRIMARY KEY(scope,node)) WITHOUT ROWID",
 ];
@@ -697,30 +697,41 @@ impl<A: RowApplication> EncryptedReplica<A> {
         node: PublicKey,
         credentials: &CredentialChain,
     ) -> Result<(), Error> {
+        self.record_horizon_chain(node, &Chain::new(credentials.clone())?)
+            .await
+    }
+    /// Records the chain a peer authenticated with; the record names the
+    /// stored chain by digest.
+    pub(crate) async fn record_horizon_chain(
+        &self,
+        node: PublicKey,
+        chain: &Chain,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.verify_chain_scopes(credentials, node, now()?, &[])?;
+        inner.verify_chain_scopes(chain.credentials(), node, now()?, &[])?;
         inner.touch_peer(node);
-        let bytes = encode(credentials)?;
         let mut rows = inner
             .conn
             .query(
-                "SELECT credentials FROM secure_horizon_credentials WHERE node=?",
+                "SELECT chain FROM secure_horizon_credentials WHERE node=?",
                 [node.as_bytes().to_vec()],
             )
             .await?;
         if let Some(row) = rows.next().await?
-            && row.get::<Vec<u8>>(0)? == bytes
+            && row.get::<Vec<u8>>(0)? == chain.digest()
         {
             return Ok(());
         }
         drop(rows);
         let first = inner.unrecorded_peer(node).await?;
         transaction!(inner, |inner| {
-            inner.conn.execute("INSERT INTO secure_horizon_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET credentials=excluded.credentials", [node.as_bytes().to_vec(),bytes.clone()]).await?;
+            inner.keep_chain(chain).await?;
+            inner.conn.execute("INSERT INTO secure_horizon_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET chain=excluded.chain", [node.as_bytes().to_vec(),chain.digest().to_vec()]).await?;
             if first {
                 inner.bound_peers().await?;
             }
-            Ok(())
+            // A replaced or bounded-out chain may have lost its last name.
+            inner.sweep_chains().await
         })
     }
     pub async fn horizon_credentials(
@@ -733,14 +744,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let mut rows = inner
                 .conn
                 .query(
-                    "SELECT credentials FROM secure_horizon_credentials WHERE node=?",
+                    "SELECT chain FROM secure_horizon_credentials WHERE node=?",
                     [node.as_bytes().to_vec()],
                 )
                 .await?;
             let row = rows.next().await?.ok_or_else(|| {
                 denied("sync with the required device before declaring its credential deadline")
             })?;
-            result.push((*node, decode(&row.get::<Vec<u8>>(0)?)?));
+            let digest = row
+                .get::<Vec<u8>>(0)?
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Corrupt("horizon credential digest".into()))?;
+            drop(rows);
+            let chain = inner.stored_chain(digest).await?;
+            result.push((*node, chain.credentials().clone()));
         }
         Ok(result)
     }

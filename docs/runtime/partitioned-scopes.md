@@ -252,7 +252,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 2, one secret per recipient, bound to manifest, group address, epoch identity and revocation IDs ([0050](../decisions/0050-concurrent-key-epochs.md)) |
-| Frame | Row format 6 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
+| Frame | Row format 8 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 7 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |
 
@@ -359,7 +359,27 @@ not a direct timer: headers count at 94%, checkpoint records at 87%, and
 session messages at the 61% of frame bytes that are chains. This gives 1.8 s, 4.2 s and 4.1 s of the three stages. The 801 frames of the
 catch-up carry 7.27 MB of headers, 6.80 MB of them chains, beside 3.87 MB of
 payload; the 801 checkpoint records hold 11.31 MB, 9.82 MB of them chains.
-[Phase 11](../features_07/11-chains-by-reference.md) starts from these figures.
+[Phase 11](../features_07/11-chains-by-reference.md) started from these figures.
+
+Chain bytes were 48% of the checkpoint stage, above the 20% at which phase 11
+moves the chain out of the frame header as well as off the checkpoint page
+([decision 0053](../decisions/0053-chains-by-reference.md)). Rerun on
+2026-10-10 on the same kind of host, under another load:
+
+| Four tables, 200 partitions | Budget | Phase 3 | Phase 11 |
+| --- | ---: | ---: | ---: |
+| Register keys and author | 60 s | 18.4 s | 4.4 s |
+| Authenticated range catch-up | 100 s | 49.7 s | 18.5 s |
+| 801 checkpoints | 48 s | 8.6 s | 1.5 s |
+| Headers of the 801 catch-up frames | | 7.27 MB | 0.59 MB |
+| Chains of those frames | | 6.80 MB, in every header | 41.9 KB, stored once |
+| 801 checkpoint records / their signers' chains | | 11.31 / 9.82 MB | 11.43 / 9.87 MB |
+
+All three budgets are met. The single-table probe took 1.5 s, 1.5 s, 0.3 s
+and 0.1 s to reopen and passes its budgets above. A signed checkpoint still
+embeds its signer's chain. The
+[logs and gate measurements](../../benchmarks/runtime-scaling/evidence/chains-2026-10-10/README.md)
+are kept.
 
 ## Design rationale
 

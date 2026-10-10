@@ -125,6 +125,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             &inner.config.revocations,
             now()?,
         )?;
+        inner.chain = Chain::new(credentials.clone())?;
         inner.config.credentials = credentials;
         let readable =
             |key: &KeyMaterial| grants.iter().any(|grant| readable_grant(grant, key.scope));

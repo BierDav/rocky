@@ -472,7 +472,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Admits one incoming frame into custody; application follows in the pass.
     async fn receive_step(&mut self, frame: &EncryptedFrame, time: u64) -> Result<Staged, Error> {
-        let bytes = frame.to_bytes()?.len();
+        let bytes = frame.weight();
         let operation = frame.operation()?;
         let mut store = TransactionStore(self.conn.clone());
         let held = store.has_operation(operation.hash).await?;
@@ -516,6 +516,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.admit_scope(&operation.header).await?;
         self.check_budget(bytes).await?;
+        self.keep_chain(frame.chain()?).await?;
         store
             .insert_operation(
                 operation.hash,

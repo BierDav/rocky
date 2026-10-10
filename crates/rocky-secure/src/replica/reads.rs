@@ -135,10 +135,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("corrupt operation"));
             };
             let id = Hash::try_from(id.as_slice()).map_err(|_| denied("invalid operation hash"))?;
-            let frame = EncryptedFrame {
-                header: header.clone(),
-                body: body.clone(),
-            };
+            let frame = inner.stored_frame(header.clone(), body.clone()).await?;
             if !scopes.contains(&frame.scope()?) {
                 continue;
             }
@@ -150,7 +147,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 last = Some(id);
                 continue;
             }
-            let weight = frame.to_bytes()?.len();
+            let weight = frame.weight();
             if frames.len() == 32 || used + weight > byte_quota {
                 if frames.is_empty() {
                     return Err(denied("byte quota smaller than one frame"));

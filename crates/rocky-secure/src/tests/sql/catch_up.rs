@@ -388,20 +388,11 @@ async fn interrupted_catch_up(retry_receipt: bool) {
     )
     .await;
     // Every operation in log order, the updater's ticks first.
-    let mut frames: Vec<_> = rows_of(
+    let mut frames = crate::tests::stored_frames(
         &editor,
         "SELECT header,body FROM secure_operations ORDER BY author,sequence",
     )
-    .await
-    .into_iter()
-    .map(|record| match record.as_slice() {
-        [SqlValue::Blob(header), SqlValue::Blob(body)] => EncryptedFrame {
-            header: header.clone(),
-            body: body.clone(),
-        },
-        _ => panic!("stored operation"),
-    })
-    .collect();
+    .await;
     assert_eq!(frames.len(), 2 * rows);
     // Without the first creation, every other operation waits.
     let first = frames.remove(rows);

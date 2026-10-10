@@ -17,6 +17,31 @@ struct Fixture {
 /// From a day ago for 300 days: a fixture chain's validity, within the
 /// longest a chain may live. Read once per process, so a link issued after a
 /// second boundary never outlives its parent.
+/// The retained operations `sql` selects as header and body, each with the
+/// stored chain its header names.
+pub(crate) async fn stored_frames<A: rocky_core::RowApplication>(
+    replica: &EncryptedReplica<A>,
+    sql: &str,
+) -> Vec<EncryptedFrame> {
+    let inner = replica.inner.lock().await;
+    let mut frames = Vec::new();
+    for record in crate::storage::rows(&inner.conn, sql).await.unwrap() {
+        let [
+            rocky_core::SqlValue::Blob(header),
+            rocky_core::SqlValue::Blob(body),
+        ] = record.as_slice()
+        else {
+            panic!("stored operation")
+        };
+        frames.push(
+            inner
+                .stored_frame(header.clone(), body.clone())
+                .await
+                .unwrap(),
+        );
+    }
+    frames
+}
 pub(crate) fn lifetime() -> (u64, u64) {
     static LIFETIME: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
     *LIFETIME.get_or_init(|| {
@@ -1416,10 +1441,7 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
     let mut operation = frame.operation().unwrap();
     operation.header.extensions.generation.generation = 2;
     operation.header.sign(&key);
-    let wrong_generation = EncryptedFrame {
-        header: operation.header.to_bytes(),
-        body: frame.body.clone(),
-    };
+    let wrong_generation = frame.with_header(operation.header.to_bytes());
     // A key epoch this replica does not hold waits for its key; nothing applies.
     assert_eq!(
         target.receive(wrong_generation).await.unwrap(),
@@ -1428,10 +1450,7 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
     operation.header.extensions.generation.generation = 1;
     operation.header.extensions.scope.domain.mesh = MeshId([99; 16]);
     operation.header.sign(&key);
-    let wrong_scope = EncryptedFrame {
-        header: operation.header.to_bytes(),
-        body: frame.body.clone(),
-    };
+    let wrong_scope = frame.with_header(operation.header.to_bytes());
     assert!(target.receive(wrong_scope).await.is_err());
     assert_eq!(target.snapshot(fixture.public).await.unwrap().revision, 0);
     let narrow_node = PrivateKey::new();
@@ -1490,6 +1509,7 @@ mod checkpoint;
 
 mod admission;
 mod bundles;
+mod chains;
 mod constraints;
 mod delegation;
 mod delivery;

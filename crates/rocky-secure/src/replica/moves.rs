@@ -807,10 +807,7 @@ impl<A: RowApplication> Inner<A> {
                     let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
                         return Err(Error::Corrupt("own updates".into()));
                     };
-                    let frame = EncryptedFrame {
-                        header: header.clone(),
-                        body: body.clone(),
-                    };
+                    let frame = EncryptedFrame::bare(header.clone(), body.clone());
                     let operation = frame.operation()?;
                     let payload = self.row_payload(&frame)?;
                     for write in payload.clone().into_writes() {

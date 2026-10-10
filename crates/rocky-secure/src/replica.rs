@@ -3,6 +3,7 @@ mod apply;
 mod author;
 mod backup;
 pub(super) mod bundle;
+mod chains;
 pub(crate) mod checkpoint;
 mod constraints;
 mod evict;
@@ -29,7 +30,7 @@ mod session;
 mod sql;
 mod typed;
 use super::store::{SCHEMA, TransactionStore};
-use super::wire::{Extensions, Membership, RowPayload, author, decrypt};
+use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
 use super::*;
 use crate::{
     database::DatabaseOwner,
@@ -183,6 +184,10 @@ pub(super) struct Inner<A> {
     pub(super) app: Arc<A>,
     /// `config.keys` holds the current key of every scope.
     pub(super) config: SecureConfig,
+    /// `config.credentials` with the digest this device's frames name.
+    pub(super) chain: Chain,
+    /// Stored chains decoded recently, by digest.
+    chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
     row_authors: BTreeMap<Commitment, identity::RowAuthor>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     /// Earlier key epochs, kept to open retained ciphertext.
@@ -377,6 +382,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         existence::SCHEMA,
         horizon::SCHEMA,
         constraints::SCHEMA,
+        chains::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().copied())
@@ -410,7 +416,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v10" {
+    if label != "rocky.encrypted-replica.v11" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -547,6 +553,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             conn,
             permission_fields: app.permission_fields().into_iter().collect(),
             app: Arc::new(app),
+            chain: Chain::new(config.credentials.clone())?,
+            chains: Default::default(),
             config,
             row_authors: BTreeMap::new(),
             partitions: BTreeMap::new(),
@@ -790,7 +798,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 results[index] = Some(Err(error));
                 continue;
             }
-            let weight = frame.header.len().saturating_add(frame.body.len());
+            let weight = frame.weight();
             positions.push(index);
             work.push((group::Work::Receive(frame), weight));
         }
@@ -1102,13 +1110,15 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let operation = frame.operation()?;
         let extension = &operation.header.extensions;
+        // Only bytes are shared by digest: the chain is verified here, for
+        // every frame, against the current revocations.
+        let credentials = frame.chain()?.credentials();
         let manifest = &self.definition;
         self.admits(extension.manifest)?;
         if extension.scope.domain.app != manifest.app
             || !self.domains.contains(&extension.scope.domain.domain)
             || !self.tables.contains(&extension.scope.table)
-            || extension
-                .credentials
+            || credentials
                 .0
                 .first()
                 .is_some_and(|root| root.capability.manifest != extension.manifest)
@@ -1116,14 +1126,12 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("wrong app/domain/table/manifest"));
         }
         self.check_authenticated_partition(extension.scope, extension.partition.as_ref())?;
-        let pseudonym = extension
-            .credentials
+        let pseudonym = credentials
             .0
             .last()
             .is_some_and(|leaf| leaf.capability.kind == rocky_core::PrincipalKind::Pseudonym);
         let grants = match &extension.partition {
-            Some(tuple) => extension
-                .credentials
+            Some(tuple) => credentials
                 .verify_partition_author(
                     self.config.publisher,
                     extension.manifest,
@@ -1137,12 +1145,11 @@ impl<A: RowApplication> Inner<A> {
                     time,
                 )
                 .map_err(credential)?,
-            None => self.verify_chain(&extension.credentials, operation.header.public_key, time)?,
+            None => self.verify_chain(credentials, operation.header.public_key, time)?,
         };
         if let Some(number) = extension.author {
             if !pseudonym
-                || extension
-                    .credentials
+                || credentials
                     .authors()
                     .map_err(credential)?
                     .and_then(|range| range.single())
@@ -1189,13 +1196,12 @@ impl<A: RowApplication> Inner<A> {
     }
     async fn frame(&self, id: Hash) -> Result<Option<EncryptedFrame>, Error> {
         let store = TransactionStore(self.conn.clone());
-        Ok(store
-            .get_raw_operation(id)
-            .await?
-            .map(|(header, body)| EncryptedFrame {
-                header,
-                body: body.unwrap_or_default(),
-            }))
+        match store.get_raw_operation(id).await? {
+            Some((header, body)) => Ok(Some(
+                self.stored_frame(header, body.unwrap_or_default()).await?,
+            )),
+            None => Ok(None),
+        }
     }
     async fn status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
         let mut result = self

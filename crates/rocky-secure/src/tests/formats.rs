@@ -49,7 +49,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();
@@ -119,14 +119,11 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 6, 8] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
-        let altered = EncryptedFrame {
-            header: operation.header.to_bytes(),
-            body: frame.body.clone(),
-        };
+        let altered = frame.with_header(operation.header.to_bytes());
         let error = replica.receive(altered).await.unwrap_err();
         assert!(
             error.to_string().contains("unsupported row frame format"),
@@ -179,13 +176,14 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     .await
     .unwrap();
     let sender = PrivateKey::new();
+    let chain = crate::wire::Chain::new(f.credentials(&sender, f.full())).unwrap();
     let extensions = crate::wire::Extensions {
         manifest: f.app().definition().hash(),
         scope: f.public,
         generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
-        credentials: f.credentials(&sender, f.full()),
+        chain: chain.digest(),
         author: None,
-        row_format: 7,
+        row_format: crate::wire::ROW_FORMAT,
         partition: None,
     };
     for (envelope_version, body_version, message) in [
@@ -215,6 +213,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         let frame = crate::wire::author(
             &sender,
             extensions.clone(),
+            chain.clone(),
             &[11; 32],
             (0, None, 1),
             vec![],

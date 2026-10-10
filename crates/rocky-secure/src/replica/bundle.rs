@@ -585,11 +585,14 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         if let Some(row) = result.next().await? {
-            let frame = EncryptedFrame {
-                header: row.get::<Vec<u8>>(0)?,
-                body: row.get::<Vec<u8>>(1)?,
-            };
-            return Ok(match row.get::<String>(2)?.as_str() {
+            let (header, body, status) = (
+                row.get::<Vec<u8>>(0)?,
+                row.get::<Vec<u8>>(1)?,
+                row.get::<String>(2)?,
+            );
+            drop(result);
+            let frame = self.stored_frame(header, body).await?;
+            return Ok(match status.as_str() {
                 "applied" => Member::Settled(Some(frame)),
                 "rejected" => Member::Rejected,
                 _ => Member::Pending(frame),

@@ -199,6 +199,7 @@ impl<A: RowApplication> Inner<A> {
                 bytes += *size;
             }
             if !batch.is_empty() {
+                inner.sweep_chains().await?;
                 inner
                     .conn
                     .execute(

@@ -28,6 +28,7 @@ naturally holds.
 | [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
 | [0051](0051-roster-free-admission.md) | Roster-free admission and the revocation exchange in the native session |
 | [0052](0052-holding-proofs.md) | Session-bound partition holding proofs |
+| [0053](0053-chains-by-reference.md) | Credential chains named by digest in frames, sessions, storage and checkpoint pages |
 | [0054](0054-envelope-delivery.md) | Envelope delivery to the recipient alone, directly or through a mailbox |
 | 0056 | [Contact exchange and discovery secrets](0056-contact-exchange-and-discovery-secrets.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
@@ -61,6 +62,7 @@ unreserved record is 0061.
 | Credentials, grant profiles, issuer devices, key epochs | [credentials](../runtime/credentials.md#design-rationale) |
 | Revocation statements, mergeable sets, the frame rule | [0049](0049-mergeable-revocation-set.md), [revocations](../runtime/revocations.md) |
 | Admission by chain and revocation set, the session version | [0051](0051-roster-free-admission.md) |
+| Chains by digest, the session chain table, stored chains | [0053](0053-chains-by-reference.md) |
 | Author pseudonyms and author ranges | [credential-primitives](../runtime/credential-primitives.md#design-rationale) |
 | Partitioned reader scopes, key envelopes | [partitioned-scopes](../runtime/partitioned-scopes.md#design-rationale) |
 | Envelope delivery, mailboxes, receipts | [0054](0054-envelope-delivery.md) |

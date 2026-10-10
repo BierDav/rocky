@@ -1,6 +1,9 @@
 # 11. Chains by reference
 
-Status: not started.
+Status: complete (2026-10-10). Scope rule: chain bytes were 48% of the
+checkpoint stage in phase 3's profile, so every slice was done.
+[Decision 0053](../decisions/0053-chains-by-reference.md);
+[measured evidence](../../benchmarks/runtime-scaling/evidence/chains-2026-10-10/README.md).
 Owner: `rocky-secure` frames, operation storage, checkpoint transfer and
 session pages. Depends on [phase 3](03-catch-up-cost.md) and
 [phase 8](08-concurrent-rotation.md); lands after

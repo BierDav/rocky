@@ -14,19 +14,6 @@ projection or ledger on the writer thread. Listed under
 
 Fix: page them, or serve them from the read connection.
 
-## A command table's checkpoint page carries whole credential chains
-
-`rocky-secure/src/replica/checkpoint/transfer.rs`, `checkpoint_page`: the first
-page holds the scope's `StrongState` whole, and its `latest` confirmed command
-embeds the caller's and the executor's credential chains. In the shopping
-example one command already makes that 49 KiB of the page's 63 KiB budget
-(its sealed plaintext must fit one 64 KiB package). Larger grant sets or
-receipts would exceed it again, and the scope could not bootstrap.
-
-Fix: send the latest command beside the page, or reference it by hash and let
-the peer fetch it with its result, and encode byte strings as CBOR byte strings
-so the budget no longer reserves two bytes per stored byte.
-
 ## Kotlin tests choose TCP ports that another process can take
 
 `sdks/kotlin/room-qualification` and `examples/shoppinglist-app/shared` tests

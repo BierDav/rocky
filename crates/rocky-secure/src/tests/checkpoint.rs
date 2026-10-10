@@ -846,7 +846,7 @@ async fn rebootstrap_refuses_unverifiable_checkpoints() {
             f.public,
             checkpoint,
             None,
-            8192,
+            4096,
         )
         .await
         .unwrap();

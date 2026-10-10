@@ -645,10 +645,7 @@ impl<A: RowApplication> Inner<A> {
                 else {
                     return Err(Error::Corrupt("retained operation".into()));
                 };
-                let frame = EncryptedFrame {
-                    header: header.clone(),
-                    body: body.clone(),
-                };
+                let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let manifest = frame.operation()?.header.extensions.manifest;
                 if self
                     .generation_of(manifest, false)
@@ -656,7 +653,7 @@ impl<A: RowApplication> Inner<A> {
                 {
                     break;
                 }
-                let weight = frame.to_bytes()?.len();
+                let weight = frame.weight();
                 if page.frames.len() == RANGE_FRAMES || used + weight > byte_quota {
                     if page.frames.is_empty() {
                         return Err(denied("byte quota smaller than one frame"));

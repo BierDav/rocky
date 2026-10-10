@@ -73,12 +73,11 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 let [SqlValue::Blob(header), SqlValue::Blob(body)] = record.as_slice() else {
                     return Err(denied("corrupt operation"));
                 };
-                let frame = EncryptedFrame {
-                    header: header.clone(),
-                    body: body.clone(),
-                };
+                let frame = EncryptedFrame::bare(header.clone(), body.clone());
                 if scopes.contains(&frame.scope()?) {
-                    payload.frames.push(frame);
+                    payload
+                        .frames
+                        .push(inner.stored_frame(header.clone(), body.clone()).await?);
                 }
             }
             for record in rows(

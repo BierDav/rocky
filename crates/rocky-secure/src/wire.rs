@@ -8,7 +8,7 @@ use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowChange, RowWrite};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 /// Frames decoded recently, by a digest of their bytes. A frame is decoded
 /// several times as it is received and applied, and each decoding encodes
@@ -35,7 +35,8 @@ pub(crate) struct Extensions {
     pub manifest: Commitment,
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
-    pub credentials: CredentialChain,
+    /// The digest of the author's credential chain; see `Chain`.
+    pub chain: Commitment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<u32>,
     pub row_format: u8,
@@ -43,24 +44,125 @@ pub(crate) struct Extensions {
     pub partition: Option<rocky_core::PartitionTuple>,
 }
 
+/// The current row frame format: the header names its chain by digest.
+pub(crate) const ROW_FORMAT: u8 = 8;
+/// The refusal of a frame whose credential chain the receiver lacks.
+pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
+
+/// A credential chain with the digest a frame header names it by. The digest
+/// shares the chain's bytes between frames, sessions and stored operations;
+/// it carries no authority, and every use still verifies the chain. See
+/// `docs/decisions/0053-chains-by-reference.md`.
+#[derive(Clone, Debug)]
+pub(crate) struct Chain {
+    digest: Commitment,
+    credentials: Arc<CredentialChain>,
+}
+impl Chain {
+    pub(crate) fn new(credentials: CredentialChain) -> Result<Self, Error> {
+        Ok(Self::of_bytes(&encode(&credentials)?, credentials))
+    }
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        Ok(Self::of_bytes(bytes, decode(bytes)?))
+    }
+    fn of_bytes(bytes: &[u8], credentials: CredentialChain) -> Self {
+        Self {
+            digest: rocky_core::commitment("rocky.credential-chain.v1", bytes),
+            credentials: Arc::new(credentials),
+        }
+    }
+    pub(crate) fn digest(&self) -> Commitment {
+        self.digest
+    }
+    pub(crate) fn credentials(&self) -> &CredentialChain {
+        &self.credentials
+    }
+}
+impl Serialize for Chain {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.credentials.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for Chain {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(CredentialChain::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A signed header, its sealed body and, beside them, the author's
+/// credential chain. The header signs the chain's digest only: a session
+/// carries the chain once and sends its frames without it, and a replica
+/// stores it once. A frame without its chain is incomplete and is refused.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedFrame {
     #[serde(with = "serde_bytes")]
     pub(crate) header: Vec<u8>,
     #[serde(with = "serde_bytes")]
     pub(crate) body: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chain: Option<Chain>,
 }
 impl EncryptedFrame {
+    /// A frame without its chain, as storage and a session page hold it.
+    pub(crate) fn bare(header: Vec<u8>, body: Vec<u8>) -> Self {
+        Self {
+            header,
+            body,
+            chain: None,
+        }
+    }
+    pub(crate) fn with_chain(mut self, chain: Chain) -> Self {
+        self.chain = Some(chain);
+        self
+    }
+    /// The frame under another signed header, as a forger alters one.
+    #[cfg(test)]
+    pub(crate) fn with_header(&self, header: Vec<u8>) -> Self {
+        Self {
+            header,
+            ..self.clone()
+        }
+    }
+    /// Removes the chain, which a session sends once before the frame.
+    pub(crate) fn take_chain(&mut self) -> Option<Chain> {
+        self.chain.take()
+    }
+    /// The digest the signed header names its chain by.
+    pub(crate) fn chain_digest(&self) -> Result<Commitment, Error> {
+        Ok(self.operation()?.header.extensions.chain)
+    }
+    /// The author's chain, which must be the one the header names.
+    pub(crate) fn chain(&self) -> Result<&Chain, Error> {
+        match &self.chain {
+            Some(chain) if chain.digest() == self.chain_digest()? => Ok(chain),
+            _ => Err(denied(INCOMPLETE_FRAME)),
+        }
+    }
+    /// Bytes a page or a retention bound counts for the frame: its header
+    /// and body with their encoding, without the chain.
+    pub fn weight(&self) -> usize {
+        self.header
+            .len()
+            .saturating_add(self.body.len())
+            .saturating_add(32)
+    }
+    /// The frame with its chain, for a transport outside a native session.
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        if self.weight() > MAX_SECURE_FRAME {
+            return Err(denied("secure frame quota"));
+        }
         let bytes = encode(self)?;
-        if bytes.len() > MAX_SECURE_FRAME {
+        if bytes.len() > 2 * MAX_SECURE_FRAME {
             return Err(denied("secure frame quota"));
         }
         Ok(bytes)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let frame: Self = decode(bytes)?;
-        frame.operation()?;
+        let frame: Self = decode_bounded(bytes, 2 * MAX_SECURE_FRAME)?;
+        if frame.weight() > MAX_SECURE_FRAME {
+            return Err(denied("secure frame quota"));
+        }
+        frame.chain()?;
         Ok(frame)
     }
     pub fn id(&self) -> Result<Hash, Error> {
@@ -92,7 +194,7 @@ impl EncryptedFrame {
     }
     fn decode_operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
-        if header.extensions.row_format != 7 {
+        if header.extensions.row_format != ROW_FORMAT {
             return Err(denied("unsupported row frame format"));
         }
         let extension = &header.extensions;
@@ -158,11 +260,15 @@ pub(crate) fn decrypt(key: &[u8; 32], aad: &[u8], bytes: &[u8]) -> Result<Vec<u8
 pub(crate) fn author(
     key: &PrivateKey,
     extensions: Extensions,
+    chain: Chain,
     encryption_key: &[u8; 32],
     log: (u64, Option<Hash>, u64),
     previous: Vec<Hash>,
     plaintext: &[u8],
 ) -> Result<EncryptedFrame, Error> {
+    if extensions.chain != chain.digest() {
+        return Err(denied(INCOMPLETE_FRAME));
+    }
     let bytes = encrypt(encryption_key, &encode(&extensions)?, plaintext)?;
     let body = Body::new(&bytes);
     let mut header = Header {
@@ -178,10 +284,7 @@ pub(crate) fn author(
         extensions,
     };
     header.sign(key);
-    let frame = EncryptedFrame {
-        header: header.to_bytes(),
-        body: bytes,
-    };
+    let frame = EncryptedFrame::bare(header.to_bytes(), bytes).with_chain(chain);
     frame.to_bytes()?;
     Ok(frame)
 }

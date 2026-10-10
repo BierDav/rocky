@@ -1,0 +1,7 @@
+running 1 test
+P11 partitions=200 empty_open_ms=11 initialize_ms=1450 sync_ms=1484 checkpoints_ms=254 reopen_ms=63 ciphertext_bytes=1542461 empty_pages=Integer(135) partition_metadata_pages=Integer(156) file_bytes=7458816 page_count=Integer(1821)
+test tests::partitions::measure_200_partitions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 226 filtered out; finished in 3.40s
+
+exit 0

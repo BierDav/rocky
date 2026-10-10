@@ -163,11 +163,24 @@ frontiers as acknowledgment and clears the outgoing work they cover.
 and the other targets rebootstrap from a full node when they fall behind.
 `RetentionStatus::peers` reports what each target last reported.
 
+## Chains by reference
+
+A frame's signed header names its author's credential chain by digest
+([decision 0053](../decisions/0053-chains-by-reference.md)). A
+[session](secure-sessions.md#native-peer-sessions) carries the chain once and
+its pages hold frames alone: 32 frames of a 20-grant author in a 128 KiB page,
+where 3 fit with the 32 KB chain in every header.
+
+A replica stores each chain once. A retained operation, the horizon credential
+of a peer and a registered row author name it; the transaction that removes
+the last of them removes the chain, so an interrupted prune leaves no
+operation without its chain. Chain bytes do not count toward the retention
+limits. `audit` fails on an operation whose chain is missing.
+
 ## Limits
 
-- Every encrypted frame carries the author's credential chain. With 20 scope
-  grants a frame is tens of kilobytes, so a page holds few frames; see the
-  [measurements](scaling-limits.md#measured-limits).
+- A frame outside a session, and each frame of a recovery package, still
+  carries its author's chain beside the header.
 - The encrypted frontier is recomputed from retained operations per request and
   is limited to 256 logs per scope.
 - A gap present at both ends is resent once per pass.

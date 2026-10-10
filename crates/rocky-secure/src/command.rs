@@ -39,6 +39,11 @@ pub fn secure_principal_id(key: PublicKey) -> PrincipalId {
     PrincipalId(id)
 }
 
+/// The refusal of a checkpoint whose chains beside the page are not the
+/// ones its strong state names.
+pub(crate) const CHAIN_MISMATCH: &str =
+    "checkpoint chain does not match the digest the strong state names";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedCommand {
     pub(super) request: Vec<u8>,
@@ -155,7 +160,112 @@ pub struct ConfirmedCommand {
     signature: Signature,
     pub parts: Vec<EncryptedPackage>,
 }
+/// A confirmed command as a checkpoint page carries it: the caller's and
+/// the executor's chains are named by digest and travel beside the page, and
+/// byte strings are CBOR byte strings. The signatures cover the attached
+/// form, which `ConfirmedCommand::attach` restores unchanged.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DetachedCommand {
+    #[serde(with = "serde_bytes")]
+    request: Vec<u8>,
+    node: PublicKey,
+    caller: Commitment,
+    submitted: Signature,
+    #[serde(with = "serde_bytes")]
+    package: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    receipt: Vec<u8>,
+    executor: PublicKey,
+    credentials: Commitment,
+    signature: Signature,
+    parts: Vec<DetachedPart>,
+}
+#[derive(Serialize, Deserialize)]
+struct DetachedPart {
+    scope: ResourceScope,
+    generation: rocky_core::KeyEpoch,
+    kind: PackageKind,
+    #[serde(with = "serde_bytes")]
+    bytes: Vec<u8>,
+}
+impl DetachedCommand {
+    /// How many distinct chains the command names.
+    pub(crate) fn chains(&self) -> usize {
+        1 + usize::from(self.caller != self.credentials)
+    }
+}
 impl ConfirmedCommand {
+    /// The command without its chains, and the chains: the caller's, then
+    /// the executor's unless it is the same chain.
+    pub(crate) fn detach(&self) -> Result<(DetachedCommand, Vec<CredentialChain>), Error> {
+        let caller = crate::wire::Chain::new(self.command.credentials.clone())?;
+        let executor = crate::wire::Chain::new(self.credentials.clone())?;
+        let mut chains = vec![self.command.credentials.clone()];
+        if executor.digest() != caller.digest() {
+            chains.push(self.credentials.clone());
+        }
+        Ok((
+            DetachedCommand {
+                request: self.command.request.clone(),
+                node: self.command.node,
+                caller: caller.digest(),
+                submitted: self.command.signature,
+                package: self.package.clone(),
+                receipt: self.receipt.clone(),
+                executor: self.executor,
+                credentials: executor.digest(),
+                signature: self.signature,
+                parts: self
+                    .parts
+                    .iter()
+                    .map(|part| DetachedPart {
+                        scope: part.scope,
+                        generation: part.generation,
+                        kind: part.kind.clone(),
+                        bytes: part.bytes.clone(),
+                    })
+                    .collect(),
+            },
+            chains,
+        ))
+    }
+    /// Restores the command from the chains sent beside it. Each must be
+    /// the one a digest names; a missing or different chain is refused.
+    pub(crate) fn attach(
+        detached: DetachedCommand,
+        chains: &[crate::wire::Chain],
+    ) -> Result<Self, Error> {
+        let named = |digest: Commitment| {
+            chains
+                .iter()
+                .find(|chain| chain.digest() == digest)
+                .map(|chain| chain.credentials().clone())
+                .ok_or_else(|| denied(CHAIN_MISMATCH))
+        };
+        Ok(Self {
+            command: EncryptedCommand {
+                request: detached.request,
+                node: detached.node,
+                credentials: named(detached.caller)?,
+                signature: detached.submitted,
+            },
+            package: detached.package,
+            receipt: detached.receipt,
+            executor: detached.executor,
+            credentials: named(detached.credentials)?,
+            signature: detached.signature,
+            parts: detached
+                .parts
+                .into_iter()
+                .map(|part| EncryptedPackage {
+                    scope: part.scope,
+                    generation: part.generation,
+                    kind: part.kind,
+                    bytes: part.bytes,
+                })
+                .collect(),
+        })
+    }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         bounded(self)
     }

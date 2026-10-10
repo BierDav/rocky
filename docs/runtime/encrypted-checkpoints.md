@@ -86,6 +86,13 @@ scope key; the switch installs their sequence/head as the
 [strong base](strong-history.md#read-and-catch-up). A cached offer behind the
 source's strong pruning base is refreshed.
 
+The latest result names its caller's and its executor's credential chain by
+digest. The chains travel beside the first page: in `CheckpointPage::chains`,
+and on a session in a message of their own before the page. Staging rebuilds
+the signed result from them and refuses the page, staging nothing, unless
+exactly the named chains arrived
+([decision 0053](../decisions/0053-chains-by-reference.md)).
+
 The switch verifies the staged rows against the statement. `RebootstrapReport`
 accounts for every local operation: `superseded` when the checkpoint covers it,
 otherwise `reapplied`, `rejected` with the reason, or `pending` on a dependency
@@ -127,12 +134,13 @@ against their digests, and the replay, in batches under the replica lock.
 - The rebootstrap switch and `rebuild_projection` are one transaction
   proportional to the scope's rows.
 - A checkpoint names at most 256 logs per scope and must fit one 256 KiB frame.
-- Checkpoint pages use the whole frame, less 8 KiB. The first page carries a
-  command table's strong state whole, mostly the latest confirmed command and
-  its two credential chains: about 49 KiB after one command of the shopping
-  example. A page's sealed plaintext must fit one 64 KiB package, and row bytes
-  encode as integer arrays of up to two bytes each, so the budget is at most
-  63 KiB, counting each stored row byte twice.
+- Checkpoint pages use the whole frame, less 8 KiB. A page's sealed plaintext
+  must fit one 64 KiB package, so a page holds at most 63 KiB of row records;
+  stored bytes are CBOR byte strings and count once. The first page also
+  carries a command table's strong state: 3.1 KB after one command, whatever
+  the chains, where it was 79 KB with two 20-grant chains embedded.
+- A chain beside the page must fit one 256 KiB session frame, and the confirmed
+  command itself 128 KiB with both chains.
 - `export_recovery` and recovery custodians need complete mergeable history.
 
 ## Offering an imported checkpoint back to its signer

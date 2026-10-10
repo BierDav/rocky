@@ -104,7 +104,19 @@ to later calls. Bytes already returned cannot be taken back.
 
 ## Native peer sessions
 
-Authenticated network sessions use version 11. A partition's grants are checked
+Authenticated network sessions use version 11; any other is refused in the
+handshake. A frame's signed header names its author's credential chain by
+digest. The session carries each distinct chain once, in a message of its own
+before the first page whose frames name it; later pages of the session send
+only frames. Each side keeps that table for the session alone. Sharing the
+bytes shares no authority: every received frame's chain is verified against
+the current [revocations](revocations.md), so a chain revoked during a
+session admits no later frame of it. A frame whose chain the session never
+carried is refused as incomplete and not stored; `CatchUp::incomplete` and
+`Pulled::incomplete` count such frames, and a pass on another session
+receives them. See [decision 0053](../decisions/0053-chains-by-reference.md).
+
+A partition's grants are checked
 in addition to its [holding proof](replica-roles.md#proving-a-partition). Reader
 proofs bind the key epoch, scope and mutual handshake; keyless custody uses the
 tuple and custody authority. Frontier batches refuse unproved members alone.
@@ -129,5 +141,9 @@ scopes. Proof memory is local to that native session; the application
   against pruned partners.
 - Sessions end on renewal, attenuation, policy and logout. Read-only,
   custody-only and field-limited principals cannot widen their writes.
+
+`cargo test -p rocky-secure --lib tests::chains` covers the chain table: one
+chain across two pages of a 20-grant author, a withheld chain in a pull and a
+push, a revocation inside a session and an earlier session version.
 
 This is application-level evidence, not a cryptographic audit.

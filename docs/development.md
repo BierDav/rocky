@@ -128,6 +128,12 @@ in e2e: their real QUIC shutdown cycles exceed 2 s after fixture optimization.
 The deterministic revocation recovery sweep remains in integration, separated
 by secret, table and commit boundaries with the same twenty fault stops.
 
+Phase 11's chain tests (`tests::chains` in `rocky-secure`) run in integration
+through the existing package filter: authenticated in-memory sessions and real
+SQLite replicas, the slowest 0.35 s alone. No exception is added. The
+four-table and single-table fixtures stay ignored measurements; their rerun is
+in the [chain evidence](../benchmarks/runtime-scaling/evidence/chains-2026-10-10/README.md).
+
 Phase 12's sealing and receipt checks in `rocky-credentials` run in unit. The
 delivery family over a real session (`rocky-secure` `tests::delivery`), the
 SDK's delivery, mailbox and revocation scenarios (`rocky-sdk`

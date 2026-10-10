@@ -97,6 +97,7 @@ impl<A: RowApplication> Inner<A> {
         };
         let signing_key = signer.map_or(&self.config.node, |author| &author.key);
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
+        let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
         let grants = match signer {
             Some(author) if partition.is_some() => credentials
                 .verify_partition_author(
@@ -290,13 +291,14 @@ impl<A: RowApplication> Inner<A> {
             signing_key,
             Extensions {
                 author: signer.map(|author| author.number),
-                row_format: 7,
+                row_format: ROW_FORMAT,
                 partition,
                 manifest: self.manifest,
                 scope,
                 generation: key.generation,
-                credentials: credentials.clone(),
+                chain: chain.digest(),
             },
+            chain,
             &key.key,
             (
                 sequence,
@@ -316,7 +318,8 @@ impl<A: RowApplication> Inner<A> {
         self.verify_frame(&frame, time)?;
         let operation = frame.operation()?;
         let materialized = self.materialize(&frame, writes, &grants).await?;
-        self.check_budget(frame.to_bytes()?.len()).await?;
+        self.check_budget(frame.weight()).await?;
+        self.keep_chain(frame.chain()?).await?;
         TransactionStore(self.conn.clone())
             .insert_operation(
                 operation.hash,

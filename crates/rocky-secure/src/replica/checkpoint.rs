@@ -1110,10 +1110,7 @@ impl<A: RowApplication> Inner<A> {
                     "an applied operation after the checkpoint is not retained".into(),
                 ));
             };
-            let frame = EncryptedFrame {
-                header: header.clone(),
-                body: body.clone(),
-            };
+            let frame = EncryptedFrame::bare(header.clone(), body.clone());
             let operation = frame.operation()?;
             if self.known(operation.header.extensions.manifest).is_err()
                 || !self.dependencies_ready(&frame, &BTreeSet::new()).await?

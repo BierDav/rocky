@@ -24,10 +24,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
             return Err(denied("operation writes require a framework transaction"));
         }
         let body = body.ok_or_else(|| denied("payload retention is required"))?;
-        let frame = EncryptedFrame {
-            header: header_bytes.to_vec(),
-            body: body.to_bytes(),
-        };
+        let frame = EncryptedFrame::bare(header_bytes.to_vec(), body.to_bytes());
         let operation = frame.operation()?;
         if operation.hash != hash
             || operation.header.to_bytes() != header.to_bytes()
@@ -38,6 +35,19 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
         if self.has_operation(hash).await? {
             return Ok(false);
         }
+        // An operation is never stored without the chain it names.
+        let chain = header.extensions.chain.to_vec();
+        let mut kept = self
+            .0
+            .query(
+                "SELECT 1 FROM secure_chains WHERE digest=?",
+                [chain.clone()],
+            )
+            .await?;
+        if kept.next().await?.is_none() {
+            return Err(denied(crate::wire::INCOMPLETE_FRAME));
+        }
+        drop(kept);
         let fork = self
             .0
             .query(
@@ -52,7 +62,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
         if !collect_rows(fork).await?.is_empty() {
             return Err(denied("author log fork"));
         }
-        self.0.execute("INSERT INTO secure_operations(hash,author,scope,sequence,header,body,status) VALUES(?,?,?,?,?,?, 'pending')", bindings(vec![SqlValue::Blob(hash.as_bytes().to_vec()), SqlValue::Blob(header.public_key.as_bytes().to_vec()), SqlValue::Blob(encode(log)?), SqlValue::Integer(header.seq_num as i64), SqlValue::Blob(header_bytes.to_vec()), SqlValue::Blob(body.to_bytes())])).await?;
+        self.0.execute("INSERT INTO secure_operations(hash,author,scope,sequence,header,body,status,chain) VALUES(?,?,?,?,?,?, 'pending',?)", bindings(vec![SqlValue::Blob(hash.as_bytes().to_vec()), SqlValue::Blob(header.public_key.as_bytes().to_vec()), SqlValue::Blob(encode(log)?), SqlValue::Integer(header.seq_num as i64), SqlValue::Blob(header_bytes.to_vec()), SqlValue::Blob(body.to_bytes()), SqlValue::Blob(chain)])).await?;
         self.0
             .execute(
                 "UPDATE secure_retained SET records=records+1,bytes=bytes+?",
@@ -96,7 +106,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,revocations BLOB NOT NULL,revision INTEGER NOT NULL)",
-    "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,UNIQUE(author,scope,sequence))",
+    "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,chain BLOB NOT NULL,UNIQUE(author,scope,sequence))",
     "CREATE TABLE secure_rows(scope BLOB NOT NULL,row BLOB NOT NULL,fields BLOB,stamp BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE secure_outbox(hash BLOB PRIMARY KEY)",
     "CREATE TABLE secure_handles(handle BLOB PRIMARY KEY,input BLOB NOT NULL,hash BLOB NOT NULL)",

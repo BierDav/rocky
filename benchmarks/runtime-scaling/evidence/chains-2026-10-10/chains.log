@@ -1,0 +1,13 @@
+test tests::chains::an_earlier_session_version_is_refused ... ok
+test tests::chains::a_chain_beside_the_page_that_differs_from_its_digest_stages_nothing ... ok
+test tests::chains::a_horizon_credential_keeps_its_chain_until_a_renewal_replaces_it ... ok
+test tests::chains::a_pushed_frame_without_its_chain_is_not_received ... ok
+test tests::chains::a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_next_pass ... ok
+test tests::chains::a_chain_revoked_during_a_session_admits_no_later_frame_of_it ... ok
+P11 strong_state grants=20 chain=37222 before=79116 after=3144 budget=64512
+test tests::chains::a_chain_goes_with_the_last_operation_that_names_it ... ok
+P11 strong_state grants=40 chain=54229 before=113165 after=3162 budget=64512
+test tests::chains::a_command_table_bootstraps_by_checkpoint_under_20_and_40_grant_chains ... ok
+P11 frames_per_page grants=20 quota=131072 frame=1213 chain=32434 before=3 after=32 frame_bytes=48415 chain_bytes=32434
+test tests::chains::a_session_carries_an_authors_chain_once_across_its_pages ... ok
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 218 filtered out; finished in 0.75s

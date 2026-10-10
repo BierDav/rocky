@@ -122,8 +122,9 @@ entities.
 Replica roles (`roles 500000 10000`): a partial replica holding 5% converged in
 8.4 s; 10,000 operations caught up at 205 operations/s while the full node's
 writes reached a 120 ms p99; rebootstrap 5.8 s; eviction of 25,000 rows 0.5 s.
-Frames carry the author's credential chain: about 30 KB per 32 rows with one
-grant, 67 KB with 20 grants.
+These frames carried the author's credential chain: about 30 KB per 32 rows
+with one grant, 67 KB with 20 grants. A header now names the chain by
+[digest](replica-roles.md#chains-by-reference).
 
 ## Gate workload
 

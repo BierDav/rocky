@@ -274,7 +274,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 7);
+    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 8);
     assert_eq!(
         reader.receive(fa.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -291,10 +291,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         operation.header.extensions.partition = None;
         operation.header.extensions.row_format = 2;
         operation.header.sign(&author);
-        EncryptedFrame {
-            header: operation.header.to_bytes(),
-            body: fa.body.clone(),
-        }
+        fa.with_header(operation.header.to_bytes())
     };
     assert!(legacy.operation().is_err());
     assert!(custody.receive(legacy).await.is_err());

@@ -66,6 +66,8 @@ pub(super) enum RowMessage {
 #[derive(Clone, Debug)]
 pub struct Pulled {
     pub next: Option<Hash>,
+    /// Frames refused because the session never carried their chain.
+    pub incomplete: usize,
     /// Scopes whose pruned history at the peer this replica does not hold.
     pub rebootstrap: Vec<ResourceScope>,
 }
@@ -83,6 +85,9 @@ pub struct CatchUp {
     pub lag: u64,
     /// The session's byte budget ran low; continue on a new session.
     pub exhausted: bool,
+    /// Frames refused because the session never carried their chain; a
+    /// pass on another session receives them.
+    pub incomplete: usize,
 }
 /// What one push of a scope did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -176,12 +181,14 @@ impl NativeSession {
         }
         let frames = held;
         if frames.len() > MAX_SECURE_PAGE
-            || frames.iter().try_fold(0usize, |sum, frame| {
-                Ok::<_, Error>(sum.saturating_add(frame.to_bytes()?.len()))
-            })? > quota
+            || frames
+                .iter()
+                .fold(0usize, |sum, frame| sum.saturating_add(frame.weight()))
+                > quota
         {
             return Err(denied("native page quota"));
         }
+        let (frames, incomplete) = self.complete_frames(frames)?;
         let mut ids = Vec::with_capacity(frames.len());
         for frame in &frames {
             if !scopes.contains(&frame.scope()?) {
@@ -201,7 +208,11 @@ impl NativeSession {
                     .await?;
             }
         }
-        Ok(Pulled { next, rebootstrap })
+        Ok(Pulled {
+            next,
+            incomplete,
+            rebootstrap,
+        })
     }
     /// Pulls every frame of `scope` this replica lacks in bounded pages and
     /// acknowledges its frontier after each page. Stops at once when this
@@ -269,8 +280,8 @@ impl NativeSession {
             }
             let mut bytes = 0usize;
             for frame in &page.frames {
-                bytes = bytes.saturating_add(frame.to_bytes()?.len());
-                report.bytes = report.bytes.saturating_add(frame.to_bytes()?.len());
+                bytes = bytes.saturating_add(frame.weight());
+                report.bytes = report.bytes.saturating_add(frame.weight());
                 if frame.scope()? != scope {
                     return Err(denied("native response outside subscription"));
                 }
@@ -284,8 +295,10 @@ impl NativeSession {
                 return Ok(report);
             }
             report.frames += page.frames.len();
+            let (frames, incomplete) = self.complete_frames(page.frames)?;
+            report.incomplete += incomplete;
             // The page is received in shared transactions and one flush.
-            for status in replica.receive_all(page.frames).await {
+            for status in replica.receive_all(frames).await {
                 status?;
             }
             let held = replica.frontier(scope).await?;
@@ -322,7 +335,7 @@ impl NativeSession {
                 pushed.exhausted = true;
                 return Ok(pushed);
             }
-            let page = replica
+            let mut page = replica
                 .range_page(self.peer, &self.credentials, &frontier, after, quota)
                 .await?;
             if page.behind {
@@ -333,6 +346,7 @@ impl NativeSession {
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
+            self.carry_chains(&mut page.frames).await?;
             self.send(RowMessage::Push {
                 scope,
                 frames: page.frames,
@@ -449,12 +463,13 @@ impl NativeSession {
                         return Err(denied("phase-3 rebootstrap required before sync or write"));
                     }
                 }
-                let page = replica
+                let mut page = replica
                     .transfer_page(self.peer, &self.credentials, &scopes, after, quota)
                     .await?;
                 for frame in &page.frames {
                     self.served_frames.insert(frame.id()?, frame.scope()?);
                 }
+                self.carry_chains(&mut page.frames).await?;
                 self.send(RowMessage::Page {
                     frames: page.frames,
                     next: page.next,
@@ -487,12 +502,13 @@ impl NativeSession {
                 {
                     return Err(denied("phase-3 rebootstrap required before sync or write"));
                 }
-                let page = replica
+                let mut page = replica
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
                 for frame in &page.frames {
                     self.served_frames.insert(frame.id()?, frame.scope()?);
                 }
+                self.carry_chains(&mut page.frames).await?;
                 self.send(RowMessage::RangeFrames { page }).await
             }
             RowMessage::Held { frontier } => {
@@ -526,6 +542,9 @@ impl NativeSession {
                         return Err(denied("pushed frame outside its scope"));
                     }
                 }
+                // An incomplete frame is not received; the frontier that
+                // answers the push shows the sender what is still missing.
+                let (frames, _) = self.complete_frames(frames)?;
                 for status in replica.receive_all(frames).await {
                     status?;
                 }

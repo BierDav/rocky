@@ -185,10 +185,8 @@ impl<A: RowApplication> Inner<A> {
                 };
                 cursor = hash.clone();
                 count += 1;
-                let frame = EncryptedFrame {
-                    header: header.clone(),
-                    body: body.clone(),
-                };
+                // Every retained operation has the chain its header names.
+                let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let operation = frame.operation()?;
                 if operation.hash.as_bytes().as_slice() != hash
                     || self.known(operation.header.extensions.manifest).is_err()

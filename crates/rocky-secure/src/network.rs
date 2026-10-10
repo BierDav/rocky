@@ -17,6 +17,7 @@ use tokio::{
     time::timeout,
 };
 
+mod chains;
 mod checkpoints;
 mod contacts;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
@@ -28,6 +29,7 @@ pub(crate) mod holdings;
 mod horizon;
 mod revocations;
 mod rows;
+use chains::{ChainMessage, ChainTable};
 use checkpoints::CheckpointMessage;
 use commands::CommandMessage;
 use contacts::ContactMessage;
@@ -150,6 +152,7 @@ enum Message {
     Holdings(HoldingMessage),
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
+    Chains(ChainMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -180,6 +183,7 @@ families!(
     Holdings(HoldingMessage),
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
+    Chains(ChainMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -196,6 +200,9 @@ pub struct NativeSession {
     local: PrivateKey,
     peer: PublicKey,
     credentials: CredentialChain,
+    /// `credentials` with its digest, as the replica records it.
+    peer_chain: crate::wire::Chain,
+    chains: ChainTable,
     /// The encoded start of every message's signed bytes.
     signing: Vec<u8>,
     binding: Commitment,
@@ -324,6 +331,8 @@ impl NativeSession {
             stream,
             local,
             peer: peer.node,
+            peer_chain: crate::wire::Chain::new(peer.credentials.clone())?,
+            chains: Default::default(),
             credentials: peer.credentials,
             signing: frame_signing_head(&binding)?,
             binding: rocky_core::commitment("rocky.holding-session.v1", &binding),
@@ -432,13 +441,22 @@ impl NativeSession {
             .ok_or_else(|| denied("session sequence exhausted"))?;
         decode(&message.bytes)
     }
+    /// The peer's answer; the chains it carries first join the table.
+    async fn answered(&mut self) -> Result<Message, Error> {
+        loop {
+            match self.receive().await? {
+                Message::Chains(message) => self.learn_chains(message),
+                message => return Ok(message),
+            }
+        }
+    }
     /// The next message, which must belong to family `T`.
     async fn reply<T: TryFrom<Message, Error = Error>>(&mut self) -> Result<T, Error> {
-        self.receive().await?.try_into()
+        self.answered().await?.try_into()
     }
     /// Fails with `refusal` unless the peer acknowledges.
     async fn acknowledged(&mut self, refusal: &str) -> Result<(), Error> {
-        match self.receive().await? {
+        match self.answered().await? {
             Message::Acknowledged => Ok(()),
             _ => Err(denied(refusal)),
         }
@@ -475,7 +493,8 @@ impl NativeSession {
         &mut self,
         replica: &EncryptedReplica<A>,
     ) -> Result<(), Error> {
-        let message = self.receive().await?;
+        // Chains a push carries first are not a request of their own.
+        let message = self.answered().await?;
         self.answer(replica, message).await
     }
     async fn answer<A: RowApplication>(
@@ -484,7 +503,7 @@ impl NativeSession {
         message: Message,
     ) -> Result<(), Error> {
         replica
-            .record_horizon_credentials(self.peer, &self.credentials)
+            .record_horizon_chain(self.peer, &self.peer_chain)
             .await?;
         self.guard_message(replica, &message).await?;
         match message {

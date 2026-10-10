@@ -153,24 +153,11 @@ async fn foreign_author_move_follows_offline_edit_once_and_keeps_identity() {
         Some("ticked")
     );
     send(&offline, &b).await;
-    let outgoing = {
-        let inner = a.inner.lock().await;
-        let rows = crate::storage::rows(
-            &inner.conn,
-            "SELECT header,body FROM secure_operations ORDER BY sequence",
-        )
-        .await
-        .unwrap();
-        rows.into_iter()
-            .map(|row| match row.as_slice() {
-                [SqlValue::Blob(header), SqlValue::Blob(body)] => EncryptedFrame {
-                    header: header.clone(),
-                    body: body.clone(),
-                },
-                _ => panic!("frame"),
-            })
-            .collect::<Vec<_>>()
-    };
+    let outgoing = crate::tests::stored_frames(
+        &a,
+        "SELECT header,body FROM secure_operations ORDER BY sequence",
+    )
+    .await;
     send(&outgoing, &b).await;
     assert_eq!(
         title(&f, &b, partitions[1]).await.as_deref(),
@@ -390,23 +377,12 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
         )
         .await;
     f.keys(&reader, partitions[1], TABLES).await;
-    let all = {
-        let inner = b.inner.lock().await;
-        crate::storage::rows(
-            &inner.conn,
-            "SELECT header,body FROM secure_operations ORDER BY sequence",
-        )
-        .await
-        .unwrap()
-    };
-    for row in all {
-        let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
-            panic!("frame");
-        };
-        let frame = EncryptedFrame {
-            header: header.clone(),
-            body: body.clone(),
-        };
+    let all = crate::tests::stored_frames(
+        &b,
+        "SELECT header,body FROM secure_operations ORDER BY sequence",
+    )
+    .await;
+    for frame in all {
         if frame.scope().unwrap().encryption == f.scope("lists", partitions[1]).encryption
             || TABLES
                 .iter()
@@ -699,19 +675,9 @@ async fn source_finalization_and_destination_horizon_fence_late_follows() {
         }
         send(&moved, &a).await;
         if !source_cut {
-            let inner = a.inner.lock().await;
-            let frames = crate::storage::rows(&inner.conn, "SELECT header,body FROM secure_operations WHERE status='applied' ORDER BY sequence").await.unwrap();
-            drop(inner);
-            for row in frames {
-                let [SqlValue::Blob(header), SqlValue::Blob(body)] = row.as_slice() else {
-                    panic!("frame");
-                };
-                b.receive(EncryptedFrame {
-                    header: header.clone(),
-                    body: body.clone(),
-                })
-                .await
-                .unwrap();
+            let frames = crate::tests::stored_frames(&a, "SELECT header,body FROM secure_operations WHERE status='applied' ORDER BY sequence").await;
+            for frame in frames {
+                b.receive(frame).await.unwrap();
             }
             assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
             super::horizon::restore_scope(&b, &a, cut_scope).await;

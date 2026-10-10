@@ -175,28 +175,30 @@ impl Drop for Profile {
     }
 }
 
-/// Bytes of the frames a catch-up received: headers, the credential chains
-/// inside them, and encrypted payloads.
+/// Bytes of the frames a catch-up received: headers, encrypted payloads,
+/// and the credential chains stored once beside them.
 async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
     let inner = replica.inner.lock().await;
     let stored = crate::storage::rows(&inner.conn, "SELECT header,body FROM secure_operations")
         .await
         .unwrap();
-    let (mut header, mut chain, mut body) = (0, 0, 0);
+    let (mut header, mut chain, mut body) = (0, 0usize, 0);
     for record in &stored {
         let [SqlValue::Blob(head), SqlValue::Blob(payload)] = record.as_slice() else {
             panic!("stored operation")
         };
-        let frame = EncryptedFrame {
-            header: head.clone(),
-            body: payload.clone(),
-        };
-        let operation = frame.operation().unwrap();
         header += head.len();
-        chain += crate::encode(&operation.header.extensions.credentials)
-            .unwrap()
-            .len();
         body += payload.len();
+    }
+    // Chains are stored once, beside the operations that name them.
+    for record in crate::storage::rows(&inner.conn, "SELECT LENGTH(chain) FROM secure_chains")
+        .await
+        .unwrap()
+    {
+        let [SqlValue::Integer(bytes)] = record.as_slice() else {
+            panic!("stored chain")
+        };
+        chain += *bytes as usize;
     }
     println!(
         "P03 frame_bytes tables={tables} frames={} header={header} chain={chain} payload={body}",

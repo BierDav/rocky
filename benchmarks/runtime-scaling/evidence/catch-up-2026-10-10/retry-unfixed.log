@@ -1,0 +1,21 @@
+   Compiling rocky-secure v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-secure)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.31s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 1 test
+
+thread 'tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening' (37337919) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:472:17:
+assertion `left == right` failed
+  left: [[Integer(62), Integer(2)]]
+ right: [[Integer(160), Integer(160)]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening ... FAILED
+
+failures:
+
+failures:
+    tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 200 filtered out; finished in 5.60s
+
+error: test failed, to rerun pass `-p rocky-secure --lib`

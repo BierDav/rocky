@@ -220,7 +220,7 @@ impl<A: RowApplication> Inner<A> {
         session: &SessionStatus,
         authority: u64,
         scope: ResourceScope,
-    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+    ) -> Result<Grants, Error> {
         self.check_authority(Some(authority))?;
         if !session.scopes.contains(&scope) {
             return Err(denied("scope is outside the session"));

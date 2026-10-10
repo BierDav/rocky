@@ -174,6 +174,18 @@ and retakes it only for maintenance; it also releases it between groups. A
 caller whose requests another leader took waits for that answer. A flush covers
 the commit count read under the mutex, so it never claims an uncommitted write.
 
+A group applies at most 64 dependency-ready frames in its own transaction. When
+more are ready, as when a catch-up delivers what earlier frames waited for, the
+leader applies them in further transactions of at most 64 and releases the
+mutex between them, so a writer that asked meanwhile goes first; the receivers
+are answered once the frames settled. Key installation, learned revocations,
+checkpoint import and open apply what they unblocked the same way. Only a log's
+first pending frame can be ready, since each later frame names it as its
+backlink, so a pass examines one frame per waiting log rather than every
+waiting frame. Interrupted between two transactions, the work resumes at the
+next receipt (including a duplicate retry) or open, and no frame applies twice: its status changes in the
+transaction that applies it.
+
 ## Design rationale
 
 - **SQLite, not Turso MVCC.** Turso 0.8.1 allowed several durable writers per

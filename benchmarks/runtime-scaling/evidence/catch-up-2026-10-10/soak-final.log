@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 1 test
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up has been running for over 60 seconds
+P03 authored operations=10000 ms=172019
+P03 catch_up operations=10000 catch_up_ms=169282 writes=239 longest_write_ms=205 longest_hold_ms=707
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 200 filtered out; finished in 341.55s
+

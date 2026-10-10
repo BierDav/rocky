@@ -805,7 +805,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.verified_at.remove(&id);
         inner.publish_revision().await?;
-        inner.process_pending(time).await?;
+        drop(inner);
+        self.settle().await?;
         Ok(report)
     }
 }

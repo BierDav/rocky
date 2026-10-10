@@ -1,0 +1,27 @@
+
+running 1 test
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=1 catch_up_ms=6252 idle_ms=117
+P03 frame_bytes tables=1 frames=201 header=1031821 chain=912571 payload=532843
+P03 checkpoint_bytes tables=1 records=201 bytes=1304674 chain_bytes=931032
+P09 partitions=200 tables=1 scopes=201 open_ms=22 register_ms=391 author_ms=2127 catch_up_ms=6252 idle_ms=117 checkpoint_ms=1090 reopen_ms=580 metadata_bytes_per_partition=389.12
+test tests::group_sync_measurement::measure_200_partition_group_sync has been running for over 60 seconds
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=4 catch_up_ms=49690 idle_ms=659
+P03 frame_bytes tables=4 frames=801 header=7269410 chain=6796758 payload=3869577
+P03 checkpoint_bytes tables=4 records=801 bytes=11310765 chain_bytes=9823464
+P09 partitions=200 tables=4 scopes=801 open_ms=41 register_ms=8966 author_ms=9422 catch_up_ms=49690 idle_ms=659 checkpoint_ms=8577 reopen_ms=5261 metadata_bytes_per_partition=1638.40
+P09 additional_table open_ms=6.25
+P09 additional_table register_ms=2858.53
+P09 additional_table author_ms=2431.96
+P09 additional_table catch_up_ms=14479.44
+P09 additional_table idle_ms=180.97
+P09 additional_table checkpoint_ms=2495.70
+P09 additional_table reopen_ms=1560.22
+P09 additional_table metadata_bytes_per_partition=416.43
+test tests::group_sync_measurement::measure_200_partition_group_sync ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 199 filtered out; finished in 141.11s
+

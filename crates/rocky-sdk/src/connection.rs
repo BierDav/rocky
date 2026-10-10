@@ -315,6 +315,10 @@ pub(crate) struct State {
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
     room: room::Housekeeping,
+    /// The installed schema's version, read between transactions: a
+    /// statement must not wait for the settings while its transaction holds
+    /// the replica, since a renewal holds them while it waits for the replica.
+    version: u32,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -324,6 +328,7 @@ impl State {
             }
             None => room::Housekeeping::new(None),
         };
+        let version = node.settings.lock().await.schema.version;
         let mut state = Self {
             read_only: options.read_only,
             options,
@@ -334,6 +339,7 @@ impl State {
             reading: None,
             results: BTreeMap::new(),
             room,
+            version,
         };
         state.sql().await?;
         Ok(state)
@@ -431,14 +437,20 @@ impl State {
         if self.options.profile.is_none() {
             return Ok(None);
         }
-        let version = self.node.settings.lock().await.schema.version;
         let read_only = self.read_only;
         let timeout = self.options.sql().transaction_timeout.as_millis();
         // The session of an idle connection may have lost its authority.
         if !self.active() {
+            self.version = self.node.settings.lock().await.schema.version;
             self.sql().await?;
         }
-        let Self { opened, room, .. } = self;
+        let Self {
+            opened,
+            room,
+            version,
+            ..
+        } = self;
+        let version = *version;
         let sql_session = &opened.as_ref().ok_or("connection has no session")?.sql;
         room.answer(
             sql,

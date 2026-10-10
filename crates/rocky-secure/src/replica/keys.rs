@@ -250,7 +250,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         inner.bump_authority();
-        inner.process_pending(time).await?;
+        drop(inner);
+        self.settle().await?;
+        let mut inner = self.inner.lock().await;
         // A key installed after the projection was built, as at open, anchors
         // the children of this partition that were hidden without it.
         if opens

@@ -1,0 +1,229 @@
+   Compiling rocky-secure v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-secure)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.56s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 201 tests
+test tests::checkpoint::checkpoint_crash_child ... ignored, invoked by process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits
+test command::cut_tests::an_encrypted_result_refuses_any_mergeable_cut ... ok
+test network::tests::frame_signing_bytes_equal_the_generic_encoding ... ok
+test tests::bundles::logout_drops_keys_and_ends_sessions ... ok
+test tests::bundles::a_session_is_bound_to_its_authority_and_ends_when_it_changes ... ok
+test tests::checkpoint::checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock ... ok
+test tests::checkpoint::handles_beyond_the_window_are_forgotten_once_pruned ... ok
+test tests::checkpoint::bootstrap_refuses_a_valid_checkpoint_signed_by_a_read_only_device ... ok
+test tests::checkpoint::late_copy_of_a_pruned_dependency_releases_a_waiting_frame ... ok
+test tests::bundles::field_limited_and_read_only_principals_cannot_widen_their_writes ... ok
+test tests::checkpoint::a_writer_resigns_an_imported_checkpoint_before_offering_it_to_its_original_signer ... ok
+test tests::checkpoint::late_frames_and_retried_handles_from_before_the_horizon_do_nothing ... ok
+test tests::bundles::checkpoints_prune_held_partitions_and_a_late_partition_still_applies ... ok
+test tests::bundles::members_that_disagree_reject_every_held_partition ... ok
+test tests::commands::command_outputs_jobs_blobs_and_checkpoints_are_filtered_together ... ok
+test tests::checkpoint::rebootstrap_refuses_unverifiable_checkpoints ... ok
+test tests::bundles::native_sessions_carry_bundles_and_each_peer_applies_its_partitions ... ok
+
+running 1 test
+test tests::checkpoint::retried_command_from_before_the_horizon_keeps_its_one_result ... ok
+test tests::bundles::bundle_handles_return_the_same_frames_and_failures_commit_nothing ... ok
+test tests::commands::command_companions_wait_for_keys_and_require_proven_deletion ... ok
+test tests::commands::confirmed_history_is_audited_once_per_open_and_then_incrementally ... ok
+test tests::confirmed_result_binds_private_subpackages_without_granting_access ... ok
+test tests::commands::command_private_invocation_acl_fields_and_mixed_denial ... ok
+test tests::commands::retained_preparation_is_verified_before_confirmation ... ok
+test tests::commands::encrypted_commands_recover_lost_reply_and_atomic_multiscope_rollback ... ok
+test tests::bundles::a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions_atomically ... ok
+test tests::commands::native_encrypted_invocation_and_result_application ... ok
+test tests::crash_child ... ignored, invoked by committed_ciphertext_survives_process_exit
+test tests::commands::renewed_policy_preserves_applied_command_history_and_denies_old_invocations ... ok
+test tests::committed_ciphertext_survives_process_exit ... ok
+test tests::concurrent_field_updates_converge_and_no_remote_operation_is_reauthored ... ok
+test tests::confirmed_tables::a_projection_plan_keeps_confirmed_tables_in_place ... ok
+test tests::confirmed_tables::secure_sql_refuses_every_write_to_a_command_controlled_table ... ok
+test tests::commands::encrypted_result_subset_reordering_missing_keys_and_private_artifacts ... ok
+test tests::effects::http_webhook_retries_provider_key_after_send_success_record_failure ... ok
+test tests::delegation::widening_delegations_are_refused_at_every_admitting_boundary ... ok
+test tests::constraints::case_insensitive_schema_references_install_capture_and_resolve ... ok
+test tests::checkpoint::pruning_needs_a_verified_checkpoint_acknowledgments_and_custody ... ok
+test tests::confirmed_tables::confirmed_results_project_atomically_and_pending_commands_never_show ... ok
+test tests::effects::alice_receipt_does_not_authorize_accounting_and_current_conditions_are_rechecked ... ok
+test tests::effects::uncertain_send_survives_recovery_and_retries_with_stable_job_identity ... ok
+test tests::existence::a_keyless_replica_verifies_signatures_and_author_rights ... ok
+test tests::constraints::checkpoints_and_evictions_rebuild_the_same_hidden_rows ... ok
+test tests::encrypted_offline_publisher_public_private_and_opaque_relay ... ok
+test tests::existence::horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen ... ok
+test tests::constraints::deleted_parents_hide_children_until_a_live_parent_is_named ... ok
+test tests::constraints::equal_unique_stamps_from_different_columns_choose_the_larger_row_id ... ok
+test tests::constraints::unique_values_converge_in_any_order_and_the_loser_returns ... ok
+test tests::existence::holders_and_non_holders_agree_when_a_held_parent_is_hidden_or_evicted ... ok
+test tests::existence::horizon_recovery_refuses_packages_that_cannot_preserve_the_declaration ... ok
+test tests::existence::horizon_checkpoint_fences_missing_declaration_and_preserves_declarations_on_rebootstrap ... ok
+test tests::existence::native_sessions_exchange_existence_logs ... ok
+test tests::existence::horizon_finalizes_child_only_orphans_and_stored_null_atomically ... ok
+test tests::existence::horizon_finalizes_unique_losers_without_later_reappearance ... ok
+test tests::formats::unsupported_frames_leave_operation_projection_and_revision_unchanged ... ok
+test tests::existence::horizon_base_conflicts_drop_but_fresh_concurrent_inserts_and_causal_reuse_converge ... ok
+test tests::exposure::effect_attempts_and_outcomes_are_flushed_before_the_provider_or_caller_sees_them ... ok
+test tests::formats::unsupported_payload_formats_refuse_before_custody_writes ... ok
+test tests::existence::horizon_expired_child_rebootstraps_authenticated_base_without_parent_keys_or_resurrection ... ok
+test tests::existence::puppets_are_unreadable_and_read_only ... ok
+test tests::exposure::recovery_exports_and_custody_are_flushed_before_they_are_exposed ... ok
+test tests::exposure::encrypted_command_steps_are_flushed_before_they_are_exposed ... ok
+test tests::existence::items_follow_the_list_existence_log_without_the_list_scope ... ok
+test tests::generations::an_uninterrupted_local_plan_switches_while_reads_continue ... ok
+test tests::checkpoint::checkpoint_binds_the_scope_and_survives_a_failure_at_every_step ... ok
+test tests::existence::horizon_parent_loser_base_finalizes_child_only_orphans_identically ... ok
+test tests::existence::horizon_drops_absent_local_edits_and_deletes_without_ending_plain_or_logged_logs ... ok
+test tests::existence::horizon_old_inserts_stay_dropped_across_successors_and_future_frames_wait ... ok
+test tests::group::group_crash_child ... ignored, invoked by process_exit_inside_a_group_leaves_each_handle_whole_or_absent
+test tests::group::measure_group_commit_throughput ... ignored, measurement
+test tests::group::concurrent_authors_share_one_commit_and_keep_their_own_frames ... ok
+test tests::group::failing_request_in_a_group_rolls_back_alone ... ok
+test tests::group::a_received_page_shares_one_commit_and_refuses_frames_alone ... ok
+
+running 1 test
+test tests::group::open_verifies_buffered_commits_full_flushes_and_manual_checkpoints ... ok
+test tests::generations::a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history ... ok
+test tests::checkpoint::offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edits ... ok
+test tests::group::busy_file_retries_whole_transaction_then_reports_exhaustion ... ok
+test tests::group_sync_measurement::measure_200_partition_group_sync ... ignored, phase 9 measurement; run with --ignored --nocapture
+test tests::group::buffered_commits_are_flushed_before_they_leave_the_device ... ok
+test tests::group::exposed_results_arrive_while_other_leaders_and_readers_run_during_the_flush ... ok
+test tests::partition_foreign_keys::foreign_keys_refuse_different_partition_groups ... ok
+test tests::partition_foreign_keys::foreign_keys_refuse_unlogged_parent_outside_group ... ok
+test tests::group::nothing_is_observable_when_the_group_does_not_commit ... ok
+
+running 1 test
+test tests::native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments ... ok
+
+running 1 test
+test tests::group_sync_measurement::batch_frontiers_preserve_horizons_and_refuse_ungranted_scopes ... ok
+test tests::group::process_exit_inside_a_group_leaves_each_handle_whole_or_absent ... ok
+test tests::partition_foreign_keys::in_group_identity_accepts_text_partition_slots_and_refuses_wrong_slot_mapping ... ok
+test tests::learned_revocation_lost_keys_wrong_generations_and_package_subset ... ok
+test tests::partition_foreign_keys::partitioned_foreign_keys_refuse_natural_keys ... ok
+test tests::partition_foreign_keys::partitioned_foreign_keys_refuse_nulling_the_whole_partition ... ok
+test tests::partition_foreign_keys::partitioned_foreign_keys_refuse_restrict ... ok
+test tests::generations::a_checkpoint_of_the_previous_generation_rebootstraps_typed_rows_and_tombstones ... ok
+test tests::group::power_loss_keeps_everything_exposed_and_drops_only_unexposed_work ... ok
+test tests::partition_foreign_keys::horizon::group_horizon_b_does_not_wait_for_a_and_refuses_missing_parent_rights ... ok
+test tests::generations::a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the_horizon ... ok
+test tests::partition_foreign_keys::row_moves::process::peer_worker ... ignored, invoked by the process-isolated acceptance orchestrator
+test tests::existence::a_horizon_proposal_alone_never_releases_tombstones_or_existence_history ... ok
+test tests::partition_foreign_keys::group_references_hold_cascade_and_null_only_category_per_partition ... ok
+test tests::existence::horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unknown_deletes ... ok
+test tests::partition_foreign_keys::partitioned_children_follow_keyless_parent_liveness_and_restore ... ok
+test tests::partition_foreign_keys::horizon::partition_checkpoint_rebuilds_keyless_support_and_base_import_preserves_unrelated_graph ... ok
+test tests::partition_foreign_keys::row_moves::missing_child_holding_and_interrupted_move_leave_everything_unchanged ... ok
+test tests::partitions::measure_200_partitions ... ignored, explicit phase-11 measurement; run with --ignored --nocapture
+test tests::partition_foreign_keys::row_moves::destination_edit_with_later_stamp_wins_over_offline_update ... ok
+test tests::partition_foreign_keys::row_moves::foreign_author_move_follows_offline_edit_once_and_keeps_identity ... ok
+test tests::partition_foreign_keys::row_moves::proof_replay_and_future_stamps_require_the_current_move_contract ... ok
+test tests::formats::unsupported_replica_and_checkpoint_formats_refuse_before_writes ... ok
+test tests::partitions::partitioned_equal_stamps_break_ties_by_partition_and_id ... ok
+
+running 1 test
+test tests::partition_foreign_keys::row_moves::source_only_author_drops_offline_update_and_cannot_open_destination ... ok
+test tests::partitions::partitioned_sql_refuses_local_duplicates_and_keeps_other_partition_atomic ... ok
+test tests::partitions::horizon_preserves_table_identity_allocation_across_partitions ... ok
+test tests::partition_foreign_keys::row_moves::attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuilds ... ok
+test tests::group_sync_measurement::erp_group_sync_preserves_all_references_and_reopens ... ok
+test tests::recovery::archive_retention_requires_durable_complete_successor ... ok
+test tests::recovery::head_advance_during_import_is_visible_and_takeover_does_not_hide_it ... ok
+test tests::recovery::recovery_crash_child ... ignored, invoked by abrupt_executor_exit_recovers_each_confirmation_boundary
+
+running 1 test
+test tests::partitions::partition_frames_keys_custody_sql_and_checkpoints_are_isolated ... ok
+test tests::recovery::checkpoint_requires_dependency_closure_and_excludes_private_companions ... ok
+test tests::recovery::lost_newest_payload_and_lost_data_keys_block_old_domain ... ok
+test tests::partitions::partitioned_open_refuses_dropped_or_changed_constraint_indexes ... ok
+test tests::revocations::a_hello_with_another_digest_is_refused_by_name_until_both_hold_the_set ... ok
+test tests::recovery::native_phone_publication_recovers_after_executor_exit ... ok
+test tests::partitions::partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen ... ok
+test tests::roles::a_full_node_alone_confirms_nothing ... ok
+test tests::partition_foreign_keys::row_moves::two_move_chain_follows_original_update_and_reopen_does_not_repeat ... ok
+test tests::revocations::a_learned_revocation_refuses_the_revoked_author_and_admits_every_other ... ok
+test tests::recovery::required_custody_precedes_confirmation_and_survives_restart ... ok
+
+running 1 test
+test tests::recovery::phone_recovers_confirmed_unapplied_and_pending_work_to_new_identity ... ok
+test tests::roles::a_remote_read_states_its_source_and_is_never_local_state ... ok
+test tests::partition_foreign_keys::row_moves::source_finalization_and_destination_horizon_fence_late_follows ... ok
+test tests::rotation::a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write ... ok
+test tests::roles::pruning_counts_full_nodes_only_once_they_applied ... ok
+test tests::recovery::abrupt_executor_exit_recovers_each_confirmation_boundary ... ok
+test tests::generations::a_local_plan_survives_an_interruption_at_every_step ... ok
+test tests::row_and_field_pairing_cannot_be_combined_and_mixed_patches_are_atomic ... ok
+test tests::rollback_retry_restart_and_missing_encrypted_dependencies ... ok
+test tests::rotation::a_rotation_seals_later_writes_out_of_a_revoked_readers_reach ... ok
+test tests::rotation::reusing_another_scopes_key_names_the_collision_and_keeps_epochs ... ok
+test tests::scaling::read_and_replay_queries_use_indexes ... ok
+test tests::roles::eviction_needs_applied_custody_and_a_resubscribed_scope_converges ... ok
+test tests::signatures_attenuation_expiry_revocation_and_cross_app_replay ... ok
+test tests::rotation::an_interrupted_rotation_completes_at_open_and_never_rolls_back ... ok
+test tests::partition_foreign_keys::horizon::group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step ... ok
+test tests::rotation::earlier_epochs_retire_only_when_nothing_retained_needs_them ... ok
+test tests::scaling::shadow_switch_rollback_reopen_and_tombstones_preserve_original_history ... ok
+test tests::sql::authority_changes_wait_for_the_lease_and_end_the_session ... ok
+test tests::sql::a_handle_recovers_its_commit_after_restart_and_policies_shape_masks ... ok
+test tests::signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision ... ok
+test tests::sql::an_edit_concurrent_with_a_delete_applies_and_its_log_continues ... ok
+test tests::sql::cancel_and_timeout_roll_back_and_free_the_replica ... ok
+test tests::sql::a_sql_transaction_over_two_reader_scopes_commits_one_bundle ... ok
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up ... ignored, phase 3 measurement; run with --ignored --nocapture
+test tests::sql::catalogs_cursors_and_joins_report_unavailable_rows_instead_of_absence ... ok
+test tests::scaling::wide_signed_definitions_are_cached_without_weakening_row_admission ... ok
+test tests::sql::credentials_expiring_inside_an_open_transaction_refuse_it ... ok
+test tests::sql::concurrent_sql_edits_converge_in_every_typed_table ... ok
+test tests::sql::failed_identity_commit_releases_its_sequence_and_forged_frame_author_is_refused ... ok
+test tests::sql::identity_descriptor_installs_shared_columns_and_reopens ... ok
+test tests::sql::definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen ... ok
+test tests::sql::incarnation_key_index_reopens_and_tracks_rebuild_and_eviction ... ok
+test tests::sql::ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_and_reopen ... ok
+test tests::sql::identity_reservations_follow_savepoints_and_distinct_table_signers_form_one_bundle ... ok
+test tests::sql::local_identity_columns_refuse_reserved_kinds_and_mutation ... ok
+test tests::scaling::bounded_pages_scope_filtering_and_pending_passes_do_not_starve ... ok
+test tests::sql::secure_cursors_keep_their_snapshot_and_end_when_authority_changes ... ok
+test tests::sql::secure_table_events_follow_commits_receipts_and_authority ... ok
+test tests::roles::a_partial_replica_holds_only_its_subscription ... ok
+test tests::sql::multi_frame_relinks_verify_the_final_sql_projection ... ok
+test tests::sql::statements_outside_the_session_and_unpermitted_fields_are_refused ... ok
+test tests::sql::natural_key_relink_converges_and_old_identity_edits_never_touch_replacement ... ok
+test tests::strong_history::base_corruption_and_a_recovery_suffix_gap_are_refused ... ok
+test tests::strong_history::acknowledgment_retires_unevidenced_identities_once_pruned ... ok
+test tests::strong_history::soak_executor_and_reader_cross_4096_commands_with_a_window ... ignored, soak; run by scripts/check --slow
+test tests::scaling::pages_bound_reads_and_rebuild_streams_past_the_snapshot_limit ... ok
+test tests::strong_history::redundant_and_stale_preparations_go_but_unknown_outcomes_stay ... ok
+test tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure ... ok
+test tests::strong_history::unobserved_and_uncertain_jobs_pin_results_until_a_finished_observation ... ok
+test tests::strong_history::missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_is_atomic ... ok
+test tests::group::wal_stays_bounded_under_sustained_authoring ... ok
+test tests::two_native_clients_and_keyless_relay_with_offline_manifest ... ok
+test tests::strong_history::writer_enrolled_after_revocation_bootstraps_old_mergeable_and_confirmed_rows ... ok
+test tests::typed_commands::acknowledgment_before_a_reader_pulls_keeps_the_result_verifiable ... ok
+test tests::strong_history::offers_refresh_past_the_strong_horizon_and_partial_readers_prune_their_suffix ... ok
+test tests::validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth ... ok
+test tests::typed_commands::competing_reservations_confirm_one_acceptance_and_one_typed_rejection ... ok
+test tests::typed_commands::scoped_results_stay_scoped_and_the_coordinator_sees_commitments_only ... ok
+test tests::roles::range_sync_pages_by_frontier_and_rebootstraps_behind_a_pruned_gap ... ok
+test tests::typed_commands::settled_identities_end_tickets_and_acknowledgment_retires_them ... ok
+test tests::typed_commands::lost_reply_reopen_cancellation_and_takeover_recover_the_same_ticket ... ok
+test tests::typed_commands::local_and_delivered_commands_share_admission_and_forgeries_fail ... ok
+test tests::typed_commands::handler_failures_and_a_moved_head_prepare_nothing_and_stay_retryable ... ok
+test tests::partition_foreign_keys::row_moves::process::six_scenarios_across_device_processes ... ok
+test tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening ... ok
+test tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits ... ok
+test tests::sql::catch_up::an_interrupted_catch_up_resumes_and_applies_every_operation_once ... ok
+test tests::roles::interrupted_transfers_resume_and_a_replacement_full_node_converges ... ok
+test tests::existence::horizon_finalization_and_retention_plateau ... ok
+test tests::roles::a_sync_larger_than_a_session_continues_on_the_next ... ok
+test tests::sql::catch_up::a_writer_commits_within_the_write_limit_during_a_catch_up ... ok
+test tests::strong_history::executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base ... ok
+test tests::roles::a_far_behind_replica_catches_up_while_both_sides_keep_writing ... ok
+
+test result: ok. 191 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 50.62s
+
+   Doc-tests rocky_secure
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

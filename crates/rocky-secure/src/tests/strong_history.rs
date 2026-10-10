@@ -428,13 +428,14 @@ async fn missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_
 
 fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey]) -> SecureConfig {
     let user = PrivateKey::new();
+    let (not_before, expires) = crate::tests::lifetime();
     let capability = |subject, kind, delegations| Capability {
         manifest: f.app().definition().hash(),
         subject,
         kind,
         grants: command_grants(f),
-        not_before: crate::tests::lifetime().0,
-        expires: crate::tests::lifetime().1,
+        not_before,
+        expires,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),

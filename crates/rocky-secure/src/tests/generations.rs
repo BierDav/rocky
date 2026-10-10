@@ -238,13 +238,14 @@ impl Lineage {
     fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
         let user = PrivateKey::new();
         let manifest = self.definition(generation).hash();
+        let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
             manifest,
             subject,
             kind,
             grants: self.grants(generation),
-            not_before: crate::tests::lifetime().0,
-            expires: crate::tests::lifetime().1,
+            not_before,
+            expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),

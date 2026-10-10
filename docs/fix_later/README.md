@@ -6,16 +6,6 @@ site and a proposed fix. Scheduled work is in
 in its [small fixes](../features_07/04-small-fixes.md). Remove an entry when it
 is fixed or moved into a phase.
 
-## A Room write times out behind background sync
-
-Seen twice in nine runs of the [emulator pair](../runtime/shopping-devices.md#emulator-pair-2026-10-09):
-right after a device came online, a Room write transaction failed with code 4
-(`transaction was rolled back: Timeout`), most likely because background sync
-held the replica past the 5 s write limit while applying incoming frames, during catch-up. Not yet measured. Nothing was committed, so the driver retries.
-
-Fix: apply received pages in bounded transactions that yield to a waiting
-writer, and measure the longest replica hold during catch-up on a device.
-
 ## Reads and status do whole-table work on the writer thread
 
 `query()`, `observe()`, `strong_status` and `strong_results` scan a whole

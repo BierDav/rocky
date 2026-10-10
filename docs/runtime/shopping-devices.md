@@ -31,7 +31,7 @@ the activity feed's 512-event lifetime; they are discarded when the app closes.
 The [Compose app](../../examples/shoppinglist-app/androidApp) opens drive
 links (see `ShoppingLinks`), so the harness drives it with `adb` and reads the
 results from logcat. A host issuer enrolls both devices as issuing devices of
-the user and enrolls the packaged custody peer; then the host closes. Both
+the user and enrolls the packaged custody peer; then the host closes and its contact is removed from both phones. Both
 devices reach the custody peer through `adb reverse` and never each other.
 
 ```sh
@@ -57,12 +57,33 @@ model, API level and ABI, and the app's log lines under `phones/`.
 
 | Date | Devices | Result |
 | --- | --- | --- |
+| 2026-10-10 | Two Android 15 (API 35) `arm64-v8a` emulators, `adb reverse` to the host | 20 complete passes, zero write retries; [Phase 3](#emulator-pair-2026-10-10) |
 | 2026-10-09 | Two Android 15 (API 35) `arm64-v8a` emulators, `adb reverse` to the host | The procedure above, group schema; [below](#emulator-pair-2026-10-09) |
 | 2026-10-08 | Pixel 11 Pro, one host, LAN | Version-2 unpartitioned schema; [below](#physical-device-run-2026-10-08) |
 
-No two-phone run exists: only one phone was attached, and it was in personal
-use. The emulators run the same APK, but not a phone's radio, Keystore
+No run with two physical phones exists: only one phone was attached, and it
+was in personal use. The emulators run the same APK, but not a phone's radio, Keystore
 hardware or power management.
+
+## Emulator pair, 2026-10-10
+
+[Phase 3](../features_07/03-catch-up-cost.md) rebuilt the Android runtime for
+`arm64-v8a` and `x86_64` and the Compose APK in its assigned workspace. The APK's
+native libraries match that workspace's AAR byte for byte. The same two
+Android 15 / API 35 arm64 AVDs, `rocky-p03-a` and `rocky-p03-b`, completed
+20 procedures in 28.427–89.354 s, with no write timeout or retried write.
+Every pass checked both shared lists, the duplicate Bread and Milk's move
+with the offline tick. The host issuer was closed and its contact removed;
+the phones relayed through the packaged TCP custody launcher.
+
+The final series has 21 attempts, all with zero write retries. Attempt 18
+failed convergence: B could not reach custody, and its `adb reverse` list
+was empty after the run while A's mappings remained. Three further full
+procedures passed. Earlier attempts also found a failed `adb logcat -c`;
+unique per-run step markers now delimit logs without clearing them. The
+[aggregate, artifact hashes, failed attempts and workspace check logs](../../benchmarks/runtime-scaling/evidence/catch-up-2026-10-10/README.md)
+retain the evidence. This qualifies the emulator/TCP procedure, not physical
+radios, hardware Keystore, power management or WAN behavior.
 
 ## Emulator pair, 2026-10-09
 
@@ -84,9 +105,11 @@ Findings fixed on the way:
 - A Share code lists only devices this issuer enrolled, so the procedure names
   phone B, which the host enrolled.
 - Two of nine runs failed a write with code 4 (`transaction was rolled back:
-  Timeout`) right after a device came online, most likely while background sync
-  held the replica past the 5 s write limit. The write was rolled back; the driver retries such
-  a step up to three times and records it in `retried` ([fix later](../fix_later/README.md#a-room-write-times-out-behind-background-sync)).
+  Timeout`) right after a device came online. [Phase 3](../features_07/03-catch-up-cost.md)
+  reproduced a settings/replica lock cycle: renewal waited for a replica held
+  by a Room transaction whose next statement waited for settings. The Room
+  profile now reads the schema version between transactions. Historical
+  timed-out steps were rolled back and retried by the device harness.
 
 ## Physical-device run, 2026-10-08
 

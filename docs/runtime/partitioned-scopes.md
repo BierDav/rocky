@@ -245,6 +245,72 @@ compares one and four ERP tables, including authenticated idle sync. The SDK
 exchanges group-member frontiers together; keys, logs and checkpoints stay
 per table scope ([Decision 0044](../decisions/0044-group-frontier-exchange.md)).
 
+### Four-table profile
+
+[Phase 3](../features_07/03-catch-up-cost.md) profiled the four-table fixture
+(`measure_200_partition_group_sync`) on 2026-10-10: macOS arm64, debug build, a
+host shared with other builds. `ROCKY_PROFILE_DIR=<dir>` makes the fixture sample
+each stage with macOS `sample`; a sample counts toward the outermost named cost
+on its stack, and estimated seconds scale a share to the unsampled stage.
+The [call trees, stage logs and analyzer](../../benchmarks/runtime-scaling/evidence/catch-up-2026-10-10/README.md)
+retain the evidence. Named costs cover 91.3%, 98.8% and 98.0% before, and
+84.8%, 92.5% and 90.0% after. Rounded rows may not add to 100%.
+
+| Four tables, 200 partitions | Budget | Before | After |
+| --- | ---: | ---: | ---: |
+| Register keys and author | 60 s | 45.5 s (86 s in phase 9's run) | 18.4 s |
+| Authenticated range catch-up | 100 s | 177.9 s | 49.7 s |
+| 801 checkpoints | 48 s | 49.9 s | 8.6 s |
+
+The continuation rerun after local heavy builds finished took 32.910 s,
+84.143 s and 10.105 s for four tables; all three budgets passed. Its log and
+a prior contended run that missed two budgets are kept in the evidence. The
+final build, including receipt-retry recovery, took 28.507 s, 68.200 s and
+8.911 s; all three budgets passed again.
+
+One table in the profiled after run takes 2.5 s, 6.3 s and 1.1 s. Before,
+by share of each stage:
+
+| Cost | Register and author | Catch-up | Checkpoints |
+| --- | ---: | ---: | ---: |
+| This device's chain resolved against every registered partition, per frame, scope and step | 52% | 29% | 75% |
+| Peer and frame chains verified, per request and frame | 6% | 12% | |
+| CBOR of frame headers, 94% of whose bytes are chains | 20% | 13% | 9% |
+| CBOR of the session's signed bytes: binding and message as integer arrays | | 18% | |
+| CBOR of checkpoint records, 87% of whose bytes are chains, including signing | | | 7% |
+| CBOR of payloads | 3% | 2% | 3% |
+| Bundle members trial-decrypted with every held key | | 8% | |
+| Other sealing, signatures and hashing | 3% | 3% | 2% |
+| SQLite and device flushes | 6% | 13% | 1% |
+| Unattributed | 9% | 1% | 2% |
+
+The fixes need no format change. The device's grants are resolved once per
+authority, partition count and second; `validate_keys` checks a set; frames
+decoded recently are kept by a digest of their bytes; a session encodes the
+start of its signed bytes once and the message by byte; bundle members are
+tried with their own and their partition's keys first. Every request still
+verifies its chains against the current revocations.
+
+After, the costs left are, by share of each stage:
+
+| Cost | Register and author | Catch-up | Checkpoints |
+| --- | ---: | ---: | ---: |
+| This device's chain, once per new partition | 38% | 1% | 2% |
+| Peer chains verified per request | | 38% | |
+| Frame chains verified per frame and authoring | 12% | 10% | |
+| Chain bytes: CBOR of headers and checkpoint records, signing over their chains | 10% | 8% | 48% |
+| CBOR of payloads and other values | 10% | 11% | 24% |
+| Device flushes | 4% | 11% | |
+| Other sealing, signatures, hashing, SQLite and named chain work | 11% | 12% | 17% |
+| Unattributed | 15% | 8% | 10% |
+
+The chain-byte cost is an estimate from encoded-type samples and byte shares,
+not a direct timer: headers count at 94%, checkpoint records at 87%, and
+session messages at the 61% of frame bytes that are chains. This gives 1.8 s, 4.2 s and 4.1 s of the three stages. The 801 frames of the
+catch-up carry 7.27 MB of headers, 6.80 MB of them chains, beside 3.87 MB of
+payload; the 801 checkpoint records hold 11.31 MB, 9.82 MB of them chains.
+[Phase 11](../features_07/11-chains-by-reference.md) starts from these figures.
+
 ## Design rationale
 
 - A subscription selects scopes and cannot narrow a key, so confidentiality

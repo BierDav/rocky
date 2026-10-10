@@ -90,13 +90,14 @@ impl Fixture {
     fn credentials(&self, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
         let user = PrivateKey::new();
         let deployment = PrivateKey::new();
+        let (not_before, expires) = lifetime();
         let capability = |subject, kind, delegations| Capability {
             manifest: self.app().definition().hash(),
             subject,
             kind,
             grants: grants.clone(),
-            not_before: crate::tests::lifetime().0,
-            expires: crate::tests::lifetime().1,
+            not_before,
+            expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),

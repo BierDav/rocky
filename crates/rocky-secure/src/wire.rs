@@ -7,7 +7,16 @@ use p2panda_core::{Body, Header, Operation, validate_operation};
 use rand::{RngCore, rngs::OsRng};
 use rocky_core::{Commitment, ResourceScope, RowChange, RowWrite};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{LazyLock, Mutex, PoisonError};
+
+/// Frames decoded recently, by a digest of their bytes. A frame is decoded
+/// several times as it is received and applied, and each decoding encodes
+/// the header again for its canonical form, its hash and its signature;
+/// the result depends on the bytes alone.
+static DECODED: LazyLock<Mutex<HashMap<Hash, Operation<Extensions>>>> =
+    LazyLock::new(Mutex::default);
+const DECODED_FRAMES: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageKind {
@@ -61,6 +70,27 @@ impl EncryptedFrame {
         Ok(self.operation()?.header.extensions.scope)
     }
     pub(crate) fn operation(&self) -> Result<Operation<Extensions>, Error> {
+        let digest = Hash::new(
+            [
+                &(self.header.len() as u64).to_le_bytes()[..],
+                &self.header,
+                &self.body,
+            ]
+            .concat(),
+        );
+        let decoded = || DECODED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(operation) = decoded().get(&digest) {
+            return Ok(operation.clone());
+        }
+        let operation = self.decode_operation()?;
+        let mut decoded = decoded();
+        if decoded.len() >= DECODED_FRAMES {
+            decoded.clear();
+        }
+        decoded.insert(digest, operation.clone());
+        Ok(operation)
+    }
+    fn decode_operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
         if header.extensions.row_format != 6 {
             return Err(denied("unsupported row frame format"));

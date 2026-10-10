@@ -1,0 +1,30 @@
+   Compiling rocky-secure v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-secure)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.94s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 1 test
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=1 catch_up_ms=9496 idle_ms=191
+P03 frame_bytes tables=1 frames=201 header=1031614 chain=913381 payload=529150
+P03 checkpoint_bytes tables=1 records=201 bytes=1308638 chain_bytes=935454
+P09 partitions=200 tables=1 scopes=201 open_ms=35 register_ms=882 author_ms=4386 catch_up_ms=9496 idle_ms=191 checkpoint_ms=1764 reopen_ms=859 metadata_bytes_per_partition=430.08
+test tests::group_sync_measurement::measure_200_partition_group_sync has been running for over 60 seconds
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=4 catch_up_ms=84143 idle_ms=754
+P03 frame_bytes tables=4 frames=801 header=7263128 chain=6789354 payload=3854665
+P03 checkpoint_bytes tables=4 records=801 bytes=11292782 chain_bytes=9802638
+P09 partitions=200 tables=4 scopes=801 open_ms=78 register_ms=15924 author_ms=16986 catch_up_ms=84143 idle_ms=754 checkpoint_ms=10105 reopen_ms=6263 metadata_bytes_per_partition=1597.44
+P09 additional_table open_ms=14.36
+P09 additional_table register_ms=5013.72
+P09 additional_table author_ms=4199.78
+P09 additional_table catch_up_ms=24882.38
+P09 additional_table idle_ms=187.82
+P09 additional_table checkpoint_ms=2780.32
+P09 additional_table reopen_ms=1801.09
+P09 additional_table metadata_bytes_per_partition=389.12
+test tests::group_sync_measurement::measure_200_partition_group_sync ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 199 filtered out; finished in 214.93s
+

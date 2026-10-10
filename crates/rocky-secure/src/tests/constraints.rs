@@ -135,13 +135,14 @@ impl Shop {
             .verify(self.publisher.public_key())
             .unwrap()
             .hash();
+        let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
             manifest,
             subject,
             kind,
             grants: self.grants(),
-            not_before: crate::tests::lifetime().0,
-            expires: crate::tests::lifetime().1,
+            not_before,
+            expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),

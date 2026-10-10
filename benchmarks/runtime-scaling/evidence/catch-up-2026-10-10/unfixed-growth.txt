@@ -1,0 +1,8 @@
+P03 authored operations=1280 ms=35007
+P03 catch_up operations=1280 catch_up_ms=137816 writes=415 longest_write_ms=5440 longest_hold_ms=5346
+thread 'tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up' (36770982) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:285:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 197 filtered out; finished in 172.91s
+P03 authored operations=2560 ms=85280
+thread '<unnamed>' (36782662) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:103:50:
+thread 'tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up' (36780464) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:122:10:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 197 filtered out; finished in 221.31s

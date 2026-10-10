@@ -1,69 +1,89 @@
 use super::*;
 
-impl<A: RowApplication> Inner<A> {
-    /// Applies pending frames in bounded transactions, publishing after each
-    /// commit. Applications before a failing one stay committed.
-    pub(crate) async fn process_pending(&mut self, time: u64) -> Result<(), Error> {
+impl<A: RowApplication> EncryptedReplica<A> {
+    /// Applies pending frames one bounded transaction at a time, publishing
+    /// after each commit. The replica is released between transactions, so
+    /// a writer that asked for it meanwhile goes first. Applications before
+    /// a failing one stay committed.
+    pub(crate) async fn settle(&self) -> Result<(), Error> {
         loop {
-            let (more, failure) = transaction!(self, |inner| {
-                match inner.apply_pending(time, group::GROUP_REQUESTS).await {
-                    Ok(more) => Ok((more, None)),
-                    Err(error) if retryable(&error) => Err(error),
-                    Err(error) => Ok((false, Some(error))),
-                }
-            })?;
-            self.publish_revision().await?;
-            if let Some(error) = failure {
-                return Err(error);
+            tokio::task::yield_now().await;
+            #[cfg(test)]
+            if !crate::apply_allowed() {
+                return Err(Error::InjectedFailure);
             }
-            if !more {
+            if !self.inner.lock().await.apply_step(now()?).await? {
                 return Ok(());
             }
+        }
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// One bounded transaction of `EncryptedReplica::settle`; true when
+    /// more frames may be ready.
+    pub(super) async fn apply_step(&mut self, time: u64) -> Result<bool, Error> {
+        let (more, failure) = transaction!(self, |inner| {
+            match inner.apply_pending(time, group::GROUP_REQUESTS).await {
+                Ok(more) => Ok((more, None)),
+                Err(error) if retryable(&error) => Err(error),
+                Err(error) => Ok((false, Some(error))),
+            }
+        })?;
+        self.publish_revision().await?;
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(more),
         }
     }
     /// Applies or rejects dependency-ready pending frames inside the caller's
     /// transaction, each application in its own savepoint. A failing
     /// application rolls back alone and ends the pass with its error. Returns
     /// true when `limit` stopped the pass before it settled.
+    ///
+    /// Each later frame of a log names the one before as its backlink, so
+    /// only a log's first pending frame can be ready: a round examines that
+    /// frame of every log and follows a log while its frames apply, in
+    /// sequence order across logs. A waiting log costs one examination per
+    /// round, however many of its frames wait behind it.
     pub(super) async fn apply_pending(&mut self, time: u64, limit: usize) -> Result<bool, Error> {
         let mut changed = 0;
         loop {
-            // Log order applies a chain that arrived in any order in one scan.
-            let mut cursor = (-1i64, Vec::new());
+            let mut heads = BTreeSet::new();
+            for record in collect_rows(self.conn.query(
+                "SELECT o.sequence,o.hash,o.scope,o.author FROM secure_operations o JOIN (SELECT scope,author,min(sequence) AS sequence FROM secure_operations WHERE status='pending' GROUP BY scope,author) h ON o.author=h.author AND o.scope=h.scope AND o.sequence=h.sequence",
+                (),
+            ).await?).await? {
+                heads.insert(head(record)?);
+            }
             let mut advanced = false;
-            loop {
-                let records = collect_rows(self.conn.query(
-                "SELECT hash,header,body,sequence FROM secure_operations WHERE status='pending' AND (sequence,hash)>(?,?) ORDER BY sequence,hash LIMIT 32",
-                bindings(vec![SqlValue::Integer(cursor.0), SqlValue::Blob(cursor.1.clone())]),
-            ).await?).await?;
-                if records.is_empty() {
-                    break;
+            while let Some((sequence, hash, scope, author)) = heads.pop_first() {
+                if changed >= limit {
+                    return Ok(true);
                 }
-                for record in records {
-                    if changed >= limit {
-                        return Ok(true);
-                    }
-                    let [
-                        SqlValue::Blob(hash),
-                        SqlValue::Blob(header),
-                        SqlValue::Blob(body),
-                        SqlValue::Integer(sequence),
-                    ] = record.as_slice()
-                    else {
-                        return Err(denied("corrupt pending operation"));
-                    };
-                    cursor = (*sequence, hash.clone());
-                    let frame = EncryptedFrame {
-                        header: header.clone(),
-                        body: body.clone(),
-                    };
-                    if !matches!(
-                        Box::pin(self.apply_frame(&frame, time)).await?,
-                        Outcome::Waiting
-                    ) {
-                        changed += 1;
-                        advanced = true;
-                    }
+                let Some(frame) = self
+                    .frame(Hash::from_bytes(
+                        hash.try_into()
+                            .map_err(|_| denied("corrupt pending operation"))?,
+                    ))
+                    .await?
+                else {
+                    return Err(denied("missing pending operation"));
+                };
+                if matches!(
+                    Box::pin(self.apply_frame(&frame, time)).await?,
+                    Outcome::Waiting
+                ) {
+                    continue;
+                }
+                changed += 1;
+                advanced = true;
+                let next = collect_rows(self.conn.query(
+                    "SELECT sequence,hash,scope,author FROM secure_operations WHERE scope=? AND author=? AND sequence>? AND status='pending' ORDER BY sequence LIMIT 1",
+                    bindings(vec![SqlValue::Blob(scope), SqlValue::Blob(author), SqlValue::Integer(sequence)]),
+                ).await?).await?;
+                for record in next {
+                    heads.insert(head(record)?);
                 }
             }
             if !advanced {
@@ -349,4 +369,20 @@ pub(super) enum Outcome {
     Applied,
     Rejected(String),
     Waiting,
+}
+
+/// A log's first pending frame: sequence, hash, scope and author.
+type Head = (i64, Vec<u8>, Vec<u8>, Vec<u8>);
+fn head(record: Vec<SqlValue>) -> Result<Head, Error> {
+    match <[SqlValue; 4]>::try_from(record) {
+        Ok(
+            [
+                SqlValue::Integer(sequence),
+                SqlValue::Blob(hash),
+                SqlValue::Blob(scope),
+                SqlValue::Blob(author),
+            ],
+        ) => Ok((sequence, hash, scope, author)),
+        _ => Err(denied("corrupt pending operation")),
+    }
 }

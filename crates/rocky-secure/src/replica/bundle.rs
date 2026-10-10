@@ -426,7 +426,8 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
     ) -> Result<Outcome, Error> {
         let author = trigger.header.public_key;
-        let required = match self.required_members(membership, time).await {
+        let scope = trigger.header.extensions.scope;
+        let required = match self.required_members(membership, scope, time).await {
             Ok(required) => required,
             Err(error) => {
                 self.reject(trigger.hash).await?;
@@ -521,9 +522,15 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Member entries this replica opens with a readable key of a held scope,
     /// in scope and sequence order.
+    /// The members to hold, found by trying the held keys on each sealed
+    /// opening. Only one key opens a member, so the order of trial only
+    /// saves time: the trigger's `scope` first, then the scopes with its
+    /// partition values, as the other tables of a partition group, which a
+    /// bundle usually spans, then every other key.
     async fn required_members(
         &self,
         membership: &Membership,
+        scope: ResourceScope,
         time: u64,
     ) -> Result<Vec<(usize, Opening)>, Error> {
         let count = membership.members.len();
@@ -531,10 +538,23 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("invalid bundle membership"));
         }
         let grants = self.local_grants(time).unwrap_or_default();
+        let values = |scope| {
+            self.partitions
+                .get(scope)
+                .map(|tuple| tuple.values().values().collect::<Vec<_>>())
+        };
+        let own = values(&scope);
+        let mut keys: Vec<_> = self.opening_keys().collect();
+        keys.sort_by_cached_key(|key| {
+            (
+                key.scope != scope,
+                own.is_none() || values(&key.scope) != own,
+            )
+        });
         let mut required = Vec::new();
         for (index, sealed) in membership.members.iter().enumerate() {
             let aad = member_aad(&membership.transaction, index, count)?;
-            for key in self.opening_keys() {
+            for key in &keys {
                 let Ok(bytes) = decrypt(&key.key, &aad, sealed) else {
                     continue;
                 };

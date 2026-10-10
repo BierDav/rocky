@@ -1,0 +1,12 @@
+{
+  "attempt": 18,
+  "custody_listen": "127.0.0.1:58279",
+  "phone_a_custody_state": "connected",
+  "phone_b_custody_error": "peer unreachable: Connection refused (os error 111)",
+  "reverse_maps_observed_after_the_run": {
+    "emulator-5554": "mappings present, including tcp:58279 to tcp:58279",
+    "emulator-5556": []
+  },
+  "retried_writes": 0,
+  "observation_limit": "Reverse state was inspected after failure; no emulator restart or cause of map removal was established."
+}

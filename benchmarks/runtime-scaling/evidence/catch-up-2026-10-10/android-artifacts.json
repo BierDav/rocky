@@ -1,0 +1,15 @@
+{
+  "apk": "build/tasks/_androidApp_buildAndroidDebug/gradle-project-debug.apk",
+  "apk_sha256": "18a7bea7772ea38978df19efddf123fbd8fb4459768be3c7bbb7e10755e1af78",
+  "aar": "sdks/kotlin/android-runtime/build/outputs/aar/rocky-runtime-android-release.aar",
+  "aar_sha256": "238c3309e117a99c9201f1b1adbf3008a69fbb40f34c79bd58aa512cecb276cd",
+  "matching_native_libraries_sha256": {
+    "arm64-v8a": "b0097aa16c5e175258be840d090a47677b318a11a4cec0495f89afc2ee1997fb",
+    "x86_64": "607b2369d0c1bd30cf737ccb4ef844615d645315d0da3f18e1eb2212f2c64f5e"
+  },
+  "custody_peer_sha256": {
+    "at_gate_start_default_iroh": "0931cf8e4fe6a9aea70c053667a9ea9dbd2d03c8ec859137b45e42578e6e6f89",
+    "after_workspace_no_default_features_check": "5d49942442cb0ac8fae16941d2d0e2fd43c307acaf70b0019cfc646a29e547a2"
+  },
+  "custody_peer_note": "scripts/check rebuilt target/debug/rocky-peer without default features during the device series. Both binaries came from the final workspace sources and served TCP; per-run executable hashes were not captured. The APK and AAR remained unchanged."
+}

@@ -1,0 +1,9 @@
+   Compiling rocky-sdk v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.35s
+     Running unittests src/lib.rs (target/debug/deps/rocky_sdk-d88cb038d0df9e91)
+
+running 1 test
+test node::sync_tests::a_room_write_commits_while_a_renewal_waits_for_the_replica ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.55s
+

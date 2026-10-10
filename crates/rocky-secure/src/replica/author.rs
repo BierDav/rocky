@@ -123,7 +123,7 @@ impl<A: RowApplication> Inner<A> {
                     time,
                 )
                 .map_err(credential)?,
-            None => self.local_grants(time)?,
+            None => self.local_grants(time)?.to_vec(),
         };
         if let Some(author) = signer {
             if identity_aware.iter().any(Option::is_none) {

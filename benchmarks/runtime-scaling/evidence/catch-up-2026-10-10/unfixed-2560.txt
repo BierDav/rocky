@@ -1,0 +1,20 @@
+
+running 1 test
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up has been running for over 60 seconds
+P03 authored operations=2560 ms=94532
+
+thread '<unnamed>' (36802588) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:103:50:
+called `Result::unwrap()` on an `Err` value: Rejected("native read timeout")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up' (36799191) panicked at crates/rocky-secure/src/tests/sql/catch_up.rs:122:10:
+called `Result::unwrap()` on an `Err` value: Io(Kind(UnexpectedEof))
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up ... FAILED
+
+failures:
+
+failures:
+    tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 197 filtered out; finished in 221.53s
+

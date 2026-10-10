@@ -1,0 +1,12 @@
+   Compiling rocky-secure v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-secure)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.20s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 1 test
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up has been running for over 60 seconds
+P03 authored operations=10000 ms=283470
+P03 catch_up operations=10000 catch_up_ms=335090 writes=239 longest_write_ms=1932 longest_hold_ms=2619
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 199 filtered out; finished in 619.93s
+

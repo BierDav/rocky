@@ -50,6 +50,15 @@ Readers never delay the writer. A caller that awaits a reader inside its own
 write transaction waits for that timeout; an ORM uses the transaction's own
 connection for nested calls instead.
 
+Background sync takes the replica in bounded steps: received frames apply in
+transactions of at most 64, and the replica is released between them, so
+a waiting writer takes the replica before the next apply transaction
+([write concurrency](write-concurrency.md#encrypted-path)). The Room profile
+reads the schema version between transactions: reading device settings inside
+a transaction would form a lock cycle with renewal, which holds settings
+while waiting for the replica. The [Phase 3 evidence](../../benchmarks/runtime-scaling/evidence/catch-up-2026-10-10/README.md)
+records both the settings/replica cycle and the separate long pending pass.
+
 | Limit | Value | When exceeded |
 | --- | --- | --- |
 | Rows of one bundle | 2,048 | The commit fails, code 18; nothing is published or split |

@@ -126,7 +126,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if group.is_empty() {
                 break;
             }
-            let (exposed, scopes) = inner.commit_group(group).await;
+            let (exposed, scopes, settling) = inner.commit_group(group).await;
             if let Some(exposed) = exposed {
                 let flusher = inner.flusher.clone();
                 drop(inner);
@@ -138,6 +138,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             // Replies are out; one bounded step keeps retained history in check.
             inner.maintain(&scopes).await;
             inner.checkpoint_if_due().await;
+            if !settling.is_empty() {
+                // The rest of the pass runs in transactions of its own and
+                // releases the replica between them.
+                drop(inner);
+                let settled = self.settle().await;
+                let inner = self.inner.lock().await;
+                let exposed = inner.answer_settled(settling, settled).await;
+                if let Some(exposed) = exposed {
+                    let flusher = inner.flusher.clone();
+                    drop(inner);
+                    exposed.answer(&flusher);
+                }
+            }
         }
         // Another leader took these requests and answers them after its
         // flush, outside the lock. A reply is lost only when its leader was
@@ -196,6 +209,15 @@ fn collect(pending: &mut [oneshot::Receiver<Reply>], results: &mut [Option<Reply
     results.iter().all(Option::is_some)
 }
 
+/// Received frames whose status waits for the rest of the pending pass:
+/// each reply, whether it is exposed, and its final status kind.
+enum PendingReply {
+    Stored(Hash),
+    Duplicate,
+    Covered,
+}
+type Settling = Vec<(oneshot::Sender<Reply>, bool, PendingReply)>;
+
 /// Results that may leave the device: answered after a flush covers `commit`.
 struct Exposed {
     replies: Vec<(oneshot::Sender<Reply>, Done)>,
@@ -216,12 +238,13 @@ impl Exposed {
 
 impl<A: RowApplication> Inner<A> {
     /// Commits one group and answers its requests after the commit, except
-    /// the exposed ones, which it returns for the flush. Also returns the
+    /// the exposed ones, which it returns for the flush, and the received
+    /// frames whose status waits for more pending passes. Also returns the
     /// scopes the group wrote, for maintenance.
     async fn commit_group(
         &mut self,
         group: Vec<Request>,
-    ) -> (Option<Exposed>, BTreeSet<ResourceScope>) {
+    ) -> (Option<Exposed>, BTreeSet<ResourceScope>, Settling) {
         let mut works = Vec::with_capacity(group.len());
         let mut replies = Vec::with_capacity(group.len());
         let mut scopes = BTreeSet::new();
@@ -241,13 +264,13 @@ impl<A: RowApplication> Inner<A> {
                 .map(|outcome| (outcome, time)),
             Err(error) => Err(error),
         };
-        let (mut outcome, time) = match outcome {
+        let (outcome, _) = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 for (reply, _) in replies {
                     let _ = reply.send(Err(shared(&error)));
                 }
-                return (None, BTreeSet::new());
+                return (None, BTreeSet::new(), Vec::new());
             }
         };
         #[cfg(test)]
@@ -272,15 +295,23 @@ impl<A: RowApplication> Inner<A> {
             *current = revision;
             changed
         });
-        if outcome.more
-            && outcome.pass.is_none()
-            && let Err(error) = self.process_pending(time).await
-        {
-            outcome.pass = Some(error);
-        }
+        let more = outcome.more && outcome.pass.is_none();
         let mut exposed = Vec::new();
+        let mut settling = Vec::new();
         for ((reply, flush), result) in replies.into_iter().zip(outcome.results) {
             let done = match result {
+                Ok(Staged::Stored(hash)) if more => {
+                    settling.push((reply, flush, PendingReply::Stored(hash)));
+                    continue;
+                }
+                Ok(Staged::Duplicate) if more => {
+                    settling.push((reply, flush, PendingReply::Duplicate));
+                    continue;
+                }
+                Ok(Staged::Covered) if more => {
+                    settling.push((reply, flush, PendingReply::Covered));
+                    continue;
+                }
                 Ok(Staged::Author(frame)) => Ok(Done::Author(frame)),
                 Ok(Staged::Bundle(frames)) => Ok(Done::Bundle(frames)),
                 Ok(Staged::Handled(hash)) => Ok(Done::Pruned(hash)),
@@ -304,7 +335,36 @@ impl<A: RowApplication> Inner<A> {
             replies: exposed,
             commit: self.commit,
         });
-        (exposed, scopes)
+        (exposed, scopes, settling)
+    }
+    /// Answers received frames with their status once the pending pass
+    /// settled, or with its failure; returns the exposed ones for the flush.
+    async fn answer_settled(
+        &self,
+        settling: Settling,
+        settled: Result<(), Error>,
+    ) -> Option<Exposed> {
+        let mut exposed = Vec::new();
+        for (reply, flush, pending) in settling {
+            let done = match &settled {
+                Ok(()) => match pending {
+                    PendingReply::Stored(hash) => self.status(hash).await.map(Done::Receive),
+                    PendingReply::Duplicate => Ok(Done::Receive(ReceiveStatus::Duplicate)),
+                    PendingReply::Covered => Ok(Done::Receive(ReceiveStatus::Pruned)),
+                },
+                Err(error) => Err(shared(error)),
+            };
+            match done {
+                Ok(done) if flush => exposed.push((reply, done)),
+                done => {
+                    let _ = reply.send(done.map(|done| (done, self.commit)));
+                }
+            }
+        }
+        (!exposed.is_empty()).then_some(Exposed {
+            replies: exposed,
+            commit: self.commit,
+        })
     }
     async fn run_group(&mut self, works: &[Work], time: u64) -> Result<Outcome, Error> {
         let mut outcome = Outcome::default();
@@ -371,8 +431,11 @@ impl<A: RowApplication> Inner<A> {
                     outcome.results.push(Err(error));
                 }
                 Ok(staged) => {
-                    // A covered late frame may be what a pending frame waited for.
-                    unapplied |= matches!(staged, Staged::Stored(_) | Staged::Covered);
+                    // A retry must resume a pass interrupted after receipt committed.
+                    unapplied |= matches!(
+                        staged,
+                        Staged::Stored(_) | Staged::Covered | Staged::Duplicate
+                    );
                     self.conn.execute("RELEASE request", ()).await?;
                     outcome.results.push(Ok(staged));
                 }
@@ -514,6 +577,8 @@ impl<A: RowApplication> Inner<A> {
 /// The group's failure as reported to each of its callers.
 fn shared(error: &Error) -> Error {
     match error {
+        #[cfg(test)]
+        Error::InjectedFailure => Error::InjectedFailure,
         Error::RetryExhausted => Error::RetryExhausted,
         Error::Closed => Error::Closed,
         Error::Conflict => Error::Conflict,

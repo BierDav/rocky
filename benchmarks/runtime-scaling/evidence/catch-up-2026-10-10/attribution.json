@@ -1,0 +1,3419 @@
+{
+  "before-register_author": {
+    "samples": 37500,
+    "unsampled_wall_seconds": 45.558,
+    "categories": {
+      "chain verification and credential resolution": {
+        "samples": 21798,
+        "percent": 58.128,
+        "estimated_seconds": 26.482
+      },
+      "encoding (CBOR)": {
+        "samples": 9052,
+        "percent": 24.139,
+        "estimated_seconds": 10.997
+      },
+      "other": {
+        "samples": 3268,
+        "percent": 8.715,
+        "estimated_seconds": 3.97
+      },
+      "storage (SQLite)": {
+        "samples": 1641,
+        "percent": 4.376,
+        "estimated_seconds": 1.994
+      },
+      "flush (fsync)": {
+        "samples": 547,
+        "percent": 1.459,
+        "estimated_seconds": 0.665
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 539,
+        "percent": 1.437,
+        "estimated_seconds": 0.655
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 321,
+        "percent": 0.856,
+        "estimated_seconds": 0.39
+      },
+      "hashing": {
+        "samples": 305,
+        "percent": 0.813,
+        "estimated_seconds": 0.371
+      },
+      "wait (round trips, idle)": {
+        "samples": 29,
+        "percent": 0.077,
+        "estimated_seconds": 0.035
+      }
+    },
+    "entries": [
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 8089,
+        "percent": 21.571
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::validate_keys <- rocky_core::typed_rows::TypedRows::install_key",
+        "samples": 5140,
+        "percent": 13.707
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::follow_moves <- follow_moves::Future::poll::G",
+        "samples": 5037,
+        "percent": 13.432
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 3903,
+        "percent": 10.408
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 1436,
+        "percent": 3.829
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::register_partition <- group_sync_measurement::fixture::Fixture::keys",
+        "samples": 1372,
+        "percent": 3.659
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 1299,
+        "percent": 3.464
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 987,
+        "percent": 2.632
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "TypedRows::author_frame_carried::bundle::author_bundle_carried <- author_bundle_carried::Future::poll::E",
+        "samples": 941,
+        "percent": 2.509
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 566,
+        "percent": 1.509
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 547,
+        "percent": 1.459
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::to_bytes",
+        "samples": 448,
+        "percent": 1.195
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 447,
+        "percent": 1.192
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 405,
+        "percent": 1.08
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 365,
+        "percent": 0.973
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 362,
+        "percent": 0.965
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 308,
+        "percent": 0.821
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 304,
+        "percent": 0.811
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 262,
+        "percent": 0.699
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 222,
+        "percent": 0.592
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::encrypt <- rocky_secure::wire::author",
+        "samples": 161,
+        "percent": 0.429
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 157,
+        "percent": 0.419
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::sign",
+        "samples": 142,
+        "percent": 0.379
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 129,
+        "percent": 0.344
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj4_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 128,
+        "percent": 0.341
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 113,
+        "percent": 0.301
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "L1bv5kwMu_5alloc3vec3VecNtNtCsfiS03hsKwe1_10rocky_core11permissions13ResourceGrantENtNt::PjDWk9_13rocky_storage7sto::Error::rocky_secure <- rocky_core::typed_rows::TypedRows::follow_moves",
+        "samples": 112,
+        "percent": 0.299
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 92,
+        "percent": 0.245
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 90,
+        "percent": 0.24
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 86,
+        "percent": 0.229
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- hsK::rocky_core::manifest::definition_item_id",
+        "samples": 56,
+        "percent": 0.149
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::manifest::ApplicationManifest::app_id",
+        "samples": 53,
+        "percent": 0.141
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 48,
+        "percent": 0.128
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 43,
+        "percent": 0.115
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 34,
+        "percent": 0.091
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 33,
+        "percent": 0.088
+      },
+      {
+        "category": "wait (round trips, idle)",
+        "caller": "rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync <- rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync",
+        "samples": 29,
+        "percent": 0.077
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 24,
+        "percent": 0.064
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::sign <- rocky_secure::wire::author",
+        "samples": 20,
+        "percent": 0.053
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::sign <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 19,
+        "percent": 0.051
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "L1bv5kwMu_5alloc3vec3VecNtNtCsfiS03hsKwe1_10rocky_core11permissions8RowWriteERIBR_NtNtB::hash::Hash::rocky_secure <- evTWYq4Q::p2panda_core::hash::Hash",
+        "samples": 18,
+        "percent": 0.048
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::encrypt <- rocky_core::typed_rows::TypedRows::author_bundle_carried",
+        "samples": 16,
+        "percent": 0.043
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 15,
+        "percent": 0.04
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 15,
+        "percent": 0.04
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 15,
+        "percent": 0.04
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 15,
+        "percent": 0.04
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 11,
+        "percent": 0.029
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 10,
+        "percent": 0.027
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::verify",
+        "samples": 10,
+        "percent": 0.027
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 9,
+        "percent": 0.024
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::sign",
+        "samples": 9,
+        "percent": 0.024
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "group_sync_measurement::fixture::Fixture::key <- group_sync_measurement::fixture::Fixture::keys",
+        "samples": 9,
+        "percent": 0.024
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::partition::PartitionTuple::rocky_secure <- hsK::rocky_core::partition::PartitionTuple",
+        "samples": 7,
+        "percent": 0.019
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 5,
+        "percent": 0.013
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::row_id",
+        "samples": 5,
+        "percent": 0.013
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_core::typed_rows::TypedRows::identity_marks <- a_NcN::a_5Br::a_E0E::I_",
+        "samples": 5,
+        "percent": 0.013
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "open::path::PathBuf::rocky_secure <- rocky_secure::replica::Flusher::flush",
+        "samples": 5,
+        "percent": 0.013
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 4,
+        "percent": 0.011
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- rocky_secure::replica::moves::CreationProof",
+        "samples": 4,
+        "percent": 0.011
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 4,
+        "percent": 0.011
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- encode::replica::bundle::Opening",
+        "samples": 4,
+        "percent": 0.011
+      },
+      {
+        "category": "hashing",
+        "caller": "rocky_secure::wire::author <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::revocation_digest <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::storage_row",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::EncryptedFrame <- rocky_secure::encode::wire::EncryptedFrame",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::sign <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::Sets::replace <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "FnMut::B2c_E::call_mut::rocky_secure <- ResourceScope::NtNtBa_3cmp10Parti::lt::rocky_secure",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_secure::replica::keys::key_hash",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::yyEECsbWTAgFQBxPe_12 <- rocky_secure::encode::yyEEB2_",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::bundle_with",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::existence::ExistenceRecord <- encode::replica::existence::ExistenceRecord",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "",
+        "samples": 1,
+        "percent": 0.003
+      }
+    ]
+  },
+  "before-catch_up": {
+    "samples": 166196,
+    "unsampled_wall_seconds": 177.858,
+    "categories": {
+      "chain verification and credential resolution": {
+        "samples": 68500,
+        "percent": 41.216,
+        "estimated_seconds": 73.307
+      },
+      "encoding (CBOR)": {
+        "samples": 55145,
+        "percent": 33.181,
+        "estimated_seconds": 59.015
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 14857,
+        "percent": 8.939,
+        "estimated_seconds": 15.9
+      },
+      "storage (SQLite)": {
+        "samples": 12463,
+        "percent": 7.499,
+        "estimated_seconds": 13.338
+      },
+      "flush (fsync)": {
+        "samples": 9767,
+        "percent": 5.877,
+        "estimated_seconds": 10.452
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 2893,
+        "percent": 1.741,
+        "estimated_seconds": 3.096
+      },
+      "other": {
+        "samples": 1936,
+        "percent": 1.165,
+        "estimated_seconds": 2.072
+      },
+      "hashing": {
+        "samples": 369,
+        "percent": 0.222,
+        "estimated_seconds": 0.395
+      },
+      "wait (round trips, idle)": {
+        "samples": 266,
+        "percent": 0.16,
+        "estimated_seconds": 0.285
+      }
+    },
+    "entries": [
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::L1bv5kwMu_5alloc3vec3VechEyBT_EEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::encode::L1bv5kwMu_5alloc3vec3VechEyBG_EEEB2_",
+        "samples": 26891,
+        "percent": 16.18
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::apply_frame <- apply_frame::Future::poll::D",
+        "samples": 15082,
+        "percent": 9.075
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::required_members <- rocky_core::typed_rows::TypedRows::apply_bundle",
+        "samples": 15059,
+        "percent": 9.061
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::required_members",
+        "samples": 13249,
+        "percent": 7.972
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 12449,
+        "percent": 7.491
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::resolve_chain_scopes_at <- rocky_core::typed_rows::TypedRows::verify_chain_scopes",
+        "samples": 9255,
+        "percent": 5.569
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 8670,
+        "percent": 5.217
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::receive_step <- rocky_core::typed_rows::TypedRows::run_group",
+        "samples": 8648,
+        "percent": 5.203
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 5887,
+        "percent": 3.542
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 4775,
+        "percent": 2.873
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 4156,
+        "percent": 2.501
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 4049,
+        "percent": 2.436
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 3869,
+        "percent": 2.328
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_peer_behind <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 2637,
+        "percent": 1.587
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::range <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 2635,
+        "percent": 1.585
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2320,
+        "percent": 1.396
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::apply_frame",
+        "samples": 1864,
+        "percent": 1.122
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 1418,
+        "percent": 0.853
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::network::NativeSession::send <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1308,
+        "percent": 0.787
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_scope_peer <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1295,
+        "percent": 0.779
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 1291,
+        "percent": 0.777
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 1226,
+        "percent": 0.738
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 1115,
+        "percent": 0.671
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::network::SignedMessage <- rocky_secure::encode::network::SignedMessage",
+        "samples": 1087,
+        "percent": 0.654
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 1063,
+        "percent": 0.64
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::receive_step",
+        "samples": 1049,
+        "percent": 0.631
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::open_member",
+        "samples": 1041,
+        "percent": 0.626
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::network::SignedMessage <- rocky_secure::decode_bounded::network::SignedMessage",
+        "samples": 926,
+        "percent": 0.557
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 912,
+        "percent": 0.549
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 890,
+        "percent": 0.536
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::record_horizon_credentials <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 862,
+        "percent": 0.519
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj4_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 831,
+        "percent": 0.5
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::network::NativeSession::receive <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 804,
+        "percent": 0.484
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 755,
+        "percent": 0.454
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 681,
+        "percent": 0.41
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 582,
+        "percent": 0.35
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 367,
+        "percent": 0.221
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::apply_frame",
+        "samples": 343,
+        "percent": 0.206
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::to_bytes",
+        "samples": 301,
+        "percent": 0.181
+      },
+      {
+        "category": "wait (round trips, idle)",
+        "caller": "rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync <- rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync",
+        "samples": 266,
+        "percent": 0.16
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 217,
+        "percent": 0.131
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::receive_step",
+        "samples": 186,
+        "percent": 0.112
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 169,
+        "percent": 0.102
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 167,
+        "percent": 0.1
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::membership_of",
+        "samples": 167,
+        "percent": 0.1
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::network::Message <- rocky_secure::decode_bounded::network::Message",
+        "samples": 135,
+        "percent": 0.081
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "open::path::PathBuf::rocky_secure <- rocky_secure::replica::Flusher::flush",
+        "samples": 121,
+        "percent": 0.073
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::network::Message <- rocky_secure::encode::network::Message",
+        "samples": 106,
+        "percent": 0.064
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 95,
+        "percent": 0.057
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 90,
+        "percent": 0.054
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- decode_bounded::replica::bundle::Opening",
+        "samples": 86,
+        "percent": 0.052
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 84,
+        "percent": 0.051
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 68,
+        "percent": 0.041
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 64,
+        "percent": 0.039
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 56,
+        "percent": 0.034
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 54,
+        "percent": 0.032
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 52,
+        "percent": 0.031
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 43,
+        "percent": 0.026
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- encode::replica::bundle::Opening",
+        "samples": 42,
+        "percent": 0.025
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::manifest::ApplicationManifest::app_id",
+        "samples": 32,
+        "percent": 0.019
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 27,
+        "percent": 0.016
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 24,
+        "percent": 0.014
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- hsK::rocky_core::manifest::definition_item_id",
+        "samples": 23,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_page",
+        "samples": 21,
+        "percent": 0.013
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::verify",
+        "samples": 18,
+        "percent": 0.011
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 16,
+        "percent": 0.01
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::custody_offers <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 15,
+        "percent": 0.009
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::yyEECsbWTAgFQBxPe_12 <- rocky_secure::encode::yyEEB2_",
+        "samples": 11,
+        "percent": 0.007
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 11,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::existence_scopes <- rocky_secure::tests::group_sync_measurement::sync",
+        "samples": 11,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_base_offer",
+        "samples": 10,
+        "percent": 0.006
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_base_at",
+        "samples": 10,
+        "percent": 0.006
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::authorize_existence_peer",
+        "samples": 10,
+        "percent": 0.006
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::row_id",
+        "samples": 8,
+        "percent": 0.005
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::flush",
+        "samples": 8,
+        "percent": 0.005
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 6,
+        "percent": 0.004
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::EncryptedFrame <- rocky_secure::encode::wire::EncryptedFrame",
+        "samples": 6,
+        "percent": 0.004
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 5,
+        "percent": 0.003
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::replica::checkpoint::key_of <- rocky_core::typed_rows::TypedRows::frontier",
+        "samples": 5,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 4,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 4,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "L1bv5kwMu_5alloc11collections5btree3set8BTreeSetAhj20_ENtNtCs33v9mEcCS3W_4core3cmp9Part::ne::rocky_secure <- rocky_core::typed_rows::TypedRows::check_tuple",
+        "samples": 4,
+        "percent": 0.002
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_core::typed_rows::TypedRows::identity_marks <- a_NcN::a_5Br::a_E0E::I_",
+        "samples": 3,
+        "percent": 0.002
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::storage_row",
+        "samples": 3,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::record_frontiers <- rocky_core::typed_rows::TypedRows::record_frontier",
+        "samples": 3,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 3,
+        "percent": 0.002
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::existence_page",
+        "samples": 3,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- rocky_secure::replica::moves::CreationProof",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::L1bv5kwMu_5alloc3vec3VecINtNtCs33v9mEcCS3W_4core6option6OptionNtNtCsbWTAgFQBxPe_12rocky::replica::Stamp <- rocky_secure::encode::L1bv5kwMu_5alloc3vec3VecINtNtCs33v9mEcCS3W_4core6option6OptionNtNtB2_7replica5StampEEEB",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure <- PjDWk9_13rocky_storage17sc::ScopedConnection::execute::rocky_secure",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "BufMut::advance_mut::YL6yDJk::rocky_coordinator <- BufMut::put_slice::YL6yDJk::rocky_coordinator",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::record_horizon_credentials",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::replica::checkpoint::key_of <- rocky_core::typed_rows::TypedRows::logs",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "LeafOrInternal::find_key_index::z::rocky_secure <- LeafOrInternal::search_tree::y::rocky_secure",
+        "samples": 2,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::holding",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::roles::RoleConfig <- rocky_core::typed_rows::TypedRows::holds",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage7sto::collect_rows <- rocky_core::typed_rows::TypedRows::winner",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::EncryptedFrame::operation <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::index_row_key <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure <- PjDWk9_13rocky_storage17sc::ScopedConnection::execute::L1bv5kwMu_5alloc3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::find_scope_id",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::L1bv5kwMu_5alloc3vec3VecINtNtCs33v9mEcCS3W_4core6option6OptionNtNtCsbWTAgFQBxPe_12rocky::replica::Stamp <- rocky_secure::decode_bounded::L1bv5kwMu_5alloc3vec3VecINtNtCs33v9mEcCS3W_4core6option6OptionNtNtB2_7replica5StampEEEB",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- moves::CreationProof::Global::k_",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_allows_position <- rocky_core::typed_rows::TypedRows::apply_frame",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Rows::next <- rocky_core::typed_rows::TypedRows::stored_status",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure <- ScopedConnection::execute::E::rocky_secure",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::is_autocommit",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Rows::next <- PjDWk9_13rocky_storage7sto::collect_rows",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Rows::next <- rocky_core::typed_rows::TypedRows::find_scope_id",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_state <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::revocation_digest <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "typed_rows::TypedRows::resolve_chain_scopes_at::c_ <- typed_rows::TypedRows::resolve_chain_scopes_at::S",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "FnMut::B2c_E::call_mut::rocky_secure <- ResourceScope::NtNtBa_3cmp10::lt::rocky_secure",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::existence::ExistenceRecord::hash",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::existence::Statement <- encode::replica::existence::Statement",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_existence <- rocky_core::typed_rows::TypedRows::receive_existence",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage7sto::collect_rows <- PjDWk9_13rocky_storage7sto::collect_rows",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::store_frontiers <- rocky_core::typed_rows::TypedRows::store_frontiers",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::horizon_bootstrap",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::network::Message <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1,
+        "percent": 0.001
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_allows_position",
+        "samples": 1,
+        "percent": 0.001
+      }
+    ]
+  },
+  "before-checkpoint": {
+    "samples": 42834,
+    "unsampled_wall_seconds": 49.881,
+    "categories": {
+      "chain verification and credential resolution": {
+        "samples": 32705,
+        "percent": 76.353,
+        "estimated_seconds": 38.086
+      },
+      "encoding (CBOR)": {
+        "samples": 7727,
+        "percent": 18.039,
+        "estimated_seconds": 8.998
+      },
+      "other": {
+        "samples": 873,
+        "percent": 2.038,
+        "estimated_seconds": 1.017
+      },
+      "storage (SQLite)": {
+        "samples": 592,
+        "percent": 1.382,
+        "estimated_seconds": 0.689
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 520,
+        "percent": 1.214,
+        "estimated_seconds": 0.606
+      },
+      "hashing": {
+        "samples": 222,
+        "percent": 0.518,
+        "estimated_seconds": 0.259
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 195,
+        "percent": 0.455,
+        "estimated_seconds": 0.227
+      }
+    },
+    "entries": [
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::checkpoint_step",
+        "samples": 32249,
+        "percent": 75.288
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 1958,
+        "percent": 4.571
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- encode::replica::checkpoint::SignedCheckpoint",
+        "samples": 905,
+        "percent": 2.113
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "checkpoint::SignedCheckpoint::from_bytes::Version <- replica::checkpoint::SignedCheckpoint::from_bytes",
+        "samples": 880,
+        "percent": 2.054
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- decode_bounded::replica::checkpoint::SignedCheckpoint",
+        "samples": 763,
+        "percent": 1.781
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 681,
+        "percent": 1.59
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 675,
+        "percent": 1.576
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 431,
+        "percent": 1.006
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 412,
+        "percent": 0.962
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 399,
+        "percent": 0.932
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 345,
+        "percent": 0.805
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::signing_bytes <- replica::checkpoint::SignedCheckpoint::sign",
+        "samples": 232,
+        "percent": 0.542
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 228,
+        "percent": 0.532
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 220,
+        "percent": 0.514
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::signing_bytes <- replica::checkpoint::SignedCheckpoint::verify_signature",
+        "samples": 193,
+        "percent": 0.451
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_secure::replica::restore::replay_changes",
+        "samples": 175,
+        "percent": 0.409
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 165,
+        "percent": 0.385
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 152,
+        "percent": 0.355
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 140,
+        "percent": 0.327
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 123,
+        "percent": 0.287
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 95,
+        "percent": 0.222
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::Capture <- decode_bounded::replica::checkpoint::Capture",
+        "samples": 75,
+        "percent": 0.175
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 48,
+        "percent": 0.112
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 47,
+        "percent": 0.11
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 43,
+        "percent": 0.1
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 42,
+        "percent": 0.098
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::checkpoint::SignedCheckpoint::sign <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 40,
+        "percent": 0.093
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 33,
+        "percent": 0.077
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::Capture <- encode::replica::checkpoint::Capture",
+        "samples": 32,
+        "percent": 0.075
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::checkpoint::SignedCheckpoint::verify_signature <- rocky_core::typed_rows::TypedRows::verify_record",
+        "samples": 31,
+        "percent": 0.072
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 22,
+        "percent": 0.051
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::digest",
+        "samples": 19,
+        "percent": 0.044
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 12,
+        "percent": 0.028
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 12,
+        "percent": 0.028
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 10,
+        "percent": 0.023
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 8,
+        "percent": 0.019
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 8,
+        "percent": 0.019
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 8,
+        "percent": 0.019
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::create::chain",
+        "samples": 8,
+        "percent": 0.019
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 5,
+        "percent": 0.012
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 5,
+        "percent": 0.012
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 4,
+        "percent": 0.009
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::v9mEcCS3W_4core5clone5Clone5clone <- SignedCheckpoint::clone::Clone::clone",
+        "samples": 4,
+        "percent": 0.009
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 3,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::seal_step <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 3,
+        "percent": 0.007
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu <- PjDWk9_13rocky_storage17sc::ScopedConnection::execute::L1bv5kwMu_5alloc3vec3VecNtNtB9_6sqlite5ValueEE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure <- PjDWk9_13rocky_storage17sc::ScopedConnection::execute::rocky_secure",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- rocky_secure::replica::checkpoint::SignedCheckpoint",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::strong_summary",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- replica::moves::CreationProof::cloned",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::revocation_digest <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::command::history::StrongState <- encode::command::history::StrongState",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::replica::checkpoint::key_of <- rocky_core::typed_rows::TypedRows::logs",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage7sto::collect_rows <- rocky_core::typed_rows::TypedRows::identity_marks",
+        "samples": 1,
+        "percent": 0.002
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- rocky_secure::tests::group_sync_measurement::measure",
+        "samples": 1,
+        "percent": 0.002
+      }
+    ]
+  },
+  "after-register_author": {
+    "samples": 15300,
+    "unsampled_wall_seconds": 18.388,
+    "categories": {
+      "chain verification and credential resolution": {
+        "samples": 7853,
+        "percent": 51.327,
+        "estimated_seconds": 9.438
+      },
+      "encoding (CBOR)": {
+        "samples": 2983,
+        "percent": 19.497,
+        "estimated_seconds": 3.585
+      },
+      "other": {
+        "samples": 2322,
+        "percent": 15.176,
+        "estimated_seconds": 2.791
+      },
+      "storage (SQLite)": {
+        "samples": 672,
+        "percent": 4.392,
+        "estimated_seconds": 0.808
+      },
+      "flush (fsync)": {
+        "samples": 539,
+        "percent": 3.523,
+        "estimated_seconds": 0.648
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 497,
+        "percent": 3.248,
+        "estimated_seconds": 0.597
+      },
+      "hashing": {
+        "samples": 261,
+        "percent": 1.706,
+        "estimated_seconds": 0.314
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 91,
+        "percent": 0.595,
+        "estimated_seconds": 0.109
+      },
+      "wait (round trips, idle)": {
+        "samples": 82,
+        "percent": 0.536,
+        "estimated_seconds": 0.099
+      }
+    },
+    "entries": [
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::validate_keys <- rocky_core::typed_rows::TypedRows::install_key",
+        "samples": 4561,
+        "percent": 29.81
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::register_partition <- group_sync_measurement::fixture::Fixture::keys",
+        "samples": 1126,
+        "percent": 7.359
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 963,
+        "percent": 6.294
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "TypedRows::author_frame_carried::bundle::author_bundle_carried <- author_bundle_carried::Future::poll::E",
+        "samples": 891,
+        "percent": 5.824
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 539,
+        "percent": 3.523
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::to_bytes",
+        "samples": 403,
+        "percent": 2.634
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 389,
+        "percent": 2.542
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 364,
+        "percent": 2.379
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 363,
+        "percent": 2.373
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 348,
+        "percent": 2.275
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 309,
+        "percent": 2.02
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 284,
+        "percent": 1.856
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 220,
+        "percent": 1.438
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 180,
+        "percent": 1.176
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::encrypt <- rocky_secure::wire::author",
+        "samples": 167,
+        "percent": 1.092
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 163,
+        "percent": 1.065
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 154,
+        "percent": 1.007
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 150,
+        "percent": 0.98
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 140,
+        "percent": 0.915
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::sign",
+        "samples": 138,
+        "percent": 0.902
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 132,
+        "percent": 0.863
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 110,
+        "percent": 0.719
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 91,
+        "percent": 0.595
+      },
+      {
+        "category": "wait (round trips, idle)",
+        "caller": "rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync <- rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync",
+        "samples": 82,
+        "percent": 0.536
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 79,
+        "percent": 0.516
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::follow_moves <- follow_moves::Future::poll::G",
+        "samples": 62,
+        "percent": 0.405
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::manifest::ApplicationManifest::app_id",
+        "samples": 58,
+        "percent": 0.379
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 47,
+        "percent": 0.307
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 46,
+        "percent": 0.301
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- hsK::rocky_core::manifest::definition_item_id",
+        "samples": 37,
+        "percent": 0.242
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 27,
+        "percent": 0.176
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "open::path::PathBuf::rocky_secure <- rocky_secure::replica::Flusher::flush",
+        "samples": 27,
+        "percent": 0.176
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 26,
+        "percent": 0.17
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 25,
+        "percent": 0.163
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::encrypt <- rocky_core::typed_rows::TypedRows::author_bundle_carried",
+        "samples": 21,
+        "percent": 0.137
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 20,
+        "percent": 0.131
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj4_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 20,
+        "percent": 0.131
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 20,
+        "percent": 0.131
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::sign <- rocky_secure::wire::author",
+        "samples": 20,
+        "percent": 0.131
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 14,
+        "percent": 0.092
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::sign <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 14,
+        "percent": 0.092
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 11,
+        "percent": 0.072
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 9,
+        "percent": 0.059
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::verify",
+        "samples": 9,
+        "percent": 0.059
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::sign",
+        "samples": 9,
+        "percent": 0.059
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "L1bv5kwMu_5alloc3vec3VecNtNtCsfiS03hsKwe1_10rocky_core11permissions8RowWriteERIBR_NtNtB::hash::Hash::rocky_secure <- evTWYq4Q::p2panda_core::hash::Hash",
+        "samples": 9,
+        "percent": 0.059
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 8,
+        "percent": 0.052
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "group_sync_measurement::fixture::Fixture::key <- group_sync_measurement::fixture::Fixture::keys",
+        "samples": 8,
+        "percent": 0.052
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 6,
+        "percent": 0.039
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 5,
+        "percent": 0.033
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::storage_row",
+        "samples": 5,
+        "percent": 0.033
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "FnMut::B2c_E::call_mut::rocky_secure <- cmp::PartialOrd::lt::rocky_secure",
+        "samples": 5,
+        "percent": 0.033
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 4,
+        "percent": 0.026
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::row_id",
+        "samples": 4,
+        "percent": 0.026
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_core::typed_rows::TypedRows::identity_marks <- a_NcN::a_5Br::a_E0E::I_",
+        "samples": 4,
+        "percent": 0.026
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 4,
+        "percent": 0.026
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- encode::replica::bundle::Opening",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::bundle_with",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "iterator::Iterator::next::rocky_secure <- P_8BT::y::from_sorted_iter::E0EENtNtB9_5alloc6GlobalECsbWTAgFQBxPe_12rocky_secure",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::partition::PartitionTuple::rocky_secure <- hsK::rocky_core::partition::PartitionTuple",
+        "samples": 3,
+        "percent": 0.02
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::Sets::replace <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 2,
+        "percent": 0.013
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::EncryptedFrame <- rocky_secure::encode::wire::EncryptedFrame",
+        "samples": 2,
+        "percent": 0.013
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::revocation_digest <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 2,
+        "percent": 0.013
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "FnMut::B2c_E::call_mut::rocky_secure <- ResourceScope::NtNtBa_3cmp10::lt::rocky_secure",
+        "samples": 2,
+        "percent": 0.013
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::decode_operation",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- rocky_secure::replica::moves::CreationProof",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- moves::CreationProof::Global::k_",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "hashing",
+        "caller": "rocky_secure::wire::author <- TypedRows::author_frame_carried::bundle::author_bundle_carried",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure <- ScopedConnection::query::E::rocky_secure",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::roles::RoleConfig <- rocky_core::typed_rows::TypedRows::holds",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::yyEECsbWTAgFQBxPe_12 <- rocky_secure::encode::yyEEB2_",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::mergeable_horizon",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "FnMut::B2c_E::call_mut::rocky_secure <- ResourceScope::NtNtBa_3cmp10Partia::lt::rocky_secure",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- partition_groups::logical::LogicalSchema::group_address",
+        "samples": 1,
+        "percent": 0.007
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::existence::ExistenceRecord <- encode::replica::existence::ExistenceRecord",
+        "samples": 1,
+        "percent": 0.007
+      }
+    ]
+  },
+  "after-catch_up": {
+    "samples": 39994,
+    "unsampled_wall_seconds": 49.69,
+    "categories": {
+      "chain verification and credential resolution": {
+        "samples": 19688,
+        "percent": 49.227,
+        "estimated_seconds": 24.461
+      },
+      "encoding (CBOR)": {
+        "samples": 7931,
+        "percent": 19.83,
+        "estimated_seconds": 9.854
+      },
+      "flush (fsync)": {
+        "samples": 4468,
+        "percent": 11.172,
+        "estimated_seconds": 5.551
+      },
+      "other": {
+        "samples": 2985,
+        "percent": 7.464,
+        "estimated_seconds": 3.709
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 1951,
+        "percent": 4.878,
+        "estimated_seconds": 2.424
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 1629,
+        "percent": 4.073,
+        "estimated_seconds": 2.024
+      },
+      "storage (SQLite)": {
+        "samples": 981,
+        "percent": 2.453,
+        "estimated_seconds": 1.219
+      },
+      "hashing": {
+        "samples": 285,
+        "percent": 0.713,
+        "estimated_seconds": 0.354
+      },
+      "wait (round trips, idle)": {
+        "samples": 76,
+        "percent": 0.19,
+        "estimated_seconds": 0.094
+      }
+    },
+    "entries": [
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::resolve_chain_scopes_at <- rocky_core::typed_rows::TypedRows::verify_chain_scopes",
+        "samples": 8473,
+        "percent": 21.186
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 2521,
+        "percent": 6.303
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_peer_behind <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 2413,
+        "percent": 6.033
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::range <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 2371,
+        "percent": 5.928
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 1942,
+        "percent": 4.856
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::apply_frame",
+        "samples": 1635,
+        "percent": 4.088
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 1249,
+        "percent": 3.123
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_scope_peer <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1247,
+        "percent": 3.118
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::network::NativeSession::send <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1170,
+        "percent": 2.925
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 1118,
+        "percent": 2.795
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::network::SignedMessage <- rocky_secure::encode::network::SignedMessage",
+        "samples": 1050,
+        "percent": 2.625
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::receive_step",
+        "samples": 968,
+        "percent": 2.42
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 945,
+        "percent": 2.363
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_frame <- rocky_core::typed_rows::TypedRows::open_member",
+        "samples": 943,
+        "percent": 2.358
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 853,
+        "percent": 2.133
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::network::SignedMessage <- rocky_secure::decode_bounded::network::SignedMessage",
+        "samples": 845,
+        "percent": 2.113
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::record_horizon_credentials <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 752,
+        "percent": 1.88
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::network::NativeSession::receive <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 723,
+        "percent": 1.808
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 628,
+        "percent": 1.57
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 533,
+        "percent": 1.333
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 398,
+        "percent": 0.995
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::receive_step <- rocky_core::typed_rows::TypedRows::run_group",
+        "samples": 349,
+        "percent": 0.873
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::to_bytes",
+        "samples": 314,
+        "percent": 0.785
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 290,
+        "percent": 0.725
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::apply_frame",
+        "samples": 286,
+        "percent": 0.715
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 216,
+        "percent": 0.54
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 201,
+        "percent": 0.503
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::required_members",
+        "samples": 171,
+        "percent": 0.428
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::membership_of",
+        "samples": 164,
+        "percent": 0.41
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::receive_step",
+        "samples": 155,
+        "percent": 0.388
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 145,
+        "percent": 0.363
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 140,
+        "percent": 0.35
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 138,
+        "percent": 0.345
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 133,
+        "percent": 0.333
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "open::path::PathBuf::rocky_secure <- rocky_secure::replica::Flusher::flush",
+        "samples": 128,
+        "percent": 0.32
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 114,
+        "percent": 0.285
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 113,
+        "percent": 0.283
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::network::Message <- rocky_secure::decode_bounded::network::Message",
+        "samples": 105,
+        "percent": 0.263
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::network::Message <- rocky_secure::encode::network::Message",
+        "samples": 97,
+        "percent": 0.243
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 90,
+        "percent": 0.225
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 85,
+        "percent": 0.213
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 83,
+        "percent": 0.208
+      },
+      {
+        "category": "wait (round trips, idle)",
+        "caller": "rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync <- rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync",
+        "samples": 76,
+        "percent": 0.19
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 67,
+        "percent": 0.168
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- decode_bounded::replica::bundle::Opening",
+        "samples": 59,
+        "percent": 0.148
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 44,
+        "percent": 0.11
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::bundle::Opening <- encode::replica::bundle::Opening",
+        "samples": 34,
+        "percent": 0.085
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::manifest::ApplicationManifest::app_id",
+        "samples": 32,
+        "percent": 0.08
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 30,
+        "percent": 0.075
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::custody_offers <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 30,
+        "percent": 0.075
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::moves::CreationProof::verify <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 25,
+        "percent": 0.063
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 25,
+        "percent": 0.063
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- hsK::rocky_core::manifest::definition_item_id",
+        "samples": 24,
+        "percent": 0.06
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 20,
+        "percent": 0.05
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_page",
+        "samples": 20,
+        "percent": 0.05
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 16,
+        "percent": 0.04
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 15,
+        "percent": 0.038
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 15,
+        "percent": 0.038
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj4_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 14,
+        "percent": 0.035
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::bytes <- replica::moves::CreationProof::verify",
+        "samples": 12,
+        "percent": 0.03
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::yyEECsbWTAgFQBxPe_12 <- rocky_secure::encode::yyEEB2_",
+        "samples": 12,
+        "percent": 0.03
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 11,
+        "percent": 0.028
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_base_offer",
+        "samples": 10,
+        "percent": 0.025
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::existence_base_at",
+        "samples": 10,
+        "percent": 0.025
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAINtNtB1d_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 9,
+        "percent": 0.023
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::authorize_domain_peer <- rocky_core::typed_rows::TypedRows::authorize_existence_peer",
+        "samples": 9,
+        "percent": 0.023
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::required_members <- n_E14::Map::IB7U_INtNtNtBa_5slice4iter4IterBV_EB1S_E::v_EE0",
+        "samples": 6,
+        "percent": 0.015
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::replica::checkpoint::key_of <- rocky_core::typed_rows::TypedRows::frontier",
+        "samples": 6,
+        "percent": 0.015
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::row_id",
+        "samples": 5,
+        "percent": 0.013
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 4,
+        "percent": 0.01
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 4,
+        "percent": 0.01
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "p2panda_core::cbor::encode_cbor::L1bv5kwMu_5alloc3vec3VechEyBT_EEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::encode::L1bv5kwMu_5alloc3vec3VechEyBG_EEEB2_",
+        "samples": 4,
+        "percent": 0.01
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- PjDWk9_13rocky_storage7sto::collect_rows",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::existence_page",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::decode_operation",
+        "samples": 3,
+        "percent": 0.008
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj3_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::typed_rows::TypedRows::storage_row",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_secure::replica::keys::key_hash",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- ResourceScope::wire::Extensions::get_raw_operation",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::Flusher::flush <- replica::group::Exposed::answer",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::revocation_digest <- rocky_core::typed_rows::TypedRows::maintain_scope",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_existence <- rocky_core::typed_rows::TypedRows::receive_existence",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::network::Hello <- rocky_secure::decode_bounded::network::Hello",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::identity::PublicKey::L1bv5kwMu_5alloc3vec3VechEEj2_EECsbWTAgFQBxPe_12rocky_secure <- p2panda_core::identity::PublicKey::L1bv5kwMu_5alloc3vec3VechEEj2_EEB2_",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "typed_rows::TypedRows::resolve_chain_scopes_at::c_ <- typed_rows::TypedRows::resolve_chain_scopes_at::S",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::replica::checkpoint::key_of <- rocky_core::typed_rows::TypedRows::logs",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "BufMut::advance_mut::YL6yDJk::rocky_coordinator <- BufMut::put_slice::YL6yDJk::rocky_coordinator",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "flush (fsync)",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::flush",
+        "samples": 2,
+        "percent": 0.005
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::EncryptedFrame::operation <- rocky_core::typed_rows::TypedRows::write_materialized",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- rocky_secure::replica::moves::CreationProof",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::moves::CreationProof::v9mEcCS3W_4core5clone5Clone5clone <- rocky_core::typed_rows::TypedRows::materialize",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::EncryptedFrame::operation <- rocky_core::typed_rows::TypedRows::dependencies_ready",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_allows_position <- rocky_core::typed_rows::TypedRows::horizon_allows_position",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::apply_frame <- apply_frame::Future::poll::F",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure <- ScopedConnection::execute::E::rocky_secure",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::discover_partition <- rocky_core::typed_rows::TypedRows::receive_with",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "hsK::rocky_core::typed_rows::TypedRows <- rocky_secure::tests::group_sync_measurement::sync",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::horizon_device_behind <- rocky_core::typed_rows::TypedRows::horizon_device_behind",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::record_frontiers <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::peer_holds <- hsK::rocky_core::typed_rows::TypedRows",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::PjDWk9_13rocky_storage6sql::Rows <- rocky_core::typed_rows::TypedRows::find_scope_id",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::verify_chain_scopes <- rocky_core::typed_rows::TypedRows::record_horizon_credentials",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Rows::next <- rocky_core::typed_rows::TypedRows::record_horizon_credentials",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::Flusher::flush <- rocky_core::typed_rows::TypedRows::range_page",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::network::frame_signing_bytes <- rocky_secure::network::NativeSession::send",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::mergeable_horizon <- rocky_core::typed_rows::TypedRows::exchange_frontiers",
+        "samples": 1,
+        "percent": 0.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::network::frame_signing_bytes <- rocky_secure::network::NativeSession::receive",
+        "samples": 1,
+        "percent": 0.003
+      }
+    ]
+  },
+  "after-checkpoint": {
+    "samples": 7326,
+    "unsampled_wall_seconds": 8.577,
+    "categories": {
+      "encoding (CBOR)": {
+        "samples": 4866,
+        "percent": 66.421,
+        "estimated_seconds": 5.697
+      },
+      "other": {
+        "samples": 735,
+        "percent": 10.033,
+        "estimated_seconds": 0.861
+      },
+      "chain verification and credential resolution": {
+        "samples": 571,
+        "percent": 7.794,
+        "estimated_seconds": 0.669
+      },
+      "sealing (encrypt, decrypt)": {
+        "samples": 508,
+        "percent": 6.934,
+        "estimated_seconds": 0.595
+      },
+      "storage (SQLite)": {
+        "samples": 366,
+        "percent": 4.996,
+        "estimated_seconds": 0.428
+      },
+      "hashing": {
+        "samples": 202,
+        "percent": 2.757,
+        "estimated_seconds": 0.236
+      },
+      "signatures (frames, checkpoints)": {
+        "samples": 75,
+        "percent": 1.024,
+        "estimated_seconds": 0.088
+      },
+      "wait (round trips, idle)": {
+        "samples": 3,
+        "percent": 0.041,
+        "estimated_seconds": 0.004
+      }
+    },
+    "entries": [
+      {
+        "category": "encoding (CBOR)",
+        "caller": "checkpoint::SignedCheckpoint::from_bytes::Version <- replica::checkpoint::SignedCheckpoint::from_bytes",
+        "samples": 871,
+        "percent": 11.889
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- encode::replica::checkpoint::SignedCheckpoint",
+        "samples": 856,
+        "percent": 11.684
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- decode_bounded::replica::checkpoint::SignedCheckpoint",
+        "samples": 729,
+        "percent": 9.951
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Version <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 418,
+        "percent": 5.706
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::Extensions <- rocky_secure::encode::wire::Extensions",
+        "samples": 399,
+        "percent": 5.446
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::decode_bounded::wire::BundleBody",
+        "samples": 385,
+        "percent": 5.255
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- operation::Header::wire::Extensions",
+        "samples": 378,
+        "percent": 5.16
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_core::typed_rows::TypedRows::row_payload",
+        "samples": 340,
+        "percent": 4.641
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::signing_bytes <- replica::checkpoint::SignedCheckpoint::verify_signature",
+        "samples": 223,
+        "percent": 3.044
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::BundleBody <- rocky_secure::encode::wire::BundleBody",
+        "samples": 220,
+        "percent": 3.003
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::signing_bytes <- replica::checkpoint::SignedCheckpoint::sign",
+        "samples": 212,
+        "percent": 2.894
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringuE0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 169,
+        "percent": 2.307
+      },
+      {
+        "category": "sealing (encrypt, decrypt)",
+        "caller": "rocky_secure::wire::decrypt <- rocky_secure::replica::restore::replay_changes",
+        "samples": 168,
+        "percent": 2.293
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::mix",
+        "samples": 145,
+        "percent": 1.979
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::replica::Materialized <- rocky_secure::decode_bounded::replica::Materialized",
+        "samples": 138,
+        "percent": 1.884
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::hash",
+        "samples": 133,
+        "percent": 1.815
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::wire::Extensions::h <- rocky_secure::wire::Extensions::verify",
+        "samples": 127,
+        "percent": 1.734
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::scope_key <- rocky_core::typed_rows::TypedRows::checkpoint_step",
+        "samples": 112,
+        "percent": 1.529
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::replica::Materialized <- rocky_secure::encode::replica::Materialized",
+        "samples": 95,
+        "percent": 1.297
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringuE0Ba_",
+        "samples": 89,
+        "percent": 1.215
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::Capture <- decode_bounded::replica::checkpoint::Capture",
+        "samples": 45,
+        "percent": 0.614
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::permissions::ResourceScope::rocky_secure <- hsK::rocky_core::permissions::ResourceScope",
+        "samples": 40,
+        "percent": 0.546
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::checkpoint::SignedCheckpoint::sign <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 29,
+        "percent": 0.396
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAINtNtB1b_3vec3VechEj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 25,
+        "percent": 0.341
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringINtNtB1b_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 25,
+        "percent": 0.341
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringINtNtB1d_3vec3VecNtB8_5ValueEE0CsbWTAgFQBxPe_12rocky_secu",
+        "samples": 25,
+        "percent": 0.341
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "rocky_secure::wire::Extensions::verify <- validate_header::rocky_secure::wire::Extensions",
+        "samples": 24,
+        "percent": 0.328
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::EncryptedFrame::operation",
+        "samples": 22,
+        "percent": 0.3
+      },
+      {
+        "category": "signatures (frames, checkpoints)",
+        "caller": "replica::checkpoint::SignedCheckpoint::verify_signature <- rocky_core::typed_rows::TypedRows::verify_record",
+        "samples": 22,
+        "percent": 0.3
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_secure::replica::checkpoint::Capture <- encode::replica::checkpoint::Capture",
+        "samples": 20,
+        "percent": 0.273
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::Lt::digest",
+        "samples": 16,
+        "percent": 0.218
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 15,
+        "percent": 0.205
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::query::L1bv5kwMu_5alloc6string6StringAxj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 12,
+        "percent": 0.164
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone <- rocky_secure::wire::Extensions::v9mEcCS3W_4core5clone5Clone5clone",
+        "samples": 9,
+        "percent": 0.123
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "wire::RowPayload::check_formats::Envelope <- rocky_secure::wire::RowPayload::check_formats",
+        "samples": 6,
+        "percent": 0.082
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::partition::PartitionTuple::scope",
+        "samples": 6,
+        "percent": 0.082
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- replica::checkpoint::create::chain",
+        "samples": 5,
+        "percent": 0.068
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "decode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::decode_bounded::wire::WitnessBody",
+        "samples": 3,
+        "percent": 0.041
+      },
+      {
+        "category": "wait (round trips, idle)",
+        "caller": "rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync <- rocky_secure::tests::group_sync_measurement::measure_200_partition_group_sync",
+        "samples": 3,
+        "percent": 0.041
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- moves::CreationProof::v9mEcCS3W_4core3ops4drop4Drop4dro::t_",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "hashing",
+        "caller": "validate_operation::rocky_secure::wire::Extensions <- rocky_secure::wire::EncryptedFrame::decode_operation",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "hashing",
+        "caller": "hash::Hash::new::L1bv5kwMu_5alloc3vec3VechEECsbWTAgFQBxPe_12rocky_secure <- rocky_secure::wire::Extensions::hash",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "v9mEcCS3W_4core3ptr9drop_glueNtNt::rocky_secure::wire::Extensions <- rocky_secure::wire::Extensions::t",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "encode_cbor::rocky_secure::wire::WitnessBody <- rocky_secure::encode::wire::WitnessBody",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- rocky_core::manifest::ApplicationManifest::app_id",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "hashing",
+        "caller": "hsK::rocky_core::strong::commitment <- hsK::rocky_core::manifest::definition_item_id",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::raw <- PjDWk9_13rocky_storage6sql::Connection::run",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "replica::checkpoint::SignedCheckpoint::v9mEcCS3W_4core5clone5Clone5clone <- SignedCheckpoint::clone::Clone::clone",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj2_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "storage (SQLite)",
+        "caller": "PjDWk9_13rocky_storage6sql::Connection::run <- PjDWk9_13rocky_storage6sql::Connection::execute::L1bv5kwMu_5alloc6string6StringAxj1_E0CsbWTAgFQBxPe_12rocky_secure",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::seal_step <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 2,
+        "percent": 0.027
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::EncryptedFrame::operation <- rocky_core::typed_rows::TypedRows::replay",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::wire::EncryptedFrame::operation <- rocky_secure::replica::restore::replay_changes",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "range::RangeTo::index_mut::rocky_secure <- replica::checkpoint::Lt::mix",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::moves::CreationProof <- rocky_secure::replica::moves::CreationProof",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- rocky_secure::replica::checkpoint::SignedCheckpoint",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "encoding (CBOR)",
+        "caller": "rocky_core::types::Scope::rocky_secure <- hsK::rocky_core::types::Scope",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_secure::replica::checkpoint::SignedCheckpoint <- rocky_core::typed_rows::TypedRows::seal_step",
+        "samples": 1,
+        "percent": 0.014
+      },
+      {
+        "category": "chain verification and credential resolution",
+        "caller": "rocky_core::typed_rows::TypedRows::mergeable_horizon <- rocky_core::typed_rows::TypedRows::begin_step",
+        "samples": 1,
+        "percent": 0.014
+      }
+    ]
+  }
+}

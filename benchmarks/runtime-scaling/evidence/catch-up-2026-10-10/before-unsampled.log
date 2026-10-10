@@ -1,0 +1,23 @@
+running 1 test
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=1 catch_up_ms=14131 idle_ms=148
+P09 partitions=200 tables=1 scopes=201 open_ms=32 register_ms=584 author_ms=3512 catch_up_ms=14131 idle_ms=148 checkpoint_ms=2734 reopen_ms=566 metadata_bytes_per_partition=430.08
+test tests::group_sync_measurement::measure_200_partition_group_sync has been running for over 60 seconds
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=4 catch_up_ms=177858 idle_ms=786
+P09 partitions=200 tables=4 scopes=801 open_ms=50 register_ms=14636 author_ms=30922 catch_up_ms=177858 idle_ms=786 checkpoint_ms=49881 reopen_ms=5277 metadata_bytes_per_partition=1597.44
+P09 additional_table open_ms=5.99
+P09 additional_table register_ms=4684.02
+P09 additional_table author_ms=9136.66
+P09 additional_table catch_up_ms=54575.64
+P09 additional_table idle_ms=212.56
+P09 additional_table checkpoint_ms=15715.79
+P09 additional_table reopen_ms=1570.66
+P09 additional_table metadata_bytes_per_partition=389.12
+test tests::group_sync_measurement::measure_200_partition_group_sync ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 195 filtered out; finished in 359.31s
+
+cargo test -p rocky-secure --lib measure_200_partition_group_sync --locked --  945.43s user 42.01s system 224% cpu 7:19.37 total

@@ -104,6 +104,21 @@ thread_local! {
     /// Seconds this test thread's clock runs ahead, to expire credentials
     /// without sleeping.
     static CLOCK_SKEW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Apply transactions this test thread's replicas may still start
+    /// before the pending pass is interrupted between two of them.
+    static APPLY_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+/// Spends one apply transaction of the thread's budget; false once it ran out.
+#[cfg(test)]
+fn apply_allowed() -> bool {
+    APPLY_BUDGET.with(|budget| match budget.get() {
+        Some(0) => false,
+        Some(left) => {
+            budget.set(Some(left - 1));
+            true
+        }
+        None => true,
+    })
 }
 
 #[cfg(test)]

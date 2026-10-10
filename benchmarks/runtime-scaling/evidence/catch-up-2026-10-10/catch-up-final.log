@@ -1,0 +1,14 @@
+   Compiling rocky-secure v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-secure)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.64s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 4 tests
+test tests::sql::catch_up::soak_a_writer_commits_within_the_write_limit_during_a_10000_operation_catch_up ... ignored, phase 3 measurement; run with --ignored --nocapture
+test tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening ... ok
+P03 authored operations=640 ms=12784
+test tests::sql::catch_up::an_interrupted_catch_up_resumes_and_applies_every_operation_once ... ok
+P03 catch_up operations=640 catch_up_ms=8446 writes=15 longest_write_ms=23 longest_hold_ms=359
+test tests::sql::catch_up::a_writer_commits_within_the_write_limit_during_a_catch_up ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 197 filtered out; finished in 21.33s
+

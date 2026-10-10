@@ -19,13 +19,14 @@ fn reader(f: &Fixture) -> Vec<ResourceGrant> {
 /// A device's chain: publisher, user, node.
 fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
     let user = PrivateKey::new();
+    let (not_before, expires) = crate::tests::lifetime();
     let capability = |subject, kind, delegations| Capability {
         manifest: f.app().definition().hash(),
         subject,
         kind,
         grants: grants.clone(),
-        not_before: crate::tests::lifetime().0,
-        expires: crate::tests::lifetime().1,
+        not_before,
+        expires,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),

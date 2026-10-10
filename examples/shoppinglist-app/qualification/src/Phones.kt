@@ -11,6 +11,7 @@ private const val TAG = "RockyShopping"
 /** One Android device running the debug shopping app, driven by its `rocky-shopping://drive` links; results are read from logcat. */
 internal class Phone(val name: String, val serial: String, private val log: File) {
     private var step = 0
+    private val runId = java.util.UUID.randomUUID().toString()
     fun adb(vararg args: String, strict: Boolean = true): String {
         val process = ProcessBuilder(listOf("adb", "-s", serial) + args).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().readText()
@@ -36,14 +37,14 @@ internal class Phone(val name: String, val serial: String, private val log: File
     }
     private class Busy(message: String) : Exception(message)
     private fun attempt(parameters: Array<out Pair<String, String>>, timeoutSeconds: Long): List<String> {
-        val marker = "$name-${++step}"
-        adb("logcat", "-c")
+        val marker = "$name-$runId-${++step}"
         // `adb shell` passes one command line to the device shell: quote the link, whose values are URL-encoded.
         val query = (parameters.toList() + ("step" to marker)).joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
         adb("shell", "am", "start", "-a", "android.intent.action.VIEW", "-p", PACKAGE, "-d", "'rocky-shopping://drive?$query'")
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
         while (System.nanoTime() < deadline) {
             val lines = adb("logcat", "-d", "-v", "raw", "-s", "$TAG:I").lines()
+                .dropWhile { it != "started $marker" }.drop(1)
             lines.firstOrNull { it.startsWith("failed $marker") }?.let {
                 if ("Error code: 4," in it) throw Busy(it)
                 error("$name: $it")
@@ -115,6 +116,8 @@ internal fun phones(peer: File, evidence: File) {
                 phone.send("peer" to custody.contact)
             }
             host.close()
+            // The closed enrollment host is no longer a sync target.
+            for (phone in listOf(a, b)) phone.send("forget" to host.node)
             notes += "${elapsed()} ms: both devices enrolled; the host issuer is closed"
 
             a.send("add" to "Milk", "list" to "Weekly")

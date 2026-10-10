@@ -190,6 +190,10 @@ pub(super) struct Inner<A> {
     strict_projection: bool,
     /// Constrained rows a change may affect, until the frame or commit settles.
     settling: std::sync::Mutex<constraints::Seeds>,
+    /// This device's grants as last resolved, for the authority, partition
+    /// count and second they were resolved at: resolving the chain against
+    /// every registered partition otherwise repeats for each frame and scope.
+    local: std::sync::Mutex<Option<LocalGrants>>,
     /// Cursors, table events and the authority mirror of this replica.
     pub(super) queries: queries::Queries,
     pub(super) notifications: watch::Sender<u64>,
@@ -307,6 +311,11 @@ pub struct Buffered<T> {
     pub value: T,
     pub commit: u64,
 }
+/// Resolved grants, shared by the callers within one authority and second.
+pub(super) type Grants = Arc<Vec<rocky_core::ResourceGrant>>;
+/// Grants with the authority, partition count and second they hold for.
+type LocalGrants = ((u64, usize, u64), Grants);
+
 /// Encrypted protocol files use an explicit API; trusted files cannot be opened here.
 pub struct EncryptedReplica<A> {
     pub(super) inner: Arc<Mutex<Inner<A>>>,
@@ -525,6 +534,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             horizon: 0,
             strict_projection: false,
             settling: Default::default(),
+            local: Default::default(),
             queries: Default::default(),
             notifications,
             frames: watch::channel(()).0,
@@ -626,13 +636,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
         inner.verify_open().await?;
-        inner.process_pending(now()?).await?;
-        Ok(Self {
+        let replica = Self {
             inner: Arc::new(Mutex::new(inner)),
             queue: Arc::default(),
             revisions,
             executing: Arc::default(),
-        })
+        };
+        replica.settle().await?;
+        Ok(replica)
     }
     /// Wakes after a frame group commits, including keyless custody receipt.
     /// Duplicate incoming frames do not wake it; exports still require a flush.
@@ -810,7 +821,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.config.keys.pop();
             return Err(error);
         }
-        inner.process_pending(now()?).await
+        drop(inner);
+        self.settle().await
     }
     pub async fn evict_key(&self, scope: ResourceScope) {
         let mut inner = self.inner.lock().await;
@@ -873,7 +885,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.config.revocations = merged;
         inner.bump_authority();
         inner.publish_revision().await?;
-        inner.process_pending(now()?).await?;
+        drop(inner);
+        self.settle().await?;
         Ok(added)
     }
     /// The revocations this replica holds.
@@ -951,13 +964,25 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) fn revocation_digest(&self) -> Result<Commitment, Error> {
         self.config.revocations.digest(now()?).map_err(credential)
     }
-    pub(super) fn local_grants(&self, time: u64) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        self.resolve_chain(
+    pub(super) fn local_grants(&self, time: u64) -> Result<Grants, Error> {
+        let key = (self.authority, self.partitions.len(), time);
+        let mut local = self
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((resolved, grants)) = local.as_ref()
+            && *resolved == key
+        {
+            return Ok(grants.clone());
+        }
+        let grants = Arc::new(self.resolve_chain(
             &self.config.credentials,
             self.config.node.public_key(),
             &self.config.revocations,
             time,
-        )
+        )?);
+        *local = Some((key, grants.clone()));
+        Ok(grants)
     }
     pub(super) fn can_read_key(
         &self,
@@ -971,7 +996,13 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     fn validate_keys(&self, time: u64) -> Result<(), Error> {
-        let grants = self.local_grants(time)?;
+        // `can_read_key` for every key at once.
+        let readable: BTreeSet<_> = self
+            .local_grants(time)?
+            .iter()
+            .filter(|grant| grant.rows == RowSelection::All && grant.rights.contains(&Right::Read))
+            .map(|grant| grant.scope)
+            .collect();
         let mut scopes = BTreeSet::new();
         let mut epochs = BTreeSet::new();
         let mut secrets = BTreeSet::new();
@@ -988,7 +1019,7 @@ impl<A: RowApplication> Inner<A> {
                 || (current == Some(key.generation) && !scopes.insert(key.scope))
                 || current.is_none_or(|current| current < key.generation)
                 || !secrets.insert(key.key)
-                || !self.can_read_key(key.scope, &grants)
+                || !readable.contains(&key.scope)
             {
                 return Err(denied(
                     "key requires read permission for every row in its encryption scope",
@@ -1244,6 +1275,10 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
         }
         self.config.revocations = merged;
+        *self
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
     }
 }

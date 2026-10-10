@@ -88,7 +88,7 @@ async fn enable(node: &Node) -> Result<(), Failure> {
     assert_eq!(statuses.borrow()["retry"], false);
     Ok(())
 }
-async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
+async fn install_pseudonym(node: &Node) -> Result<(), Failure> {
     let client = node.client(1)?;
     let request = node
         .dispatch(
@@ -107,6 +107,11 @@ async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
         &json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
     )
     .await?;
+    Ok(())
+}
+async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
+    install_pseudonym(node).await?;
+    let client = node.client(1)?;
     node.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
         .await?;
     let id = node
@@ -362,3 +367,52 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
 }
 
 mod change_driven;
+
+/// A renewal holds the settings while it teaches the replica. A Room write
+/// that holds the replica must not wait for the settings: that cycle lasted
+/// until the transaction timed out with code 4 on the emulator pair.
+#[tokio::test]
+async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<(), Failure> {
+    use crate::connection::{Call, ConnectionOptions, Profile, Registry, Reply, serve};
+    tokio::task::LocalSet::new().run_until(async {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+        install_pseudonym(&node).await?;
+        let connections = Registry::default();
+        let options = ConnectionOptions {
+            read_only: false,
+            profile: Some(Profile::Room284),
+            transaction_timeout: Some(Duration::from_secs(1)),
+        };
+        let writer = connections.get(connections.connect(node.clone(), options).await?)?;
+        let execute = |sql: &str, params: Vec<SqlValue>| {
+            let call = Call::Execute { statement: 1, sql: sql.into(), params };
+            serve(writer.clone(), call)
+        };
+        execute("BEGIN IMMEDIATE TRANSACTION", Vec::new()).await?;
+        let Reply::Page(page) = execute("SELECT rocky_next_id('items')", Vec::new()).await? else {
+            return Err("no row id".into());
+        };
+        let id = page.rows[0][0].clone();
+        // The transaction holds the replica: the renewal takes the settings
+        // and waits for the replica.
+        let renewal = node.renew(None, false, None);
+        tokio::pin!(renewal);
+        tokio::select! {
+            biased;
+            renewed = &mut renewal => return Err(format!("renewal did not wait: {renewed:?}").into()),
+            () = std::future::ready(()) => {}
+        }
+        assert!(node.settings.try_lock().is_err(), "the renewal holds the settings");
+        let write = async {
+            execute("INSERT INTO items(key,title,id) VALUES('k','Milk',?)", vec![id]).await?;
+            execute("COMMIT", Vec::new()).await
+        };
+        let (renewed, written) = tokio::join!(renewal, write);
+        written?;
+        renewed?;
+        node.detach(None).await;
+        Ok(())
+    }).await
+}

@@ -42,6 +42,53 @@ struct Hello {
     /// The digest of the sender's live revocations.
     revocations: Commitment,
 }
+/// What a session signs of each message is
+/// `signing_bytes("rocky.native-frame.v1", &(binding, sequence, bytes))`.
+/// A `Vec<u8>` encodes as an array of integers, which the generic encoder
+/// writes one element at a time, and the binding holds both hellos with
+/// their credential chains: encoding it for every message cost more than
+/// the signature. The session encodes it once, up to the sequence.
+fn frame_signing_head(binding: &Vec<u8>) -> Result<Vec<u8>, Error> {
+    let mut head = signing_bytes("rocky.native-frame.v1", &(binding, 0u64, &Vec::<u8>::new()))?;
+    // Sequence 0 and the empty message are the last two bytes.
+    if head.split_off(head.len().saturating_sub(2)) != [0x00, 0x80] {
+        return Err(Error::Corrupt("native frame signing head".into()));
+    }
+    Ok(head)
+}
+/// The signed bytes of one message, byte for byte as `signing_bytes`
+/// encodes them after `frame_signing_head`.
+fn frame_signing_bytes(head: &[u8], sequence: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut signed = Vec::with_capacity(head.len() + 18 + 2 * bytes.len());
+    signed.extend_from_slice(head);
+    cbor_head(&mut signed, 0, sequence);
+    cbor_head(&mut signed, 4, bytes.len() as u64);
+    for byte in bytes {
+        cbor_head(&mut signed, 0, u64::from(*byte));
+    }
+    signed
+}
+/// A CBOR head in its shortest form, as the canonical encoder writes it.
+fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
+    let major = major << 5;
+    if let Ok(value) = u8::try_from(value) {
+        if value < 24 {
+            out.push(major | value);
+        } else {
+            out.extend([major | 24, value]);
+        }
+    } else if let Ok(value) = u16::try_from(value) {
+        out.push(major | 25);
+        out.extend(value.to_be_bytes());
+    } else if let Ok(value) = u32::try_from(value) {
+        out.push(major | 26);
+        out.extend(value.to_be_bytes());
+    } else {
+        out.push(major | 27);
+        out.extend(value.to_be_bytes());
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct SignedMessage {
     sequence: u64,
@@ -264,7 +311,8 @@ pub struct NativeSession {
     local: PrivateKey,
     peer: PublicKey,
     credentials: CredentialChain,
-    binding: Vec<u8>,
+    /// The encoded start of every message's signed bytes.
+    signing: Vec<u8>,
     sent: u64,
     received: u64,
     remaining: usize,
@@ -357,7 +405,7 @@ impl NativeSession {
             local,
             peer: peer.node,
             credentials: peer.credentials,
-            binding,
+            signing: frame_signing_head(&binding)?,
             sent: 0,
             received: 0,
             remaining: byte_budget,
@@ -376,10 +424,9 @@ impl NativeSession {
     }
     async fn send(&mut self, message: &Message) -> Result<(), Error> {
         let bytes = encode(message)?;
-        let signature = self.local.sign(&signing_bytes(
-            "rocky.native-frame.v1",
-            &(&self.binding, self.sent, &bytes),
-        )?);
+        let signature = self
+            .local
+            .sign(&frame_signing_bytes(&self.signing, self.sent, &bytes));
         let frame = encode(&SignedMessage {
             sequence: self.sent,
             bytes,
@@ -399,10 +446,7 @@ impl NativeSession {
         let message: SignedMessage = decode(&bytes)?;
         if message.sequence != self.received
             || !self.peer.verify(
-                &signing_bytes(
-                    "rocky.native-frame.v1",
-                    &(&self.binding, message.sequence, &message.bytes),
-                )?,
+                &frame_signing_bytes(&self.signing, message.sequence, &message.bytes),
                 &message.signature,
             )
         {
@@ -1710,4 +1754,25 @@ async fn read_frame(stream: &mut Box<dyn SessionStream>) -> Result<Vec<u8>, Erro
     })
     .await
     .map_err(|_| denied("native read timeout"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_signing_bytes_equal_the_generic_encoding() {
+        let binding = (0..4096).map(|index| (index % 251) as u8).collect();
+        let head = frame_signing_head(&binding).unwrap();
+        for length in [0, 1, 23, 24, 255, 256, 65_535, 65_536, 70_000] {
+            let bytes: Vec<u8> = (0..length).map(|index| (index * 31 % 256) as u8).collect();
+            for sequence in [0, 23, 24, 255, 256, 65_536, 1 << 40] {
+                assert_eq!(
+                    frame_signing_bytes(&head, sequence, &bytes),
+                    signing_bytes("rocky.native-frame.v1", &(&binding, sequence, &bytes)).unwrap(),
+                    "{length} bytes at {sequence}"
+                );
+            }
+        }
+    }
 }

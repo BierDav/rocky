@@ -75,8 +75,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 number,
             },
         );
-        inner.process_pending(now()?).await?;
-        Ok(())
+        drop(inner);
+        self.settle().await
     }
 }
 impl<A: RowApplication> Inner<A> {

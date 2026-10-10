@@ -1,0 +1,16 @@
+   Compiling rocky-sdk v0.1.0 (/Users/david-bieregger/RustroverProjects/rocky-db-ws/p03-catch-up-cost/crates/rocky-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.12s
+     Running unittests src/lib.rs (target/debug/deps/rocky_sdk-d88cb038d0df9e91)
+
+running 1 test
+Error: SqlFailure { code: 4, message: "SQL session: transaction was rolled back: Timeout" }
+test node::sync_tests::a_room_write_commits_while_a_renewal_waits_for_the_replica ... FAILED
+
+failures:
+
+failures:
+    node::sync_tests::a_room_write_commits_while_a_renewal_waits_for_the_replica
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 2.51s
+
+error: test failed, to rerun pass `-p rocky-sdk --lib`

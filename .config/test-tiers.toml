@@ -113,3 +113,33 @@ filter = '''
         | test(=tests::strong_history::executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base)
     ))
 '''
+
+# Accepted over-budget tests (Phase 3, catch-up cost). Each measured alone on the
+# reference host (2026-10-10). Remove or fix each before the expiry date.
+[[exception]]
+test = "rocky-secure network::tests::frame_signing_bytes_equal_the_generic_encoding"
+limit = "100ms"
+measured = "64.8ms"
+cause = "Frame signing in debug builds dominates; the test compares the signed bytes against the generic encoding."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-secure tests::sql::catch_up::retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening"
+limit = "3s"
+measured = "2.09s"
+cause = "Catch-up of a multi-table history plus an interrupted receipt retry; the setup is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-secure tests::sql::catch_up::an_interrupted_catch_up_resumes_and_applies_every_operation_once"
+limit = "4s"
+measured = "2.88s"
+cause = "Interrupted and resumed catch-up applies every operation once; the replay and the verification are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-secure tests::sql::catch_up::a_writer_commits_within_the_write_limit_during_a_catch_up"
+limit = "6s"
+measured = "4.82s"
+cause = "A writer commits concurrently with a catch-up while the write limit is asserted; the concurrent writes are the cost."
+expires = 2026-11-30

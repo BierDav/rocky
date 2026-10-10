@@ -1,0 +1,80 @@
+[
+  {
+    "run": 1,
+    "exit": 0,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 34572,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "19657 ms: both devices enrolled; the host issuer is closed",
+      "26463 ms: B received both lists through custody only",
+      "34558 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 2,
+    "exit": 0,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 33293,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "19015 ms: both devices enrolled; the host issuer is closed",
+      "25064 ms: B received both lists through custody only",
+      "32939 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 3,
+    "exit": 1,
+    "scenario": "phones",
+    "passed": false,
+    "milliseconds": 19334,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [],
+    "retried": [],
+    "error": "java.lang.IllegalStateException: adb logcat -c: \n\tat org.example.examples.shopping.qualification.Phone.adb(Phones.kt:18)\n\tat org.example.examples.shopping.qualification.Phone.adb$default(Phones.kt:14)\n\tat org.example.examples.shopping.qualification.Phone.attempt(Phones.kt:40)\n\tat org.example.examples.shopping.qualification.Phone.send(Phones.kt:30)\n\tat org.example.examples.shopping.qualification.Phone.send$default(Phones.kt:27)\n\tat org.example.examples.shopping.qualification.PhonesKt.phones(Phones.kt:119)\n\tat org.example.examples.shopping.qualification.QualificationKt.main(Qualification.kt:24)\n\tat org.example.examples.shopping.qualification.QualificationKt.main(Qualification.kt)\n"
+  }
+]

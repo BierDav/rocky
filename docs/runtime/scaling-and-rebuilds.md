@@ -13,11 +13,13 @@ seeks after the retained hash cursor and fetches at most 33 records: 32 delivera
 records and one lookahead. A page respects both the record and encoded-byte limits.
 Original signed/encrypted bytes are forwarded without reauthoring.
 
-Pending processing and reopen history verification fetch 32 records per batch.
-Pending processing advances its cursor even past unavailable keys/dependencies,
-then restarts a pass when any operation advanced. An unresolved first batch cannot
-starve later records. These batches bound query allocation; they do not shorten
-the entire operation or release its replica mutex between batches.
+Pending processing examines only the first pending frame of each log, since a
+later frame needs its backlink applied, and follows a log while its frames apply;
+it starts another round when any operation advanced. A waiting log costs one
+examination per round, so a long wait cannot starve the others. It applies at most
+64 operations per transaction and releases the replica mutex between
+transactions ([write concurrency](write-concurrency.md#encrypted-path)). Reopen
+history verification fetches 32 records per batch.
 
 Hash cursors describe a retained range, not a snapshot or commit sequence. Restart
 a pass after new receipts or subscription changes, including insertions before the
@@ -78,7 +80,8 @@ migration. Opening an incompatible compiled definition continues to fail closed.
 | Command, effect and recovery records | 4,096 records |
 | Transfer query batch | 33 records |
 | Transfer response | 32 records and caller quota, at most 256 KiB |
-| Pending/history query batch | 32 records |
+| Pending operations per apply transaction | 64 |
+| History query batch | 32 records |
 | Recovery custody archives | 32 MiB aggregate stored package bytes |
 | Recovery package | 32 MiB encoded bytes |
 | Scope read (`snapshot`, one `snapshot_page`) | 1,024 live rows and 1 MiB stored records |

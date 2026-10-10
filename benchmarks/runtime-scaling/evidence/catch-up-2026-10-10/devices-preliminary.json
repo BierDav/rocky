@@ -1,0 +1,131 @@
+[
+  {
+    "run": 1,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 89988,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "72015 ms: both devices enrolled; the host issuer is closed",
+      "79500 ms: B received both lists through custody only",
+      "89974 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 2,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 112674,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "90584 ms: both devices enrolled; the host issuer is closed",
+      "100122 ms: B received both lists through custody only",
+      "112586 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 3,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 43123,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "22590 ms: both devices enrolled; the host issuer is closed",
+      "31977 ms: B received both lists through custody only",
+      "43091 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 4,
+    "scenario": "phones",
+    "passed": true,
+    "milliseconds": 33393,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "18403 ms: both devices enrolled; the host issuer is closed",
+      "25108 ms: B received both lists through custody only",
+      "33169 ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+    ],
+    "retried": []
+  },
+  {
+    "run": 5,
+    "scenario": "phones",
+    "passed": false,
+    "milliseconds": 21687,
+    "devices": {
+      "phone-a": {
+        "serial": "emulator-5554",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      },
+      "phone-b": {
+        "serial": "emulator-5556",
+        "model": "sdk_gphone64_arm64",
+        "sdk": "35",
+        "abi": "arm64-v8a"
+      }
+    },
+    "notes": [
+      "15616 ms: both devices enrolled; the host issuer is closed"
+    ],
+    "retried": [],
+    "error": "java.lang.IllegalStateException: B: {} []\n\tat org.example.examples.shopping.qualification.PhonesKt.phones(Phones.kt:136)\n\tat org.example.examples.shopping.qualification.QualificationKt.main(Qualification.kt:24)\n\tat org.example.examples.shopping.qualification.QualificationKt.main(Qualification.kt)\n"
+  }
+]

@@ -12,9 +12,9 @@ import kotlinx.coroutines.launch
  * Opens the app's links from an activity's intents. `rocky-shopping://pair?…` is a [PairingCode], offered for
  * confirmation. `rocky-shopping://drive?…` drives a debuggable build for device qualification, naming lists and items
  * by title: `invitation` (a pairing code or a raw invitation) and `transport` (`tcp` or iroh) on first open; then
- * `contact` (logs it), `peer` (adds a contact), `online`, `add` (to `list`, else the first list), `share` (logs one
+ * `contact` (logs it), `peer` (adds a contact), `forget` (removes a peer), `online`, `add` (to `list`, else the first list), `share` (logs one
  * code per device, or for the node `to`), `accept` (a code), `check`, `move` (to the list `to`), `sync`, `status` and
- * `dump`. `step` logs `done <step>` or `failed <step>` last. See docs/runtime/shopping-devices.md.
+ * `dump`. `step` delimits the log with `started <step>` and `done <step>` or `failed <step>`. See docs/runtime/shopping-devices.md.
  */
 class ShoppingLinks(
     private val context: Context,
@@ -40,6 +40,7 @@ class ShoppingLinks(
         val session = graph.session
         scope.launch {
             try {
+                parameters["step"]?.let { Log.i(TAG, "started $it") }
                 parameters["invitation"]?.let { invitation ->
                     if (session.state.value == SessionState.Setup) {
                         chooseTransport(parameters["transport"])
@@ -69,6 +70,7 @@ class ShoppingLinks(
         } ?: error("no item $title")
         if ("contact" in parameters) rocky.contact().let { Log.i(TAG, "contact ${it.node} ${it.uri}") }
         parameters["peer"]?.let { Log.i(TAG, "peer " + rocky.addPeer(it)) }
+        parameters["forget"]?.let { rocky.removePeer(it) }
         parameters["online"]?.let { rocky.setOnline(it.toBoolean()) }
         parameters["add"]?.let { title ->
             // Drivers add to the named or first list, which they create on first use.
@@ -86,7 +88,12 @@ class ShoppingLinks(
             val moved = item(title)
             repository.move(moved.list, moved.id, list(parameters["to"]) ?: error("no target list"))
         }
-        if ("sync" in parameters) Log.i(TAG, "sync " + rocky.syncOnce().state)
+        if ("sync" in parameters) {
+            rocky.syncOnce().let { status ->
+                Log.i(TAG, "sync ${status.state} ${status.error.orEmpty()}")
+                rocky.peers().forEach { peer -> Log.i(TAG, "sync peer ${peer.node} ${peer.state} ${peer.error.orEmpty()}") }
+            }
+        }
         if ("status" in parameters) {
             for (list in repository.lists().first()) {
                 Log.i(TAG, "status ${list.title}: " + rocky.list(list.id).status())

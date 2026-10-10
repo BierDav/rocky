@@ -51,13 +51,14 @@ pub(super) fn config<A: RowCommandApplication>(
         .collect();
     let invocation_scope = scope;
     let user = PrivateKey::new();
+    let (not_before, expires) = crate::tests::lifetime();
     let cap = Capability {
         manifest: app.manifest().hash(),
         subject: user.public_key(),
         kind: PrincipalKind::User,
         grants: grants.clone(),
-        not_before: crate::tests::lifetime().0,
-        expires: crate::tests::lifetime().1,
+        not_before,
+        expires,
         delegations: 1,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),

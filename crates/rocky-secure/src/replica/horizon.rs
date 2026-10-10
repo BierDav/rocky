@@ -1390,7 +1390,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verified_at.insert(id, commit);
         inner.flush()?;
         inner.publish_revision().await?;
-        inner.process_pending(now()?).await?;
+        drop(inner);
+        self.settle().await?;
         Ok(result)
     }
 }

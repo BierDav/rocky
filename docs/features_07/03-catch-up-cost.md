@@ -1,10 +1,10 @@
 # 3. Catch-up cost
 
-Status: not started.
+Status: complete (2026-10-10). [Measured evidence and qualification](../../benchmarks/runtime-scaling/evidence/catch-up-2026-10-10/README.md).
 Owner: `rocky-secure` apply (`replica/incoming.rs`, `replica/group.rs`), the
-SQL writer lease (`replica/sql.rs`), credential verification on receive and
-the group-sync measurement fixture; the shopping device procedure. No
-dependency. Wave 0.
+SQL writer lease (`replica/sql.rs`), Room driver profile (`rocky-sdk/connection.rs`),
+credential verification on receive and the group-sync measurement fixture;
+the shopping device procedure. No dependency. Wave 0.
 Follow the [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective

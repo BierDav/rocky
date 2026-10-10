@@ -1,0 +1,30 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.75s
+     Running unittests src/lib.rs (target/debug/deps/rocky_secure-c0ca1f2c65752901)
+
+running 1 test
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=1 catch_up_ms=7569 idle_ms=148
+P03 frame_bytes tables=1 frames=201 header=1032225 chain=913573 payload=529932
+P03 checkpoint_bytes tables=1 records=201 bytes=1306778 chain_bytes=933444
+P09 partitions=200 tables=1 scopes=201 open_ms=47 register_ms=521 author_ms=2652 catch_up_ms=7569 idle_ms=148 checkpoint_ms=1378 reopen_ms=791 metadata_bytes_per_partition=409.60
+test tests::group_sync_measurement::measure_200_partition_group_sync has been running for over 60 seconds
+P09 sync_sessions=1
+P09 sync_sessions=1
+P09 sync_stage tables=4 catch_up_ms=68200 idle_ms=662
+P03 frame_bytes tables=4 frames=801 header=7266929 chain=6794175 payload=3848313
+P03 checkpoint_bytes tables=4 records=801 bytes=11297199 chain_bytes=9810648
+P09 partitions=200 tables=4 scopes=801 open_ms=61 register_ms=13592 author_ms=14915 catch_up_ms=68200 idle_ms=662 checkpoint_ms=8911 reopen_ms=5365 metadata_bytes_per_partition=1617.92
+P09 additional_table open_ms=4.70
+P09 additional_table register_ms=4357.05
+P09 additional_table author_ms=4087.75
+P09 additional_table catch_up_ms=20210.26
+P09 additional_table idle_ms=171.46
+P09 additional_table checkpoint_ms=2510.92
+P09 additional_table reopen_ms=1524.77
+P09 additional_table metadata_bytes_per_partition=402.77
+test tests::group_sync_measurement::measure_200_partition_group_sync ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 200 filtered out; finished in 183.32s
+

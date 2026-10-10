@@ -147,6 +147,65 @@ async fn assert_rows(replica: &EncryptedReplica<TypedRows>, names: &[&str], part
     }
 }
 
+/// Samples this process while a stage runs, when `ROCKY_PROFILE_DIR` names
+/// a directory: macOS `sample` writes `<stage>.txt` there when the stage ends.
+struct Profile(Option<std::process::Child>);
+fn profile(stage: &str) -> Profile {
+    let Ok(directory) = std::env::var("ROCKY_PROFILE_DIR") else {
+        return Profile(None);
+    };
+    let file = Path::new(&directory).join(format!("{stage}.txt"));
+    let sampler = std::process::Command::new("sample")
+        .args([&std::process::id().to_string(), "3600", "-mayDie", "-file"])
+        .arg(file)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // `sample` attaches before it samples.
+    std::thread::sleep(Duration::from_millis(500));
+    Profile(Some(sampler))
+}
+impl Drop for Profile {
+    fn drop(&mut self) {
+        if let Some(mut sampler) = self.0.take() {
+            let _ = std::process::Command::new("kill")
+                .args(["-INT", &sampler.id().to_string()])
+                .status();
+            let _ = sampler.wait();
+        }
+    }
+}
+
+/// Bytes of the frames a catch-up received: headers, the credential chains
+/// inside them, and encrypted payloads.
+async fn frame_bytes(replica: &EncryptedReplica<TypedRows>, tables: usize) {
+    let inner = replica.inner.lock().await;
+    let stored = crate::storage::rows(&inner.conn, "SELECT header,body FROM secure_operations")
+        .await
+        .unwrap();
+    let (mut header, mut chain, mut body) = (0, 0, 0);
+    for record in &stored {
+        let [SqlValue::Blob(head), SqlValue::Blob(payload)] = record.as_slice() else {
+            panic!("stored operation")
+        };
+        let frame = EncryptedFrame {
+            header: head.clone(),
+            body: payload.clone(),
+        };
+        let operation = frame.operation().unwrap();
+        header += head.len();
+        chain += crate::encode(&operation.header.extensions.credentials)
+            .unwrap()
+            .len();
+        body += payload.len();
+    }
+    println!(
+        "P03 frame_bytes tables={tables} frames={} header={header} chain={chain} payload={body}",
+        stored.len()
+    );
+}
+
 struct Measurement {
     open: Duration,
     register: Duration,
@@ -196,6 +255,7 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         .await
         .unwrap();
     let empty = database_bytes(&writer).await;
+    let sampled = profile(&format!("register_author_{tables}"));
     let started = Instant::now();
     for partition in 1..=partitions {
         f.keys(&writer, partition, &names).await;
@@ -219,6 +279,7 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
     }
     writer.flush().await.unwrap();
     let author = started.elapsed();
+    drop(sampled);
     let reader = f
         .open(
             &root.path().join("reader.sqlite"),
@@ -255,9 +316,11 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
                 .map(|(name, partition)| f.scope(name, partition)),
         )
         .collect();
+    let sampled = profile(&format!("catch_up_{tables}"));
     let started = Instant::now();
     assert_eq!(sync(&writer, &reader, &scopes).await.len(), scopes.len());
     let catch_up = started.elapsed();
+    drop(sampled);
     let started = Instant::now();
     assert!(sync(&writer, &reader, &scopes).await.is_empty());
     let idle = started.elapsed();
@@ -267,11 +330,28 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         idle.as_millis()
     );
     assert_rows(&reader, &names, partitions).await;
+    frame_bytes(&reader, tables).await;
+    let sampled = profile(&format!("checkpoint_{tables}"));
     let started = Instant::now();
+    let mut checkpoints = Vec::new();
     for scope in &scopes {
-        writer.checkpoint(*scope).await.unwrap();
+        checkpoints.push(writer.checkpoint(*scope).await.unwrap());
     }
     let checkpoint = started.elapsed();
+    drop(sampled);
+    // Each record carries the signer's whole chain.
+    let chain = crate::encode(&writer.inner.lock().await.config.credentials)
+        .unwrap()
+        .len();
+    let record: usize = checkpoints
+        .iter()
+        .map(|signed| signed.to_bytes().unwrap().len())
+        .sum();
+    println!(
+        "P03 checkpoint_bytes tables={tables} records={} bytes={record} chain_bytes={}",
+        checkpoints.len(),
+        chain * checkpoints.len()
+    );
     drop(writer);
     let started = Instant::now();
     let keys = std::iter::once(f.key("products", 0))

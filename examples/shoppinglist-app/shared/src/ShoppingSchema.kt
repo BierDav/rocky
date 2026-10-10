@@ -5,8 +5,9 @@ import rocky.*
 /**
  * [ShoppingDatabase]'s tables as Rocky replicates them; importing its Room export with [shoppingRoomOverlay] yields
  * the same definition. `id` and `row_kind` are implicit. A list, its categories and items form the `list` group:
- * one secret per list derives every table's key, so one envelope shares the whole list. `devices` names each
- * device's kind and `keys` carries list envelopes to them; both are written by trusted devices only. Each device
+ * one secret per list derives every table's key, so one envelope shares the whole list; sync delivers it to its
+ * recipient alone. `devices` names each device's kind and is written by trusted devices only; `keys` is no longer
+ * written or read and goes with the roster. Each device
  * publishes its command identity in `identities`. Trusted devices alone read `invitations`, each one's open pairing
  * code, and `coordination`, the household's coordination tenant. `requests` and `decisions` change only through the [ApprovalCommands].
  */

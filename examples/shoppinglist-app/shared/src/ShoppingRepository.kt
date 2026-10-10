@@ -2,10 +2,10 @@ package org.example.examples.shopping
 
 import kotlinx.coroutines.flow.Flow
 import rocky.GrantProfile
+import rocky.RecipientDelivery
 import rocky.RockyDatabase
 import rocky.room.moveRockyRow
 import rocky.room.settledOnRocky
-import kotlin.io.encoding.Base64
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -71,23 +71,22 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
      */
     suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) = database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
 
-    /** One envelope per recipient node sharing the whole list; needs a trusted device. */
-    suspend fun share(list: Long, recipients: List<String>): Map<String, ByteArray> = rocky.list(list).share(recipients)
+    /**
+     * Shares the whole list with [recipients] by node; needs a trusted device. Sync carries each envelope to its device
+     * alone, directly or through the custody peer, which installs it and starts a list new to it from a checkpoint.
+     */
+    suspend fun share(list: Long, recipients: List<String>) {
+        rocky.list(list).share(recipients)
+    }
 
-    /** Installs a shared list's envelope; a list new to this device starts from a peer's checkpoint. */
-    suspend fun accept(list: Long, envelope: ByteArray) = rocky.list(list).accept(envelope)
-
-    /** For drivers without the `keys` table: [share] as text codes `list:<id>:<base64url envelope>`, for [acceptCode]. */
-    suspend fun shareCodes(list: Long, devices: List<String>): Map<String, String> = share(list, devices).mapValues { (_, envelope) -> "list:$list:${Base64.UrlSafe.encode(envelope)}" }
-
-    /** [shareCodes] for every other reading device this issuer enrolled; a custody peer relays lists without a key. */
-    suspend fun shareWithDevices(list: Long): Map<String, String> {
+    /** Shares [list] with every other reading device this issuer enrolled, and returns them; custody holds no key. */
+    suspend fun shareWithDevices(list: Long): List<String> {
         val own = rocky.session().node
-        return shareCodes(list, rocky.devices().filter { !it.revoked && it.node != own && it.profile !is GrantProfile.Custody }.map { it.node })
+        val devices = rocky.devices().filter { !it.revoked && it.node != own && it.profile !is GrantProfile.Custody }.map { it.node }
+        share(list, devices)
+        return devices
     }
-    suspend fun acceptCode(code: String): Long {
-        val parts = code.trim().split(":")
-        require(parts.size == 3 && parts[0] == "list") { "not a shared list code" }
-        return parts[1].toLong().also { accept(it, Base64.UrlSafe.decode(parts[2])) }
-    }
+
+    /** How far each envelope of [list] this device shared travelled; no other device knows. */
+    suspend fun deliveries(list: Long): List<RecipientDelivery> = rocky.list(list).status().recipients
 }

@@ -19,10 +19,9 @@ class IssuerRecoveryTest {
     private suspend fun RockyDatabase.add(title: String) = repository.add(list, title)
     private suspend fun RockyDatabase.titles() = rooms.getValue(this).items().all(list).map { it.title }.sorted()
 
-    /** The issuer shares the list's current secret with [readers], as the application delivers envelopes. */
+    /** The issuer shares the list's current secret with [readers]; each one's next sync delivers it. */
     private suspend fun RockyDatabase.share(vararg readers: RockyDatabase) {
-        val envelopes = repository.share(list, readers.map { it.session().node })
-        for (reader in readers) reader.repository.accept(list, envelopes.getValue(reader.session().node))
+        repository.share(list, readers.map { it.session().node })
     }
 
     /** A joined device finishes its own bootstrap before it starts a list from a checkpoint. */
@@ -65,8 +64,8 @@ class IssuerRecoveryTest {
             assertTrue(b.peers().none { it.node == creator })
 
             val c = join(File(root, "c"), b.pairing(writer)).withRoom(File(root, "c")).also { opened += it }.joined()
-            // Revocation rotated the list's secret; the second issuer shares the new epoch, and the
-            // new device starts the list from its checkpoint, as it rejects the revoked creator's frames.
+            // Revocation rotated the list's secret; the second issuer shares the new epoch with the device
+            // enrolled since, which starts the list from its checkpoint, as it rejects the revoked creator's frames.
             b.share(c)
             assertEquals(ConnectionState.Connected, c.syncOnce().state)
             assertEquals(listOf("Milk"), c.titles())
@@ -75,8 +74,8 @@ class IssuerRecoveryTest {
             assertEquals(b.session().revocations, renewed.revocations)
             assertTrue(renewed.expiresAtEpochSeconds > expiring.expiresAtEpochSeconds + 24 * 60 * 60)
             assertTrue(d.peers().none { it.node == creator })
-            // The held list gains the rotated epoch; renewal's bootstrap then restarts it from a checkpoint.
-            b.share(d)
+            // The rotation sealed the new epoch to the recorded reader itself: the held list gains it at the
+            // next sync, and renewal's bootstrap then restarts it from a checkpoint.
             assertEquals(ConnectionState.Connected, d.syncOnce().state)
             // Its authors ended with the revoked epoch: the second issuer assigns new ones over the network.
             d.installAuthors()
@@ -109,10 +108,10 @@ class IssuerRecoveryTest {
             assertFailsWith<RockyException> { x.grant(keys, writer) }
             assertFailsWith<RockyException> { x.delegate(keys, writer) }
             assertFailsWith<RockyException> { x.revoke(a.session().node) }
-            assertFailsWith<RockyException> { x.repository.share(list, listOf(a.session().node)) }
             a.share(x)
             // The list arrives before an item can reference it.
             assertEquals(ConnectionState.Connected, x.syncOnce().state)
+            x.repository.share(list, listOf(a.session().node))
             x.add("Milk")
             assertEquals(ConnectionState.Connected, x.syncOnce().state)
             assertEquals(listOf("Milk"), a.titles())

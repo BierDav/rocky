@@ -236,7 +236,9 @@ revoke at the same time.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` (`rocky_sdk` `VERSION`) | 11 | Profile, `revocations`, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation and its claim, pending `rotation` with its statement and target epochs, `tombstones`), `issuers` by node key, author range and pseudonyms; device records are in the [registry](issuer-registry.md); 10 is refused |
+| `identity.json` (`rocky_sdk` `VERSION`) | 13 | Profile, `revocations`, held key epochs per collection, group partitions with held secret epochs and the revocation IDs of each epoch, issuer `authority` (invitation and its claim, pending `rotation` with its statement and target epochs, `tombstones`), `issuers` by node key, author range and pseudonyms, and the envelopes this device sends in `deliveries`; device records are in the [registry](issuer-registry.md); 12 is refused |
+| `mailbox.json` | 1 | A mailbox's deposits by digest: depositor, recipient node key, arrival, the sealed delivery or the recipient's receipt ([decision 0054](../decisions/0054-envelope-delivery.md)) |
+| Sealed delivery, delivery receipt | 1 | Labels `rocky.envelope-delivery.*.v1` and `rocky.envelope-receipt.v1` ([decision 0054](../decisions/0054-envelope-delivery.md)) |
 | Issuer registry rows | | One row per entry of a device's record ([decision 0048](../decisions/0048-replicated-issuer-registry.md)) |
 | Invitation URI `rocky://join/` | 4 | Carries the grant profile and an explicit `via_custody` flag |
 | Pair request | 2 | Labels `rocky.credentials.pair-*.v2`; the enrollment carries profile, key epochs and, for an issuer, the publisher key and an author range; optional `routes` are bound by the proof when present |

@@ -5,6 +5,7 @@ mod commands;
 mod connection;
 mod custody;
 mod database;
+mod delivery;
 mod domain;
 mod engine;
 mod enrollment;

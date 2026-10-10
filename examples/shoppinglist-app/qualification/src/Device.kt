@@ -1,6 +1,7 @@
 package org.example.examples.shopping.qualification
 
 import androidx.room.Room
+import androidx.room.useReaderConnection
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -8,7 +9,6 @@ import org.example.examples.shopping.*
 import rocky.*
 import rocky.room.setRockyDatabase
 import java.io.File
-import java.util.Base64
 
 /** Marks a reply line; native logging shares stdout. */
 internal const val REPLY = "@@rocky-device@@ "
@@ -152,19 +152,24 @@ private class DeviceProcess {
                 JsonNull
             }
 
-            "share" -> JsonObject(
+            "share" -> {
                 repository.share(list(), request.getValue("recipients").jsonArray.map { it.jsonPrimitive.content })
-                    .mapValues { JsonPrimitive(Base64.getEncoder().encodeToString(it.value)) },
-            )
-
-            "shareCodes" -> JsonObject(repository.shareWithDevices(list()).mapValues { JsonPrimitive(it.value) })
-
-            "acceptCode" -> JsonPrimitive(repository.acceptCode(request.text("code")))
-
-            "accept" -> {
-                repository.accept(list(), Base64.getDecoder().decode(request.text("envelope")))
                 JsonNull
             }
+
+            "shareWithDevices" -> JsonArray(repository.shareWithDevices(list()).map(::JsonPrimitive))
+
+            "deliveries" -> JsonObject(repository.deliveries(list()).associate { it.node to JsonPrimitive(it.state.name) })
+
+            // The former envelope table, which nothing writes any more.
+            "keyRows" -> JsonPrimitive(
+                room!!.useReaderConnection { reader ->
+                    reader.usePrepared("SELECT count(*) FROM keys") {
+                        it.step()
+                        it.getLong(0)
+                    }
+                },
+            )
 
             "lists" -> JsonArray(room!!.lists().observe().first().map { JsonPrimitive("${it.id}:${it.title}") })
 

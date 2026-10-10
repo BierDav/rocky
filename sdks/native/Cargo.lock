@@ -3251,6 +3251,7 @@ dependencies = [
  "rand 0.8.8",
  "rocky-core",
  "serde",
+ "serde_bytes",
  "sha2 0.10.9",
 ]
 
@@ -3291,6 +3292,7 @@ dependencies = [
  "rocky-secure",
  "rocky-storage",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "tokio",

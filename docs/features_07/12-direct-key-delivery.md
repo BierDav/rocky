@@ -1,6 +1,11 @@
 # 12. Direct key delivery
 
-Status: not started.
+Status: implemented on 2026-10-10 with
+[decision 0054](../decisions/0054-envelope-delivery.md); rebased onto phase 10
+(`main` at `ff86c729`), not landed. Direct and mailbox delivery, registry-driven
+rotation delivery, delegated member sharing, private status, revocation cleanup,
+restart/expiry and deterministic crash recovery are implemented. Qualification
+and tier measurements are in [the evidence](12-direct-key-delivery-evidence.md).
 Owner: `rocky-credentials` envelopes; `rocky-sdk` groups, sharing and
 rotation; `rocky-secure` session; Kotlin `partitions`; the sharing code of
 the shopping example. Depends on [phase 8](08-concurrent-rotation.md) and

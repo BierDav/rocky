@@ -333,8 +333,8 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         1,
         secret,
         PrivateKey::from_bytes(&node.vault.get("node")?).public_key(),
-    )?
-    .to_bytes()?;
+    )?;
+    let partition = crate::groups::GroupPartition::of(&node.domain, record)?;
     drop(client);
     drop(node);
     for passed in 0..3 {
@@ -342,14 +342,15 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         copy_tree(template.path(), root.path())?;
         let store: Arc<dyn crate::SecretStore> = Arc::new(keys.copy()?);
         let node = reload(root.path(), store.clone()).await?;
-        let client = node.client(1)?;
         fault::STOP.with(|stop| stop.set(Some((fault::Stage::Table, passed))));
-        let error = node.dispatch(&client, &json!({"type":"partition_install","group":"list","values":[{"type":"text","value":"L"}],"envelope":envelope})).await.unwrap_err();
+        let error = node
+            .install_envelope(partition.clone(), &envelope, None, false)
+            .await
+            .unwrap_err();
         assert!(
             fault::STOP.with(|stop| stop.get()).is_none(),
             "before table {passed}: {error}"
         );
-        drop(client);
         drop(node);
         let database = crate::Database::open(crate::Open {
             directory: root.path(),

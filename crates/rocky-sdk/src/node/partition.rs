@@ -166,7 +166,7 @@ impl Node {
         let mut settings = self.settings.lock().await;
         if !settings.issuer() {
             return Err(refused(
-                "partition creation requires an issuer; install an envelope on a reader",
+                "partition creation requires an issuer; a reader receives the envelope by sync",
             ));
         }
         self.reads_group(&settings, &partition)?;
@@ -211,24 +211,44 @@ impl Node {
         Ok(json!({"address": record_key(&record.address), "epoch": epoch}))
     }
     /// Accepts one group envelope after it opens and the device reads every
-    /// member in whole; only then is anything registered or stored.
-    async fn install_group(
+    /// member in whole; only then is anything registered or stored. Returns
+    /// whether it was new: an epoch already held installs nothing again.
+    pub(super) async fn install_envelope(
         &self,
         partition: GroupPartition,
-        request: &Value,
-    ) -> Result<Value, Failure> {
-        let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
-        let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
-        let epoch = request
-            .get("epoch")
-            .filter(|value| !value.is_null())
-            .map(|value| serde_json::from_value(value.clone()))
-            .transpose()?
-            .unwrap_or(envelope.epoch());
+        envelope: &GroupSecretEnvelope,
+        sender: Option<&CredentialChain>,
+        bootstrap: bool,
+    ) -> Result<bool, Failure> {
+        let epoch = envelope.epoch();
         let mut settings = self.settings.lock().await;
+        let signer = match sender {
+            None => settings.publisher,
+            Some(chain) => {
+                let signer = envelope.issuer();
+                for member in &partition.members {
+                    let grants = chain.verify_partition(
+                        settings.publisher,
+                        self.domain.manifest().hash(),
+                        signer,
+                        member.scope,
+                        &member.tuple,
+                        &settings.revocations,
+                        now()?,
+                    )?;
+                    if !grants.iter().any(|grant| {
+                        grant.rows == rocky_core::RowSelection::All
+                            && grant.rights.contains(&rocky_core::Right::Read)
+                    }) {
+                        return Err(refused("envelope signer lacks whole-group read"));
+                    }
+                }
+                signer
+            }
+        };
         let secret = envelope.open(
             &PrivateKey::from_bytes(&self.vault.get("node")?),
-            settings.publisher,
+            signer,
             self.domain.manifest().hash(),
             partition.record.address,
             epoch,
@@ -242,19 +262,38 @@ impl Node {
             .unwrap_or_else(|| partition.record.clone());
         record.admit(epoch)?;
         let role = secret_role(&record.address, epoch);
-        match self.vault.find(&role)? {
-            Some(held) if held != secret => {
-                return Err(refused(
-                    "group secret epoch already holds different material",
-                ));
-            }
-            Some(_) => {}
-            None => self.vault.put(&role, &secret)?,
+        let held = self.vault.find(&role)?;
+        if held.is_some_and(|held| held != secret) {
+            return Err(refused(
+                "group secret epoch already holds different material",
+            ));
+        }
+        if held.is_some()
+            && record.epochs.contains(&epoch)
+            && settings.epoch_statements.get(&role).map(Vec::as_slice)
+                == Some(envelope.statements())
+        {
+            return Ok(false);
+        }
+        if bootstrap {
+            self.save_bootstrap(
+                partition
+                    .members
+                    .iter()
+                    .map(|member| member.scope)
+                    .collect(),
+            )?;
+        }
+        crate::delivery::fault::check(
+            PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
+            crate::delivery::fault::Stage::Prepared,
+        )?;
+        if held.is_none() {
+            self.vault.put(&role, &secret)?;
         }
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
-        let role = secret_role(&record.address, epoch);
         if draft
             .epoch_statements
             .get(&role)
@@ -270,15 +309,14 @@ impl Node {
         *settings = draft;
         let partition = GroupPartition::of(&self.domain, &record)?;
         self.hold_keys(&settings, &partition).await?;
-        Ok(json!({"address": record_key(&record.address), "epoch": epoch}))
+        Ok(true)
     }
-    /// One envelope per recipient of the current epoch's group secret.
+    /// Seals the current epoch's group secret to each recipient and saves
+    /// the deliveries before any network call; sync delivers them.
     async fn share(&self, partition: GroupPartition, request: &Value) -> Result<Value, Failure> {
         let registry = self.registry().await?;
-        let settings = self.settings.lock().await;
-        if !settings.issuer() {
-            return Err(refused("sharing a group partition requires an issuer"));
-        }
+        let mut settings = self.settings.lock().await;
+        self.reads_group(&settings, &partition)?;
         if settings
             .authority
             .as_ref()
@@ -290,6 +328,7 @@ impl Node {
             .groups
             .get(&record_key(&partition.record.address))
             .filter(|record| record.current().is_some())
+            .cloned()
             .ok_or_else(|| refused("no group secret is held here; create or install it first"))?;
         let current = record.current().ok_or("no group secret epoch")?;
         let epoch = request
@@ -305,6 +344,10 @@ impl Node {
         }
         let recipients: BTreeSet<PublicKey> =
             serde_json::from_value(request["recipients"].clone())?;
+        if recipients.len() > 256 {
+            return Err(refused("share with at most 256 recipients at once"));
+        }
+        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         if let Some(revoked) = recipients
             .iter()
             .find(|recipient| settings.revoked_device(recipient, &registry))
@@ -314,35 +357,78 @@ impl Node {
                 revoked.to_hex()
             )));
         }
+        if recipients.contains(&own) {
+            return Err(refused("this device holds the group secret already"));
+        }
         let statements = settings
             .epoch_statements
             .get(&secret_role(&record.address, epoch))
             .cloned()
             .unwrap_or_default();
-        let envelopes = recipients.iter().map(|recipient| GroupSecretEnvelope::seal_recorded(
-            &PrivateKey::from_bytes(&self.vault.get("publisher")?),
-            self.domain.manifest().hash(),
-            record.address,
-            epoch.generation,
-            self.vault.get(&secret_role(&record.address, epoch))?,
-            *recipient, statements.clone(),
-        )).collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .map(|envelope| {
-            Ok(json!({"recipient": envelope.recipient().to_hex(), "envelope": envelope.to_bytes()?}))
-        })
-        .collect::<Result<Vec<_>, Failure>>()?;
-        Ok(json!({"epoch": epoch, "envelopes": envelopes}))
+        let sender = (!settings.issuer()).then(|| settings.credentials.clone());
+        let signer = PrivateKey::from_bytes(&self.vault.get(if settings.issuer() {
+            "publisher"
+        } else {
+            "node"
+        })?);
+        let secret = self.vault.get(&secret_role(&record.address, epoch))?;
+        let mut draft = settings.clone();
+        let mut envelopes = Vec::new();
+        for recipient in &recipients {
+            let envelope = GroupSecretEnvelope::seal_recorded(
+                &signer,
+                self.domain.manifest().hash(),
+                record.address,
+                epoch.generation,
+                secret,
+                *recipient,
+                statements.clone(),
+            )?;
+            envelopes.push(json!({
+                "recipient": envelope.recipient().to_hex(),
+                "envelope": envelope.to_bytes()?,
+            }));
+            let delivery = crate::delivery::Contents::seal(
+                *recipient,
+                crate::delivery::Reason::Share,
+                &record,
+                envelope.to_bytes()?,
+                sender.clone(),
+            )?;
+            draft.queue(*recipient, &record, epoch, &delivery, true)?;
+        }
+        draft.save(&self.path)?;
+        *settings = draft;
+        Ok(json!({
+            "epoch": epoch,
+            "recipients": recipients.iter().map(PublicKey::to_hex).collect::<Vec<_>>(),
+            "envelopes": envelopes,
+        }))
     }
     async fn group_status(&self, partition: GroupPartition) -> Result<Value, Failure> {
-        let epochs = self
-            .settings
-            .lock()
-            .await
-            .groups
-            .get(&record_key(&partition.record.address))
-            .map(|record| record.epochs.clone())
-            .unwrap_or_default();
+        let address = record_key(&partition.record.address);
+        let (epochs, recipients) = {
+            let settings = self.settings.lock().await;
+            // Only the sharer holds its deliveries: no other device sees them.
+            let recipients: Vec<Value> = settings
+                .deliveries
+                .values()
+                .filter(|pending| pending.address == address)
+                .map(|pending| {
+                    json!({
+                        "node": pending.recipient.to_hex(),
+                        "epoch": pending.epoch,
+                        "state": pending.state(),
+                    })
+                })
+                .collect();
+            let epochs = settings
+                .groups
+                .get(&address)
+                .map(|record| record.epochs.clone())
+                .unwrap_or_default();
+            (epochs, recipients)
+        };
         let holding: BTreeMap<ResourceScope, rocky_secure::Holding> =
             self.replica.subscriptions().await?.into_iter().collect();
         let mut tables = Vec::new();
@@ -365,6 +451,7 @@ impl Node {
             "current": epochs.iter().max(),
             "epochs": epochs,
             "tables": tables,
+            "recipients": recipients,
         }))
     }
     pub(super) async fn partition_call(
@@ -446,12 +533,21 @@ impl Node {
         };
         let result = match kind {
             "partition_create" => self.create_group(partition).await?,
-            "partition_install" => self.install_group(partition, request).await?,
+            "partition_install" => {
+                let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
+                let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
+                let address = record_key(&partition.record.address);
+                let epoch = envelope.epoch();
+                self.install_envelope(partition, &envelope, None, false)
+                    .await?;
+                json!({"address": address, "epoch": epoch})
+            }
             "partition_share" => {
                 let shared = self.share(partition, request).await?;
                 let mut event = named.clone();
-                event["recipients"] = json!(shared["envelopes"].as_array().map_or(0, Vec::len));
+                event["recipients"] = json!(shared["recipients"].as_array().map_or(0, Vec::len));
                 self.activity.record("partition_shared", event);
+                self.wake_sync();
                 return Ok(shared);
             }
             "partition_status" => return self.group_status(partition).await,
@@ -465,28 +561,8 @@ impl Node {
                 json!({})
             }
             "partition_subscribe" | "partition_bootstrap" => {
-                let covered = partition.covered(&omit).map_err(refused)?;
-                for member in &covered {
-                    self.replica
-                        .register_partition(member.scope, member.tuple.clone())
-                        .await?;
-                }
-                self.know(&partition).await?;
-                for member in &covered {
-                    self.replica.subscribe(member.scope).await?;
-                }
-                for member in partition
-                    .members
-                    .iter()
-                    .filter(|member| omit.contains(&member.table))
-                {
-                    self.replica.unsubscribe(member.scope).await?;
-                }
-                if kind == "partition_bootstrap" {
-                    self.bootstrap_partition(&covered).await?
-                } else {
-                    json!({})
-                }
+                self.hold(&partition, &omit, kind == "partition_bootstrap")
+                    .await?
             }
             "partition_unsubscribe" => {
                 for member in partition.released(&omit).map_err(refused)? {
@@ -521,13 +597,43 @@ impl Node {
         self.wake_sync();
         Ok(result)
     }
+    /// Holds the group partition but the tables left out; with `bootstrap`
+    /// it starts from a peer's checkpoint at the next sync.
+    pub(super) async fn hold(
+        &self,
+        partition: &GroupPartition,
+        omit: &BTreeSet<String>,
+        bootstrap: bool,
+    ) -> Result<Value, Failure> {
+        let covered = partition.covered(omit).map_err(refused)?;
+        for member in &covered {
+            self.replica
+                .register_partition(member.scope, member.tuple.clone())
+                .await?;
+        }
+        self.know(partition).await?;
+        for member in &covered {
+            self.replica.subscribe(member.scope).await?;
+        }
+        for member in partition
+            .members
+            .iter()
+            .filter(|member| omit.contains(&member.table))
+        {
+            self.replica.unsubscribe(member.scope).await?;
+        }
+        if bootstrap {
+            self.bootstrap_partition(&covered).await
+        } else {
+            Ok(json!({}))
+        }
+    }
     /// Saves a checkpoint-first intent for the covered members this device
     /// reads; the next sync imports them before catching up.
     async fn bootstrap_partition(
         &self,
         covered: &[&crate::groups::Member],
     ) -> Result<Value, Failure> {
-        let marker = self.path.with_file_name("bootstrap.json");
         let added: Vec<ResourceScope> = {
             let settings = self.settings.lock().await;
             covered
@@ -536,6 +642,10 @@ impl Node {
                 .map(|member| member.scope)
                 .collect()
         };
+        self.save_bootstrap(added)
+    }
+    fn save_bootstrap(&self, added: Vec<ResourceScope>) -> Result<Value, Failure> {
+        let marker = self.path.with_file_name("bootstrap.json");
         // A pending intent waits for a peer that offers checkpoints, which a
         // keyless custody peer never does: later partitions join it.
         let mut intent = if marker.exists() {

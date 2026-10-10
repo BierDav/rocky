@@ -24,6 +24,7 @@ filter = '''
     | (package(rocky-secure) & test(/^tests::/))
     | (package(rocky-secure) & test(/^network::(holdings|contacts)::tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
+    | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
     | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
@@ -43,7 +44,8 @@ filter = '''
 [e2e]
 suite = "15m"
 filter = '''
-    test(/::soak_/)
+    (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
+    | test(/::soak_/)
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
     | (binary_id(rocky-coordinator) & (
           test(=raft_store::tests::openraft_storage_contract)

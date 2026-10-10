@@ -121,15 +121,17 @@ impl Transfer {
 /// need another pass and what moved. A peer may run a newer definition
 /// generation, whose credentials this device cannot verify: it pulls, and
 /// its own changes wait until it upgrades. See `docs/runtime/generations.md`.
+/// `first` is a session already open with the peer, which rows use first.
 pub(crate) async fn reconcile(
     replica: &EncryptedReplica<TypedCommands>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
     coordinator: Option<&dyn Coordinator>,
     progress: impl Fn(bool),
+    first: Option<NativeSession>,
 ) -> Result<(bool, bool, Transfer), Failure> {
     let mut transfer = Transfer::default();
-    let newer = rows(replica, upstream, scopes, progress, &mut transfer).await?;
+    let newer = rows(replica, upstream, scopes, progress, &mut transfer, first).await?;
     // Rows stay in sync while a coordinator is unreachable or a peer holds
     // no results; a ticket then stays `confirmed` until a later sync.
     let retry = match coordinator {
@@ -247,10 +249,14 @@ async fn rows(
     scopes: &[ResourceScope],
     progress: impl Fn(bool),
     transfer: &mut Transfer,
+    mut first: Option<NativeSession>,
 ) -> Result<bool, Failure> {
     let mut newer = false;
     for _ in 0..SESSIONS {
-        let mut session = session(replica, upstream).await?;
+        let mut session = match first.take() {
+            Some(session) => session,
+            None => session(replica, upstream).await?,
+        };
         let mut exhausted = false;
         let exchange = session.changed_scopes(replica, scopes).await?;
         transfer.refuse(&exchange.refused);
@@ -424,12 +430,14 @@ async fn results(
     Ok(retry)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve_contacts(
     stream: Stream,
     replica: &EncryptedReplica<TypedCommands>,
     node: PrivateKey,
     credentials: CredentialChain,
     coordinator: Option<&dyn Coordinator>,
+    deliveries: &dyn rocky_secure::network::Deliveries,
     admitted_peer: impl FnOnce(PublicKey),
     handler: &dyn rocky_secure::network::ContactHandler,
 ) -> Result<(), Failure> {
@@ -437,6 +445,6 @@ pub(crate) async fn serve_contacts(
         NativeSession::accept(stream, replica, node, credentials, MAX_SECURE_BYTES).await?;
     admitted_peer(session.peer());
     Ok(session
-        .serve_with_contacts(replica, coordinator, handler)
+        .serve_all(replica, coordinator, deliveries, Some(handler))
         .await?)
 }

@@ -67,8 +67,31 @@ pub fn derive_table_key(
     Ok(hkdf(DERIVATION, secret, &info))
 }
 
+/// A fresh ephemeral X25519 public key and the secret it shares with the
+/// recipient's Ed25519 key, converted to X25519.
+pub(crate) fn agree(recipient: PublicKey) -> Result<([u8; 32], [u8; 32]), Error> {
+    let point = CompressedEdwardsY(*recipient.as_bytes())
+        .decompress()
+        .filter(|point| point.is_torsion_free() && !point.is_small_order())
+        .ok_or_else(|| denied("invalid envelope recipient"))?
+        .to_montgomery();
+    let mut ephemeral = [0; 32];
+    rand::rngs::OsRng.fill_bytes(&mut ephemeral);
+    Ok((
+        MontgomeryPoint::mul_base_clamped(ephemeral).to_bytes(),
+        point.mul_clamped(ephemeral).to_bytes(),
+    ))
+}
+/// The secret `agree` shared, on the recipient's side.
+pub(crate) fn agreed(recipient: &PrivateKey, ephemeral: [u8; 32]) -> [u8; 32] {
+    let digest = Sha512::digest(recipient.as_bytes());
+    let mut scalar = [0; 32];
+    scalar.copy_from_slice(&digest[..32]);
+    MontgomeryPoint(ephemeral).mul_clamped(scalar).to_bytes()
+}
+
 /// One group secret wrapped to one recipient, signed by the delivering
-/// issuer. Possession establishes no credential right.
+/// signer. Possession establishes no credential right.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupSecretEnvelope {
@@ -184,13 +207,7 @@ impl GroupSecretEnvelope {
         recipient: PublicKey,
         statements: Vec<Commitment>,
     ) -> Result<Self, Error> {
-        let point = CompressedEdwardsY(*recipient.as_bytes())
-            .decompress()
-            .filter(|point| point.is_torsion_free() && !point.is_small_order())
-            .ok_or_else(|| denied("invalid group envelope recipient"))?
-            .to_montgomery();
-        let mut ephemeral = [0; 32];
-        rand::rngs::OsRng.fill_bytes(&mut ephemeral);
+        let (ephemeral, shared) = agree(recipient)?;
         let mut body = Body {
             version: ENVELOPE_VERSION,
             manifest,
@@ -199,10 +216,9 @@ impl GroupSecretEnvelope {
             statements,
             issuer: issuer.public_key(),
             recipient,
-            ephemeral: MontgomeryPoint::mul_base_clamped(ephemeral).to_bytes(),
+            ephemeral,
             sealed: Vec::new(),
         };
-        let shared = point.mul_clamped(ephemeral).to_bytes();
         body.sealed = crate::enroll::seal(body.wrapping_key(shared)?, &body.aad()?, &secret)?;
         body.validate()?;
         let signature = issuer.sign(&signing_bytes(SIGNED, &body)?);
@@ -241,12 +257,7 @@ impl GroupSecretEnvelope {
         if recipient.public_key() != self.body.recipient {
             return Err(denied("group envelope names another recipient"));
         }
-        let digest = Sha512::digest(recipient.as_bytes());
-        let mut scalar = [0; 32];
-        scalar.copy_from_slice(&digest[..32]);
-        let shared = MontgomeryPoint(self.body.ephemeral)
-            .mul_clamped(scalar)
-            .to_bytes();
+        let shared = agreed(recipient, self.body.ephemeral);
         let secret = crate::enroll::open(
             self.body.wrapping_key(shared)?,
             &self.body.aad()?,
@@ -261,6 +272,9 @@ impl GroupSecretEnvelope {
     }
     pub fn statements(&self) -> &[Commitment] {
         &self.body.statements
+    }
+    pub fn issuer(&self) -> PublicKey {
+        self.body.issuer
     }
     pub fn recipient(&self) -> PublicKey {
         self.body.recipient

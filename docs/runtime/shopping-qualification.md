@@ -38,11 +38,13 @@ For the horizon, B meets A directly; see [outstanding](#outstanding).
 
 The deliverable is the shopping-list application as a packaged Kotlin app with
 no Rust source: Room DAOs on Rocky's file, lists, categories and items in one
-partition group, per-list sharing through one envelope, a packaged always-on
-custody peer and a second issuing device. Its lists merge; its approvals are
-strong commands the public coordination service orders, which this harness
-does not run: its devices open over TCP without a coordinator. Strong commands
-under contention, loss, takeover and voter faults are qualified by the
+partition group, per-list sharing through one envelope that sync delivers to
+its recipient alone, a packaged always-on custody peer that holds envelopes as
+a mailbox, and a second issuing device. Every scenario ends by checking that
+no device holds a row in `keys`. Its lists merge; its approvals are strong
+commands the public coordination service orders, which this harness does not
+run: its devices open over TCP without a coordinator. Strong commands under
+contention, loss, takeover and voter faults are qualified by the
 [market](market-qualification.md).
 
 | Scenario | Evidence | Status |

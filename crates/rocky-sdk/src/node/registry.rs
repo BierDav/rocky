@@ -217,8 +217,10 @@ impl Node {
         self.record_revocation(node).await?;
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
         let registry = self.registry().await?;
-        self.configure(|settings| settings.complete_revocation(&registry))
-            .await
+        self.configure(|settings| {
+            settings.complete_revocation(&self.vault, &self.domain, &registry)
+        })
+        .await
     }
 
     /// Every other device's record, on an issuer.

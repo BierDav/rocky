@@ -61,7 +61,10 @@ data class DeviceRow(
     @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
 )
 
-/** A list's secret at [epoch], sealed to [recipient]: only that device can open [envelope]. */
+/**
+ * The former carrier of list envelopes, which sync now delivers to each recipient alone: nothing writes or reads it.
+ * The table and its grants stay until the roster goes (`docs/features_07/20-shopping-without-a-roster.md`).
+ */
 @Entity(tableName = "keys", primaryKeys = ["recipient", "list"], indices = [Index(value = ["id"], unique = true, name = "keys_identity")])
 class ListKey(
     val recipient: String,
@@ -190,40 +193,17 @@ interface DeviceDao {
     @Query("DELETE FROM devices WHERE node = :node")
     suspend fun delete(node: String): Int
 
-    @Query("DELETE FROM keys WHERE recipient = :node")
-    suspend fun deleteKeys(node: String): Int
-
     @Query("DELETE FROM identities WHERE node = :node")
     suspend fun deleteIdentity(node: String): Int
 
-    /** Removes the device's record, the keys sealed to it and its identity in one commit. */
+    /** Removes the device's record and its identity in one commit. */
     @Transaction suspend fun forget(node: String) {
         delete(node)
-        deleteKeys(node)
         deleteIdentity(node)
     }
 
     @Transaction suspend fun record(node: String, name: String, kind: String) {
         if (update(node, name, kind) == 0) insert(DeviceRow(node, name, kind, nextId()))
-    }
-}
-
-@Dao
-interface KeyDao {
-    @Query("SELECT * FROM keys")
-    fun observe(): Flow<List<ListKey>>
-
-    @Insert suspend fun insert(key: ListKey)
-
-    @SkipQueryVerification
-    @Query("SELECT rocky_next_id('keys')")
-    suspend fun nextId(): Long
-
-    @Query("UPDATE keys SET epoch = :epoch, envelope = :envelope WHERE recipient = :recipient AND list = :list")
-    suspend fun update(recipient: String, list: Long, epoch: String, envelope: ByteArray): Int
-
-    @Transaction suspend fun deliver(recipient: String, list: Long, epoch: String, envelope: ByteArray) {
-        if (update(recipient, list, epoch, envelope) == 0) insert(ListKey(recipient, list, epoch, envelope, nextId()))
     }
 }
 
@@ -274,7 +254,6 @@ abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun categories(): CategoryDao
     abstract fun items(): ShoppingDao
     abstract fun devices(): DeviceDao
-    abstract fun keys(): KeyDao
     abstract fun identities(): IdentityDao
     abstract fun approvals(): ApprovalDao
 }

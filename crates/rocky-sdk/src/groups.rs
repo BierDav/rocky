@@ -73,6 +73,7 @@ pub(crate) struct Member {
 }
 /// A group partition resolved against the current schema generation, so a
 /// table that joined the group later is a member too.
+#[derive(Clone)]
 pub(crate) struct GroupPartition {
     pub record: GroupRecord,
     pub members: Vec<Member>,

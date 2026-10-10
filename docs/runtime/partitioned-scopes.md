@@ -71,7 +71,7 @@ refuses to reinterpret existing rows under another scope.
 Kotlin's `KeyEpoch` exposes `generation` and `secretHash`, implements the writer
 order and has a stable text representation. `GroupStatus.current` and each
 `TableHolding.current` identify the winner; `epochs` and `keyEpochs` retain
-complete identities. `share` and `install` accept an optional complete identity.
+complete identities. `share` accepts an optional complete identity.
 
 One random secret per group partition and epoch identity derives every member
 table's key ([Decision 0040](../decisions/0040-group-secrets.md)). Reading is
@@ -96,28 +96,46 @@ native request may name `table` instead of `group` to mean that table's group.
 | Operation | Effect |
 | --- | --- |
 | `create(group, values)` | Issuer: prepares the secret at the partition's current epoch, else epoch 1 |
-| `share(group, values, recipients)` | Issuer: one envelope of the current epoch per recipient node key |
-| `install(group, values, envelope)` | Opens the envelope, then requires whole-partition read on every member before anything is stored |
+| `share(group, values, recipients)` | Whole-group reader: saves one envelope of the current epoch per recipient node key, which sync delivers; returns no envelope |
 | `grant` / `delegate` | Selector grants; an issuer records the device and user first |
 | `register(group, values)` | Registers the addresses without a key, as custody; a custody peer also registers partitions devices offer ([0045](../decisions/0045-custody-partition-offers.md)) |
 | `subscribe` / `bootstrap(group, values, omit)` | Holds every member except those left out; `bootstrap` saves checkpoint-first intent, joining one still pending |
 | `unsubscribe` / `evict(group, values, keep)` | Releases every member except those kept |
-| `status(group, values)` | Held sibling identities, the current winner, and each member's identities, winner and holding |
+| `status(group, values)` | Held sibling identities, the current winner, each member's identities, winner and holding, and on the sharer each recipient's envelope as `pending`, `deposited` or `delivered` |
 
-The SDK pins its publisher as delivering issuer and stores only the secret in
+The SDK verifies the publisher signature or the member signer's node chain
+and whole-group read, and stores only the secret in
 the installation's external key provider. `share` refuses a revoked recipient,
 a non-current epoch and an unfinished revocation. A grant never delivers a key;
-an envelope never grants authority. A recipient without B's grant cannot
+an envelope never grants authority. A recipient installs an envelope only
+after it opens and the device reads every member in whole. A recipient without B's grant cannot
 request B's range or checkpoint, register its key or admit its frames. A key
 reveals a whole partition, including earlier ciphertext under that epoch.
 
+**Delivery.** An envelope reaches its recipient alone. Each sync's first
+session hands the peer the envelopes addressed to it and collects those the
+peer holds for this device; the recipient returns a receipt signed by its node
+key and the sender drops the envelope. A sender also deposits an envelope with
+up to three mailboxes it meets: issuers and any peer with a custody grant.
+Reader and writer profiles also carry custody; a raw read-only grant does
+not. A mailbox serves a deposit only to the session of its recipient, hands
+the receipt back to the depositor and forgets both; it holds 256 deposits per
+recipient and 4,096 in all, each for 30 days, and refuses beyond as the
+retryable `mailbox_full`. It learns that a recipient was sent something, when
+and how large, and no partition: the group, the epoch and the secret are
+sealed to the recipient. No replicated row records who holds which partition.
+An epoch received twice installs once. A revoked recipient's envelopes are
+dropped by the sender and by every mailbox that learns the statement.
+[Decision 0054](../decisions/0054-envelope-delivery.md) defines the formats.
+
 **Sharing with an enrolled device.** A profile reads every partition of its
-tables, whether paired or supplied through `grant`, so one `share` and one
-`install` open a list to it. A partitioned table's own scope holds no rows: it
-offers no checkpoint, and a join's bootstrap skips it. A device that does not
-hold the list yet calls `bootstrap` after its join's bootstrap has finished, so
-it starts from a peer's checkpoint and needs no earlier epoch or revoked
-author; a device that holds it only installs the new epoch. The
+tables, whether paired or supplied through `grant`, so one `share` opens a
+list to it once it syncs with the sharer or a mailbox. A partitioned table's
+own scope holds no rows: it offers no checkpoint, and a join's bootstrap skips
+it. A shared list this device does not hold yet starts from a peer's
+checkpoint after its join's bootstrap, so it needs no earlier epoch or revoked
+author; the SDK records that intent as it installs the envelope. A device that
+holds the list only installs the new epoch. The
 [shopping example](../../examples/shoppinglist-app/README.md) shares this way.
 
 **A partition the peer has not seen.** Two issuers may each create a
@@ -138,8 +156,10 @@ profile reads or a recorded grant selects, whichever issuer enrolled it.
 A partition-only record selects only its grants. An absent record, including
 an unrecorded delegate, rotates every known partition whose secret the
 revoking issuer holds. A recorded user subject is revoked with its device,
-so a fresh node key under that user cannot renew. Earlier epochs remain for retained history; share
-the new epoch to remaining readers. A grant delegated on a non-issuer is not
+so a fresh node key under that user cannot renew. Earlier epochs remain for retained history. The
+completed rotation seals each new epoch to every unrevoked device whose
+registry record reads the partition, saved with the rotation, and sync
+delivers it; no application call shares it. A grant delegated on a non-issuer is not
 recorded and uses that conservative rotation when its recipient is revoked;
 no delegator is inferred. Revoking a delegator does not enumerate its
 descendants or rotate extra scopes on their behalf, but shared chain ancestors
@@ -231,7 +251,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
 | Definition/descriptor | Format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
-| Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0040](../decisions/0040-group-secrets.md)) |
+| Group secret envelope | Version 2, one secret per recipient, bound to manifest, group address, epoch identity and revocation IDs ([0050](../decisions/0050-concurrent-key-epochs.md)) |
 | Frame | Row format 6 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 7 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |

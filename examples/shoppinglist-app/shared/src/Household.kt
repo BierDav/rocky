@@ -23,8 +23,9 @@ data class Purge(val waiting: Int, val deadlineEpochSeconds: Long?, val finalize
 
 /**
  * The household's devices and how list keys reach them, without a server: a trusted device records each device it
- * enrolls in `devices` and seals every list's key to trusted and full devices in `keys`, which sync like any row;
- * each device installs the keys sealed to it. Partial devices receive only lists shared with them by [share].
+ * enrolls in `devices` and shares every list with trusted and full devices. Sync carries each envelope to its device
+ * alone, directly or through the custody peer, and that device installs it; no row records who holds which list.
+ * Partial devices receive only lists shared with them by [share], and the new epochs of a revocation's rotation.
  */
 class Household(private val database: ShoppingDatabase, private val rocky: RockyDatabase, val self: String) {
     private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
@@ -50,8 +51,26 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
             .distinctUntilChanged()
     }
 
-    /** Which device was sent the key of which list, at which epoch. */
-    fun keys(): Flow<List<ListKey>> = database.keys().observe().settledOnRocky()
+    /**
+     * On a trusted device: the lists whose current key this device sent to each node, by node. Only the sharer knows
+     * its deliveries; it refreshes whenever one moves.
+     */
+    fun sent(): Flow<Map<String, Set<Long>>> = combine(
+        database.lists().observe().settledOnRocky(),
+        rocky.activity().filter { it is RockyEvent.EnvelopesDelivered || it is RockyEvent.PartitionChanged || it is RockyEvent.Renewed }
+            .map { Unit }.onStart { emit(Unit) },
+    ) { lists, _ -> lists }
+        .map { lists ->
+            val sent = mutableMapOf<String, MutableSet<Long>>()
+            for (list in lists) {
+                val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
+                for (recipient in status.recipients.filter { it.epoch == status.current }) {
+                    sent.getOrPut(recipient.node) { mutableSetOf() } += list.id
+                }
+            }
+            sent
+        }
+        .distinctUntilChanged()
 
     /** What key delivery did, for the activity log. */
     val deliveries: SharedFlow<String> = notes.asSharedFlow()
@@ -73,8 +92,10 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     fun invitations(): Flow<List<InvitationRow>> = if (!rocky.isIssuer) flowOf(emptyList()) else trusted.invitations()
     suspend fun record(node: String, name: String, kind: NodeKind) = database.devices().record(node, name, kind.name.lowercase())
 
-    /** On a trusted device: seals [list]'s current key to the partial device [node]. */
-    suspend fun share(list: Long, node: String) = deliver(list, listOf(node))
+    /** On a trusted device: seals [list]'s current key to the partial device [node]; sync delivers it. */
+    suspend fun share(list: Long, node: String) {
+        rocky.list(list).share(listOf(node))
+    }
 
     /** Revokes future access and rotates the keys this device could read. */
     suspend fun revoke(node: String) {
@@ -82,8 +103,8 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     }
 
     /**
-     * On a trusted device: removes a revoked device's record, the keys sealed to it and its identity in one commit, so
-     * it disappears everywhere with the next sync. The signed revocation stays: it is what refuses the old identity.
+     * On a trusted device: removes a revoked device's record and its identity in one commit, so it disappears
+     * everywhere with the next sync; its pending envelopes were dropped at the revocation. The signed revocation stays: it is what refuses the old identity.
      * Only the deleted rows' tombstones remain, until a horizon declared with [purge] is finalized.
      */
     suspend fun forget(node: String) {
@@ -96,7 +117,6 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
      * Declares horizons on `devices` and `identities` with every live device as participant: once each acknowledged
      * them, or reached its deadline, sync finalizes them and drops the removed rows' tombstones and history. Until then
      * both tables refuse writes, so enrollments are recorded afterwards. Fails until this device synced with each one.
-     * Removed `keys` rows keep their history: those envelopes open only key epochs the revoked device already held.
      */
     suspend fun purge() {
         val participants = rocky.devices().filter { !it.revoked && it.node != self && it.profile !is GrantProfile.Custody }.map { it.node }.toSet()
@@ -117,13 +137,12 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
             Purge(maxOf(a.waiting, b.waiting), listOfNotNull(a.deadlineEpochSeconds, b.deadlineEpochSeconds).maxOrNull(), a.finalized && b.finalized)
         }
 
-    /** Runs until cancelled: records enrollments and delivers keys on a trusted device, and installs its own keys. */
+    /** Runs until cancelled on a trusted device: records enrollments and shares every list; sync delivers the keys. */
     suspend fun run() = coroutineScope {
         if (rocky.isIssuer) {
             launch { recordEnrollments() }
             launch { deliverEveryList() }
         }
-        launch { installOwnKeys() }
     }
 
     private suspend fun recordEnrollments() {
@@ -144,48 +163,30 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         }
     }
 
+    /**
+     * Shares each list's current epoch with every trusted and full device this device has not sent it to. A
+     * revocation's rotation seals the new epoch to every device whose record reads the list, partial ones included.
+     */
     @OptIn(FlowPreview::class)
     private suspend fun deliverEveryList() {
-        combine(database.lists().observe(), devices(), database.keys().observe(), revokedDevices()) { lists, devices, keys, revoked ->
-            Triple(lists, devices.filter { it.node !in revoked }, keys)
+        combine(database.lists().observe(), devices(), revokedDevices()) { lists, devices, revoked ->
+            lists to devices.filter { it.node !in revoked }
         }
             .settledOnRocky()
             .debounce(300)
-            .collectLatest { (lists, devices, keys) ->
+            .collectLatest { (lists, devices) ->
                 val recipients = devices.filter { it.node != self && NodeKind.of(it.kind)?.receivesEveryList == true }
-                // A partial device keeps receiving the new epoch of lists it was given.
-                val given = keys.filter { key -> devices.any { it.node == key.recipient && NodeKind.of(it.kind) == NodeKind.Partial } }
                 for (list in lists) {
-                    val epoch = attempt("read ${list.title}") { rocky.list(list.id).status().epochs.maxOrNull()?.toString() } ?: continue
-                    val stale = (recipients.map { it.node } + given.filter { it.list == list.id }.map { it.recipient })
-                        .filter { node -> keys.none { it.recipient == node && it.list == list.id && it.epoch == epoch } }
-                    for (recipient in stale) {
-                        attempt("share ${list.title} with ${recipient.take(6)}") {
-                            deliver(list.id, listOf(recipient))
-                            notes.tryEmit("Sealed “${list.title}” to ${devices.firstOrNull { it.node == recipient }?.name ?: recipient.take(6)}")
-                        }
+                    val status = attempt("read ${list.title}") { rocky.list(list.id).status() } ?: continue
+                    val current = status.current ?: continue
+                    val stale = recipients.filter { device -> status.recipients.none { it.node == device.node && it.epoch == current } }
+                    if (stale.isEmpty()) continue
+                    attempt("share ${list.title}") {
+                        rocky.list(list.id).share(stale.map { it.node })
+                        notes.tryEmit("Sealed “${list.title}” to ${stale.joinToString { it.name }}")
                     }
                 }
             }
-    }
-
-    private suspend fun installOwnKeys() {
-        database.keys().observe().settledOnRocky().map { keys -> keys.filter { it.recipient == self } }.collect { keys ->
-            for (key in keys) {
-                val list = rocky.list(key.list)
-                val held = attempt("read list ${key.list}") { list.status().epochs } ?: continue
-                if (held.any { it.toString() == key.epoch }) continue
-                attempt("install list ${key.list}") {
-                    list.accept(key.envelope)
-                    notes.tryEmit("Installed the key of list ${key.list}, epoch ${key.epoch}")
-                }
-            }
-        }
-    }
-
-    private suspend fun deliver(list: Long, recipients: List<String>) {
-        val epoch = rocky.list(list).status().epochs.maxOrNull()?.toString() ?: error("no key of list $list is held here")
-        for ((node, envelope) in rocky.list(list).share(recipients)) database.keys().deliver(node, list, epoch, envelope)
     }
 
     private companion object {

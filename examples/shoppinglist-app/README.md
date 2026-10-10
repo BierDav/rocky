@@ -101,9 +101,14 @@ verify, so the app acknowledges unconditionally; see
 
 Only trusted devices create, rename and delete lists. Each list, its items
 and categories form the `list` partition group with one secret. Trusted
-nodes seal each list's secret to its recipients in the replicated `keys`
-table; recipients install it and bootstrap from a peer checkpoint. No
-plaintext secret travels in a row. The `devices` table records names and
+nodes share each list with trusted and full devices, and partial devices get
+the lists sent to them from the **Devices** tab. Sync carries each sealed
+secret to its recipient alone, directly or through the custody peer, which
+holds it without learning the list; the recipient installs it and bootstraps
+from a peer checkpoint. A revocation's rotation reaches the remaining devices
+the same way. No row records who holds which list: the `keys` table is no
+longer written or read and goes with the roster in
+[phase 20](../../docs/features_07/20-shopping-without-a-roster.md). The `devices` table records names and
 kinds. List title conflicts converge per list; deleting a list hides its
 children, and deleting a category clears its items' category. Moving an item
 keeps an offline tick attached to it.

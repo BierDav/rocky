@@ -149,18 +149,9 @@ impl Peer {
         self.rows("SELECT list,title,completed,category FROM items ORDER BY list,title")
             .await
     }
+    /// Saves `list`'s envelope for `reader`; a later sync delivers it.
     async fn share(&self, list: &str, reader: &Peer) -> Result<(), Failure> {
-        let shared = self
-            .call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[reader.node().await?]}))
-            .await?;
-        reader
-            .call(
-                json!({"type":"partition_install","group":"list","values":values(list),
-                "envelope":shared["envelopes"][0]["envelope"]}),
-            )
-            .await?;
-        reader
-            .call(json!({"type":"partition_bootstrap","group":"list","values":values(list)}))
+        self.call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[reader.node().await?]}))
             .await
             .map(drop)
     }
@@ -270,7 +261,8 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
     let milk = a.add(&weekly, "Milk", Some(&dairy)).await?;
     a.add(&weekly, "Butter", Some(&dairy)).await?;
     a.add(&party, "Cake", None).await?;
-    // One envelope per list; B accepts all three while it only meets custody.
+    // One envelope per list; B receives all three while it only meets
+    // custody, which holds them as a mailbox.
     for list in [&weekly, &weekend, &party] {
         a.share(list, b).await?;
     }

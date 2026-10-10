@@ -79,10 +79,9 @@ class ShoppingLinks(
         }
         parameters["share"]?.let { title ->
             val target = list(title) ?: error("no list $title")
-            val codes = parameters["to"]?.let { repository.shareCodes(target, listOf(it)) } ?: repository.shareWithDevices(target)
-            codes.forEach { (device, code) -> Log.i(TAG, "share $device $code") }
+            val devices = parameters["to"]?.let { listOf(it).also { to -> repository.share(target, to) } } ?: repository.shareWithDevices(target)
+            devices.forEach { device -> Log.i(TAG, "share $device") }
         }
-        parameters["accept"]?.let { repository.acceptCode(it) }
         parameters["check"]?.let { title -> item(title).let { repository.check(it.list, it.id, !it.completed) } }
         parameters["move"]?.let { title ->
             val moved = item(title)

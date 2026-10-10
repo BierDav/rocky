@@ -78,7 +78,8 @@ Depends on `rocky-core` only. `rocky-secure` and `rocky-sdk` depend on it;
 Start at `crates/rocky-credentials/src/lib.rs`.
 
 [Partition credential primitives](runtime/partition-credentials.md) add selector
-attenuation and recipient-bound partition key envelopes. Canonical tuple/address
+attenuation, recipient-bound partition key envelopes, and the sealed delivery
+and receipt that carry them to their recipient alone. Canonical tuple/address
 types belong to `rocky-core`; `rocky-secure` owns authenticated partition frames,
 checkpoints and SQL enforcement, `rocky-storage` owns SQL completeness proofs,
 and `rocky-sdk`/Kotlin own consumer key lifecycle and schema overlays.
@@ -165,6 +166,8 @@ and signed per-scope checkpoints, pruning and
 rebootstrap ([encrypted checkpoints](runtime/encrypted-checkpoints.md)), and
 replica roles: scope subscriptions, frontier range sync, eviction under full-node
 custody and remote reads ([replica roles](runtime/replica-roles.md)).
+The session's delivery family carries opaque sealed deliveries; their owner
+implements its `Deliveries` port ([decision 0054](decisions/0054-envelope-delivery.md)).
 Handlers run outside its lock and transactions, one command at a time, and
 durable tickets record what a device knows of each command it submitted,
 apart from whatever delivers it ([typed commands](runtime/typed-commands.md)).
@@ -296,7 +299,9 @@ launcher and its container; see [always-on peer](runtime/always-on-peer.md).
 `crates/rocky-sdk` owns the native reactor over `EncryptedReplica`: a schema's
 typed secure tables, enrollment with grant profiles, the replicated
 [issuer registry](runtime/issuer-registry.md), renewal,
-revocation statements with key rotation and issuer tombstones, supplied credentials, durable pseudonym assignment
+revocation statements with key rotation and issuer tombstones, envelope delivery
+from its outbox in `identity.json` and a mailbox's deposits
+([decision 0054](decisions/0054-envelope-delivery.md)), supplied credentials, durable pseudonym assignment
 and per-table signing keys, the `SecretStore` key
 provider, contact records and sync with any admitted peer
 ([SDK enrollment](runtime/sdk-enrollment.md)). Its transports are TCP, the

@@ -1,13 +1,14 @@
-use rocky_sdk::{Database, Open, Session};
+use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 const SCHEMA: &str = r#"{"format":4,"application":"partitionsdk","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}],"views":[{"name":"partial_items","create_sql":"CREATE VIEW partial_items AS SELECT * FROM items WHERE row_kind=0"}]}"#;
-fn open(directory: &Path) -> Open<'_> {
+fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
+    let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
         directory,
         schema: SCHEMA,
         secrets: None,
-        network: None,
+        network: Some(Network::Owned(hub.connector(name))),
         commands: None,
     }
 }
@@ -32,7 +33,8 @@ fn values(name: &str) -> Value {
 async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("writer");
-    let db = Database::create(open(&path), None).unwrap().database;
+    let hub = Arc::new(Hub::default());
+    let db = Database::create(open(&path, &hub), None).unwrap().database;
     let scope: Value = serde_json::from_str(&db.scope()).unwrap();
     let session = db.session();
     for name in ["A", "B"] {
@@ -124,14 +126,34 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     let device = Database::device(&reader_path, None).unwrap();
     let supplied=call(&session,&scope,json!({"type":"partition_grant","device":device,"partitions":[{"domain":scope,"table":address["scope"]["table"],"selector":selector,"rows":"All","rights":["Read"],"fields":[]}]})).await;
     let reader = Database::install(
-        open(&reader_path),
+        open(&reader_path, &hub),
         serde_json::from_value(supplied["supplied"].clone()).unwrap(),
     )
     .unwrap()
     .database;
     let reader_session = reader.session();
-    let shared=call(&session,&scope,json!({"type":"partition_share","table":"items","values":values("A"),"recipients":[device.node]})).await;
-    call(&reader_session,&scope,json!({"type":"partition_install","table":"items","values":values("A"),"envelope":shared["envelopes"][0]["envelope"]})).await;
+    call(&session,&scope,json!({"type":"partition_share","table":"items","values":values("A"),"recipients":[device.node]})).await;
+    // The reader receives the envelope by syncing with its sender.
+    let contact = call(&session, &scope, json!({"type":"contact"})).await;
+    call(
+        &reader_session,
+        &scope,
+        json!({"type":"peer_add","contact":contact["uri"]}),
+    )
+    .await;
+    call(&reader_session, &scope, json!({"type":"sync"})).await;
+    assert_eq!(
+        call(
+            &reader_session,
+            &scope,
+            json!({"type":"partition_status","table":"items","values":values("A")})
+        )
+        .await["epochs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_ne!(
         reply(
             &reader_session,
@@ -158,14 +180,14 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     )
     .await;
     reader.close().await.unwrap();
-    Database::open(open(&reader_path))
+    Database::open(open(&reader_path, &hub))
         .unwrap()
         .database
         .close()
         .await
         .unwrap();
     db.close().await.unwrap();
-    let db = Database::open(open(&path)).unwrap().database;
+    let db = Database::open(open(&path, &hub)).unwrap().database;
     let session = db.session();
     call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
     let id = call(
@@ -208,7 +230,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
     call(&session,&scope,json!({"type":"sql","sql":"INSERT INTO items(list,key,amount,id) VALUES('A','next',7,?)","values":[{"type":"integer","value":id["id"]}]})).await;
     call(&session, &scope, json!({"type":"sql","sql":"COMMIT"})).await;
     db.close().await.unwrap();
-    Database::open(open(&path))
+    Database::open(open(&path, &hub))
         .unwrap()
         .database
         .close()
@@ -279,7 +301,8 @@ async fn own_id_partitions_continue_the_table_log() {
 async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("writer");
-    let db = Database::create(open(&path), None).unwrap().database;
+    let hub = Arc::new(Hub::default());
+    let db = Database::create(open(&path, &hub), None).unwrap().database;
     let scope: Value = serde_json::from_str(&db.scope()).unwrap();
     let session = db.session();
     for name in ["A", "B"] {
@@ -328,7 +351,7 @@ async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
     let schema = definition.to_string();
     let db = Database::open(Open {
         schema: &schema,
-        ..open(&path)
+        ..open(&path, &hub)
     })
     .unwrap()
     .database;

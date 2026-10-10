@@ -1,6 +1,7 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod delivery;
 mod mesh;
 mod partition;
 mod registry;
@@ -255,6 +256,8 @@ pub(crate) struct Node {
     acquire: Option<Acquire>,
     /// The coordination service commands are composed with, for its owner.
     service: Option<crate::owner::Service>,
+    /// Deposits held as a mailbox, loaded at first use.
+    mailbox: Mutex<Option<crate::delivery::Mailbox>>,
 }
 /// Acquires `scope` at fencing `epoch` with this device's node key.
 pub(crate) type Acquire = Arc<
@@ -304,6 +307,7 @@ impl Node {
             coordinator,
             acquire,
             service: None,
+            mailbox: Mutex::new(None),
         }
     }
     /// Lets the owner control its domain on this coordination service.
@@ -1476,6 +1480,7 @@ impl Node {
             .and_then(|authority| authority.rotation.clone())
             .ok_or("the revocation was not begun")?;
         let keys = draft.rotate(&self.vault)?.unwrap_or_default();
+        draft.drop_revoked_deliveries();
         draft.save(&self.path)?;
         *settings = draft;
         self.apply(&settings.revocations, &settings.credentials, keys)
@@ -2290,6 +2295,7 @@ impl Node {
         if draft.lacks(&held)? {
             draft.learn_revocations(&held)?;
             draft.forget_revoked();
+            draft.drop_revoked_deliveries();
             self.learned.store(true, Ordering::SeqCst);
             // Issuers retain sibling epochs; members restore newly revoked authors by checkpoint.
             if !draft.issuer() {
@@ -2309,7 +2315,8 @@ impl Node {
                 .record("device_revoked", json!({"node": node.to_hex()}));
         }
         *settings = draft;
-        Ok(())
+        drop(settings);
+        self.sweep_deliveries().await
     }
     /// Syncs with one peer, then keeps the revocations its sessions brought.
     async fn reconcile(
@@ -2363,15 +2370,15 @@ impl Node {
             .coordinator
             .as_deref()
             .filter(|_| !self.domain.app.commands().is_empty());
+        // Envelopes first, on the exchange's first session: a list a
+        // delivery opens syncs in this exchange. A stalled dial must not
+        // hold the shared checkpoint import slot.
+        let mut first = Some(self.deliver(&upstream).await?);
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
-            // A stalled dial must not hold the shared checkpoint import slot.
-            let first = sync::session(&self.replica, &upstream).await?;
             let _bootstrap = self.bootstrap.lock().await;
-            if !marker.exists() {
-                first.close().await?;
-            } else {
+            if marker.exists() {
                 self.sync_state.send_replace("bootstrapping");
                 let expected = std::fs::read(&marker)?;
                 let intent: Value = serde_json::from_slice(&expected)?;
@@ -2411,7 +2418,7 @@ impl Node {
                     &marker,
                     expected,
                     &mut bootstrapped,
-                    Some(first),
+                    first.take(),
                 )
                 .await?
                 {
@@ -2449,6 +2456,7 @@ impl Node {
                     "syncing"
                 });
             },
+            first,
         )
         .await?;
         bootstrapped.extend(transfer);
@@ -2471,6 +2479,10 @@ impl Node {
                     node,
                     settings.credentials,
                     self.coordinator.as_deref(),
+                    &delivery::Port {
+                        node: self,
+                        serving: true,
+                    },
                     |peer| self.inbound_sync(peer),
                     self,
                 )
@@ -3424,6 +3436,8 @@ fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bo
     }
 }
 
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 mod revocation_tests;
 #[cfg(test)]

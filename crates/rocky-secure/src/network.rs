@@ -21,6 +21,7 @@ mod checkpoints;
 mod contacts;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
 mod commands;
+mod delivery;
 mod existence;
 mod frontiers;
 pub(crate) mod holdings;
@@ -30,6 +31,8 @@ mod rows;
 use checkpoints::CheckpointMessage;
 use commands::CommandMessage;
 use contacts::ContactMessage;
+use delivery::DeliveryMessage;
+pub use delivery::{DELIVERY_PAGE, Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
 use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
@@ -146,6 +149,7 @@ enum Message {
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
     Contacts(ContactMessage),
+    Delivery(DeliveryMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -175,6 +179,7 @@ families!(
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
     Contacts(ContactMessage),
+    Delivery(DeliveryMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -489,6 +494,7 @@ impl NativeSession {
             Message::Horizon(message) => self.answer_horizon(replica, message).await,
             Message::Frontiers(message) => self.answer_frontiers(replica, message).await,
             Message::Existence(message) => self.answer_existence(replica, message).await,
+            Message::Delivery(_) => Err(denied("this peer serves no envelope delivery")),
             _ => Err(denied("unexpected native request")),
         }
     }

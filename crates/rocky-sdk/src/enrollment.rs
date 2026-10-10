@@ -34,7 +34,7 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
-/// revocations are a set of statements.
+/// revocations are a set of statements, envelopes wait in `deliveries`.
 pub const VERSION: u32 = 13;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
@@ -142,6 +142,8 @@ pub struct Settings {
     pub author_high_water: u32,
     /// An issuer's assignment key, separate from every node/user identity.
     pub author_issuer: Option<PublicKey>,
+    /// Envelopes this device sends, by delivery digest, until delivered.
+    pub deliveries: BTreeMap<String, crate::delivery::Pending>,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -755,6 +757,7 @@ impl Settings {
                 return Err("invalid epoch revocation IDs".into());
             }
         }
+        settings.check_deliveries()?;
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<(), Failure> {
@@ -1134,6 +1137,7 @@ impl Settings {
             pseudonyms: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
+            deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2394,6 +2398,7 @@ impl Settings {
             pseudonyms: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
+            deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2572,6 +2577,7 @@ impl Joining {
             pseudonyms: BTreeMap::new(),
             author_high_water: 0,
             author_issuer: None,
+            deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3549,15 +3555,27 @@ impl Settings {
         Ok(Some(keys))
     }
     /// Discards the redo intent only after the completion transaction committed.
-    pub(crate) fn complete_revocation(&mut self, registry: &Registry) -> Result<(), Failure> {
-        let authority = self.issuing("revokes devices")?;
-        if let Some(rotation) = &authority.rotation {
-            if !registry.revoked(&rotation.node) {
-                return Err("revocation tombstone is not committed".into());
-            }
-            fault::check(fault::Stage::Clearing)?;
-            authority.rotation = None;
+    /// The rotation's envelopes are saved with it.
+    pub(crate) fn complete_revocation(
+        &mut self,
+        vault: &Vault,
+        domain: &Domain,
+        registry: &Registry,
+    ) -> Result<(), Failure> {
+        let Some(node) = self
+            .issuing("revokes devices")?
+            .rotation
+            .as_ref()
+            .map(|rotation| rotation.node)
+        else {
+            return Ok(());
+        };
+        if !registry.revoked(&node) {
+            return Err("revocation tombstone is not committed".into());
         }
+        self.queue_rotation(vault, domain, registry)?;
+        fault::check(fault::Stage::Clearing)?;
+        self.issuing("revokes devices")?.rotation = None;
         Ok(())
     }
 }

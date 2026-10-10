@@ -42,7 +42,10 @@ pub struct Hub {
     /// At the cut, hold the stream instead of disconnecting it.
     pub hold_cut: AtomicBool,
     connectivity: tokio::sync::watch::Sender<()>,
+    /// What every stream of a recorded node carried, both ways.
+    transcripts: Mutex<HashMap<String, Tap>>,
 }
+type Tap = Arc<Mutex<Vec<u8>>>;
 impl Default for Hub {
     fn default() -> Self {
         Self {
@@ -60,6 +63,7 @@ impl Default for Hub {
             written: tokio::sync::watch::channel(0).0,
             hold_cut: AtomicBool::new(false),
             connectivity: tokio::sync::watch::channel(()).0,
+            transcripts: Mutex::default(),
         }
     }
 }
@@ -70,6 +74,32 @@ impl Hub {
             hub: self.clone(),
             name: name.into(),
         })
+    }
+    /// Records the bytes of every later stream `name` dials or accepts.
+    pub fn record(&self, name: &str) {
+        self.transcripts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(name.into())
+            .or_default();
+    }
+    /// What the streams of a recorded node carried so far.
+    pub fn transcript(&self, name: &str) -> Vec<u8> {
+        self.transcripts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .map(|tap| tap.lock().unwrap_or_else(PoisonError::into_inner).clone())
+            .unwrap_or_default()
+    }
+    fn taps(&self, ends: [&str; 2]) -> Vec<Tap> {
+        let transcripts = self
+            .transcripts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        ends.iter()
+            .filter_map(|end| transcripts.get(*end).cloned())
+            .collect()
     }
     /// Holds dials to just this address; does not signal connectivity.
     pub fn stall_peer(&self, address: &str, stalled: bool) {
@@ -166,6 +196,7 @@ impl Hub {
 struct Pipe {
     io: DuplexStream,
     hub: Arc<Hub>,
+    taps: Vec<Tap>,
 }
 fn cut() -> std::io::Error {
     std::io::ErrorKind::ConnectionReset.into()
@@ -194,6 +225,11 @@ impl AsyncWrite for Pipe {
         let written = Pin::new(&mut self.io).poll_write(cx, &buf[..allowed]);
         if let Poll::Ready(Ok(written)) = &written {
             self.hub.spend(*written);
+            for tap in &self.taps {
+                tap.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&buf[..*written]);
+            }
         }
         written
     }
@@ -287,9 +323,11 @@ impl Transport for Node {
                 return Err("no service listens there".into());
             }
             let (near, far) = tokio::io::duplex(self.hub.capacity.load(Ordering::SeqCst).max(1));
+            let taps = self.hub.taps([&self.name, address]);
             let pipe = |io| Pipe {
                 io,
                 hub: self.hub.clone(),
+                taps: taps.clone(),
             };
             listener
                 .try_send((protocol, Box::new(pipe(far))))

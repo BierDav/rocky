@@ -104,7 +104,7 @@ to later calls. Bytes already returned cannot be taken back.
 
 ## Native peer sessions
 
-Authenticated network sessions use version 10. A partition's grants are checked
+Authenticated network sessions use version 11. A partition's grants are checked
 in addition to its [holding proof](replica-roles.md#proving-a-partition). Reader
 proofs bind the key epoch, scope and mutual handshake; keyless custody uses the
 tuple and custody authority. Frontier batches refuse unproved members alone.

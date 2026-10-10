@@ -28,6 +28,7 @@ naturally holds.
 | [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
 | [0051](0051-roster-free-admission.md) | Roster-free admission and the revocation exchange in the native session |
 | [0052](0052-holding-proofs.md) | Session-bound partition holding proofs |
+| [0054](0054-envelope-delivery.md) | Envelope delivery to the recipient alone, directly or through a mailbox |
 | 0056 | [Contact exchange and discovery secrets](0056-contact-exchange-and-discovery-secrets.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
@@ -62,6 +63,7 @@ unreserved record is 0061.
 | Admission by chain and revocation set, the session version | [0051](0051-roster-free-admission.md) |
 | Author pseudonyms and author ranges | [credential-primitives](../runtime/credential-primitives.md#design-rationale) |
 | Partitioned reader scopes, key envelopes | [partitioned-scopes](../runtime/partitioned-scopes.md#design-rationale) |
+| Envelope delivery, mailboxes, receipts | [0054](0054-envelope-delivery.md) |
 | Typed command descriptors, tickets, handler hosts | [typed-commands](../runtime/typed-commands.md#design-rationale) |
 | Merged strong steps, local reconciliation read | [strong-publication](../runtime/strong-publication.md#design-rationale) |
 | Portable result evidence, historical results | [encrypted-commands](../runtime/encrypted-commands.md#portable-result-evidence) |

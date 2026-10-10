@@ -21,7 +21,7 @@ enum class NodeKind(val label: String, val summary: String) {
     ;
 
     /**
-     * What the device may do: members read devices and keys, which only trusted devices write, publish their own
+     * What the device may do: members read devices, which only trusted devices write, and the unused `keys`, publish their own
      * command identity, ask for approvals and read decisions. `coordination` holds the tenant key: trusted only.
      */
     val profile: GrantProfile get() = when (this) {

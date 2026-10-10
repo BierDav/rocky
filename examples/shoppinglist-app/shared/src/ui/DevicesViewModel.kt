@@ -24,7 +24,7 @@ data class HouseholdDevice(
     val isSelf: Boolean,
     /** Set when this device syncs with it directly. */
     val peer: Peer?,
-    /** Titles of the lists whose key was sealed to it. */
+    /** On a trusted device: titles of the lists whose current key this device sent it. */
     val lists: List<String>,
     val revoked: Boolean = false,
     val revocable: Boolean = false,
@@ -75,7 +75,8 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
             }
         }
         val recorded = combine(node.household.devices(), node.household.invitations(), ::Pair)
-        combine(recorded, node.household.keys(), node.repository.lists(), reach, invitation) { (rows, opened), keys, lists, reach, code ->
+        val sent = if (node.isTrusted) node.household.sent() else flowOf(emptyMap())
+        combine(recorded, sent, node.repository.lists(), reach, invitation) { (rows, opened), sent, lists, reach, code ->
             val (self, network, enrolled, purge) = reach
             val titles = lists.associate { it.id to it.title }
             val recorded = rows.map { row ->
@@ -85,7 +86,7 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
                     NodeKind.of(row.kind),
                     row.node == self.node,
                     network.peers.firstOrNull { it.node == row.node },
-                    keys.filter { it.recipient == row.node }.mapNotNull { titles[it.list] }.distinct(),
+                    sent[row.node].orEmpty().mapNotNull { titles[it] }.sorted(),
                     revoked = enrolled.any { it.node == row.node && it.revoked },
                     revocable = row.node != self.node && enrolled.any { it.node == row.node && !it.revoked },
                 )

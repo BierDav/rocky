@@ -1,7 +1,7 @@
-//! Group secrets: one envelope shares every table of a group partition,
-//! revocation rotates the group as one unit, and the holding rule keeps
-//! a group partition whole unless a table is left out explicitly. See
-//! `docs/runtime/partitioned-scopes.md#group-secrets`.
+//! Group secrets: one envelope shares every table of a group partition and
+//! reaches its recipient by sync, revocation rotates the group as one unit,
+//! and the holding rule keeps a group partition whole unless a table is
+//! left out explicitly. See `docs/runtime/partitioned-scopes.md#group-secrets`.
 use rocky_sdk::{
     Database, DeviceKeys, Network, Open, SecretStore, Session, credentials::ProviderError,
     transport::memory::Hub,
@@ -75,37 +75,42 @@ struct Peer {
     session: Session,
     scope: Value,
     store: Arc<Store>,
+    hub: Arc<Hub>,
 }
-fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>) -> Open<'a> {
+/// Every peer reaches the others of its test through `hub`, by its
+/// directory's name.
+fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<Hub>) -> Open<'a> {
+    let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
         directory,
         schema,
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
-        network: None,
+        network: Some(Network::Owned(hub.connector(name))),
         commands: None,
     }
 }
 impl Peer {
-    fn new(database: Arc<Database>, store: Arc<Store>) -> Self {
+    fn new(database: Arc<Database>, store: Arc<Store>, hub: Arc<Hub>) -> Self {
         Self {
             session: database.session(),
             scope: serde_json::from_str(&database.scope()).unwrap(),
             database,
             store,
+            hub,
         }
     }
     fn create(directory: &Path) -> Self {
-        let store = Arc::new(Store::default());
-        let database = Database::create(open(directory, SCHEMA, &store), None)
+        let (store, hub) = (Arc::new(Store::default()), Arc::new(Hub::default()));
+        let database = Database::create(open(directory, SCHEMA, &store, &hub), None)
             .unwrap()
             .database;
-        Self::new(database, store)
+        Self::new(database, store, hub)
     }
-    fn reopen(directory: &Path, schema: &str, store: Arc<Store>) -> Self {
-        let database = Database::open(open(directory, schema, &store))
+    fn reopen(directory: &Path, schema: &str, store: Arc<Store>, hub: Arc<Hub>) -> Self {
+        let database = Database::open(open(directory, schema, &store, &hub))
             .unwrap()
             .database;
-        Self::new(database, store)
+        Self::new(database, store, hub)
     }
     async fn reply(&self, request: Value) -> Result<Value, String> {
         let reply: Value = serde_json::from_str(
@@ -187,9 +192,40 @@ impl Peer {
         self.reply(json!({"type":"partition_share","group":"list","values":values(list),"recipients":recipients}))
             .await
     }
-    async fn install(&self, list: &str, envelope: &Value) -> Result<Value, String> {
-        self.reply(json!({"type":"partition_install","group":"list","values":values(list),"envelope":envelope}))
-            .await
+    /// Syncs with `from`, which hands over what it holds for this peer.
+    async fn fetch(&self, from: &Peer) -> Result<Value, String> {
+        let contact = from.ok(json!({"type":"contact"})).await;
+        self.reply(json!({"type":"peer_add","contact":contact["uri"]}))
+            .await?;
+        self.reply(json!({"type":"sync"})).await
+    }
+    /// How the sharer sees each recipient of list `list`'s latest epoch
+    /// sent to it, by node.
+    async fn recipients(&self, list: &str) -> BTreeMap<String, Value> {
+        let mut recipients = self.status(list).await["recipients"]
+            .as_array()
+            .unwrap()
+            .clone();
+        recipients.sort_by_key(|recipient| recipient["epoch"]["generation"].as_u64());
+        recipients
+            .iter()
+            .map(|recipient| {
+                (
+                    recipient["node"].as_str().unwrap().to_owned(),
+                    recipient["state"].clone(),
+                )
+            })
+            .collect()
+    }
+    /// Every activity event of `kind`.
+    async fn events(&self, kind: &str) -> Vec<Value> {
+        self.ok(json!({"type":"activity"})).await["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .cloned()
+            .collect()
     }
 }
 fn values(list: &str) -> Value {
@@ -204,25 +240,14 @@ fn prepare(directory: &Path) -> (Arc<Store>, DeviceKeys) {
     let device = Database::device(directory, Some(store.clone() as Arc<dyn SecretStore>)).unwrap();
     (store, device)
 }
-fn install(directory: &Path, store: Arc<Store>, supplied: Value) -> Peer {
-    install_on(directory, store, supplied, None)
-}
-fn install_on(
-    directory: &Path,
-    store: Arc<Store>,
-    supplied: Value,
-    network: Option<Network>,
-) -> Peer {
+fn install(directory: &Path, store: Arc<Store>, supplied: Value, hub: &Arc<Hub>) -> Peer {
     let database = Database::install(
-        Open {
-            network,
-            ..open(directory, SCHEMA, &store)
-        },
+        open(directory, SCHEMA, &store, hub),
         serde_json::from_value(supplied).unwrap(),
     )
     .unwrap()
     .database;
-    Peer::new(database, store)
+    Peer::new(database, store, hub.clone())
 }
 /// A reader granted `rights` on list `list` of `tables`, holding no secret.
 async fn granted(
@@ -235,7 +260,7 @@ async fn granted(
     let (store, device) = prepare(directory);
     let grants = issuer.grants(list, tables, rights).await;
     let supplied = issuer.grant(&device, grants).await.unwrap();
-    (install(directory, store, supplied), device)
+    (install(directory, store, supplied, &issuer.hub), device)
 }
 
 #[tokio::test]
@@ -267,11 +292,13 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
     )
     .await;
     let shared = issuer.share("A", &[&device]).await.unwrap();
-    let envelopes = shared["envelopes"].as_array().unwrap();
-    assert_eq!(envelopes.len(), 1, "one envelope per recipient");
-    assert_eq!(envelopes[0]["recipient"], device.node.to_hex());
+    assert_eq!(shared["recipients"], json!([device.node.to_hex()]));
+    assert_eq!(
+        issuer.recipients("A").await[&device.node.to_hex()],
+        "pending"
+    );
 
-    // A reader lacking read on one table of the group cannot install, and
+    // A reader lacking read on one table of the group installs nothing, and
     // a refused envelope leaves no secret, epoch or registration behind.
     let (partial, partial_device) = granted(
         &issuer,
@@ -281,18 +308,16 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         &["Read"],
     )
     .await;
-    let foreign = issuer.share("A", &[&partial_device]).await.unwrap();
-    let refused = partial
-        .install("A", &foreign["envelopes"][0]["envelope"])
-        .await
-        .unwrap_err();
-    assert!(refused.contains("attachments lacks it"), "{refused}");
+    issuer.share("A", &[&partial_device]).await.unwrap();
+    partial.fetch(&issuer).await.unwrap();
+    let refused = partial.events("envelope_refused").await;
+    assert_eq!(refused.len(), 1, "only its own envelope reached it");
     assert!(
-        partial
-            .install("A", &envelopes[0]["envelope"])
-            .await
-            .is_err(),
-        "another recipient's envelope"
+        refused[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("attachments lacks it"),
+        "{refused:?}"
     );
     assert_eq!(partial.store.group_secrets(), 0);
     let (secrets, tables) = partial.epochs("A").await;
@@ -302,20 +327,32 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         partial.status("A").await["tables"][0]["holding"],
         Value::Null
     );
+    // Its sender keeps the envelope; the other is still pending too.
+    let states = issuer.recipients("A").await;
+    assert_eq!(states[&partial_device.node.to_hex()], "pending");
+    assert_eq!(states[&device.node.to_hex()], "pending");
 
     // The recipient installs every table's key from the one envelope.
-    let installed = reader
-        .install("A", &envelopes[0]["envelope"])
-        .await
-        .unwrap();
-    assert_eq!(installed["epoch"]["generation"], 1);
+    reader.fetch(&issuer).await.unwrap();
+    assert_eq!(reader.events("partition_key_installed").await.len(), 1);
     let (secrets, tables) = reader.epochs("A").await;
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
+    assert_eq!(
+        issuer.recipients("A").await[&device.node.to_hex()],
+        "delivered"
+    );
+    // The status of deliveries is the sharer's alone.
+    assert_eq!(reader.status("A").await["recipients"], json!([]));
     // One secret is stored; table keys are derived, never stored.
     assert_eq!(reader.store.group_secrets(), 1);
     reader.database.close().await.unwrap();
-    let reader = Peer::reopen(&root.path().join("reader"), SCHEMA, reader.store.clone());
+    let reader = Peer::reopen(
+        &root.path().join("reader"),
+        SCHEMA,
+        reader.store.clone(),
+        reader.hub.clone(),
+    );
     assert!(uniform(&reader.epochs("A").await.1, json!([1])));
     for peer in [reader, partial, issuer] {
         peer.database.close().await.unwrap();
@@ -347,18 +384,12 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         &["Read"],
     )
     .await;
-    let shared = issuer
+    issuer
         .share("A", &[&removed_device, &remaining_device])
         .await
         .unwrap();
-    for (peer, device) in [(&removed, &removed_device), (&remaining, &remaining_device)] {
-        let envelope = shared["envelopes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|envelope| envelope["recipient"] == device.node.to_hex())
-            .unwrap();
-        peer.install("A", &envelope["envelope"]).await.unwrap();
+    for peer in [&removed, &remaining] {
+        peer.fetch(&issuer).await.unwrap();
     }
 
     // The issuer knows the removed device only through its partition grant.
@@ -399,12 +430,15 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         .unwrap_err();
     assert!(refused.contains("revoked"), "{refused}");
 
-    // One new envelope per remaining reader delivers the new epoch.
+    // The rotation sealed the new epoch to the remaining reader its
+    // registry records, with no share; sharing again adds nothing.
+    let states = issuer.recipients("A").await;
+    assert_eq!(states.get(&removed_device.node.to_hex()), None);
+    assert_eq!(states[&remaining_device.node.to_hex()], "pending");
     let shared = issuer.share("A", &[&remaining_device]).await.unwrap();
     assert_eq!(shared["epoch"]["generation"], 2);
-    let envelope = &shared["envelopes"][0]["envelope"];
-    assert!(removed.install("A", envelope).await.is_err());
-    remaining.install("A", envelope).await.unwrap();
+    assert!(removed.fetch(&issuer).await.is_err(), "revoked");
+    remaining.fetch(&issuer).await.unwrap();
     let (secrets, tables) = remaining.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]));
     assert!(uniform(&tables, json!([1, 2])));
@@ -416,7 +450,12 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     );
 
     issuer.database.close().await.unwrap();
-    let issuer = Peer::reopen(&root.path().join("issuer"), SCHEMA, issuer.store.clone());
+    let issuer = Peer::reopen(
+        &root.path().join("issuer"),
+        SCHEMA,
+        issuer.store.clone(),
+        issuer.hub.clone(),
+    );
     assert!(uniform(&issuer.epochs("A").await.1, json!([1, 2])));
     for peer in [issuer, removed, remaining] {
         peer.database.close().await.unwrap();
@@ -484,9 +523,9 @@ async fn an_interrupted_rotation_resumes_to_one_epoch_across_the_group() {
             .reply(json!({"type":"revoke","node":device.node.to_string()}))
             .await;
         issuer.store.limit(None);
-        let store = issuer.store.clone();
+        let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
         issuer.database.close().await.unwrap();
-        let issuer = Peer::reopen(&directory, SCHEMA, store);
+        let issuer = Peer::reopen(&directory, SCHEMA, store, hub);
         let (secrets, tables) = issuer.epochs("A").await;
         assert_eq!(secrets, json!([1, 2]), "budget {budget}");
         assert!(
@@ -516,12 +555,13 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     let second = SCHEMA.replace(r#""version":1"#, r#""version":2"#);
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("issuer");
-    let store = Arc::new(Store::default());
+    let (store, hub) = (Arc::new(Store::default()), Arc::new(Hub::default()));
     let issuer = Peer::new(
-        Database::create(open(&directory, &first, &store), None)
+        Database::create(open(&directory, &first, &store, &hub), None)
             .unwrap()
             .database,
         store,
+        hub,
     );
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
@@ -530,10 +570,10 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
         issuer.status("A").await["tables"].as_array().unwrap().len(),
         2
     );
-    let store = issuer.store.clone();
+    let (store, hub) = (issuer.store.clone(), issuer.hub.clone());
     issuer.database.close().await.unwrap();
 
-    let issuer = Peer::reopen(&directory, &second, store);
+    let issuer = Peer::reopen(&directory, &second, store, hub);
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
@@ -570,14 +610,11 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
         .await;
     let (phone, device) =
         granted(&issuer, &root.path().join("phone"), "A", &TABLES, &["Read"]).await;
-    let shared = issuer.share("A", &[&device]).await.unwrap();
-    phone
-        .install("A", &shared["envelopes"][0]["envelope"])
-        .await
-        .unwrap();
+    issuer.share("A", &[&device]).await.unwrap();
     phone
         .ok(json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[],"custody":0}}))
         .await;
+    phone.fetch(&issuer).await.unwrap();
     for omit in [json!(["photos"]), json!(TABLES)] {
         assert!(
             phone
@@ -687,21 +724,7 @@ async fn introduce(left: &Peer, right: &Peer) {
 #[tokio::test(flavor = "multi_thread")]
 async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_later_rows() {
     let root = tempfile::tempdir().unwrap();
-    let hub = Arc::new(Hub::default());
-    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
-    let store = Arc::new(Store::default());
-    let issuer = Peer::new(
-        Database::create(
-            Open {
-                network: network("issuer"),
-                ..open(&root.path().join("issuer"), SCHEMA, &store)
-            },
-            None,
-        )
-        .unwrap()
-        .database,
-        store,
-    );
+    let issuer = Peer::create(&root.path().join("issuer"));
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
         .await;
@@ -716,42 +739,32 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
             .grant(&device, issuer.grants("A", &TABLES, &["Read"]).await)
             .await
             .unwrap();
-        let reader = install_on(&directory, store, supplied, network(name));
+        let reader = install(&directory, store, supplied, &issuer.hub);
         introduce(&issuer, &reader).await;
         readers.push((reader, device));
     }
     let devices: Vec<&DeviceKeys> = readers.iter().map(|(_, device)| device).collect();
     let shared = issuer.share("A", &devices).await.unwrap();
-    assert_eq!(shared["envelopes"].as_array().unwrap().len(), 2);
-    for (reader, device) in &readers {
-        let envelope = shared["envelopes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|envelope| envelope["recipient"] == device.node.to_hex())
-            .unwrap();
-        reader.install("A", &envelope["envelope"]).await.unwrap();
+    assert_eq!(shared["recipients"].as_array().unwrap().len(), 2);
+    for (reader, _) in &readers {
+        // One sync delivers the envelope and then the list's rows.
+        reader.ok(json!({"type":"sync"})).await;
         assert_eq!(
             reader.ok(json!({"type":"authors"})).await["installed"],
             json!([])
         );
-        reader.ok(json!({"type":"sync"})).await;
         assert_eq!(rows(reader).await, vec![vec!["before".to_owned()]; 3]);
     }
 
     let (removed, removed_device) = &readers[0];
-    let (remaining, remaining_device) = &readers[1];
+    let (remaining, _) = &readers[1];
     issuer
         .ok(json!({"type":"revoke","node":removed_device.node.to_string()}))
         .await;
     for table in TABLES {
         write(&issuer, table, "after").await;
     }
-    let shared = issuer.share("A", &[remaining_device]).await.unwrap();
-    remaining
-        .install("A", &shared["envelopes"][0]["envelope"])
-        .await
-        .unwrap();
+    // The rotation's envelope reaches the remaining reader by sync alone.
     remaining.ok(json!({"type":"sync"})).await;
     let both = vec!["after".to_owned(), "before".to_owned()];
     assert_eq!(
@@ -773,20 +786,7 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants() {
     let root = tempfile::tempdir().unwrap();
-    let hub = Arc::new(Hub::default());
-    let store = Arc::new(Store::default());
-    let issuer = Peer::new(
-        Database::create(
-            Open {
-                network: Some(Network::Owned(hub.connector("issuer"))),
-                ..open(&root.path().join("issuer"), SCHEMA, &store)
-            },
-            None,
-        )
-        .unwrap()
-        .database,
-        store,
-    );
+    let issuer = Peer::create(&root.path().join("issuer"));
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
         .await;
@@ -813,20 +813,12 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
         grant["fields"] = json!(full.fields);
     }
     let supplied = issuer.grant(&device, grants).await.unwrap();
-    let writer = install_on(
-        &directory,
-        store,
-        supplied,
-        Some(Network::Owned(hub.connector("writer"))),
-    );
+    let writer = install(&directory, store, supplied, &issuer.hub);
     introduce(&issuer, &writer).await;
-    let shared = issuer.share("A", &[&device]).await.unwrap();
-    writer
-        .install("A", &shared["envelopes"][0]["envelope"])
-        .await
-        .unwrap();
-    let authors = writer.ok(json!({"type":"authors"})).await;
-    assert_eq!(authors["installed"].as_array().unwrap().len(), TABLES.len());
+    issuer.share("A", &[&device]).await.unwrap();
+    // The sync that delivers the envelope also obtains an author per table.
+    writer.ok(json!({"type":"sync"})).await;
+    assert_eq!(writer.events("author_installed").await.len(), TABLES.len());
     assert_eq!(
         writer.ok(json!({"type":"authors"})).await["installed"],
         json!([])
@@ -850,4 +842,56 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     );
     writer.database.close().await.unwrap();
     issuer.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_member_with_a_delegated_grant_shares_without_the_publisher_key() {
+    let root = tempfile::tempdir().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer"));
+    issuer
+        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
+        .await;
+    let (store, device) = prepare(&root.path().join("member"));
+    let grants = issuer.grants("A", &TABLES, &["Read"]).await;
+    let supplied = issuer
+        .ok(json!({"type":"partition_grant","device":device,"partitions":grants,"delegations":2}))
+        .await;
+    let member = install(
+        &root.path().join("member"),
+        store,
+        supplied["supplied"].clone(),
+        &issuer.hub,
+    );
+    issuer.share("A", &[&device]).await.unwrap();
+    member.fetch(&issuer).await.unwrap();
+    let (store, recipient) = prepare(&root.path().join("recipient"));
+    let grants = member.grants("A", &TABLES, &["Read"]).await;
+    let supplied = member
+        .ok(json!({"type":"partition_delegate","device":recipient,"partitions":grants}))
+        .await;
+    let delegated = install(
+        &root.path().join("recipient"),
+        store,
+        supplied["supplied"].clone(),
+        &issuer.hub,
+    );
+    member.share("A", &[&recipient]).await.unwrap();
+    delegated.fetch(&member).await.unwrap();
+    assert_eq!(delegated.epochs("A").await.0, json!([1]));
+    assert_eq!(
+        member.recipients("A").await[&recipient.node.to_hex()],
+        "delivered"
+    );
+    let (last, last_device) =
+        granted(&issuer, &root.path().join("last"), "A", &TABLES, &["Read"]).await;
+    delegated.share("A", &[&last_device]).await.unwrap();
+    last.fetch(&delegated).await.unwrap();
+    assert_eq!(last.epochs("A").await.0, json!([1]));
+    assert_eq!(
+        delegated.recipients("A").await[&last_device.node.to_hex()],
+        "delivered"
+    );
+    for peer in [last, delegated, member, issuer] {
+        peer.database.close().await.unwrap();
+    }
 }

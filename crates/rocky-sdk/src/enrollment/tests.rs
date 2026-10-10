@@ -275,13 +275,18 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
             .collect::<Result<_, _>>()?;
         let mut reopened = Settings::load(&path)?;
         let keys = reopened.rotate(&vault)?.ok_or("the intent was lost")?;
+        let domain = reopened.domain()?;
         // No completion before the registry transaction has committed.
-        assert!(reopened.complete_revocation(&Registry::default()).is_err());
+        assert!(
+            reopened
+                .complete_revocation(&vault, &domain, &Registry::default())
+                .is_err()
+        );
         let mut rows = BTreeMap::new();
         let mut changes = registry::Changes::default();
         changes.revoked(&node)?;
         let completed = Registry::merged(&mut rows, &changes)?;
-        reopened.complete_revocation(&completed)?;
+        reopened.complete_revocation(&vault, &domain, &completed)?;
         reopened.save(&path)?;
         assert_eq!(reopened.revocations.len(), 1, "{stop:?}");
         assert!(

@@ -125,8 +125,8 @@ internal fun phones(peer: File, evidence: File) {
             val bNode = contacts.getValue(b).first
             for (list in listOf("Weekly", "Weekend")) {
                 // B was enrolled by the host, so A names it; the Share button lists only A's own enrollments.
-                val code = a.send("share" to list, "to" to bNode).first { it.startsWith("share $bNode ") }.substringAfterLast(' ')
-                b.send("accept" to code)
+                // The envelopes wait at A and reach B through custody.
+                check(a.send("share" to list, "to" to bNode).any { it == "share $bNode" }) { "A did not share $list" }
             }
             fun relay(from: Phone, to: Phone) {
                 to.send("online" to "false")

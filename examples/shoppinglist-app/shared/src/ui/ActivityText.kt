@@ -111,13 +111,29 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
 
         is RockyEvent.Connection -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, if (event.online) "Went online" else "Went offline")
 
+        is RockyEvent.EnvelopesDelivered -> ActivityEntry(
+            key,
+            event.atEpochMillis,
+            EntryKind.Key,
+            "List keys exchanged with ${device(event.peer)}",
+            listOfNotNull(
+                "${event.handed} delivered".takeIf { event.handed > 0 },
+                "${event.deposited} left for their devices".takeIf { event.deposited > 0 },
+                "${event.refused} refused for now".takeIf { event.refused > 0 },
+                "${event.received} received".takeIf { event.received > 0 },
+                "${event.receipts} confirmed".takeIf { event.receipts > 0 },
+            ).joinToString(", "),
+        )
+
+        is RockyEvent.EnvelopeRefused -> ActivityEntry(key, event.atEpochMillis, EntryKind.Problem, "A list key from ${device(event.peer)} did not install", event.error)
+
         is RockyEvent.Other -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, event.kind.replace('_', ' '))
     }
 }
 
 private val PARTITION_ACTIONS = mapOf(
     "created" to "key created",
-    "shared" to "key sealed to other devices",
+    "shared" to "key sealed to other devices, delivered by sync",
     "key_installed" to "key installed",
     "bootstrap" to "will start from a peer's checkpoint",
     "subscribed" to "held here",

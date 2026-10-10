@@ -157,6 +157,28 @@ impl NativeSession {
         }
         Ok(response)
     }
+    /// Answers one contact request inside an admitted session.
+    pub(super) async fn answer_contact<A: rocky_core::RowCommandApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        handler: &dyn ContactHandler,
+        message: ContactMessage,
+    ) -> Result<(), Error> {
+        let Payload::Request(request) = self.open_contact(message)? else {
+            return Err(denied("unexpected contact request"));
+        };
+        replica.admit_chain(self.peer, &self.credentials).await?;
+        validate(&request)?;
+        if matches!(request, ContactRequest::Request { .. }) {
+            if self.contact_requests >= 8 {
+                return Err(denied("contact request limit"));
+            }
+            self.contact_requests += 1;
+        }
+        let response = handler.answer(self.peer, request).await?;
+        replica.admit_chain(self.peer, &self.credentials).await?;
+        self.send_contact(Payload::Response(response)).await
+    }
     /// Serves the SDK mesh metadata alongside rows and optional commands.
     pub async fn serve_with_contacts<A: rocky_core::RowCommandApplication>(
         &mut self,
@@ -173,20 +195,7 @@ impl NativeSession {
             };
             match message {
                 Message::Contacts(message) => {
-                    let Payload::Request(request) = self.open_contact(message)? else {
-                        return Err(denied("unexpected contact request"));
-                    };
-                    replica.admit_chain(self.peer, &self.credentials).await?;
-                    validate(&request)?;
-                    if matches!(request, ContactRequest::Request { .. }) {
-                        if self.contact_requests >= 8 {
-                            return Err(denied("contact request limit"));
-                        }
-                        self.contact_requests += 1;
-                    }
-                    let response = handler.answer(self.peer, request).await?;
-                    replica.admit_chain(self.peer, &self.credentials).await?;
-                    self.send_contact(Payload::Response(response)).await?;
+                    self.answer_contact(replica, handler, message).await?
                 }
                 Message::Commands(message) => {
                     let coordinator =

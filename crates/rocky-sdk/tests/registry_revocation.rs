@@ -138,9 +138,8 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     assert_eq!(identity(root, "m")?["keys"]["items"], json!([1]));
     // The enrolling issuer returns, learns the statement and tombstone in one sync.
     let a = Device::new(Database::open(open(&root.join("a"), &hub, "a"))?)?;
-    // Existing group-key sharing supplies the rotated secret before checkpoint sync.
-    let shared = b.ok(json!({"type":"partition_share","group":"list","values":values("L"),"recipients":[a.node().await]})).await;
-    a.ok(json!({"type":"partition_install","group":"list","values":values("L"),"envelope":shared["envelopes"][0]["envelope"]})).await;
+    // The rotation sealed the new secret to A, which the registry records:
+    // its first sync collects it before checkpoint sync.
     sync(&a)
         .await
         .map_err(|error| format!("enrolling issuer after revocation: {error}"))?;

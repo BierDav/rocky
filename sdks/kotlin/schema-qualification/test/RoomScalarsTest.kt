@@ -85,7 +85,10 @@ class RoomScalarsTest {
                 assertTrue(tables.all { it.getValue("epochs") == status.getValue("epochs") && it.getValue("current") == status.getValue("current") })
                 val device = rocky.Credentials.prepare(File(directory, "reader"))
                 val shared = database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))))
-                assertEquals(1, shared.getValue("envelopes").jsonArray.size)
+                assertEquals(listOf(device.getValue("node")), shared.getValue("recipients").jsonArray.toList())
+                // The envelope waits for sync; only this sharer knows it is pending.
+                val recipients = database.partitions.status("list", list).getValue("recipients").jsonArray.map { it.jsonObject }
+                assertEquals(listOf("pending"), recipients.map { it.getValue("state").jsonPrimitive.content })
                 assertFailsWith<RockyException> { database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))), epoch = rocky.KeyEpoch(2, "0".repeat(64))) }
                 assertFailsWith<RockyException> { database.partitions.subscribe("list", list, omit = listOf("photos")) }
             } finally {

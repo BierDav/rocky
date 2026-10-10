@@ -139,9 +139,10 @@ impl Domain {
         for list in ["L", "M"] {
             a.ok(json!({"type":"partition_create","group":"list","values":values(list)}))
                 .await;
-            let shared = a.ok(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[b.node().await]})).await;
-            b.ok(json!({"type":"partition_install","group":"list","values":values(list),"envelope":shared["envelopes"][0]["envelope"]})).await;
+            a.ok(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[b.node().await]})).await;
         }
+        // B collects both envelopes from A.
+        sync(&b).await?;
         Ok(Self { a, b })
     }
 }

@@ -274,13 +274,11 @@ class ShoppingIntegrationTest {
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
     }
 
-    /** Shares [list] from [owner] with [reader] through one envelope, as the application delivers it. */
-    private suspend fun share(owner: ShoppingRepository, reader: Pair<RockyDatabase, ShoppingRepository>, list: Long) {
+    /** Shares [list] from [owner] with [reader] through one envelope, which the reader's next sync delivers. */
+    private suspend fun share(owner: ShoppingRepository, reader: RockyDatabase, list: Long) {
         // A joined device finishes its own bootstrap before it starts a list from a checkpoint.
-        assertEquals(ConnectionState.Connected, reader.first.syncOnce().state)
-        val node = reader.first.session().node
-        val envelopes = owner.share(list, listOf(node))
-        reader.second.accept(list, envelopes.getValue(node))
+        assertEquals(ConnectionState.Connected, reader.syncOnce().state)
+        owner.share(list, listOf(reader.session().node))
     }
 
     @Test fun `a list shares its categories and items and deleting a category nulls only the reference`() = runBlocking {
@@ -302,10 +300,10 @@ class ShoppingIntegrationTest {
             assertEquals(listOf("Eggs", "Milk"), da.items().all(list).map { it.title }.sorted())
             assertTrue(da.items().all(list).all { it.category == dairy })
 
-            // One call: one envelope per recipient covers the list's every table.
+            // One call: one envelope per recipient covers the list's every table, and waits here for sync.
             val reader = Credentials.prepare(File(root, "reader")).getValue("node").jsonPrimitive.content
-            val shared = repository.share(list, listOf(reader))
-            assertEquals(setOf(reader), shared.keys)
+            repository.share(list, listOf(reader))
+            assertEquals(listOf(reader to DeliveryState.Pending), repository.deliveries(list).map { it.node to it.state })
             val status = a.list(list).status()
             assertEquals(ShoppingTables.toSet(), status.tables.map { it.table }.toSet())
             assertTrue(status.tables.all { it.keyEpochs == status.epochs })
@@ -343,7 +341,7 @@ class ShoppingIntegrationTest {
             db = openShoppingDatabase(File(root, "b"), b)
             val rb = ShoppingRepository(db, b)
             val list = ra.createList("Groceries")
-            share(ra, b to rb, list)
+            share(ra, b, list)
             val id = ra.add(list, "Milk")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Groceries"), db.lists().all().map { it.title })
@@ -389,7 +387,7 @@ class ShoppingIntegrationTest {
             val repository = ShoppingRepository(db, b)
             val owner = ShoppingRepository(da, a)
             val list = owner.createList("Groceries")
-            share(owner, b to repository, list)
+            share(owner, b, list)
             following = launch(Dispatchers.IO) { db.followRocky(b) }
             val synced = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe(list, "tea", false).first { it.isNotEmpty() } } }
             val id = owner.add(list, "Green Tea")

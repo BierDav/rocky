@@ -33,7 +33,12 @@ fun main() {
         }
         val started = System.nanoTime()
         val notes = mutableListOf<String>()
-        val error = runCatching { Run(root, peer, notes).use { scenario(it) } }.exceptionOrNull()
+        val error = runCatching {
+            Run(root, peer, notes).use {
+                scenario(it)
+                it.noKeyRows()
+            }
+        }.exceptionOrNull()
         val millis = (System.nanoTime() - started) / 1_000_000
         failed = failed || error != null
         println("${if (error == null) "PASS" else "FAIL"} $name ($millis ms)${error?.let { ": ${it.message}" } ?: ""}")
@@ -86,6 +91,7 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
     val directory = File(root, name)
     val listen = "127.0.0.1:${freePort()}"
     lateinit var node: String
+    val alive: Boolean get() = process.isAlive
 
     fun call(op: String, vararg args: Pair<String, Any?>): JsonElement {
         val request = buildJsonObject {
@@ -127,11 +133,13 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
     fun lists(): List<String> = call("lists").jsonArray.map { it.jsonPrimitive.content.substringAfter(':') }
     fun finalized(table: String, list: Long) = call("horizon", "action" to "status", "table" to table, "list" to list).jsonObject["finalized"]?.jsonPrimitive?.boolean == true
 
-    /** Shares [list] from this issuer; each reader accepts its envelope, as the application delivers it. */
+    /** Shares [list] from this issuer; each reader's next sync delivers its envelope. */
     fun share(list: Long, vararg readers: Device) {
-        val envelopes = call("share", "list" to list, "recipients" to readers.map { it.node }).jsonObject
-        for (reader in readers) reader.call("accept", "list" to list, "envelope" to envelopes.getValue(reader.node))
+        call("share", "list" to list, "recipients" to readers.map { it.node })
     }
+
+    /** Rows in the former envelope table, which must stay empty. */
+    fun keyRows(): Long = call("keyRows").jsonPrimitive.long
     override fun close() {
         if (process.isAlive) runCatching { call("close") }
         if (!process.waitFor(30, TimeUnit.SECONDS)) process.destroyForcibly()
@@ -197,6 +205,13 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         opened.asReversed().forEach { runCatching { it.close() } }
     }
 
+    /** Envelopes travel by sync: no device wrote a row to the former `keys` table. */
+    fun noKeyRows() {
+        val devices = opened.filterIsInstance<Device>().filter { it.alive }
+        for (device in devices) expect(device.keyRows() == 0L) { "${device.name} holds rows in keys" }
+        notes += "no row in keys on ${devices.size} devices"
+    }
+
     /** An issuer and two enrolled writers that reach each other directly. */
     fun phones(): Triple<Device, Device, Device> {
         val a = device("a").open("create")
@@ -227,11 +242,10 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         a.call("add", "list" to weekly, "title" to "Butter", "category" to dairy)
         a.call("add", "list" to party, "title" to "Cake")
         val lists = listOf(weekly, weekend, party)
-        // The Share button: one code per enrolled reading device, never the custody peer.
+        // The Share button: every enrolled reading device, never the custody peer; sync delivers the envelopes.
         for (list in lists) {
-            val codes = a.call("shareCodes", "list" to list).jsonObject
-            expect(codes.keys == setOf(b.node, c.node)) { "share codes for ${codes.keys}" }
-            for (phone in listOf(b, c)) phone.call("acceptCode", "code" to codes.getValue(phone.node))
+            val shared = a.call("shareWithDevices", "list" to list).jsonArray.map { it.jsonPrimitive.content }
+            expect(shared.toSet() == setOf(b.node, c.node)) { "shared with $shared" }
         }
 
         // C joins every list from A's checkpoints, then stays offline.
@@ -346,9 +360,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         val after = a.call("status", "list" to shared).jsonObject.getValue("epochs")
         expect(before != after) { "revocation did not rotate Shared: $before -> $after" }
         notes += "revocation rotated Shared: epochs $before -> $after"
-        // Revocation rotates every list; each remaining reader receives the new epoch of the lists it holds.
-        a.share(private, b)
-        a.share(shared, b)
+        // Revocation rotates every list C could read and seals each new epoch to the remaining readers itself.
         a.call("add", "list" to shared, "title" to "After revocation")
         b.sync()
         expect(b.items(shared) == listOf("After revocation", "Milk")) { "B ${b.items(shared)}" }

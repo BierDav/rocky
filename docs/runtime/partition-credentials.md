@@ -73,10 +73,11 @@ supported by these APIs.
 HKDF-SHA256 binding the domain, group address, table identity and positive
 epoch; a derived key reveals neither the secret nor a sibling table's key.
 
-`GroupSecretEnvelope::seal` (version 1) wraps one group partition's 32-byte
+`GroupSecretEnvelope::seal` (version 2) wraps one group partition's 32-byte
 secret for one epoch to one recipient's Ed25519 public key, converted to
-X25519, with ChaCha20-Poly1305. The issuer signs the whole envelope under
-`rocky.group-secret-envelope.v1`. `seal_many` wraps the same secret
+X25519, with ChaCha20-Poly1305. The delivering signer signs the whole envelope under
+`rocky.group-secret-envelope.v2`. The epoch identity and its revocation IDs
+are bound by the signature. `seal_many` wraps the same secret
 independently to 1–256 distinct recipients, each with fresh ephemeral material
 and a fresh AEAD nonce. The sealed length follows from the secret length.
 
@@ -86,21 +87,35 @@ requires the intended recipient's secret key. The wrapping key and associated
 data bind the version, manifest, group address, epoch, recipient, issuer and
 ephemeral public key. Wrong recipients, keys, contexts, zero DH shared secrets,
 other versions or sealed lengths and modified ciphertext are refused.
-`from_bytes` enforces a 4 KiB canonical CBOR bound; decoding alone does not
-verify the issuer signature. [Decision 0040](../decisions/0040-group-secrets.md)
-pins both formats.
+`from_bytes` enforces a 128 KiB canonical CBOR bound; SDK delivery
+additionally limits the inner envelope to 4 KiB. decoding alone does not
+verify the signer signature. [Decision 0050](../decisions/0050-concurrent-key-epochs.md)
+pins the current envelope; [0040](../decisions/0040-group-secrets.md)
+records the table-key derivation.
 
 An envelope grants no rights. The receiving application verifies credentials
 and decides whether the delivering issuer is trusted for that partition. The
-SDK lifecycle, holding rule and revocation are in
+SDK additionally accepts a member node signer only after verifying the
+sealed sender chain grants whole-group read under current revocations. The
+lifecycle, holding rule, revocation and delivery are in
 [partitioned scopes](partitioned-scopes.md#group-secrets).
+
+`SealedDelivery::seal` (version 1) wraps a payload of at most 112 KiB, such as
+an envelope and the partition it opens, to one recipient's node key with fresh
+X25519 material and ChaCha20-Poly1305; only the version, the recipient and the
+ephemeral key are in the clear, so a mailbox holding it learns no group or
+epoch. `open` requires the recipient's secret key. `digest` names the delivery
+by its encoding. `DeliveryReceipt::sign` is the recipient's node-key signature
+over that digest, which a sender or mailbox verifies with `verify`.
+[Decision 0054](../decisions/0054-envelope-delivery.md) pins both formats.
 
 ## Qualification
 
 `cargo test -p rocky-core` and `cargo test -p rocky-credentials` cover canonical
 SQL equality, tuple separation, selector attenuation, paired rights/fields,
 custody, policy/expiry/revocation, renewal, author admission, the HKDF vectors,
-derived-key separation and recipient/context/ciphertext substitution.
+derived-key separation and recipient/context/ciphertext substitution, for
+envelopes and for their delivery wrapping and receipts.
 
 ## Design rationale
 

@@ -102,6 +102,24 @@ sealed interface RockyEvent {
     ) : RockyEvent
     data class Connection(override val sequence: Long, override val atEpochMillis: Long, val online: Boolean) : RockyEvent
 
+    /**
+     * One delivery round with [peer]: envelopes it acknowledged ([handed]), deposits it stored or [refused] as a
+     * mailbox, envelopes [received] from it and [receipts] of this device's deposits it returned.
+     */
+    data class EnvelopesDelivered(
+        override val sequence: Long,
+        override val atEpochMillis: Long,
+        val peer: String,
+        val handed: Int,
+        val deposited: Int,
+        val refused: Int,
+        val received: Int,
+        val receipts: Int,
+    ) : RockyEvent
+
+    /** An envelope from [peer] did not install; its sender keeps it. */
+    data class EnvelopeRefused(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
+
     /** A kind this SDK does not know yet. */
     data class Other(override val sequence: Long, override val atEpochMillis: Long, val kind: String, val detail: JsonObject) : RockyEvent
 
@@ -163,6 +181,10 @@ sealed interface RockyEvent {
                 "author_assigned" -> AuthorAssigned(sequence, at, text("node"), text("collection"))
 
                 "online", "offline" -> Connection(sequence, at, kind == "online")
+
+                "envelopes_delivered" -> EnvelopesDelivered(sequence, at, text("peer"), int("handed"), int("deposited"), int("refused"), int("received"), int("receipts"))
+
+                "envelope_refused" -> EnvelopeRefused(sequence, at, text("peer"), text("error"))
 
                 else -> if (kind.startsWith("partition_")) {
                     PartitionChanged(

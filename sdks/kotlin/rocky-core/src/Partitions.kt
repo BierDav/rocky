@@ -78,15 +78,12 @@ class Partitions internal constructor(private val client: RockyClient) {
     /** On an issuer: prepares the group secret at the current epoch. */
     suspend fun create(group: String, values: JsonArray): JsonObject = byGroup("partition_create", group, values)
 
-    /** On an issuer: one envelope of the current epoch per recipient node key; a revoked recipient is refused. */
+    /**
+     * On a whole-group reader: saves one envelope of the current epoch per recipient node key, which sync delivers to that
+     * device alone, directly or through a mailbox; a revoked recipient is refused.
+     */
     suspend fun share(group: String, values: JsonArray, recipients: JsonArray, epoch: KeyEpoch? = null): JsonObject = byGroup("partition_share", group, values) {
         put("recipients", recipients)
-        epoch?.let { put("epoch", it.json()) }
-    }
-
-    /** Requires whole-partition read on every table of the group. */
-    suspend fun install(group: String, values: JsonArray, envelope: ByteArray, epoch: KeyEpoch? = null): JsonObject = byGroup("partition_install", group, values) {
-        put("envelope", bytes(envelope))
         epoch?.let { put("epoch", it.json()) }
     }
 
@@ -107,7 +104,7 @@ class Partitions internal constructor(private val client: RockyClient) {
     }
     suspend fun evict(group: String, values: JsonArray, keep: List<String> = emptyList()): JsonObject = byGroup("partition_evict", group, values) { putOmit(keep) }
 
-    /** Held secret epochs and each member table's key epochs and holding. */
+    /** Held secret epochs, each member table's key epochs and holding, and on the sharer each recipient's delivery. */
     suspend fun status(group: String, values: JsonArray): JsonObject = byGroup("partition_status", group, values)
 }
 
@@ -118,24 +115,13 @@ enum class ReplicaRole { Full, Partial }
  * See `docs/runtime/partitioned-scopes.md#group-secrets`.
  */
 class GroupPartition internal constructor(private val partitions: Partitions, val group: String, val values: JsonArray) {
-    /** On an issuer: one envelope of the current epoch per recipient node, keyed by node. */
-    suspend fun share(recipients: Collection<String>): Map<String, ByteArray> {
-        if (recipients.isEmpty()) return emptyMap()
-        return partitions.share(group, values, JsonArray(recipients.map(::JsonPrimitive))).getValue("envelopes").jsonArray.associate { shared ->
-            val envelope = shared.jsonObject
-            envelope.getValue("recipient").jsonPrimitive.content to
-                envelope.getValue("envelope").jsonArray.let { bytes -> ByteArray(bytes.size) { bytes[it].jsonPrimitive.int.toByte() } }
-        }
-    }
-
     /**
-     * Installs a shared secret. A partition this device does not hold yet starts from a peer's checkpoint on the next
-     * sync, so it needs no earlier epoch or author; a held one only gains the new epoch.
+     * On a whole-group reader: saves delivery of the current epoch to each recipient and returns the epoch. Sync delivers each envelope to
+     * its recipient alone, which installs it; a partition it does not hold yet starts from a peer's checkpoint.
      */
-    suspend fun accept(envelope: ByteArray) {
-        val held = status().isHeld
-        partitions.install(group, values, envelope)
-        if (!held) partitions.bootstrap(group, values)
+    suspend fun share(recipients: Collection<String>): KeyEpoch? {
+        if (recipients.isEmpty()) return null
+        return KeyEpoch.fromJson(partitions.share(group, values, JsonArray(recipients.map(::JsonPrimitive))).getValue("epoch"))
     }
 
     /** The secret epochs held here and how each member table is held. */
@@ -152,6 +138,13 @@ class GroupPartition internal constructor(private val partitions: Partitions, va
                 )
             },
             status["current"]?.takeUnless { it is JsonNull }?.let(KeyEpoch::fromJson),
+            status["recipients"]?.jsonArray.orEmpty().map { it.jsonObject }.map { recipient ->
+                RecipientDelivery(
+                    recipient.getValue("node").jsonPrimitive.content,
+                    KeyEpoch.fromJson(recipient.getValue("epoch")),
+                    DeliveryState.valueOf(recipient.getValue("state").jsonPrimitive.content.replaceFirstChar(Char::uppercase)),
+                )
+            },
         )
     }
     suspend fun subscribe(omit: List<String> = emptyList()) = partitions.subscribe(group, values, omit)
@@ -159,8 +152,11 @@ class GroupPartition internal constructor(private val partitions: Partitions, va
     suspend fun evict(keep: List<String> = emptyList()): JsonObject = partitions.evict(group, values, keep)
 }
 
-/** A group partition's held secret [epochs] and its member [tables]. */
-data class GroupStatus(val epochs: List<KeyEpoch>, val tables: List<TableHolding>, val current: KeyEpoch?) {
+/**
+ * A group partition's held secret [epochs] and its member [tables]. [recipients] lists the envelopes this device
+ * sent, which only the sharer knows.
+ */
+data class GroupStatus(val epochs: List<KeyEpoch>, val tables: List<TableHolding>, val current: KeyEpoch?, val recipients: List<RecipientDelivery> = emptyList()) {
     /** Every member table is held here. */
     val isHeld: Boolean get() = tables.all { it.holding == "held" }
 
@@ -173,3 +169,8 @@ data class GroupStatus(val epochs: List<KeyEpoch>, val tables: List<TableHolding
  * subscribed. [partition] is the id `RockyEvent` scopes name it by; [keyEpochs] are the table key epochs held.
  */
 data class TableHolding(val table: String, val partition: String, val holding: String?, val keyEpochs: List<KeyEpoch>, val current: KeyEpoch?)
+
+/** How far one envelope this device shared travelled: still here, held by a mailbox, or acknowledged by [node]. */
+data class RecipientDelivery(val node: String, val epoch: KeyEpoch, val state: DeliveryState)
+
+enum class DeliveryState { Pending, Deposited, Delivered }

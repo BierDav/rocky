@@ -137,7 +137,7 @@ fun DevicesScreen(model: DevicesViewModel) {
             title = { Text("Remove ${device.name} permanently?") },
             text = {
                 Text(
-                    "Its record, its identity and the keys sealed to it are deleted now and disappear from every device with " +
+                    "Its record and its identity are deleted now and disappear from every device with " +
                         "the next sync. The signed revocation stays: it is what keeps the old identity out.\n\n" +
                         "Erasing the deletions' traces needs a horizon every other device acknowledges. It finishes once each " +
                         "of them synced, at the latest 30 days from now or when a device's credentials expire. Until then, new " +
@@ -160,7 +160,7 @@ fun DevicesScreen(model: DevicesViewModel) {
             title = { Text("Share with ${device.name}") },
             text = {
                 Column {
-                    Text("A partial device holds only the lists sent to it. Its key travels sealed, in the household's own sync.")
+                    Text("A partial device holds only the lists sent to it. Its key travels sealed to it alone, directly or through the custody peer.")
                     state.lists.forEach { list ->
                         val has = list.title in device.lists
                         Row(verticalAlignment = Alignment.CenterVertically) {

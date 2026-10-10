@@ -2,8 +2,11 @@ package org.example.examples.shopping
 
 import androidx.room.Room
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onStart
 import rocky.ConnectionState
+import rocky.DeliveryState
 import rocky.PeerTransport
 import rocky.ReadinessState
 import rocky.RockyDatabase
@@ -82,12 +85,18 @@ class HouseholdTest {
             assertTrue(removed.self in trusted.household.revokedDevices().first())
             val rotated = trusted.rocky.list(list).status().epochs.max()
             assertTrue(rotated > epoch)
-            withTimeout(60_000) {
-                trusted.household.keys().first { keys -> keys.any { it.recipient == remaining.self && it.list == list && it.epoch == rotated.toString() } }
-            }
+            // The rotation sealed the new epoch to the remaining device; nothing was sealed to the removed one.
+            assertEquals(rotated, trusted.rocky.list(list).status().current)
+            val sent = withTimeout(60_000) { trusted.household.sent().first { list in it[remaining.self].orEmpty() } }
+            assertFalse(list in sent[removed.self].orEmpty())
             trusted.repository.add(list, "Bread")
             remaining.awaitTitles(list, "Bread", "Milk")
-            assertTrue(trusted.household.keys().first().none { it.recipient == removed.self && it.list == list && it.epoch == rotated.toString() })
+            // The remaining device acknowledged the rotated epoch at a sync.
+            withTimeout(60_000) {
+                trusted.rocky.activity().filterIsInstance<RockyEvent.EnvelopesDelivered>().onStart { emit(RockyEvent.EnvelopesDelivered(0, 0, "", 0, 0, 0, 0, 0)) }.first {
+                    trusted.repository.deliveries(list).any { it.node == remaining.self && it.epoch == rotated && it.state == DeliveryState.Delivered }
+                }
+            }
             assertEquals(listOf("Milk"), removed.titles(list))
             removed.rocky.setOnline(true)
             assertEquals(ConnectionState.Revoked, removed.rocky.syncOnce().state)
@@ -165,7 +174,7 @@ class HouseholdTest {
 
             val weekly = trusted.repository.createList("Weekly")
             trusted.repository.add(weekly, "Milk")
-            // No envelope is copied by hand: the full device installs the key sealed to it and catches up.
+            // No envelope is copied by hand: sync delivers the key sealed to the full device, which catches up.
             full.awaitTitles(weekly, "Milk")
             // Joining installed its authors: it edits the list it received.
             full.repository.add(weekly, "Bread")

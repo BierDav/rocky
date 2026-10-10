@@ -33,9 +33,8 @@ fun main() = runBlocking {
             ShoppingNode.join(peerPlatform, code)
         }
         val list = creator.repository.createList("Groceries")
-        // One envelope shares the list with its categories and items.
-        val node = peer.self
-        peer.repository.accept(list, creator.repository.share(list, listOf(node)).getValue(node))
+        // One envelope shares the list with its categories and items; the peer's sync delivers it.
+        creator.repository.share(list, listOf(peer.self))
         val dairy = creator.repository.addCategory(list, "Dairy")
         creator.repository.add(list, "Milk", category = dairy)
         val rows = withTimeout(10_000) {

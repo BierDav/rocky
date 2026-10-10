@@ -1,6 +1,6 @@
-//! A list shared with an enrolled writer: one envelope opens the list, its
-//! categories and items, which then bootstrap from a checkpoint and sync. See
-//! `docs/runtime/partitioned-scopes.md#group-secrets`.
+//! A list shared with an enrolled writer: one envelope, delivered by sync,
+//! opens the list, its categories and items, which then bootstrap from a
+//! checkpoint and sync. See `docs/runtime/partitioned-scopes.md#group-secrets`.
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -145,19 +145,12 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .await?;
 
     let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    let shared = issuer
+    issuer
         .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
         .await?;
-    let envelope = &shared["envelopes"][0]["envelope"];
-    writer
-        .call(json!({"type":"partition_install","group":"list","values":values(&list),"envelope":envelope}))
-        .await?;
-    // The join's own bootstrap finishes although partitioned tables offer
-    // no checkpoint of their own scope; the list then starts from one.
-    writer.call(json!({"type":"sync"})).await?;
-    writer
-        .call(json!({"type":"partition_bootstrap","group":"list","values":values(&list)}))
-        .await?;
+    // One sync delivers the envelope; the join's own bootstrap finishes
+    // although partitioned tables offer no checkpoint of their own scope,
+    // and the list starts from one.
     writer.call(json!({"type":"sync"})).await?;
     assert_eq!(
         writer
@@ -245,15 +238,8 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
         )
         .await?;
     let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    let shared = issuer
+    issuer
         .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
-        .await?;
-    writer
-        .call(json!({"type":"partition_install","group":"list","values":values(&list),"envelope":shared["envelopes"][0]["envelope"]}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
-    writer
-        .call(json!({"type":"partition_bootstrap","group":"list","values":values(&list)}))
         .await?;
     writer.call(json!({"type":"sync"})).await?;
     // Its own authors let the writer insert into the shared list.
@@ -365,15 +351,8 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         )
         .await?;
     let node = writer.call(json!({"type":"session"})).await?["node"].clone();
-    let shared = issuer
+    issuer
         .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
-        .await?;
-    writer
-        .call(json!({"type":"partition_install","group":"list","values":values(&list),"envelope":shared["envelopes"][0]["envelope"]}))
-        .await?;
-    writer.call(json!({"type":"sync"})).await?;
-    writer
-        .call(json!({"type":"partition_bootstrap","group":"list","values":values(&list)}))
         .await?;
     writer.call(json!({"type":"sync"})).await?;
     writer
@@ -447,13 +426,10 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     }
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
         let node = to.call(json!({"type":"session"})).await?["node"].clone();
-        let shared = from
-            .call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[node]}))
+        from.call(json!({"type":"partition_share","group":"list","values":values(list),"recipients":[node]}))
             .await?;
-        to.call(json!({"type":"partition_install","group":"list","values":values(list),"envelope":shared["envelopes"][0]["envelope"]}))
-            .await?;
-        to.call(json!({"type":"partition_bootstrap","group":"list","values":values(list)}))
-            .await?;
+        // Whichever dials hands over or collects the envelope.
+        from.call(json!({"type":"sync"})).await?;
         to.call(json!({"type":"sync"})).await?;
     }
     for peer in [&a, &b] {

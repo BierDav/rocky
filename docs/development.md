@@ -128,12 +128,27 @@ in e2e: their real QUIC shutdown cycles exceed 2 s after fixture optimization.
 The deterministic revocation recovery sweep remains in integration, separated
 by secret, table and commit boundaries with the same twenty fault stops.
 
+Phase 12's sealing and receipt checks in `rocky-credentials` run in unit. The
+delivery family over a real session (`rocky-secure` `tests::delivery`), the
+SDK's delivery, mailbox and revocation scenarios (`rocky-sdk`
+`node::delivery_tests`) and the migrated sharing
+tests run in integration through the existing package filters, with no new
+exception. The nine crash-sweep cases and the mailbox's full-size
+4,096-deposit bound run in e2e through explicit filters. The
+node-level bound fills a saved mailbox and reopens it rather than sealing
+thousands of envelopes over sessions. Joined fixtures wait until the join's
+first sync has finished, so no pass in flight meets a later share.
+The null-ordering pagination test in `rocky-runtime` opens a SQLite file and
+runs a Tokio runtime; it is explicitly classified as integration instead of
+unit. This corrects its tier without raising any budget.
+
 Phase 14's secret-store topic/eviction tests and in-process contact, ranking,
 request, refusal and custody scenarios run in integration. The `mesh` and
 `network::contacts::tests` modules are included explicitly in
 `.config/test-tiers.toml`; no exception is added.
 [Phase 14 evidence](features_07/14-contacts-and-partner-choice-evidence.md)
 records measurements and the acceptance coverage.
+
 
 ## Kotlin desktop integration
 

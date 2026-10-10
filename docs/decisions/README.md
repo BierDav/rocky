@@ -67,6 +67,7 @@ unreserved record is 0061.
 | Author pseudonyms and author ranges | [credential-primitives](../runtime/credential-primitives.md#design-rationale) |
 | Partitioned reader scopes, key envelopes | [partitioned-scopes](../runtime/partitioned-scopes.md#design-rationale) |
 | Envelope delivery, mailboxes, receipts | [0054](0054-envelope-delivery.md) |
+| One-hop command carrier, executor contact resolution | [0059](0059-command-forwarding.md) |
 | Typed command descriptors, tickets, handler hosts | [typed-commands](../runtime/typed-commands.md#design-rationale) |
 | Merged strong steps, local reconciliation read | [strong-publication](../runtime/strong-publication.md#design-rationale) |
 | Portable result evidence, historical results | [encrypted-commands](../runtime/encrypted-commands.md#portable-result-evidence) |

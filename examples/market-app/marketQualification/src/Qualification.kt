@@ -73,6 +73,7 @@ internal fun environment(voters: Int): Map<String, JsonElement> = mapOf(
 
 private val scenarios: List<Pair<String, (Run) -> Unit>> = listOf(
     "last-item" to Run::lastItem,
+    "mesh" to Run::mesh,
     "loss" to Run::loss,
     "takeover" to Run::takeover,
     "refused-writes" to Run::refusedWrites,
@@ -162,6 +163,39 @@ internal class Run(val root: File, val voters: Voters, private val peer: File, v
         }
         expect(seller.calls()["reserve b"] == 1 && seller.calls()["reserve c"] == 1) { "handler calls ${seller.calls()}" }
         notes += "every device reads lamp=0 through the Room DAO; one handler call per reservation"
+    }
+
+    /** Buyers enroll and sync through custody alone before requesting the executor's contact. */
+    fun mesh() {
+        val seller = device("seller").open("create")
+        owner = seller
+        seller.call("control")
+        val custody = Custody(root, peer, seller.text("pairing", "profile" to "custody"), listOf(seller.contact())).also { opened += it }
+        val buyers = listOf("b", "c").map { name ->
+            val invitation = seller.text("pairing", "profile" to "buyer")
+            val routed = seller.text("routeEnrollment", "invitation" to invitation, "contact" to custody.contact)
+            device(name).open("join", "invitation" to routed).also {
+                it.call("retainOnly", "contact" to custody.contact)
+                it.call("publish")
+                it.sync()
+            }
+        }
+        retry(30_000, "custody delivers caller identities", pause = 200) {
+            seller.sync()
+            check(seller.call("published").jsonPrimitive.int >= 3) { "caller identities not yet held" }
+            seller.call("control")
+        }
+        restock(seller, 1, 1)
+        val b = buyers[0]
+        val c = buyers[1]
+        val first = handle(401)
+        val second = handle(402)
+        b.ticket("submit", "item" to "lamp", "quantity" to 1, "hold" to "mesh-b", "handle" to first)
+        c.ticket("submit", "item" to "lamp", "quantity" to 1, "hold" to "mesh-c", "handle" to second)
+        expect(settle(b, first).outcome == "accepted Remaining(remaining=0)") { "neighbor caller acceptance" }
+        expect(settle(c, second).outcome == "rejected Shortfall(remaining=0, requested=1)") { "neighbor caller shortfall" }
+        expect(seller.calls()["reserve mesh-b"] == 1 && seller.calls()["reserve mesh-c"] == 1) { "handler calls ${seller.calls()}" }
+        notes += "buyers enrolled and synced through custody alone; executor discovery produced one acceptance and one typed rejection"
     }
 
     /** A lost reply, a killed caller and a killed executor: each original ticket completes with one handler call. */

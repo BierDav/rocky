@@ -124,6 +124,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         self.inner.lock().await.admit_chain(node, chain, now()?)
     }
+    /// Admits a command carrier's node under the held generation horizon and
+    /// revocation set, without requiring a configured contact or writing state.
+    pub async fn admit_command_peer(
+        &self,
+        node: PublicKey,
+        chain: &CredentialChain,
+    ) -> Result<(), Error> {
+        let inner = self.inner.lock().await;
+        let time = now()?;
+        inner.admit_chain(node, chain, time)?;
+        inner.verify_chain_with(chain, node, &inner.config.revocations, time)?;
+        Ok(())
+    }
     /// The peers whose credentials and frontiers stay whatever the bound on
     /// unconfigured peers: the contacts this device keeps.
     pub async fn configure_peers(&self, peers: impl IntoIterator<Item = PublicKey>) {

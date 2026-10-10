@@ -31,7 +31,7 @@ filter = '''
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
-    | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/))
+    | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/) & !test(/^node::command_mesh::tests::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
     | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))
@@ -50,6 +50,7 @@ filter = '''
 suite = "15m"
 filter = '''
     (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
+    | (binary_id(rocky-sdk::commands) & test(=mesh_forwarder_restart_drops_inflight_work_and_same_ticket_completes))
     | test(/::soak_/)
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
     | (binary_id(rocky-coordinator) & (

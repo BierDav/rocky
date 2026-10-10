@@ -748,3 +748,501 @@ async fn a_reader_behind_pruned_strong_history_bootstraps_then_confirms_a_comman
     assert_eq!(pair.sequence(), 13);
     Ok(())
 }
+
+/// Neither buyer retains an executor contact; their neighbor answers the
+/// contact request and the executor admits their chains without an allow list.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_buyers_find_an_executor_through_only_a_neighbor() -> Result<(), Failure> {
+    let pair = Pair::new(None).await?;
+    pair.restock(1, 1).await;
+    let neighbor = mesh_neighbor(&pair).await?;
+    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    let contact = neighbor.ok(json!({"type":"contact"})).await["uri"].clone();
+    pair.b
+        .ok(json!({"type":"peer_add","contact":contact}))
+        .await;
+    pair.b
+        .ok(json!({"type":"peer_remove","node":executor}))
+        .await;
+    assert_eq!(
+        pair.b.ok(json!({"type":"peers"})).await["peers"]
+            .as_array()
+            .ok_or("peers")?
+            .len(),
+        1
+    );
+    pair.b.reserve(2, 1).await;
+    neighbor.reserve(3, 1).await;
+    let mine = pair.b.run(2).await;
+    let theirs = neighbor.run(3).await;
+    assert_eq!(mine["error"], Value::Null, "{mine}");
+    assert_eq!(mine["outcome"]["kind"], "accepted");
+    assert_eq!(theirs["outcome"]["kind"], "rejected");
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 3);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+async fn mesh_neighbor(pair: &Pair) -> Result<Device, Failure> {
+    let invitation = pair
+        .a
+        .ok(json!({"type":"pairing","profile":{"kind":"writer","scopes":["stock","holds"]}}))
+        .await["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let path = pair.root.path().join("neighbor");
+    let neighbor = Device::new(Database::join(
+        open(
+            &path,
+            Some(Network::Owned(pair.hub.connector("neighbor"))),
+            commands(&pair.coordinator, None, None),
+        ),
+        &invitation,
+    )?)?;
+    let (executor, owner, _) = pair.a.identity().await;
+    let (buyer, principal, _) = pair.b.identity().await;
+    let (node, user, _) = neighbor.identity().await;
+    pair.coordinator.set_invokers(
+        pair.scope,
+        owner,
+        vec![(executor, owner), (buyer, principal), (node, user)],
+    )?;
+    Ok(neighbor)
+}
+
+struct Indirect(Arc<dyn rocky_sdk::transport::Connector>);
+struct IndirectTransport(Arc<dyn rocky_sdk::transport::Transport>);
+impl rocky_sdk::transport::Connector for Indirect {
+    fn start(
+        &self,
+        accepts: bool,
+        key: [u8; 32],
+    ) -> rocky_sdk::transport::BoxFuture<
+        '_,
+        Result<Arc<dyn rocky_sdk::transport::Transport>, Failure>,
+    > {
+        Box::pin(async move {
+            Ok(
+                Arc::new(IndirectTransport(self.0.start(accepts, key).await?))
+                    as Arc<dyn rocky_sdk::transport::Transport>,
+            )
+        })
+    }
+}
+impl rocky_sdk::transport::Transport for IndirectTransport {
+    fn kind(&self) -> &str {
+        self.0.kind()
+    }
+    fn address(&self) -> rocky_sdk::transport::BoxFuture<'_, Result<String, Failure>> {
+        self.0.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: rocky_sdk::transport::Protocol,
+    ) -> rocky_sdk::transport::BoxFuture<'a, Result<rocky_sdk::transport::Stream, Failure>> {
+        Box::pin(async move {
+            if address == "a" {
+                return Err("no direct route; relay disabled".into());
+            }
+            self.0.connect(address, protocol).await
+        })
+    }
+    fn accept(
+        &self,
+    ) -> rocky_sdk::transport::BoxFuture<
+        '_,
+        Option<(rocky_sdk::transport::Protocol, rocky_sdk::transport::Stream)>,
+    > {
+        self.0.accept()
+    }
+    fn listen(&self, listening: bool) {
+        self.0.listen(listening);
+    }
+    fn close(&self) -> rocky_sdk::transport::BoxFuture<'_, ()> {
+        self.0.close()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_forwarding_and_direct_replay_decide_one_ticket_once() -> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    let neighbor = mesh_neighbor(&pair).await?;
+    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    pair.b.ok(json!({"type":"peer_add","contact":neighbor.ok(json!({"type":"contact"})).await["uri"]})).await;
+    pair.b
+        .ok(json!({"type":"peer_remove","node":executor}))
+        .await;
+    pair.b.close().await;
+    pair.b = Device::new(Database::open(open(
+        &pair.root.path().join("b"),
+        Some(Network::Owned(Arc::new(Indirect(pair.hub.connector("b"))))),
+        commands(&pair.coordinator, None, None),
+    ))?)?;
+    pair.b.reserve(2, 1).await;
+    let envelope = pair
+        .b
+        .ok(json!({"type":"command_envelope","handle":vec![2;32]}))
+        .await["envelope"]
+        .clone();
+    let forwarded = pair.b.run(2).await;
+    assert_eq!(forwarded["error"], Value::Null, "{forwarded}");
+    assert_eq!(forwarded["outcome"]["kind"], "accepted");
+    let calls = pair.handler.calls.load(Ordering::SeqCst);
+    let mut tampered: Vec<u8> = serde_json::from_value(envelope.clone())?;
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    let refused = pair
+        .a
+        .ok(json!({"type":"command_execute","envelope":tampered}))
+        .await;
+    let refused: Vec<u8> = serde_json::from_value(refused["answer"].clone())?;
+    assert!(matches!(
+        rocky_secure::Delivery::from_bytes(&refused)?,
+        rocky_secure::Delivery::NotSubmitted {
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), calls);
+    let answer = pair
+        .a
+        .ok(json!({"type":"command_execute","envelope":envelope}))
+        .await["answer"]
+        .clone();
+    let mut altered: Vec<u8> = serde_json::from_value(answer.clone())?;
+    let last = altered.len() - 1;
+    altered[last] ^= 1;
+    assert!(
+        pair.b
+            .call(json!({"type":"command_settle","handle":vec![2;32],"answer":altered}))
+            .await
+            .is_err()
+    );
+    pair.b
+        .ok(json!({"type":"command_settle","handle":vec![2;32],"answer":answer}))
+        .await;
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(pair.sequence(), 2);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_revoked_caller_is_refused_without_another_handler_call() -> Result<(), Failure> {
+    let pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    pair.b.reserve(2, 1).await;
+    let caller = pair.b.ok(json!({"type":"contact"})).await["node"].clone();
+    pair.a.ok(json!({"type":"revoke","node":caller})).await;
+    let ticket = pair.b.run(2).await;
+    assert_eq!(ticket["error"]["retryable"], false, "{ticket}");
+    assert_eq!(pair.sequence(), 1);
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 1);
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_without_a_route_keeps_the_same_unresolved_ticket() -> Result<(), Failure> {
+    let pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    pair.b.reserve(2, 1).await;
+    let original = pair.b.ticket(2).await["request"].clone();
+    pair.a.close().await;
+    let ticket = pair.b.run(2).await;
+    assert_eq!(ticket["error"]["retryable"], true, "{ticket}");
+    assert_eq!(ticket["state"], "outcome_unknown");
+    assert_eq!(ticket["request"], original);
+    assert_eq!(pair.sequence(), 1);
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_offline_caller_settles_from_custody_alone() -> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    pair.b.ok(json!({"type":"sync"})).await;
+    let invitation = pair
+        .a
+        .ok(json!({"type":"pairing","profile":{"kind":"custody","scopes":["stock","holds"]}}))
+        .await["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let path = pair.root.path().join("custody");
+    let custody = Device::new(Database::join(
+        open(
+            &path,
+            Some(Network::Owned(pair.hub.connector("custody"))),
+            commands(&pair.coordinator, None, None),
+        ),
+        &invitation,
+    )?)?;
+    pair.b.reserve(2, 1).await;
+    let envelope = pair
+        .b
+        .ok(json!({"type":"command_envelope","handle":vec![2;32]}))
+        .await["envelope"]
+        .clone();
+    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    pair.b
+        .ok(json!({"type":"peer_add","contact":custody.ok(json!({"type":"contact"})).await["uri"]}))
+        .await;
+    pair.b
+        .ok(json!({"type":"peer_remove","node":executor}))
+        .await;
+    pair.b.close().await;
+    pair.a
+        .ok(json!({"type":"command_execute","envelope":envelope}))
+        .await;
+    custody.ok(json!({"type":"sync"})).await;
+    pair.a.close().await;
+    pair.b = Device::new(Database::open(open(
+        &pair.root.path().join("b"),
+        Some(Network::Owned(Arc::new(Indirect(pair.hub.connector("b"))))),
+        commands(&pair.coordinator, None, None),
+    ))?)?;
+    pair.b.ok(json!({"type":"sync"})).await;
+    let ticket = pair.b.ticket(2).await;
+    assert_eq!(ticket["state"], "applied", "{ticket}");
+    assert_eq!(ticket["outcome"]["kind"], "accepted");
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 2);
+    custody.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+struct ForwardGate {
+    started: tokio::sync::watch::Sender<usize>,
+    released: tokio::sync::watch::Sender<bool>,
+}
+struct GatedConnector {
+    connector: Arc<dyn rocky_sdk::transport::Connector>,
+    gate: Arc<ForwardGate>,
+}
+struct GatedTransport {
+    transport: Arc<dyn rocky_sdk::transport::Transport>,
+    gate: Arc<ForwardGate>,
+}
+impl rocky_sdk::transport::Connector for GatedConnector {
+    fn start(
+        &self,
+        accepts: bool,
+        key: [u8; 32],
+    ) -> rocky_sdk::transport::BoxFuture<
+        '_,
+        Result<Arc<dyn rocky_sdk::transport::Transport>, Failure>,
+    > {
+        Box::pin(async move {
+            Ok(Arc::new(GatedTransport {
+                transport: self.connector.start(accepts, key).await?,
+                gate: self.gate.clone(),
+            }) as Arc<dyn rocky_sdk::transport::Transport>)
+        })
+    }
+}
+impl rocky_sdk::transport::Transport for GatedTransport {
+    fn kind(&self) -> &str {
+        self.transport.kind()
+    }
+    fn address(&self) -> rocky_sdk::transport::BoxFuture<'_, Result<String, Failure>> {
+        self.transport.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: rocky_sdk::transport::Protocol,
+    ) -> rocky_sdk::transport::BoxFuture<'a, Result<rocky_sdk::transport::Stream, Failure>> {
+        Box::pin(async move {
+            if protocol == rocky_sdk::transport::Protocol::Command && address == "a" {
+                self.gate.started.send_modify(|count| *count += 1);
+                self.gate
+                    .released
+                    .subscribe()
+                    .wait_for(|released| *released)
+                    .await?;
+            }
+            self.transport.connect(address, protocol).await
+        })
+    }
+    fn accept(
+        &self,
+    ) -> rocky_sdk::transport::BoxFuture<
+        '_,
+        Option<(rocky_sdk::transport::Protocol, rocky_sdk::transport::Stream)>,
+    > {
+        self.transport.accept()
+    }
+    fn listen(&self, listening: bool) {
+        self.transport.listen(listening);
+    }
+    fn close(&self) -> rocky_sdk::transport::BoxFuture<'_, ()> {
+        self.transport.close()
+    }
+}
+async fn gated_mesh(pair: &mut Pair) -> Result<(Device, Arc<ForwardGate>), Failure> {
+    let neighbor = mesh_neighbor(pair).await?;
+    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    pair.b.ok(json!({"type":"peer_add","contact":neighbor.ok(json!({"type":"contact"})).await["uri"]})).await;
+    pair.b
+        .ok(json!({"type":"peer_remove","node":executor}))
+        .await;
+    neighbor.close().await;
+    let gate = Arc::new(ForwardGate {
+        started: tokio::sync::watch::channel(0).0,
+        released: tokio::sync::watch::channel(false).0,
+    });
+    let neighbor = Device::new(Database::open(open(
+        &pair.root.path().join("neighbor"),
+        Some(Network::Owned(Arc::new(GatedConnector {
+            connector: pair.hub.connector("neighbor"),
+            gate: gate.clone(),
+        }))),
+        commands(&pair.coordinator, None, None),
+    ))?)?;
+    pair.b.close().await;
+    pair.b = Device::new(Database::open(open(
+        &pair.root.path().join("b"),
+        Some(Network::Owned(Arc::new(Indirect(pair.hub.connector("b"))))),
+        commands(&pair.coordinator, None, None),
+    ))?)?;
+    Ok((neighbor, gate))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_ninth_concurrent_forward_is_retryable_without_queuing() -> Result<(), Failure> {
+    use futures_util::StreamExt;
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 10).await;
+    let (neighbor, gate) = gated_mesh(&mut pair).await?;
+    for handle in 2..=10 {
+        pair.b.reserve(handle, 1).await;
+    }
+    let mut work: futures_util::stream::FuturesUnordered<_> =
+        (2..=9).map(|handle| pair.b.run(handle)).collect();
+    let mut started = gate.started.subscribe();
+    tokio::select! {
+        reached = started.wait_for(|count| *count == 8) => { reached?; }
+        answer = work.next() => panic!("forward completed before releasing gate: {answer:?}"),
+    }
+    let ninth = pair.b.run(10).await;
+    assert_eq!(ninth["error"]["retryable"], true, "{ninth}");
+    assert_eq!(*gate.started.borrow(), 8);
+    gate.released.send_replace(true);
+    while let Some(ticket) = work.next().await {
+        assert_eq!(ticket["error"], Value::Null, "{ticket}");
+    }
+    let retry = pair.b.run(10).await;
+    assert_eq!(retry["error"], Value::Null, "{retry}");
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 10);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+/// Closing a service exercises the production 5 s drain before cancellation.
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_forwarder_restart_drops_inflight_work_and_same_ticket_completes()
+-> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    let (neighbor, gate) = gated_mesh(&mut pair).await?;
+    pair.b.reserve(2, 1).await;
+    let request = pair.b.ticket(2).await["request"].clone();
+    let mut started = gate.started.subscribe();
+    let run = pair.b.run(2);
+    tokio::pin!(run);
+    tokio::select! {
+        reached = started.wait_for(|count| *count == 1) => { reached?; }
+        answer = &mut run => panic!("forward completed before restart: {answer}"),
+    }
+    neighbor.close().await;
+    let interrupted = run.await;
+    assert_eq!(interrupted["error"]["retryable"], true, "{interrupted}");
+    assert_eq!(pair.sequence(), 1);
+    let neighbor = Device::new(Database::open(open(
+        &pair.root.path().join("neighbor"),
+        Some(Network::Owned(pair.hub.connector("neighbor"))),
+        commands(&pair.coordinator, None, None),
+    ))?)?;
+    let ticket = pair.b.run(2).await;
+    assert_eq!(ticket["error"], Value::Null, "{ticket}");
+    assert_eq!(ticket["request"], request);
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 2);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_revoked_forwarder_is_refused_at_the_executor() -> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    let (neighbor, gate) = gated_mesh(&mut pair).await?;
+    gate.released.send_replace(true);
+    let relay = neighbor.ok(json!({"type":"contact"})).await["node"].clone();
+    pair.a.ok(json!({"type":"revoke","node":relay})).await;
+    pair.b.reserve(2, 1).await;
+    let ticket = pair.b.run(2).await;
+    assert_eq!(ticket["error"]["retryable"], false, "{ticket}");
+    assert_eq!(pair.sequence(), 1);
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 1);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_forwarded_revoked_caller_is_refused_at_the_executor() -> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    let (neighbor, gate) = gated_mesh(&mut pair).await?;
+    gate.released.send_replace(true);
+    pair.b.reserve(2, 1).await;
+    let caller = pair.b.ok(json!({"type":"contact"})).await["node"].clone();
+    pair.a.ok(json!({"type":"revoke","node":caller})).await;
+    let ticket = pair.b.run(2).await;
+    assert_eq!(ticket["error"]["retryable"], false, "{ticket}");
+    assert_eq!(pair.sequence(), 1);
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 1);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mesh_lost_confirmation_reply_retries_through_the_forwarder_without_deciding_again()
+-> Result<(), Failure> {
+    let mut pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    let (neighbor, gate) = gated_mesh(&mut pair).await?;
+    gate.released.send_replace(true);
+    pair.b.reserve(2, 1).await;
+    pair.coordinator.drop_next_reply()?;
+    let unknown = pair.b.run(2).await;
+    assert_eq!(unknown["error"]["retryable"], true, "{unknown}");
+    assert_eq!(unknown["state"], "outcome_unknown");
+    let calls = pair.handler.calls.load(Ordering::SeqCst);
+    let settled = pair.b.run(2).await;
+    assert_eq!(settled["error"], Value::Null, "{settled}");
+    assert_eq!(settled["request"], unknown["request"]);
+    assert_eq!(pair.handler.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(pair.sequence(), 2);
+    neighbor.close().await;
+    pair.a.close().await;
+    pair.b.close().await;
+    Ok(())
+}

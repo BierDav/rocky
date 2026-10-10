@@ -5,6 +5,7 @@ import org.example.examples.market.MarketSchema
 import java.io.File
 import java.lang.management.ManagementFactory
 import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
@@ -23,7 +24,7 @@ internal fun expect(condition: Boolean, message: () -> String) {
 }
 
 /** A loopback UDP port for an iroh endpoint, kept across a device's restarts so its peers still reach it. */
-internal fun freeUdpPort() = DatagramSocket(0).use { it.localPort }
+internal fun freeUdpPort() = DatagramSocket(InetSocketAddress("127.0.0.1", 0)).use { it.localPort }
 
 /** A refused call, with the device's error code when it had one. */
 internal class DeviceError(message: String, val code: String?) : IllegalStateException(message)
@@ -114,7 +115,9 @@ internal class Device(val name: String, private val root: File, private val bund
     fun ticket(op: String, vararg args: Pair<String, Any?>) = TicketView.of(call(op, *args))
     fun contact() = text("contact")
     fun identity() = text("identity")
-    fun sync() = text("sync").also { expect(it == "Connected") { "$name sync: $it" } }
+    fun sync() = retry(30_000, "$name sync", pause = 200) {
+        text("sync").also { check(it == "Connected") { "$name sync: $it; ${call("diagnostics")}" } }
+    }
 
     /** Handler calls this device recorded, per `reserve <hold>` or `restock <item>`. */
     fun calls(): Map<String, Int> = File(directory, "calls.log").takeIf { it.isFile }?.readLines().orEmpty().groupingBy { it }.eachCount()
@@ -241,6 +244,7 @@ internal class Custody(private val root: File, private val binary: File, invitat
                 )
                 put("invitation", invitation)
                 put("peers", JsonArray(peers.map(::JsonPrimitive)))
+                peers.firstOrNull()?.let { put("enrollment_upstream", it) }
             }.toString(),
         )
         val started = ProcessBuilder(binary.path, config.path).redirectError(ProcessBuilder.Redirect.appendTo(log)).start()

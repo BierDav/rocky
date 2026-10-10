@@ -156,6 +156,7 @@ class ShoppingIntegrationTest {
             // The same endpoint, and so the same address, serves the database again.
             a = RockyDatabase.resume(File(root, "a"), ItemsSchema, PeerTransport.Endpoint(endpoint), automaticSync = false)
             a.add("Eggs")
+            b.setOnline(true) // The reattached endpoint is a connectivity change; clear its back-off.
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Eggs", "Milk"), b.titles())
         } finally {

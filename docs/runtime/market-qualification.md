@@ -20,15 +20,17 @@ is [phase 22](../features_07/22-qualification.md)'s.
 `ROCKY_SCENARIOS=last-item,loss` selects scenarios; `ROCKY_VOTER` and
 `ROCKY_PEER` take prebuilt binaries. Each scenario registers its own domain on
 the run's service and closes it with `command_service_close` at the end. The CI
-`market` job runs all five and keeps `evidence.json`. Each evidence entry names
+`market` job runs all six and keeps `evidence.json`. Each evidence entry names
 the host, the build and the voter count.
 
 ## Scenarios
 
-All five passed on 2026-10-10 in one run of 2.5 minutes.
+The original five passed on 2026-10-10 in one run of 2.5 minutes. Phase 16
+adds `mesh`; its rerun is recorded in [the phase evidence](../features_07/16-strong-commands-evidence.md).
 
 | Scenario | What passed |
 | --- | --- |
+| `mesh` | Buyers enroll and publish command identities through custody, keep only its contact, request the executor contact and receive one acceptance and one typed shortfall. Runs in the existing CI market job |
 | `last-item` | Two buyers reserve the last lamp at once from their own processes: one `Accepted(remaining 0)`, the other `Rejected(Shortfall(0, 1))`. The rejected buyer is killed with SIGKILL and reopened; its ticket still reads the same rejection. Every device reads `lamp=0` through the Room DAO; one handler call per reservation |
 | `loss` | A lost reply (the executor confirmed, its answer dropped), a killed caller (SIGKILL after its invocation left) and a killed executor (SIGKILL after confirming, the caller meanwhile `unreachable`) each complete the original ticket after rerunning it, with one handler call per identity |
 | `takeover` | The owner's control revision names a second issuer as executor. The fenced seller answers a delivered invocation without deciding. The backup acquires the domain with its own first command at the sequence after the old head, then decides the caller's original ticket once |

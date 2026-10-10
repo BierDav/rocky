@@ -1,6 +1,7 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod command_mesh;
 mod delivery;
 mod horizon;
 mod mesh;
@@ -232,6 +233,7 @@ pub(crate) struct Node {
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
+    forwarding: command_mesh::Slots,
     sync_control: watch::Sender<u64>,
     worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<&'static str>,
@@ -292,6 +294,7 @@ impl Node {
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
             retries: std::sync::Mutex::new(BTreeMap::new()),
+            forwarding: command_mesh::Slots::default(),
             sync_control: watch::channel(0).0,
             worker_running: watch::channel(false).0,
             sync_state: watch::channel("idle").0,
@@ -2561,7 +2564,7 @@ impl Node {
             // whoever forwards it gains nothing by doing so.
             Protocol::Command => {
                 answer(stream, async |request| {
-                    let reply = self.execute_delivered(&request).await.to_bytes()?;
+                    let reply = self.answer_command_carrier(&request).await?;
                     self.wake_sync();
                     Ok(reply)
                 })
@@ -3000,9 +3003,8 @@ impl Node {
         }
     }
     /// Advances one ticket: executes it here when this device is the
-    /// domain's executor, otherwise delivers it to the executor among the
-    /// configured peers. Reaching a peer does not make it eligible; the
-    /// coordinator's assignment and the peer's own credentials do.
+    /// domain's executor, otherwise discovers a direct route or forwards once.
+    /// The coordinator's assignment and the peer's credentials decide eligibility.
     async fn run(&self, handle: [u8; 32]) -> Result<(), Failure> {
         let ticket = self
             .replica
@@ -3050,29 +3052,10 @@ impl Node {
         let link = attached
             .as_ref()
             .ok_or(ServiceError::NetworkRequired("command delivery"))?;
-        let settings = self.settings.lock().await.clone();
-        let (_, contact) = settings
-            .peers
-            .iter()
-            .find(|(peer, _)| secure_node_id(**peer) == executor)
-            .ok_or_else(|| refused("the domain's executor is not a configured peer"))?;
-        let addresses = contact.addresses(link.transport.kind());
-        if addresses.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer: "the executor",
-                network: link.transport.kind().into(),
-            }
-            .into());
-        }
         let envelope = self.replica.export_ticket(handle).await?.to_bytes()?;
-        // A closing network service cancels the wait, not the command: the
-        // ticket stays `outcome_unknown` and the same ticket settles it.
         let mut stage = link.stage.subscribe();
         let answer = tokio::select! {
-            // No answer: the ticket stays `outcome_unknown`; run it again.
-            answer = exchange(&*link.transport, &addresses, Protocol::Command, &envelope) => {
-                answer.map_err(|error| ServiceError::Unreachable(error.to_string()))?
-            }
+            answer = self.route_command(&*link.transport, executor, envelope) => answer?,
             _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => {
                 return Err(ServiceError::Closed("network service").into());
             }

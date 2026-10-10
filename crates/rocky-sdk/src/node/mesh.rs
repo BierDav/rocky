@@ -114,6 +114,9 @@ impl Node {
                 contact: Some(contact),
             } = response
             {
+                if secure_node_id(contact.node) != id {
+                    return Err(refused("answered contact does not name the requested node"));
+                }
                 let node = contact.node;
                 self.configure(|settings| {
                     settings.learn_contact(&self.vault, contact, "request", now()?)

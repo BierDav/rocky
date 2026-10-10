@@ -418,7 +418,7 @@ jobs:
           tree: ${{ steps.source.outputs.tree }}
 
   market:
-    # The market's five multi-process scenarios against three loopback voters;
+    # The market's six multi-process scenarios, including neighbor-only commands, against three loopback voters;
     # see docs/runtime/market-qualification.md. It builds the voter and the
     # custody peer itself, so it needs no architecture-specific artifact.
     # Releases skip it, as `shopping`.

@@ -26,7 +26,7 @@ fn tag(protocol: Protocol) -> u8 {
         Protocol::Pair => 1,
         Protocol::Sync => 2,
         Protocol::Renew => 3,
-        Protocol::Command => 4,
+        Protocol::Command => 6,
         Protocol::Coordinate => 5,
     }
 }

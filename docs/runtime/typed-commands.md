@@ -185,9 +185,24 @@ ticket unchanged. At most 64 tickets may be unresolved per device; a further
 
 `command_run` advances one ticket or all unresolved ones. The coordinator
 names the executor. If it is this device, the command executes here.
-Otherwise it is sent to that device, which must be a contact with a route on
-the attached network. Both paths pass the same admission: signature,
-current credentials, registered method, supported version and invocation
+Otherwise the SDK looks up its configured or learned contact. With none, it
+asks admitted contacts for the node ID the coordinator names and verifies that
+the returned key hashes to that ID before retaining it. It tries a direct
+route first. If direct delivery fails, an admitted contact forwards the
+unchanged signed envelope directly to the executor and returns its answer.
+Forwarding is one hop; a peer without a route refuses so another can be tried.
+The ticket stays unresolved with a retryable `executor_unavailable` error
+when none reaches it. A caller need not configure or previously meet the executor.
+
+A forwarder permits eight concurrent commands per caller and refuses a ninth
+as retryable. It holds no queue or durable work and releases its slot after
+an answer, cancellation or a 30-second timeout. Carrier signatures authenticate
+both peers; the executor checks the original caller's chain and the held
+revocation set, and the caller verifies the result and coordinator receipt.
+A forwarder sees identities, grants, methods, commitments, sizes and timing;
+arguments and results stay encrypted unless it already holds their reader keys.
+See [decision 0059](../decisions/0059-command-forwarding.md). Both paths pass
+the same admission: signature, current credentials, registered method, supported version and invocation
 scope. A device that receives a command it is not assigned to execute refuses.
 
 To forward commands through your own RPC or gateway instead, use
@@ -255,9 +270,10 @@ Byte-oriented methods without a descriptor are version 1
 before a confirmation is submitted or an invocation leaves the device; an
 explicit coordinator refusal returns it to 1, and an executor's answer that it
 submitted nothing clears it. State 4 commits with the applied result.
-`Protocol::Command` (`rocky/command/1`) carries one signed `EncryptedCommand`
-and one `Delivery` answer: confirmed with the parts the caller may hold, not
-submitted, or unknown.
+`Protocol::Command` (`rocky/command/2`) carries a signed request and a signed,
+request-bound reply around the unchanged `EncryptedCommand` and `Delivery`.
+The earlier command protocol is refused. [Decision 0059](../decisions/0059-command-forwarding.md)
+defines the direct and forwarding carrier.
 
 ## Limits
 

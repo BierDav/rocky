@@ -46,7 +46,7 @@ impl Protocol {
             Self::Pair => b"rocky/sdk-pair/1",
             Self::Sync => NATIVE_SESSION.as_bytes(),
             Self::Renew => b"rocky/sdk-renew/2",
-            Self::Command => b"rocky/command/1",
+            Self::Command => b"rocky/command/2",
             Self::Coordinate => b"rocky/coordinator/1",
         }
     }
@@ -108,4 +108,14 @@ pub trait Connector: Send + Sync {
         accepts: bool,
         secret: [u8; 32],
     ) -> BoxFuture<'_, Result<Arc<dyn Transport>, Failure>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_the_current_command_protocol_is_named() {
+        assert_eq!(Protocol::named(b"rocky/command/1"), None);
+        assert_eq!(Protocol::named(b"rocky/command/2"), Some(Protocol::Command));
+    }
 }

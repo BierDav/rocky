@@ -3646,7 +3646,13 @@ pub async fn exchange(
     protocol: Protocol,
     request: &[u8],
 ) -> Result<Vec<u8>, Failure> {
-    let mut stream = dial(transport, addresses, protocol).await?;
+    let stream = dial(transport, addresses, protocol).await?;
+    exchange_stream(stream, request).await
+}
+pub(crate) async fn exchange_stream(
+    mut stream: Stream,
+    request: &[u8],
+) -> Result<Vec<u8>, Failure> {
     tokio::time::timeout(2 * TIMEOUT, async {
         write_message(&mut stream, request).await?;
         let reply = read_message(&mut stream).await?;

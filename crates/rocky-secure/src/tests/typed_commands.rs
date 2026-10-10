@@ -1571,3 +1571,186 @@ async fn acknowledgment_before_a_reader_pulls_keeps_the_result_verifiable() {
         .unwrap();
     assert_eq!(world.remaining(&reader).await, 2);
 }
+
+#[tokio::test]
+async fn mesh_another_issuer_revokes_executor_and_successor_finishes_pending_ticket() {
+    let world = World::new();
+    let executor = world.executor().await;
+    world.restock(&executor, 2).await;
+    let caller_device = Device::new();
+    let caller = world.caller("mesh-caller.db", &caller_device).await;
+    let handler = Arc::new(Reservations::default());
+    let successor = world
+        .open(
+            "mesh-successor.db",
+            &world.successor,
+            &[(world.stock, EXECUTE), (world.holds, EXECUTE)],
+            Some(handler.clone()),
+        )
+        .await;
+    world
+        .catch_up(
+            &executor,
+            &successor,
+            &world.successor,
+            &[world.stock, world.holds],
+        )
+        .await;
+    caller
+        .submit_command(
+            [91; 32],
+            world.domain,
+            "Reserve",
+            2,
+            &world.reserve(1, "pending"),
+        )
+        .await
+        .unwrap();
+    let envelope = caller.export_ticket([91; 32]).await.unwrap();
+    let prepared = executor
+        .prepare_encrypted(envelope.clone(), &*world.coordinator)
+        .await
+        .unwrap();
+    let statement = rocky_credentials::Revocation {
+        app: world.domain.app,
+        issuer: world.successor.node.public_key(),
+        time: now().unwrap(),
+        nodes: [world.executor.node.public_key()].into(),
+        users: Default::default(),
+        capabilities: Default::default(),
+        pseudonyms: Default::default(),
+    };
+    let signed = rocky_credentials::SignedRevocation::sign(
+        statement,
+        &world.publisher,
+        &world.successor.node,
+    )
+    .unwrap();
+    let set = RevocationSet::try_from(vec![signed]).unwrap();
+    for replica in [&executor, &successor, &caller] {
+        replica.learn_revocations(&set).await.unwrap();
+    }
+    assert!(
+        executor
+            .confirm_encrypted(
+                prepared,
+                &*world.coordinator,
+                &DurabilityPolicy::AsyncReplication,
+                &[]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(world.sequence(), 1);
+    // The already confirmed predecessor stays verifiable after the revocation.
+    world
+        .catch_up(
+            &successor,
+            &caller,
+            &caller_device,
+            &[world.stock, world.holds],
+        )
+        .await;
+    assert_eq!(world.remaining(&caller).await, 2);
+    let head = world.coordinator.head(world.domain).unwrap();
+    world
+        .coordinator
+        .takeover(
+            world.domain,
+            world.executor.principal(),
+            world.successor.id(),
+            head.epoch,
+        )
+        .unwrap();
+    let answer = successor
+        .deliver_command(&envelope.to_bytes().unwrap(), &*world.coordinator)
+        .await;
+    let settled = caller
+        .settle_delivery([91; 32], answer, &*world.coordinator)
+        .await
+        .unwrap();
+    assert_eq!(settled.sequence, Some(2));
+    assert_eq!(
+        world.outcome(&settled),
+        Outcome::Accepted(vec![SqlValue::Integer(1)])
+    );
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mesh_two_executors_fencing_at_once_preserve_the_head_and_pending_ticket() {
+    let world = World::new();
+    let executor = world.executor().await;
+    world.restock(&executor, 2).await;
+    let caller_device = Device::new();
+    let caller = world.caller("mesh-race-caller.db", &caller_device).await;
+    let handler = Arc::new(Reservations::default());
+    let successor = world
+        .open(
+            "mesh-race-successor.db",
+            &world.successor,
+            &[(world.stock, EXECUTE), (world.holds, EXECUTE)],
+            Some(handler.clone()),
+        )
+        .await;
+    world
+        .catch_up(
+            &executor,
+            &successor,
+            &world.successor,
+            &[world.stock, world.holds],
+        )
+        .await;
+    caller
+        .submit_command(
+            [92; 32],
+            world.domain,
+            "Reserve",
+            2,
+            &world.reserve(1, "race"),
+        )
+        .await
+        .unwrap();
+    let envelope = caller.export_ticket([92; 32]).await.unwrap();
+    let base = world.coordinator.head(world.domain).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    let answers = std::thread::scope(|threads| {
+        let attempts: Vec<_> = [world.executor.id(), world.successor.id()]
+            .into_iter()
+            .map(|node| {
+                let barrier = &barrier;
+                let coordinator = &world.coordinator;
+                let world = &world;
+                threads.spawn(move || {
+                    barrier.wait();
+                    coordinator.takeover(world.domain, world.executor.principal(), node, base.epoch)
+                })
+            })
+            .collect();
+        attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(answers.iter().filter(|answer| answer.is_ok()).count(), 1);
+    let head = world.coordinator.head(world.domain).unwrap();
+    assert_eq!(head.sequence, base.sequence);
+    assert_eq!(head.head, base.head);
+    let winner = if head.executor == world.executor.id() {
+        &executor
+    } else {
+        &successor
+    };
+    let answer = winner
+        .deliver_command(&envelope.to_bytes().unwrap(), &*world.coordinator)
+        .await;
+    caller
+        .settle_delivery([92; 32], answer, &*world.coordinator)
+        .await
+        .unwrap();
+    assert_eq!(world.sequence(), 2);
+    assert_eq!(
+        world.handler.calls.load(Ordering::SeqCst) + handler.calls.load(Ordering::SeqCst),
+        2
+    );
+}

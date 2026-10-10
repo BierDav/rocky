@@ -163,6 +163,14 @@ request, refusal and custody scenarios run in integration. The `mesh` and
 records measurements and the acceptance coverage.
 
 
+Phase 16's forwarding-slot and carrier-signature tests run in unit, explicitly
+excluded from the SDK's integration module filter. Mesh routing and replay tests exercise
+SQLite and real authenticated carriers and run in integration through
+`kind(test)`. The forwarder-restart case runs in e2e because it exercises
+the production 5 s service drain. The market harness's `mesh` scenario runs in
+the existing CI `market` job against three voters. No budget exception is added. See
+[Phase 16 evidence](features_07/16-strong-commands-evidence.md).
+
 ## Kotlin desktop integration
 
 The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.
@@ -174,7 +182,7 @@ Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
 and desktop compilation, `./examples/shoppinglist-app/qualify` for the
 multi-process [shopping qualification](runtime/shopping-qualification.md),
 `./examples/market-app/check` and `./examples/market-app/qualify` for the
-[market](runtime/market-qualification.md) and its five scenarios against three
+[market](runtime/market-qualification.md) and its six scenarios against three
 voters, and `./kotlin check qualify -m inventory-qualification`
 for the existing SDK contract qualification. Run `./sdks/native/check` for the
 excluded UniFFI ABI crate. Run `./kotlin check packaged -m packaged-consumer` for an
@@ -295,7 +303,7 @@ and runs the exhaustive phase-2 byte-offset cancellation gate in the release
 profile. This job uses an x64 runner for the Android NDK and has not run on a
 hosted runner yet. Releases skip it and do not wait for its result.
 
-The `market` job runs `./examples/market-app/qualify`: the five
+The `market` job runs `./examples/market-app/qualify`: the six
 [market scenarios](runtime/market-qualification.md) against three loopback
 voters, building the voter and custody peer itself, and keeps `evidence.json`
 as an artifact. Releases skip it too; it has not run on a hosted runner yet.

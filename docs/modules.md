@@ -314,7 +314,8 @@ transport; `Engine` is the starter composition of the three
 ([SDK composition](runtime/sdk-composition.md)). `Commands` composes an
 application's coordinator, or a coordination service its trust bundle names
 ([public coordination](runtime/public-coordination.md)), and a handler: the handler runs on its own thread
-with a deadline, and command calls submit, run, deliver and settle tickets
+with a deadline, and command calls discover executor contacts, forward once when needed,
+and submit, run, deliver and settle tickets
 ([typed commands](runtime/typed-commands.md)). Its `owner` module signs a domain
 owner's tenant-key registration, control and activation calls. It also accepts
 portable definition tables through the SDK/native schema input and owns `TypedApp`, the typed-table

@@ -1,6 +1,6 @@
 # 16. Strong commands in the mesh
 
-Status: not started.
+Status: complete locally on 2026-10-11; hosted CI not run. See [evidence](16-strong-commands-evidence.md).
 Owner: `rocky-sdk` command delivery and executor registration; the command
 protocol in `rocky-core` and `rocky-secure`; the market harness. Depends on [phase 8](08-concurrent-rotation.md),
 [phase 14](14-contacts-and-partner-choice.md) and

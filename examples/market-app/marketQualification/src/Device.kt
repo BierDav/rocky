@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.sqlite.SQLiteException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import org.example.examples.market.Market
 import org.example.examples.market.MarketDatabase
@@ -121,6 +122,7 @@ private fun ticket(ticket: Ticket<*, *>?): JsonElement = ticket?.let {
 
 private class DeviceProcess {
     private var node: MarketNode? = null
+    private var lastSync: ConnectionStatus? = null
     private val market get() = (node ?: error("no open device")).market
     private val rocky get() = market.rocky
 
@@ -172,15 +174,32 @@ private class DeviceProcess {
                 }.uri,
             )
 
+            "routeEnrollment" -> JsonPrimitive(rocky.routeEnrollment(request.text("invitation"), request.text("contact")))
+
             "contact" -> JsonPrimitive(rocky.contact().uri)
 
             "addPeer" -> JsonPrimitive(rocky.addPeer(request.text("contact")))
 
-            "sync" -> JsonPrimitive(rocky.syncOnce().state.name)
+            "retainOnly" -> {
+                val kept = rocky.addPeer(request.text("contact"))
+                rocky.peers().filter { it.isConfigured && it.node != kept }.forEach { rocky.removePeer(it.node) }
+                JsonNull
+            }
+
+            "diagnostics" -> buildJsonObject {
+                put("peers", rocky.peers().toString())
+                put("network", rocky.network().toString())
+                put("error", lastSync?.error)
+                put("results", withTimeoutOrNull(1_000) { rocky.activity().first { it is RockyEvent.ResultsFailed } }?.toString())
+            }
+
+            "sync" -> JsonPrimitive(rocky.syncOnce().also { lastSync = it }.state.name)
 
             "identity" -> JsonPrimitive(rocky.commandIdentity().encoded)
 
             "publish" -> JsonPrimitive(market.publishIdentity().encoded)
+
+            "published" -> JsonPrimitive(market.published().size)
 
             "control" -> market.control(identities("executors"), identities("invokers")).let {
                 buildJsonObject {

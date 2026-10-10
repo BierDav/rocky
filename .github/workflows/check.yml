@@ -147,11 +147,15 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Workspace crates, not just dependencies, are reused across runs; cargo's
+      # fingerprints still decide what a source change rebuilds. This matters
+      # most here, the only job that compiles.
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
         with:
           workspaces: source -> target
           shared-key: check
+          cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: taiki-e/install-action@v2
@@ -262,6 +266,7 @@ jobs:
         with:
           workspaces: source -> target
           shared-key: check
+          cache-workspace-crates: true
           save-if: false
 
       - uses: taiki-e/install-action@v2
@@ -368,6 +373,7 @@ jobs:
         with:
           workspaces: source -> target
           shared-key: check
+          cache-workspace-crates: true
           save-if: false
 
       - uses: taiki-e/install-action@v2
@@ -464,6 +470,7 @@ jobs:
         with:
           workspaces: source -> target
           shared-key: check
+          cache-workspace-crates: true
           save-if: false
 
       # Missing when `build` found this tree's checks passed or failed to upload

@@ -66,11 +66,7 @@ fn config(
                 &deployment,
             )?,
         ]),
-        keys: vec![KeyMaterial {
-            scope,
-            generation: 1,
-            key: [11; 32],
-        }],
+        keys: vec![KeyMaterial::new(scope, 1, [11; 32])],
     })
 }
 pub async fn run() -> Result<(), Failure> {

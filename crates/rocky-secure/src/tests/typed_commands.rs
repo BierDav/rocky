@@ -424,14 +424,16 @@ impl World {
         let keys = grants
             .iter()
             .filter(|grant| grant.rights.contains(&Right::Read))
-            .map(|grant| KeyMaterial {
-                scope: grant.scope,
-                generation: 1,
-                key: if grant.scope == self.stock {
-                    [11; 32]
-                } else {
-                    [22; 32]
-                },
+            .map(|grant| {
+                KeyMaterial::new(
+                    grant.scope,
+                    1,
+                    if grant.scope == self.stock {
+                        [11; 32]
+                    } else {
+                        [22; 32]
+                    },
+                )
             })
             .collect();
         let root = authority

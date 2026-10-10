@@ -397,7 +397,7 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         let id = page.rows[0][0].clone();
         // The transaction holds the replica: the renewal takes the settings
         // and waits for the replica.
-        let renewal = node.renew(None, false, None);
+        let renewal = node.renew(None, false, None, false);
         tokio::pin!(renewal);
         tokio::select! {
             biased;

@@ -278,15 +278,15 @@ async fn lost_newest_payload_and_lost_data_keys_block_old_domain() {
     assert!(!target.command_snapshot(f.private).await.unwrap().complete);
     for scope in [f.public, f.private] {
         target
-            .install_key(KeyMaterial {
+            .install_key(KeyMaterial::new(
                 scope,
-                generation: 1,
-                key: if scope == f.public {
+                1,
+                if scope == f.public {
                     [11; 32]
                 } else {
                     [22; 32]
                 },
-            })
+            ))
             .await
             .unwrap();
     }

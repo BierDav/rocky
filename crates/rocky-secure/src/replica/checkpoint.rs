@@ -94,7 +94,7 @@ pub struct CustodySummary {
     pub archives: SetSummary,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 7;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 8;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -112,7 +112,7 @@ pub struct CheckpointStatement {
     /// The digest of the revocations the signer held.
     pub revocations: Commitment,
     pub scope: ResourceScope,
-    pub key_epoch: u64,
+    pub key_epoch: rocky_core::KeyEpoch,
     /// Length of the checkpoint chain of this scope, starting at 1.
     pub sequence: u64,
     pub previous: Option<Commitment>,
@@ -1034,7 +1034,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(signed)
     }
     /// The key of a scope this node may read in whole.
-    pub(super) fn scope_key(&self, scope: ResourceScope) -> Result<(u64, [u8; 32]), Error> {
+    pub(super) fn scope_key(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(rocky_core::KeyEpoch, [u8; 32]), Error> {
         if !self.can_read_key(scope, &self.local_grants(now()?)?) {
             return Err(denied("checkpoint needs whole-scope read authority"));
         }

@@ -100,6 +100,6 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE secure_rows(scope BLOB NOT NULL,row BLOB NOT NULL,fields BLOB,stamp BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE secure_outbox(hash BLOB PRIMARY KEY)",
     "CREATE TABLE secure_handles(handle BLOB PRIMARY KEY,input BLOB NOT NULL,hash BLOB NOT NULL)",
-    "CREATE TABLE secure_keys(scope BLOB PRIMARY KEY,generation INTEGER NOT NULL,key_hash BLOB NOT NULL)",
+    "CREATE TABLE secure_keys(scope BLOB PRIMARY KEY,generation BLOB NOT NULL,key_hash BLOB NOT NULL)",
     "CREATE TABLE secure_ack(peer BLOB NOT NULL,hash BLOB NOT NULL,applied INTEGER NOT NULL,PRIMARY KEY(peer,hash))",
 ];

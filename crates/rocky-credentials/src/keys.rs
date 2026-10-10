@@ -32,7 +32,7 @@ impl FileKeyProvider {
     }
     fn path(&self, name: &str) -> Result<PathBuf, ProviderError> {
         if name.is_empty()
-            || name.len() > 128
+            || name.len() > 255
             || name.starts_with('.')
             || !name
                 .bytes()

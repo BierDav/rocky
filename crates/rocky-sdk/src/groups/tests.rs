@@ -81,9 +81,25 @@ fn a_held_table_keeps_the_in_group_tables_it_references() {
 fn group_epochs_are_bounded_before_a_secret_is_stored() {
     let mut record = group().record;
     for epoch in 1..=MAX_GROUP_EPOCHS as u64 {
-        record.hold(epoch).unwrap();
+        record
+            .hold(rocky_core::KeyEpoch::new(
+                1,
+                &rocky_core::commitment("test.sibling", &epoch.to_be_bytes()),
+            ))
+            .unwrap();
     }
-    assert!(record.admit(MAX_GROUP_EPOCHS as u64).is_ok());
-    assert!(record.admit(MAX_GROUP_EPOCHS as u64 + 1).is_err());
-    assert_eq!(record.current(), Some(MAX_GROUP_EPOCHS as u64));
+    assert!(
+        record
+            .admit(rocky_core::KeyEpoch::new(
+                1,
+                &rocky_core::commitment("test.sibling", &(MAX_GROUP_EPOCHS as u64).to_be_bytes())
+            ))
+            .is_ok()
+    );
+    assert!(
+        record
+            .admit(rocky_core::KeyEpoch::new(1, &[255; 32]))
+            .is_err()
+    );
+    assert_eq!(record.current(), record.epochs.iter().max().copied());
 }

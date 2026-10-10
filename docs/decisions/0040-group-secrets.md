@@ -3,6 +3,10 @@
 Status: accepted; implemented by [phase 3](../features_06/03-group-secrets.md).
 Date: 2026-10-09
 
+Epoch identities and sibling retention are superseded by
+[decision 0050](0050-concurrent-key-epochs.md); the HKDF derivation below remains
+current.
+
 ## Context
 
 [Decision 0037](0037-partition-groups.md) gives a group partition one address

@@ -5,7 +5,7 @@ use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
     // Earlier epochs of a scope; `secure_keys` holds the current one.
-    "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation INTEGER NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))",
+    "CREATE TABLE IF NOT EXISTS secure_key_epochs(scope BLOB NOT NULL,generation BLOB NOT NULL,key_hash BLOB NOT NULL,PRIMARY KEY(scope,generation))",
 ];
 
 fn key_hash(key: &[u8; 32]) -> Vec<u8> {
@@ -13,9 +13,9 @@ fn key_hash(key: &[u8; 32]) -> Vec<u8> {
 }
 /// The current key of every scope, and the earlier epochs of `keys`.
 pub(super) fn split(keys: Vec<KeyMaterial>) -> (Vec<KeyMaterial>, Vec<KeyMaterial>) {
-    let mut newest: BTreeMap<ResourceScope, u64> = BTreeMap::new();
+    let mut newest: BTreeMap<ResourceScope, rocky_core::KeyEpoch> = BTreeMap::new();
     for key in &keys {
-        let generation = newest.entry(key.scope).or_default();
+        let generation = newest.entry(key.scope).or_insert(key.generation);
         *generation = (*generation).max(key.generation);
     }
     keys.into_iter()
@@ -28,7 +28,7 @@ impl<A: RowApplication> Inner<A> {
     pub(crate) fn opening_key(
         &self,
         scope: ResourceScope,
-        generation: u64,
+        generation: rocky_core::KeyEpoch,
     ) -> Option<&KeyMaterial> {
         self.config
             .keys
@@ -58,7 +58,7 @@ impl<A: RowApplication> Inner<A> {
                 sql,
                 bindings(vec![
                     SqlValue::Blob(encode(&key.scope)?),
-                    SqlValue::Integer(key.generation as i64),
+                    SqlValue::Blob(encode(&key.generation)?),
                     SqlValue::Blob(key_hash(&key.key)),
                 ]),
             )
@@ -66,7 +66,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// The retained record of a scope's current epoch.
-    async fn current_record(&self, scope: ResourceScope) -> Result<Option<(u64, Vec<u8>)>, Error> {
+    async fn current_record(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<(rocky_core::KeyEpoch, Vec<u8>)>, Error> {
         let records = collect_rows(
             self.conn
                 .query(
@@ -78,8 +81,8 @@ impl<A: RowApplication> Inner<A> {
         .await?;
         match records.first().map(Vec::as_slice) {
             None => Ok(None),
-            Some([SqlValue::Integer(generation), SqlValue::Blob(hash)]) => {
-                Ok(Some((*generation as u64, hash.clone())))
+            Some([SqlValue::Blob(generation), SqlValue::Blob(hash)]) => {
+                Ok(Some((decode(generation)?, hash.clone())))
             }
             _ => Err(denied("corrupt key metadata")),
         }
@@ -100,7 +103,7 @@ impl<A: RowApplication> Inner<A> {
                     "SELECT key_hash FROM secure_key_epochs WHERE scope=? AND generation=?",
                     bindings(vec![
                         SqlValue::Blob(encode(&key.scope)?),
-                        SqlValue::Integer(key.generation as i64),
+                        SqlValue::Blob(encode(&key.generation)?),
                     ]),
                 )
                 .await?,
@@ -120,7 +123,7 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT INTO secure_key_epochs SELECT scope,generation,key_hash FROM secure_keys WHERE scope=? AND generation<>? ON CONFLICT(scope,generation) DO NOTHING",
                 bindings(vec![
                     SqlValue::Blob(scope.clone()),
-                    SqlValue::Integer(key.generation as i64),
+                    SqlValue::Blob(encode(&key.generation)?),
                 ]),
             )
             .await?;
@@ -129,7 +132,7 @@ impl<A: RowApplication> Inner<A> {
                 "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET generation=excluded.generation,key_hash=excluded.key_hash",
                 bindings(vec![
                     SqlValue::Blob(scope),
-                    SqlValue::Integer(key.generation as i64),
+                    SqlValue::Blob(encode(&key.generation)?),
                     SqlValue::Blob(key_hash(&key.key)),
                 ]),
             )
@@ -164,7 +167,11 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     /// Whether any retained operation of `scope` was sealed at `generation`.
-    async fn epoch_in_use(&self, scope: ResourceScope, generation: u64) -> Result<bool, Error> {
+    async fn epoch_in_use(
+        &self,
+        scope: ResourceScope,
+        generation: rocky_core::KeyEpoch,
+    ) -> Result<bool, Error> {
         let mut cursor = Vec::new();
         loop {
             let records = collect_rows(
@@ -218,13 +225,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 "key material is already installed under another scope or epoch",
             ));
         }
-        if key.generation == 0
-            || key.generation > i64::MAX as u64
-            || !inner.can_read_key(key.scope, &inner.local_grants(time)?)
-        {
+        if !key.generation.valid() || !inner.can_read_key(key.scope, &inner.local_grants(time)?) {
             return Err(denied(
                 "key requires read permission for every row in its encryption scope",
             ));
+        }
+        if inner
+            .opening_keys()
+            .filter(|held| held.scope == scope)
+            .count()
+            >= 256
+        {
+            return Err(denied("key epoch capacity reached"));
         }
         inner.matches_record(&key).await?;
         let recorded = inner.current_record(key.scope).await?;
@@ -276,7 +288,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn retire_key_epoch(
         &self,
         scope: ResourceScope,
-        generation: u64,
+        generation: rocky_core::KeyEpoch,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         let Some(index) = inner
@@ -296,9 +308,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     /// The installed key epochs of a scope, ascending; the last is current.
-    pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<u64> {
+    pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {
         let inner = self.inner.lock().await;
-        let mut epochs: Vec<u64> = inner
+        let mut epochs: Vec<rocky_core::KeyEpoch> = inner
             .opening_keys()
             .filter(|key| key.scope == scope)
             .map(|key| key.generation)

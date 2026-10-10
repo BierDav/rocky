@@ -745,7 +745,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
                     bindings(vec![
                         SqlValue::Blob(encode(&scope)?),
-                        SqlValue::Integer(generation as i64),
+                        SqlValue::Blob(encode(&generation)?),
                         SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key).to_vec()),
                     ]),
                 )

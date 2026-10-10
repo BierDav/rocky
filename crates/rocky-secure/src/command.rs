@@ -120,8 +120,7 @@ impl EncryptedCommand {
         let grants = inner.verify_chain_with(&self.credentials, self.node, revocations, time)?;
         let invocation: EncryptedPackage = decode(&request.arguments)?;
         let resources = resources(inner, &request)?;
-        if invocation.generation == 0
-            || invocation.generation > i64::MAX as u64
+        if !invocation.generation.valid()
             || invocation.kind != PackageKind::Invocation
             || !resources.contains(&invocation.scope)
             || invocation.scope
@@ -291,8 +290,7 @@ impl ConfirmedCommand {
         let mut seen = BTreeSet::new();
         let mut row_scopes = BTreeSet::new();
         for part in &self.parts {
-            if part.generation == 0
-                || part.generation > i64::MAX as u64
+            if !part.generation.valid()
                 || !resources.contains(&part.scope)
                 || !seen.insert(part.commitment()?)
                 || part.kind == PackageKind::Invocation

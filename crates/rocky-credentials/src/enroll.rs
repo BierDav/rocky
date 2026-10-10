@@ -387,6 +387,38 @@ impl Renewal {
             return Err(denied("invalid or revoked credential"));
         }
         let capability = authority.renew(prior, &revocations, validity)?;
+        Self::seal_capability(authority, request, capability, revocations, payload)
+    }
+    /// Seals epoch delivery under a currently verified chain without renewing it.
+    pub fn seal_current(
+        authority: &Authority<'_>,
+        request: &RenewRequest,
+        revocations: RevocationSet,
+        time: u64,
+        payload: &[u8],
+    ) -> Result<Self, Error> {
+        request.chain.verify_selectors(
+            authority.publisher.public_key(),
+            authority.manifest,
+            request.node,
+            &revocations,
+            time,
+        )?;
+        let capability = request
+            .chain
+            .0
+            .first()
+            .ok_or_else(|| denied("empty epoch request chain"))?
+            .clone();
+        Self::seal_capability(authority, request, capability, revocations, payload)
+    }
+    fn seal_capability(
+        authority: &Authority<'_>,
+        request: &RenewRequest,
+        capability: SignedCapability,
+        revocations: RevocationSet,
+        payload: &[u8],
+    ) -> Result<Self, Error> {
         let (secret, exchange) = Exchange::new();
         let shared = secret.shared(&request.exchange)?;
         let sealed = seal(

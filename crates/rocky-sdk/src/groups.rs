@@ -24,20 +24,23 @@ pub struct GroupRecord {
     pub address: Commitment,
     /// Secret epochs held, ascending; empty for an address registered
     /// without a key.
-    pub epochs: Vec<u64>,
+    pub epochs: Vec<rocky_core::KeyEpoch>,
 }
 impl GroupRecord {
-    pub fn current(&self) -> Option<u64> {
+    pub fn current(&self) -> Option<rocky_core::KeyEpoch> {
         self.epochs.last().copied()
     }
     /// Adds an epoch; refused at capacity before any secret is stored.
-    pub fn admit(&self, epoch: u64) -> Result<(), Failure> {
+    pub fn admit(&self, epoch: rocky_core::KeyEpoch) -> Result<(), Failure> {
+        if !epoch.valid() {
+            return Err("invalid group secret epoch".into());
+        }
         if !self.epochs.contains(&epoch) && self.epochs.len() >= MAX_GROUP_EPOCHS {
             return Err("group secret epoch capacity reached".into());
         }
         Ok(())
     }
-    pub fn hold(&mut self, epoch: u64) -> Result<(), Failure> {
+    pub fn hold(&mut self, epoch: rocky_core::KeyEpoch) -> Result<(), Failure> {
         self.admit(epoch)?;
         if !self.epochs.contains(&epoch) {
             self.epochs.push(epoch);
@@ -50,8 +53,13 @@ pub(crate) fn record_key(address: &Commitment) -> String {
     HEXLOWER.encode(address)
 }
 /// The installation vault's role of a group secret epoch.
-pub(crate) fn secret_role(address: &Commitment, epoch: u64) -> String {
-    format!("group.{}.{epoch}", record_key(address))
+pub(crate) fn secret_role(address: &Commitment, epoch: rocky_core::KeyEpoch) -> String {
+    format!(
+        "group.{}.{}.{}",
+        record_key(address),
+        epoch.generation,
+        HEXLOWER.encode(&epoch.secret_hash)
+    )
 }
 
 /// One member table's partition of a group partition.
@@ -207,19 +215,27 @@ impl GroupPartition {
             .collect())
     }
     /// A member's key at one epoch, derived from the held secret.
-    pub fn key(&self, vault: &Vault, member: &Member, epoch: u64) -> Result<KeyMaterial, Failure> {
+    pub fn key(
+        &self,
+        vault: &Vault,
+        member: &Member,
+        epoch: rocky_core::KeyEpoch,
+    ) -> Result<KeyMaterial, Failure> {
         let secret = vault.get(&secret_role(&self.record.address, epoch))?;
-        Ok(KeyMaterial {
-            scope: member.scope,
-            generation: epoch,
-            key: derive_table_key(
+        if rocky_core::KeyEpoch::new(epoch.generation, &secret) != epoch {
+            return Err("group secret epoch identity mismatch".into());
+        }
+        Ok(KeyMaterial::at(
+            member.scope,
+            epoch,
+            derive_table_key(
                 &secret,
                 member.scope.domain,
                 self.record.address,
                 member.scope.table,
-                epoch,
+                epoch.generation,
             )?,
-        })
+        ))
     }
 }
 

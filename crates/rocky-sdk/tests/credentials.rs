@@ -41,13 +41,45 @@ fn reopen(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {
     Device::new(Database::open(open(&root.join(name), hub, name))?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        root.join(name).join("identity.json"),
-    )?)?)
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    for epochs in identity["keys"].as_object_mut().ok_or("keys")?.values_mut() {
+        for epoch in epochs.as_array_mut().ok_or("epochs")? {
+            *epoch = epoch["generation"].clone();
+        }
+    }
+    Ok(identity)
 }
 /// The secret of `role` in a device's file key store.
 fn secret(root: &Path, name: &str, role: &str) -> Result<Option<[u8; 32]>, Failure> {
-    let installation = identity(root, name)?["installation"]
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    let role = if let Some(reader) = role.strip_prefix("reader.") {
+        let (collection, generation) = reader
+            .split_once('.')
+            .map_or((reader, 1u64), |(name, value)| {
+                (name, value.parse().unwrap())
+            });
+        let epoch = state["keys"][collection].as_array().and_then(|epochs| {
+            epochs
+                .iter()
+                .find(|epoch| epoch["generation"] == generation)
+        });
+        match epoch {
+            Some(epoch) => {
+                let epoch: rocky_core::KeyEpoch = serde_json::from_value(epoch.clone())?;
+                format!(
+                    "reader.{collection}.{}.{}",
+                    epoch.generation,
+                    data_encoding::HEXLOWER.encode(&epoch.secret_hash)
+                )
+            }
+            None => return Ok(None),
+        }
+    } else {
+        role.to_owned()
+    };
+    let installation = state["installation"]
         .as_str()
         .ok_or("installation")?
         .to_owned();
@@ -355,7 +387,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     let before = secrets(root, "b")?;
     let role = before
         .iter()
-        .find(|name| name.ends_with(".reader.items.2"))
+        .find(|name| name.contains(".reader.items.2."))
         .ok_or("epoch 2 key")?;
     std::fs::remove_file(root.join("b/secrets").join(role))?;
     assert!(reopen(root, &hub, "b").is_err());
@@ -389,7 +421,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     // The intent and the record it acts on were saved and the new key
     // made; then the device stopped.
     let path = root.join("a/identity.json");
-    let mut saved = identity(root, "a")?;
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     let manifest = SignedManifest::from_bytes(
         &data_encoding::HEXLOWER
             .decode(saved["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
@@ -417,18 +449,20 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         .into(),
         pseudonyms: Default::default(),
     };
+    let statement_id = statement.id()?;
     saved["authority"]["rotation"] = json!({
         "node": c_node,
         "statement": statement,
         "keys": {"items": 2},
         "groups": {},
+        "statements": [statement_id],
     });
     std::fs::write(&path, saved.to_string())?;
     let installation = saved["installation"].as_str().ok_or("installation")?;
     let made = [7; 32];
     std::fs::write(
         root.join("a/secrets")
-            .join(format!("rocky.{installation}.reader.items.2")),
+            .join(format!("rocky.{installation}.rotation.reader.items.2")),
         made,
     )?;
 
@@ -544,7 +578,13 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
             mesh,
             domain,
             credentials: issued(root, user, "model")?,
-            keys,
+            keys: keys
+                .into_iter()
+                .map(|(name, generation, key)| {
+                    (name, rocky_core::KeyEpoch::new(generation, &key), key)
+                })
+                .collect(),
+            epoch_statements: std::collections::BTreeMap::new(),
             issuers: vec![contact.clone()],
         })
     };

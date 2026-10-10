@@ -59,9 +59,14 @@ pub(super) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     }
 }
 pub(super) fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        root.join(name).join("identity.json"),
-    )?)?)
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    for epochs in identity["keys"].as_object_mut().ok_or("keys")?.values_mut() {
+        for epoch in epochs.as_array_mut().ok_or("epochs")? {
+            *epoch = epoch["generation"].clone();
+        }
+    }
+    Ok(identity)
 }
 pub(super) async fn sync(device: &Device) -> Result<(), Failure> {
     device.sync().await.map_err(|error| error.to_string())?;
@@ -106,7 +111,14 @@ pub(super) async fn epoch(device: &Device, list: &str) -> Value {
     for table in status["tables"].as_array().into_iter().flatten() {
         assert_eq!(table["epochs"], status["epochs"], "{status}");
     }
-    status["epochs"].clone()
+    json!(
+        status["epochs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch["generation"].clone())
+            .collect::<Vec<_>>()
+    )
 }
 pub(super) async fn grant(device: &Device, list: &str) -> Value {
     let address = device

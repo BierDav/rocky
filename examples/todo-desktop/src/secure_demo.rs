@@ -128,14 +128,16 @@ impl SecureDemo {
                 keys,
             })
         };
-        let key = |scope| KeyMaterial {
-            scope,
-            generation: 1,
-            key: if scope == scopes[0] {
-                [11; 32]
-            } else {
-                [22; 32]
-            },
+        let key = |scope| {
+            KeyMaterial::new(
+                scope,
+                1,
+                if scope == scopes[0] {
+                    [11; 32]
+                } else {
+                    [22; 32]
+                },
+            )
         };
         let admin_config = config(83, full, scopes.iter().copied().map(key).collect())?;
         let editor_config = config(84, editor_grants, vec![key(scopes[0])])?;

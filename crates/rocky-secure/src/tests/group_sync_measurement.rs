@@ -247,11 +247,7 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         .await;
     let open = started.elapsed();
     writer
-        .install_key(KeyMaterial {
-            scope: f.scope("products", 0),
-            generation: 1,
-            key: [8; 32],
-        })
+        .install_key(KeyMaterial::new(f.scope("products", 0), 1, [8; 32]))
         .await
         .unwrap();
     let empty = database_bytes(&writer).await;
@@ -299,11 +295,7 @@ async fn measure(tables: usize, partitions: i64) -> Measurement {
         )
         .await;
     reader
-        .install_key(KeyMaterial {
-            scope: f.scope("products", 0),
-            generation: 1,
-            key: [8; 32],
-        })
+        .install_key(KeyMaterial::new(f.scope("products", 0), 1, [8; 32]))
         .await
         .unwrap();
     for partition in 1..=partitions {

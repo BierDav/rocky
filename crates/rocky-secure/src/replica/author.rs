@@ -290,7 +290,7 @@ impl<A: RowApplication> Inner<A> {
             signing_key,
             Extensions {
                 author: signer.map(|author| author.number),
-                row_format: 6,
+                row_format: 7,
                 partition,
                 manifest: self.manifest,
                 scope,

@@ -206,9 +206,11 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
             let bytes = encode(&payload)?;
             let mut key_epochs = BTreeMap::new();
             // The latest key epoch of every scope; earlier ones stay inside.
-            let mut check_epoch = |scope, generation: u64| -> Result<(), Error> {
-                let latest = key_epochs.entry(scope).or_insert(generation);
-                *latest = (*latest).max(generation);
+            let mut check_epoch = |scope, generation: rocky_core::KeyEpoch| -> Result<(), Error> {
+                key_epochs
+                    .entry(scope)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(generation);
                 Ok(())
             };
             for frame in &payload.frames {
@@ -245,7 +247,7 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 }
             }
             let inventory = RecoveryInventory {
-                format: 3,
+                format: 4,
                 definition: inner.manifest,
                 recipient,
                 scopes: scopes.clone(),

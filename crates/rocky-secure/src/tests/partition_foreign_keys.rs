@@ -250,14 +250,14 @@ impl Fixture {
                 .await
                 .unwrap();
             replica
-                .install_key(KeyMaterial {
-                    scope: self.scope(name, partition),
-                    generation: 1,
-                    key: rocky_core::commitment(
+                .install_key(KeyMaterial::new(
+                    self.scope(name, partition),
+                    1,
+                    rocky_core::commitment(
                         "partition-fk-key",
                         &self.scope(name, partition).encryption,
                     ),
-                })
+                ))
                 .await
                 .unwrap();
         }
@@ -504,11 +504,7 @@ async fn partitioned_children_follow_keyless_parent_liveness_and_restore() {
         )
         .await;
     writer
-        .install_key(KeyMaterial {
-            scope: f.scope("products", 0),
-            generation: 1,
-            key: [7; 32],
-        })
+        .install_key(KeyMaterial::new(f.scope("products", 0), 1, [7; 32]))
         .await
         .unwrap();
     f.keys(&writer, 10, &["items"]).await;

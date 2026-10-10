@@ -83,11 +83,11 @@ class HouseholdTest {
             val rotated = trusted.rocky.list(list).status().epochs.max()
             assertTrue(rotated > epoch)
             withTimeout(60_000) {
-                trusted.household.keys().first { keys -> keys.any { it.recipient == remaining.self && it.list == list && it.epoch == rotated } }
+                trusted.household.keys().first { keys -> keys.any { it.recipient == remaining.self && it.list == list && it.epoch == rotated.toString() } }
             }
             trusted.repository.add(list, "Bread")
             remaining.awaitTitles(list, "Bread", "Milk")
-            assertTrue(trusted.household.keys().first().none { it.recipient == removed.self && it.list == list && it.epoch == rotated })
+            assertTrue(trusted.household.keys().first().none { it.recipient == removed.self && it.list == list && it.epoch == rotated.toString() })
             assertEquals(listOf("Milk"), removed.titles(list))
             removed.rocky.setOnline(true)
             assertEquals(ConnectionState.Revoked, removed.rocky.syncOnce().state)

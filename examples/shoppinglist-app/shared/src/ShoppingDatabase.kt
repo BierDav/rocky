@@ -66,7 +66,7 @@ data class DeviceRow(
 class ListKey(
     val recipient: String,
     val list: Long,
-    val epoch: Long,
+    val epoch: String,
     val envelope: ByteArray,
     val id: Long,
     @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
@@ -220,9 +220,9 @@ interface KeyDao {
     suspend fun nextId(): Long
 
     @Query("UPDATE keys SET epoch = :epoch, envelope = :envelope WHERE recipient = :recipient AND list = :list")
-    suspend fun update(recipient: String, list: Long, epoch: Long, envelope: ByteArray): Int
+    suspend fun update(recipient: String, list: Long, epoch: String, envelope: ByteArray): Int
 
-    @Transaction suspend fun deliver(recipient: String, list: Long, epoch: Long, envelope: ByteArray) {
+    @Transaction suspend fun deliver(recipient: String, list: Long, epoch: String, envelope: ByteArray) {
         if (update(recipient, list, epoch, envelope) == 0) insert(ListKey(recipient, list, epoch, envelope, nextId()))
     }
 }

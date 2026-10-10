@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "b9c578f2c4ea0a4fc74ba2e1fd693b3c",
+    "identityHash": "a18401990f582b0a159c52724b34cc4c",
     "entities": [
       {
         "tableName": "lists",
@@ -251,7 +251,7 @@
       },
       {
         "tableName": "keys",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recipient` TEXT NOT NULL, `list` INTEGER NOT NULL, `epoch` INTEGER NOT NULL, `envelope` BLOB NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL, PRIMARY KEY(`recipient`, `list`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`recipient` TEXT NOT NULL, `list` INTEGER NOT NULL, `epoch` TEXT NOT NULL, `envelope` BLOB NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL, PRIMARY KEY(`recipient`, `list`))",
         "fields": [
           {
             "fieldPath": "recipient",
@@ -268,7 +268,7 @@
           {
             "fieldPath": "epoch",
             "columnName": "epoch",
-            "affinity": "INTEGER",
+            "affinity": "TEXT",
             "notNull": true
           },
           {
@@ -471,7 +471,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b9c578f2c4ea0a4fc74ba2e1fd693b3c')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a18401990f582b0a159c52724b34cc4c')"
     ]
   }
 }

@@ -149,13 +149,9 @@ async fn a_bundle_spans_scopes_and_frames_and_each_reader_applies_its_partitions
     }
     assert_eq!(live(&late, f.public).await, 40);
     assert!(!late.snapshot(f.private).await.unwrap().complete);
-    late.install_key(KeyMaterial {
-        scope: f.private,
-        generation: 1,
-        key: [22; 32],
-    })
-    .await
-    .unwrap();
+    late.install_key(KeyMaterial::new(f.private, 1, [22; 32]))
+        .await
+        .unwrap();
     assert_eq!(live(&late, f.private).await, 1);
 }
 
@@ -719,13 +715,9 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
     assert_eq!(dave.prune(f.public).await.unwrap().pruned, 2);
 
     // The private partition finds its pruned partners settled by the log.
-    dave.install_key(KeyMaterial {
-        scope: f.private,
-        generation: 1,
-        key: [22; 32],
-    })
-    .await
-    .unwrap();
+    dave.install_key(KeyMaterial::new(f.private, 1, [22; 32]))
+        .await
+        .unwrap();
     assert_eq!(live(&dave, f.private).await, 1);
     assert_eq!(live(&dave, f.public).await, 40);
 }

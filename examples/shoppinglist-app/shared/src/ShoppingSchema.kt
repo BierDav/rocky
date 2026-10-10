@@ -45,7 +45,7 @@ val ShoppingSchema = schema("shopping", version = 5) {
     table("keys") {
         text("recipient")
         integer("list")
-        integer("epoch")
+        text("epoch")
         blob("envelope")
         primaryKey("recipient", "list")
     }

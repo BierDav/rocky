@@ -12,7 +12,7 @@ struct Peer {
     policy: RevocationSet,
     node: [u8; 32],
     credentials: CredentialChain,
-    keys: Vec<(ResourceScope, u64, [u8; 32])>,
+    keys: Vec<(ResourceScope, rocky_core::KeyEpoch, [u8; 32])>,
     authors: Vec<([u8; 32], CredentialChain)>,
 }
 #[derive(Serialize, Deserialize)]
@@ -99,11 +99,7 @@ async fn peer_worker() {
         keys: peer
             .keys
             .iter()
-            .map(|(scope, generation, key)| KeyMaterial {
-                scope: *scope,
-                generation: *generation,
-                key: *key,
-            })
+            .map(|(scope, generation, key)| KeyMaterial::at(*scope, *generation, *key))
             .collect(),
     };
     let f = Fixture {

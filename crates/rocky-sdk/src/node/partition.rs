@@ -79,11 +79,12 @@ impl Node {
             self.replica
                 .register_partition(member.scope, member.tuple.clone())
                 .await?;
-            for epoch in &partition.record.epochs {
+            for epoch in partition.record.epochs.iter().rev() {
                 self.replica
                     .install_key_epoch(partition.key(&self.vault, member, *epoch)?)
                     .await?;
             }
+            crate::enrollment::fault::check(crate::enrollment::fault::Stage::Table)?;
         }
         Ok(())
     }
@@ -145,6 +146,7 @@ impl Node {
             Box::pin(self.record_holder(&device, &grants, delegations)).await?;
         }
         let supplied = crate::Supplied {
+            epoch_statements: BTreeMap::new(),
             mesh: settings.mesh,
             domain: settings.domain,
             credentials: rocky_credentials::Credentials {
@@ -174,15 +176,33 @@ impl Node {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| partition.record.clone());
-        let epoch = record.current().unwrap_or(1);
-        record.admit(epoch)?;
-        let role = secret_role(&record.address, epoch);
-        if self.vault.find(&role)?.is_none() {
-            self.vault.create(&role)?;
-        }
+        let epoch = match record.current() {
+            Some(epoch) => epoch,
+            None => {
+                let slot = format!("prepared.partition.{}", record_key(&record.address));
+                let secret = match self.vault.find(&slot)? {
+                    Some(secret) => secret,
+                    None => self.vault.create(&slot)?,
+                };
+                let epoch = rocky_core::KeyEpoch::new(1, &secret);
+                record.admit(epoch)?;
+                self.vault
+                    .put(&secret_role(&record.address, epoch), &secret)?;
+                epoch
+            }
+        };
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
+        let ids = settings
+            .revocations
+            .statements()
+            .map(|signed| signed.statement.id())
+            .collect::<Result<Vec<_>, _>>()?;
+        draft
+            .epoch_statements
+            .entry(secret_role(&record.address, epoch))
+            .or_insert(ids);
         draft.save(&self.path)?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
         *settings = draft;
@@ -199,7 +219,12 @@ impl Node {
     ) -> Result<Value, Failure> {
         let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
         let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
-        let epoch = request["epoch"].as_u64().unwrap_or(envelope.epoch());
+        let epoch = request
+            .get("epoch")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .unwrap_or(envelope.epoch());
         let mut settings = self.settings.lock().await;
         let secret = envelope.open(
             &PrivateKey::from_bytes(&self.vault.get("node")?),
@@ -229,6 +254,17 @@ impl Node {
         record.hold(epoch)?;
         let mut draft = settings.clone();
         draft.groups.insert(key, record.clone());
+        let role = secret_role(&record.address, epoch);
+        if draft
+            .epoch_statements
+            .get(&role)
+            .is_some_and(|held| held != envelope.statements())
+        {
+            return Err("group epoch revocation IDs differ from retained metadata".into());
+        }
+        draft
+            .epoch_statements
+            .insert(role, envelope.statements().to_vec());
         draft.save(&self.path)?;
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
         *settings = draft;
@@ -256,10 +292,15 @@ impl Node {
             .filter(|record| record.current().is_some())
             .ok_or_else(|| refused("no group secret is held here; create or install it first"))?;
         let current = record.current().ok_or("no group secret epoch")?;
-        let epoch = request["epoch"].as_u64().unwrap_or(current);
+        let epoch = request
+            .get("epoch")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()?
+            .unwrap_or(current);
         if epoch != current {
             return Err(refused(format!(
-                "only the current epoch {current} of a group secret is shared"
+                "only the current epoch {current:?} of a group secret is shared"
             )));
         }
         let recipients: BTreeSet<PublicKey> =
@@ -273,14 +314,19 @@ impl Node {
                 revoked.to_hex()
             )));
         }
-        let envelopes = GroupSecretEnvelope::seal_many(
+        let statements = settings
+            .epoch_statements
+            .get(&secret_role(&record.address, epoch))
+            .cloned()
+            .unwrap_or_default();
+        let envelopes = recipients.iter().map(|recipient| GroupSecretEnvelope::seal_recorded(
             &PrivateKey::from_bytes(&self.vault.get("publisher")?),
             self.domain.manifest().hash(),
             record.address,
-            epoch,
+            epoch.generation,
             self.vault.get(&secret_role(&record.address, epoch))?,
-            &recipients,
-        )?
+            *recipient, statements.clone(),
+        )).collect::<Result<Vec<_>, _>>()?
         .iter()
         .map(|envelope| {
             Ok(json!({"recipient": envelope.recipient().to_hex(), "envelope": envelope.to_bytes()?}))
@@ -307,6 +353,7 @@ impl Node {
                 // As activity events name the partition.
                 "partition": data_encoding::HEXLOWER.encode(&member.scope.encryption),
                 "epochs": self.replica.key_epochs(member.scope).await,
+                "current": self.replica.key_epochs(member.scope).await.into_iter().max(),
                 "holding": holding
                     .get(&member.scope)
                     .map(|state| format!("{state:?}").to_lowercase()),
@@ -315,6 +362,7 @@ impl Node {
         Ok(json!({
             "group": partition.record.group,
             "address": record_key(&partition.record.address),
+            "current": epochs.iter().max(),
             "epochs": epochs,
             "tables": tables,
         }))

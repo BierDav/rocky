@@ -25,6 +25,7 @@ naturally holds.
 | [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
 | [0048](0048-replicated-issuer-registry.md) | Replicated issuer registry |
 | [0049](0049-mergeable-revocation-set.md) | A mergeable revocation set replaces the policy epoch |
+| [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are

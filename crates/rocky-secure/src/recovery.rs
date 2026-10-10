@@ -21,7 +21,7 @@ pub struct RecoveryInventory {
     pub scopes: Vec<ResourceScope>,
     pub schema: u32,
     pub handler: u32,
-    pub key_epochs: BTreeMap<ResourceScope, u64>,
+    pub key_epochs: BTreeMap<ResourceScope, BTreeSet<rocky_core::KeyEpoch>>,
     pub frontier: Vec<Hash>,
     pub heads: Vec<StrongHead>,
     pub closure: Commitment,
@@ -128,7 +128,7 @@ impl RecoveryPackage {
     }
     fn inspect(&self, publisher: PublicKey, revocations: &RevocationSet) -> Result<(), Error> {
         self.to_bytes()?;
-        if self.inventory.format != 3
+        if self.inventory.format != 4
             || self.inventory.scopes.is_empty()
             || self.inventory.scopes.len() > 32
             || self
@@ -249,14 +249,17 @@ impl RecoveryPackage {
         let mut epochs = BTreeMap::new();
         // A scope rotated since the oldest retained artifact spans several
         // key epochs; the inventory names the latest.
-        let mut check_epoch = |scope: ResourceScope, generation: u64| -> Result<(), Error> {
-            if !self.inventory.scopes.contains(&scope) {
-                return Err(denied("recovery scope/key epoch mismatch"));
-            }
-            let latest = epochs.entry(scope).or_insert(generation);
-            *latest = (*latest).max(generation);
-            Ok(())
-        };
+        let mut check_epoch =
+            |scope: ResourceScope, generation: rocky_core::KeyEpoch| -> Result<(), Error> {
+                if !self.inventory.scopes.contains(&scope) {
+                    return Err(denied("recovery scope/key epoch mismatch"));
+                }
+                epochs
+                    .entry(scope)
+                    .or_insert_with(BTreeSet::new)
+                    .insert(generation);
+                Ok(())
+            };
         for frame in &payload.frames {
             let op = frame.operation()?;
             check_epoch(op.header.extensions.scope, op.header.extensions.generation)?;

@@ -12,6 +12,8 @@ mod manifest;
 pub use manifest::*;
 mod history;
 mod key;
+mod key_epoch;
+pub use key_epoch::KeyEpoch;
 mod logical;
 pub mod net;
 mod storage;

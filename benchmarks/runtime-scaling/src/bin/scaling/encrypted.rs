@@ -74,11 +74,7 @@ impl Fixture {
                 )
                 .map_err(signing)?,
             ]),
-            keys: vec![KeyMaterial {
-                scope: self.scope,
-                generation: 1,
-                key: [11; 32],
-            }],
+            keys: vec![KeyMaterial::new(self.scope, 1, [11; 32])],
         })
     }
     /// The `version`th edit of a row; version 0 inserts it.

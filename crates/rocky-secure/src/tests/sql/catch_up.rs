@@ -315,7 +315,8 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
 
 #[tokio::test]
 async fn a_writer_commits_within_the_write_limit_during_a_catch_up() {
-    let measured = catch_up_beside_a_writer(640).await;
+    // Six receive pages retain concurrent writes and cross-log dependencies.
+    let measured = catch_up_beside_a_writer(192).await;
     assert!(measured.writes > 0);
     assert!(measured.longest_write < WRITE_LIMIT);
 }

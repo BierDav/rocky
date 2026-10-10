@@ -555,7 +555,7 @@ impl Node {
                     )
                 }
                 "renew" => {
-                    self.renew(transport, true, None).await?;
+                    self.renew(transport, true, None, false).await?;
                     self.status(client).await
                 }
                 "authors" => self.authors(transport).await,
@@ -940,7 +940,7 @@ impl Node {
                 self.configure(|settings| settings.claim_authors(range))
                     .await?;
                 // The issuer's own capability carries the range from now on.
-                self.renew(None, false, None).await?;
+                self.renew(None, false, None, false).await?;
                 Ok(json!({"first": range.first, "last": range.last}))
             }
             other => Err(refused(format!("unsupported request {other}"))),
@@ -955,10 +955,20 @@ impl Node {
         let renewed = current
             .supplied_renewal(&self.vault, &supplied)
             .map_err(refused)?;
+        let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
-        let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let mut keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        if settings.begin_exposure_rotation(&registry)? {
+            settings.save(&self.path)?;
+            keys.extend(
+                settings
+                    .rotate(&self.vault)?
+                    .ok_or("exposure rotation intent disappeared")?,
+            );
+            settings.save(&self.path)?;
+        }
         let fresh = keys.len();
-        self.apply(&settings.revocations, &renewed.chain, keys)
+        self.apply(&settings.revocations, &settings.credentials, keys)
             .await?;
         self.activity.record(
             "renewed",
@@ -1256,6 +1266,7 @@ impl Node {
                 "profile": settings.profile,
                 "issuer_contact": settings.issuer_contact(),
             },
+            "key_epochs": settings.keys.iter().map(|(collection, epochs)| json!({"collection":collection,"epochs":epochs,"current":epochs.iter().max()})).collect::<Vec<_>>(),
             "tickets": tickets,
             "network": {"attached": self.current().is_some()},
         });
@@ -1421,7 +1432,7 @@ impl Node {
         &self,
         revocations: &RevocationSet,
         chain: &CredentialChain,
-        mut keys: Vec<(String, u64, [u8; 32])>,
+        mut keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
     ) -> Result<(), Failure> {
         self.replica.learn_revocations(revocations).await?;
         self.replica.renew_credentials(chain.clone()).await?;
@@ -1434,11 +1445,7 @@ impl Node {
                 .map(|(_, scope)| scope)
                 .ok_or("unknown collection")?;
             self.replica
-                .install_key_epoch(KeyMaterial {
-                    scope,
-                    generation,
-                    key,
-                })
+                .install_key_epoch(KeyMaterial::at(scope, generation, key))
                 .await?;
         }
         Ok(())
@@ -1451,12 +1458,25 @@ impl Node {
         transport: Option<&dyn Transport>,
         learn: bool,
         first: Option<PublicKey>,
+        epochs_only: bool,
     ) -> Result<(), Failure> {
         let current = self.settings.lock().await.clone();
-        let renewed = match current
-            .request_renewal(&self.vault, transport, learn, first)
-            .await
-        {
+        let request = async {
+            if epochs_only {
+                current
+                    .request_epochs(
+                        &self.vault,
+                        transport.ok_or(ServiceError::NetworkRequired("epoch delivery"))?,
+                        first,
+                    )
+                    .await
+            } else {
+                current
+                    .request_renewal(&self.vault, transport, learn, first)
+                    .await
+            }
+        };
+        let mut renewed = match request.await {
             Ok(renewed) => renewed,
             Err(error) => {
                 if let Some(revoked) = error.downcast_ref::<crate::enrollment::Revoked>() {
@@ -1476,23 +1496,48 @@ impl Node {
             }
         };
         let mut settings = self.settings.lock().await;
-        // Rows of a newly revoked author arrive by checkpoint.
-        if settings.lacks(&renewed.revocations)? {
+        if !epochs_only && settings.lacks(&renewed.revocations)? {
             rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
         }
+        if epochs_only {
+            renewed.chain = settings.credentials.clone();
+        }
+        // Install delivered keys before reading a registry that may wait for them.
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
-        self.apply(&settings.revocations, &renewed.chain, keys)
+        if epochs_only && serde_json::to_vec(&current)? == serde_json::to_vec(&*settings)? {
+            return Ok(());
+        }
+        self.apply(&settings.revocations, &settings.credentials, keys)
             .await?;
-        // New grants may make more members of a held group readable.
         for partition in settings.partitions(&self.domain)? {
             self.hold_keys(&settings, &partition).await?;
+        }
+        if settings.issuer() {
+            drop(settings);
+            let registry = self.registry().await?;
+            settings = self.settings.lock().await;
+            if settings.begin_exposure_rotation(&registry)? {
+                settings.save(&self.path)?;
+                let keys = settings
+                    .rotate(&self.vault)?
+                    .ok_or("exposure rotation intent disappeared")?;
+                settings.save(&self.path)?;
+                self.apply(&settings.revocations, &settings.credentials, keys)
+                    .await?;
+                for partition in settings.partitions(&self.domain)? {
+                    self.hold_keys(&settings, &partition).await?;
+                }
+            }
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
         drop(settings);
         self.forget_readers().await;
+        if self.settings.lock().await.issuer() {
+            Box::pin(self.complete_revocation()).await?;
+        }
         // An issuer's own record names its current capability.
-        if let Err(error) = Box::pin(self.record_self()).await {
+        if !epochs_only && let Err(error) = Box::pin(self.record_self()).await {
             self.activity
                 .record("registry_failed", json!({"error": error.to_string()}));
         }
@@ -1815,7 +1860,7 @@ impl Node {
         let settings = self.settings.lock().await.clone();
         let member = !settings.issuer();
         if settings.expires() < now()?.saturating_add(settings.ttl / 2) {
-            let renewed = self.renew(Some(transport), false, None).await;
+            let renewed = self.renew(Some(transport), false, None, false).await;
             if let Err(error) = &renewed {
                 self.activity
                     .record("renewal_failed", json!({"error": error.to_string()}));
@@ -1888,7 +1933,32 @@ impl Node {
         for round in 0..2 {
             let attempts = stream::iter(targets)
                 .map(|(peer, contact, generation)| async move {
-                    let result = self.reconcile(transport, peer, &contact).await;
+                    let mut result = self.reconcile(transport, peer, &contact).await;
+                    let settings = self.settings.lock().await.clone();
+                    if settings.issuer()
+                        && settings.issuers.contains(&peer)
+                        && !result
+                            .as_ref()
+                            .is_err_and(|error| error.is::<ServiceError>())
+                    {
+                        let before = serde_json::to_vec(&settings);
+                        match self.renew(Some(transport), true, Some(peer), true).await {
+                            Ok(()) => {
+                                let after = serde_json::to_vec(&*self.settings.lock().await);
+                                match (before, after) {
+                                    (Ok(before), Ok(after)) if before != after => {
+                                        result = self.reconcile(transport, peer, &contact).await;
+                                    }
+                                    (Err(error), _) | (_, Err(error)) => result = Err(error.into()),
+                                    _ => {}
+                                }
+                            }
+                            Err(error) => self.activity.record_changed(
+                                "epoch_delivery_failed",
+                                json!({"peer": peer.to_hex(), "error": error.to_string()}),
+                            ),
+                        }
+                    }
                     (peer, contact, generation, result)
                 })
                 .buffer_unordered(4);
@@ -1927,7 +1997,10 @@ impl Node {
             {
                 // Finish old-authority sessions before renewing once. Even a successful
                 // old handshake must be checked again against the learned revocations.
-                let renewed = self.renew(Some(transport), true, Some(peer)).await.is_ok();
+                let renewed = self
+                    .renew(Some(transport), true, Some(peer), false)
+                    .await
+                    .is_ok();
                 if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                     return Err(Box::new(crate::enrollment::Revoked(statement)));
                 }
@@ -2144,6 +2217,31 @@ impl Node {
                     let settings = self.settings.lock().await.clone();
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
+                    }
+                    if let Some(bytes) = request.strip_prefix(crate::enrollment::EPOCHS) {
+                        let request: crate::enrollment::EpochRequest =
+                            serde_json::from_slice(bytes)?;
+                        let signed = rocky_credentials::RenewRequest::from_bytes(&request.request)?;
+                        signed.verify(
+                            PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
+                            settings.publisher,
+                            self.domain.manifest().hash(),
+                            (now()?, 300),
+                        )?;
+                        let registry = self.admission().await;
+                        let mut current = self.settings.lock().await;
+                        let mut draft = current.clone();
+                        let added = draft.learn_revocations(&request.revocations)?;
+                        if !added.is_empty() {
+                            draft.save(&self.path)?;
+                            *current = draft;
+                            self.apply(&current.revocations, &current.credentials, Vec::new())
+                                .await?;
+                        }
+                        let reply =
+                            current.answer_epochs(&self.vault, &request.request, &registry)?;
+                        drop(current);
+                        return Ok(reply);
                     }
                     if request == crate::enrollment::POLICY {
                         return Ok(serde_json::to_vec(&settings.revocations)?);

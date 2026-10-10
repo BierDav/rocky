@@ -68,10 +68,25 @@ refuses to reinterpret existing rows under another scope.
 
 ## Group secrets
 
-One random secret per group partition and key epoch derives every member
+Kotlin's `KeyEpoch` exposes `generation` and `secretHash`, implements the writer
+order and has a stable text representation. `GroupStatus.current` and each
+`TableHolding.current` identify the winner; `epochs` and `keyEpochs` retain
+complete identities. `share` and `install` accept an optional complete identity.
+
+One random secret per group partition and epoch identity derives every member
 table's key ([Decision 0040](../decisions/0040-group-secrets.md)). Reading is
 all-or-nothing per group partition; write rights stay per table. A table that
 joins the group in a later generation derives its key from the held secret.
+
+An identity contains the numeric generation and a hash of the group secret,
+shared by every table. Concurrent creation produces first-generation siblings;
+concurrent rotation produces siblings of the next generation. All remain
+readable, while every member writes under the highest generation's lowest hash.
+HKDF continues to use the numeric generation. The SDK saves the group record
+before installing keys and resumes all member tables at reopen, including an
+installation interrupted between tables. Siblings count against the 256 retained
+group epochs. [Decision 0050](../decisions/0050-concurrent-key-epochs.md) defines
+the order, formats and revocation metadata.
 
 `RockyClient.partitions` names a group partition by group and slot values, in
 `partitionBy` order; `address` and `complete` name one table. JSON requests use
@@ -87,7 +102,7 @@ native request may name `table` instead of `group` to mean that table's group.
 | `register(group, values)` | Registers the addresses without a key, as custody; a custody peer also registers partitions devices offer ([0045](../decisions/0045-custody-partition-offers.md)) |
 | `subscribe` / `bootstrap(group, values, omit)` | Holds every member except those left out; `bootstrap` saves checkpoint-first intent, joining one still pending |
 | `unsubscribe` / `evict(group, values, keep)` | Releases every member except those kept |
-| `status(group, values)` | Held secret epochs, and each member's key epochs and holding |
+| `status(group, values)` | Held sibling identities, the current winner, and each member's identities, winner and holding |
 
 The SDK pins its publisher as delivering issuer and stores only the secret in
 the installation's external key provider. `share` refuses a revoked recipient,

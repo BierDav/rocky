@@ -146,11 +146,11 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             &writer,
             Extensions {
                 author: None,
-                row_format: 6,
+                row_format: 7,
                 partition: None,
                 manifest: f.app().definition().hash(),
                 scope: f.public,
-                generation: 1,
+                generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
                 credentials: chain.clone(),
             },
             &[11; 32],

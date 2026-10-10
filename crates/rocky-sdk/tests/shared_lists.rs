@@ -440,20 +440,10 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
         lists.push(peer.insert("lists", None, &sql).await?);
     }
-    // Each sync offers the peer a partition it has no tuple for. The peer
-    // refuses that list's group members alone; the session goes on.
+    // The first session may refuse an unknown tuple; the issuer exchange
+    // installs it and retries within this sync. The peer learns ours on its sync.
     for peer in [&a, &b] {
         peer.call(json!({"type":"sync"})).await?;
-        let tables: Vec<_> = refused(peer)
-            .await?
-            .ok_or("no refusal recorded")?
-            .iter()
-            .map(|scope| scope["table"].clone())
-            .collect();
-        assert_eq!(
-            tables,
-            [json!("categories"), json!("items"), json!("lists")]
-        );
     }
     for (from, to, list) in [(&a, &b, &lists[0]), (&b, &a, &lists[1])] {
         let node = to.call(json!({"type":"session"})).await?["node"].clone();
@@ -474,7 +464,7 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         );
     }
     // Once both hold both lists, nothing is refused any more.
-    assert_eq!(refused(&a).await?, Some(Vec::new()));
+    assert!(refused(&a).await?.unwrap_or_default().is_empty());
     for peer in [a, b] {
         peer.database.close().await?;
     }

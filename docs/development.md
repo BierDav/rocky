@@ -107,6 +107,16 @@ faster.
 | `./scripts/lint`: 30 s | `./scripts/lint` | 25 s beside a full check |
 | CI from push to a green `check` with a restored cache: 30 min; `lint`: 5 min | the hosted run | not yet measured |
 
+Phase 8's pure identity-order property and group capacity test run in unit.
+Sibling history, exposure, renewal, hub convergence and the deterministic
+recovery boundaries run in integration through the existing package filters.
+The scaling SQLite-header probe also runs in integration because it creates
+and reads a real file.
+The recovery sweep copies one prepared database instead of repeatedly creating
+identities; the hub fixtures use an in-memory secret provider. They receive the
+same 10 ms/2 s budgets, with no new exception. Measurements and coverage are in
+[the phase 8 evidence](features_07/08-concurrent-rotation-evidence.md).
+
 ## Kotlin desktop integration
 
 The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.

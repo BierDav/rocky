@@ -107,7 +107,7 @@ whole transaction rolls back.
 | New key | Insert of the whole row |
 | Changed columns | Update; under `assigned` also every assigned column |
 | Key deleted and inserted again | Delete of the old `id` and insert of a new `id` |
-| Key deleted | Delete of that incarnation, a permanent tombstone |
+| Key deleted | Permanent tombstones of the visible and other held incarnations at that key |
 | Equal rows | Nothing |
 
 The typed table shows the live incarnation with the greatest creation stamp at

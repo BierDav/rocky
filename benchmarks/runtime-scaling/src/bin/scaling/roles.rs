@@ -121,10 +121,8 @@ impl World {
             credentials: credentials.clone(),
             keys: scopes
                 .iter()
-                .map(|scope| KeyMaterial {
-                    scope: *scope,
-                    generation: 1,
-                    key: commitment("roles.key.v1", &scope.encryption),
+                .map(|scope| {
+                    KeyMaterial::new(*scope, 1, commitment("roles.key.v1", &scope.encryption))
                 })
                 .collect(),
         };

@@ -134,14 +134,16 @@ impl Fixture {
             credentials: self.credentials(node, grants),
             keys: scopes
                 .iter()
-                .map(|scope| KeyMaterial {
-                    scope: *scope,
-                    generation: 1,
-                    key: if *scope == self.public {
-                        [11; 32]
-                    } else {
-                        [22; 32]
-                    },
+                .map(|scope| {
+                    KeyMaterial::new(
+                        *scope,
+                        1,
+                        if *scope == self.public {
+                            [11; 32]
+                        } else {
+                            [22; 32]
+                        },
+                    )
                 })
                 .collect(),
         }
@@ -756,11 +758,7 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
         Companion::Unavailable
     );
     target
-        .install_key(KeyMaterial {
-            scope: fixture.private,
-            generation: 1,
-            key: [22; 32],
-        })
+        .install_key(KeyMaterial::new(fixture.private, 1, [22; 32]))
         .await
         .unwrap();
     assert_eq!(
@@ -774,30 +772,18 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
     );
     assert!(
         target
-            .install_key(KeyMaterial {
-                scope: fixture.private,
-                generation: 1,
-                key: [23; 32]
-            })
+            .install_key(KeyMaterial::new(fixture.private, 1, [23; 32]))
             .await
             .is_err()
     );
     assert!(
         target
-            .install_key(KeyMaterial {
-                scope: fixture.private,
-                generation: 2,
-                key: [22; 32]
-            })
+            .install_key(KeyMaterial::new(fixture.private, 2, [22; 32]))
             .await
             .is_err()
     );
     target
-        .install_key(KeyMaterial {
-            scope: fixture.private,
-            generation: 1,
-            key: [22; 32],
-        })
+        .install_key(KeyMaterial::new(fixture.private, 1, [22; 32]))
         .await
         .unwrap();
     for (index, kind) in [
@@ -809,10 +795,22 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
     .into_iter()
     .enumerate()
     {
-        let public =
-            EncryptedPackage::seal(fixture.public, 1, kind.clone(), &[11; 32], b"public").unwrap();
-        let private =
-            EncryptedPackage::seal(fixture.private, 1, kind, &[22; 32], b"SECRET SALARY").unwrap();
+        let public = EncryptedPackage::seal(
+            fixture.public,
+            rocky_core::KeyEpoch::new(1, &[11; 32]),
+            kind.clone(),
+            &[11; 32],
+            b"public",
+        )
+        .unwrap();
+        let private = EncryptedPackage::seal(
+            fixture.private,
+            rocky_core::KeyEpoch::new(1, &[22; 32]),
+            kind,
+            &[22; 32],
+            b"SECRET SALARY",
+        )
+        .unwrap();
         let set = PackageSet::bind(&[public.clone(), private.clone()]).unwrap();
         assert!(
             !encode(&private)
@@ -825,9 +823,14 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
             target.open_package(&private, &set).await.unwrap(),
             b"SECRET SALARY"
         );
-        let other =
-            EncryptedPackage::seal(fixture.private, 1, PackageKind::Blob, &[22; 32], b"other")
-                .unwrap();
+        let other = EncryptedPackage::seal(
+            fixture.private,
+            rocky_core::KeyEpoch::new(1, &[22; 32]),
+            PackageKind::Blob,
+            &[22; 32],
+            b"other",
+        )
+        .unwrap();
         assert!(set.verify_subset(&[other]).is_err());
         let public_config = fixture.config(
             &PrivateKey::new(),
@@ -1298,7 +1301,7 @@ async fn confirmed_result_binds_private_subpackages_without_granting_access() {
     let base = coordinator.acquire(scope, caller, node).unwrap();
     let public = EncryptedPackage::seal(
         fixture.public,
-        1,
+        rocky_core::KeyEpoch::new(1, &[11; 32]),
         PackageKind::CommandResult,
         &[11; 32],
         b"public result",
@@ -1306,7 +1309,7 @@ async fn confirmed_result_binds_private_subpackages_without_granting_access() {
     .unwrap();
     let private = EncryptedPackage::seal(
         fixture.private,
-        1,
+        rocky_core::KeyEpoch::new(1, &[22; 32]),
         PackageKind::CommandResult,
         &[22; 32],
         b"private salary",
@@ -1412,7 +1415,7 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
     broken.body[30] ^= 1;
     assert!(target.receive(broken).await.is_err());
     let mut operation = frame.operation().unwrap();
-    operation.header.extensions.generation = 2;
+    operation.header.extensions.generation.generation = 2;
     operation.header.sign(&key);
     let wrong_generation = EncryptedFrame {
         header: operation.header.to_bytes(),
@@ -1423,7 +1426,7 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
         target.receive(wrong_generation).await.unwrap(),
         ReceiveStatus::MissingKey
     );
-    operation.header.extensions.generation = 1;
+    operation.header.extensions.generation.generation = 1;
     operation.header.extensions.scope.domain.mesh = MeshId([99; 16]);
     operation.header.sign(&key);
     let wrong_scope = EncryptedFrame {

@@ -191,11 +191,23 @@ impl Settings {
         draft.manifest = HEXLOWER.encode(&SignedManifest::sign(&after, &publisher)?.to_bytes()?);
         for (name, _) in domain.scopes() {
             if !draft.keys.contains_key(name) {
-                let role = key_role(name, 1);
+                let key = match vault.find(&format!("generation.reader.{name}"))? {
+                    Some(key) => key,
+                    None => vault.create(&format!("generation.reader.{name}"))?,
+                };
+                let epoch = rocky_core::KeyEpoch::new(1, &key);
+                let role = key_role(name, epoch);
                 if vault.find(&role)?.is_none() {
-                    vault.create(&role)?;
+                    vault.put(&role, &key)?;
                 }
-                draft.keys.insert(name.to_owned(), vec![1]);
+                let mut ids = draft
+                    .revocations
+                    .statements()
+                    .map(|signed| signed.statement.id())
+                    .collect::<Result<Vec<_>, _>>()?;
+                ids.sort_unstable();
+                draft.epoch_statements.insert(role, ids);
+                draft.keys.insert(name.to_owned(), vec![epoch]);
             }
         }
         draft.credentials = draft.issue_own(

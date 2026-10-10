@@ -11,6 +11,9 @@
 per-test = "10ms"
 suite = "10s"
 
+# Phase 8: secure history/retirement and SDK delivery/recovery exercise real
+# SQLite or credential sealing. The package filters below include them; the
+# pure rocky-core epoch-order property and SDK capacity check stay in unit.
 [integration]
 per-test = "2s"
 suite = "5m"
@@ -22,7 +25,7 @@ filter = '''
     | (package(rocky-sdk) & test(/^(commands|database|enrollment|node)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
-    | (package(runtime-scaling) & test(/^(soak|wide)::tests::/))
+    | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))
     | (package(todo-desktop) & test(/^secure_demo::/))
 '''
 
@@ -137,9 +140,3 @@ measured = "2.88s"
 cause = "Interrupted and resumed catch-up applies every operation once; the replay and the verification are the cost."
 expires = 2026-11-30
 
-[[exception]]
-test = "rocky-secure tests::sql::catch_up::a_writer_commits_within_the_write_limit_during_a_catch_up"
-limit = "6s"
-measured = "4.82s"
-cause = "A writer commits concurrently with a catch-up while the write limit is asserted; the concurrent writes are the cost."
-expires = 2026-11-30

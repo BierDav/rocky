@@ -79,15 +79,15 @@ class Partitions internal constructor(private val client: RockyClient) {
     suspend fun create(group: String, values: JsonArray): JsonObject = byGroup("partition_create", group, values)
 
     /** On an issuer: one envelope of the current epoch per recipient node key; a revoked recipient is refused. */
-    suspend fun share(group: String, values: JsonArray, recipients: JsonArray, epoch: Long? = null): JsonObject = byGroup("partition_share", group, values) {
+    suspend fun share(group: String, values: JsonArray, recipients: JsonArray, epoch: KeyEpoch? = null): JsonObject = byGroup("partition_share", group, values) {
         put("recipients", recipients)
-        epoch?.let { put("epoch", it) }
+        epoch?.let { put("epoch", it.json()) }
     }
 
     /** Requires whole-partition read on every table of the group. */
-    suspend fun install(group: String, values: JsonArray, envelope: ByteArray, epoch: Long? = null): JsonObject = byGroup("partition_install", group, values) {
+    suspend fun install(group: String, values: JsonArray, envelope: ByteArray, epoch: KeyEpoch? = null): JsonObject = byGroup("partition_install", group, values) {
         put("envelope", bytes(envelope))
-        epoch?.let { put("epoch", it) }
+        epoch?.let { put("epoch", it.json()) }
     }
 
     /** Registers the addresses without a key, as a custody node. */
@@ -141,15 +141,17 @@ class GroupPartition internal constructor(private val partitions: Partitions, va
     /** The secret epochs held here and how each member table is held. */
     suspend fun status(): GroupStatus = partitions.status(group, values).let { status ->
         GroupStatus(
-            status.getValue("epochs").jsonArray.map { it.jsonPrimitive.long },
+            status.getValue("epochs").jsonArray.map(KeyEpoch::fromJson),
             status.getValue("tables").jsonArray.map { it.jsonObject }.map { table ->
                 TableHolding(
                     table.getValue("table").jsonPrimitive.content,
                     table.getValue("partition").jsonPrimitive.content,
                     table["holding"]?.jsonPrimitive?.contentOrNull,
-                    table.getValue("epochs").jsonArray.map { it.jsonPrimitive.long },
+                    table.getValue("epochs").jsonArray.map(KeyEpoch::fromJson),
+                    table["current"]?.takeUnless { it is JsonNull }?.let(KeyEpoch::fromJson),
                 )
             },
+            status["current"]?.takeUnless { it is JsonNull }?.let(KeyEpoch::fromJson),
         )
     }
     suspend fun subscribe(omit: List<String> = emptyList()) = partitions.subscribe(group, values, omit)
@@ -158,7 +160,7 @@ class GroupPartition internal constructor(private val partitions: Partitions, va
 }
 
 /** A group partition's held secret [epochs] and its member [tables]. */
-data class GroupStatus(val epochs: List<Long>, val tables: List<TableHolding>) {
+data class GroupStatus(val epochs: List<KeyEpoch>, val tables: List<TableHolding>, val current: KeyEpoch?) {
     /** Every member table is held here. */
     val isHeld: Boolean get() = tables.all { it.holding == "held" }
 
@@ -170,4 +172,4 @@ data class GroupStatus(val epochs: List<Long>, val tables: List<TableHolding>) {
  * How one member table of a group partition is held: `held`, `left`, `evicting`, `evicted`, or null when never
  * subscribed. [partition] is the id `RockyEvent` scopes name it by; [keyEpochs] are the table key epochs held.
  */
-data class TableHolding(val table: String, val partition: String, val holding: String?, val keyEpochs: List<Long>)
+data class TableHolding(val table: String, val partition: String, val holding: String?, val keyEpochs: List<KeyEpoch>, val current: KeyEpoch?)

@@ -19,11 +19,7 @@ fn clone_config(c: &SecureConfig) -> SecureConfig {
         keys: c
             .keys
             .iter()
-            .map(|key| KeyMaterial {
-                scope: key.scope,
-                generation: key.generation,
-                key: key.key,
-            })
+            .map(|key| KeyMaterial::at(key.scope, key.generation, key.key))
             .collect(),
     }
 }
@@ -62,7 +58,7 @@ async fn command(f: &Fixture, replica: &Replica, c: &dyn Coordinator, n: u32) ->
 async fn bootstrap(f: &Fixture, source: &Replica, target: &Replica, config: &SecureConfig) {
     for scope in [f.public, f.private] {
         let signed = source.checkpoint(scope).await.unwrap();
-        assert_eq!(signed.statement.format, 7);
+        assert_eq!(signed.statement.format, 8);
         assert_eq!(signed.statement.strong.base, signed.statement.strong.head);
         target.begin_rebootstrap(signed.clone()).await.unwrap();
         let mut cursor = None;
@@ -460,22 +456,24 @@ fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey
         ]),
         keys: [f.public, f.private]
             .iter()
-            .map(|scope| KeyMaterial {
-                scope: *scope,
-                generation: epoch,
-                key: if epoch == 1 {
-                    if *scope == f.public {
-                        [11; 32]
+            .map(|scope| {
+                KeyMaterial::new(
+                    *scope,
+                    epoch,
+                    if epoch == 1 {
+                        if *scope == f.public {
+                            [11; 32]
+                        } else {
+                            [22; 32]
+                        }
                     } else {
-                        [22; 32]
-                    }
-                } else {
-                    if *scope == f.public {
-                        [77; 32]
-                    } else {
-                        [88; 32]
-                    }
-                },
+                        if *scope == f.public {
+                            [77; 32]
+                        } else {
+                            [88; 32]
+                        }
+                    },
+                )
             })
             .collect(),
     }

@@ -75,8 +75,25 @@ use tokio::sync::{Mutex, watch};
 /// others open what they sealed.
 pub struct KeyMaterial {
     pub scope: ResourceScope,
-    pub generation: u64,
+    pub generation: rocky_core::KeyEpoch,
     pub key: [u8; 32],
+}
+impl KeyMaterial {
+    pub fn new(scope: ResourceScope, generation: u64, key: [u8; 32]) -> Self {
+        Self {
+            scope,
+            generation: rocky_core::KeyEpoch::new(generation, &key),
+            key,
+        }
+    }
+    /// Uses the group secret's identity for every derived table key.
+    pub fn at(scope: ResourceScope, generation: rocky_core::KeyEpoch, key: [u8; 32]) -> Self {
+        Self {
+            scope,
+            generation,
+            key,
+        }
+    }
 }
 pub struct SecureConfig {
     pub publisher: PublicKey,
@@ -385,7 +402,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v9" {
+    if label != "rocky.encrypted-replica.v10" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -470,9 +487,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_err(credential)?;
         let mut seen_scopes = BTreeSet::new();
         let mut seen_keys = BTreeSet::new();
+        let mut counts = BTreeMap::<ResourceScope, usize>::new();
         for key in &config.keys {
-            if key.generation == 0
-                || key.generation > i64::MAX as u64
+            let count = counts.entry(key.scope).or_default();
+            *count += 1;
+            if *count > 256 {
+                return Err(denied("key epoch capacity reached"));
+            }
+            if !key.generation.valid()
                 || !seen_scopes.insert((key.scope, key.generation))
                 || !seen_keys.insert(key.key)
                 || (!grants.iter().any(|grant| {
@@ -810,7 +832,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if let Some(record) = retained.first()
             && record
                 != &vec![
-                    SqlValue::Integer(key.generation as i64),
+                    SqlValue::Blob(encode(&key.generation)?),
                     SqlValue::Blob(rocky_core::commitment("rocky.scope-key.v1", &key.key).to_vec()),
                 ]
         {
@@ -1006,6 +1028,7 @@ impl<A: RowApplication> Inner<A> {
         let mut scopes = BTreeSet::new();
         let mut epochs = BTreeSet::new();
         let mut secrets = BTreeSet::new();
+        let mut counts = BTreeMap::<ResourceScope, usize>::new();
         for key in self.opening_keys() {
             let current = self
                 .config
@@ -1013,8 +1036,12 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .find(|current| current.scope == key.scope)
                 .map(|current| current.generation);
-            if key.generation == 0
-                || key.generation > i64::MAX as u64
+            let count = counts.entry(key.scope).or_default();
+            *count += 1;
+            if *count > 256 {
+                return Err(denied("key epoch capacity reached"));
+            }
+            if !key.generation.valid()
                 || !epochs.insert((key.scope, key.generation))
                 || (current == Some(key.generation) && !scopes.insert(key.scope))
                 || current.is_none_or(|current| current < key.generation)

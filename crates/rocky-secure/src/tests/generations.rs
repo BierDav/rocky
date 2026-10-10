@@ -265,11 +265,7 @@ impl Lineage {
             .iter()
             .take(if generation >= 2 { 2 } else { 1 })
             .enumerate()
-            .map(|(index, name)| KeyMaterial {
-                scope: self.scope(name),
-                generation: 1,
-                key: [40 + index as u8; 32],
-            })
+            .map(|(index, name)| KeyMaterial::new(self.scope(name), 1, [40 + index as u8; 32]))
             .collect();
         SecureConfig {
             publisher: self.publisher.public_key(),

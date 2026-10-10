@@ -156,7 +156,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
                 // A partial device keeps receiving the new epoch of lists it was given.
                 val given = keys.filter { key -> devices.any { it.node == key.recipient && NodeKind.of(it.kind) == NodeKind.Partial } }
                 for (list in lists) {
-                    val epoch = attempt("read ${list.title}") { rocky.list(list.id).status().epochs.maxOrNull() } ?: continue
+                    val epoch = attempt("read ${list.title}") { rocky.list(list.id).status().epochs.maxOrNull()?.toString() } ?: continue
                     val stale = (recipients.map { it.node } + given.filter { it.list == list.id }.map { it.recipient })
                         .filter { node -> keys.none { it.recipient == node && it.list == list.id && it.epoch == epoch } }
                     for (recipient in stale) {
@@ -174,7 +174,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
             for (key in keys) {
                 val list = rocky.list(key.list)
                 val held = attempt("read list ${key.list}") { list.status().epochs } ?: continue
-                if (key.epoch in held) continue
+                if (held.any { it.toString() == key.epoch }) continue
                 attempt("install list ${key.list}") {
                     list.accept(key.envelope)
                     notes.tryEmit("Installed the key of list ${key.list}, epoch ${key.epoch}")
@@ -184,7 +184,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     }
 
     private suspend fun deliver(list: Long, recipients: List<String>) {
-        val epoch = rocky.list(list).status().epochs.maxOrNull() ?: error("no key of list $list is held here")
+        val epoch = rocky.list(list).status().epochs.maxOrNull()?.toString() ?: error("no key of list $list is held here")
         for ((node, envelope) in rocky.list(list).share(recipients)) database.keys().deliver(node, list, epoch, envelope)
     }
 

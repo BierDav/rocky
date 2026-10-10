@@ -100,7 +100,7 @@ pub(super) struct MoveSource {
     pub(super) scope: ResourceScope,
     pub(super) tuple: rocky_core::PartitionTuple,
     pub(super) creation: Hash,
-    pub(super) generation: u64,
+    pub(super) generation: rocky_core::KeyEpoch,
     pub(super) deletion_author: PublicKey,
     pub(super) deletion_sequence: u64,
 }

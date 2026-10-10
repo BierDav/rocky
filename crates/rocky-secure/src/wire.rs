@@ -34,7 +34,7 @@ pub enum PackageKind {
 pub(crate) struct Extensions {
     pub manifest: Commitment,
     pub scope: ResourceScope,
-    pub generation: u64,
+    pub generation: rocky_core::KeyEpoch,
     pub credentials: CredentialChain,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<u32>,
@@ -92,7 +92,7 @@ impl EncryptedFrame {
     }
     fn decode_operation(&self) -> Result<Operation<Extensions>, Error> {
         let header: Header<Extensions> = decode(&self.header)?;
-        if header.extensions.row_format != 6 {
+        if header.extensions.row_format != 7 {
             return Err(denied("unsupported row frame format"));
         }
         let extension = &header.extensions;
@@ -110,7 +110,7 @@ impl EncryptedFrame {
         }
         if header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
-            || header.extensions.generation == 0
+            || !header.extensions.generation.valid()
         {
             return Err(denied("invalid operation metadata"));
         }
@@ -243,7 +243,7 @@ impl RowPayload {
         }
         let body: Version = p2panda_core::cbor::decode_cbor(envelope.body.as_slice())
             .map_err(|_| denied("unsupported bundle version"))?;
-        if body.version != 3 {
+        if body.version != 4 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(())
@@ -266,7 +266,7 @@ impl RowPayload {
             return Err(denied("invalid creation witness envelope"));
         }
         let body: BundleBody = decode(&envelope.body)?;
-        if body.version != 3 {
+        if body.version != 4 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(Self {
@@ -281,7 +281,7 @@ impl RowPayload {
     }
     pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 3,
+            version: 4,
             proofs: BTreeMap::new(),
             carried: BTreeMap::new(),
             membership: None,
@@ -290,7 +290,7 @@ impl RowPayload {
     }
     pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 3,
+            version: 4,
             proofs: BTreeMap::new(),
             carried: BTreeMap::new(),
             membership: Some(membership),
@@ -348,19 +348,19 @@ impl RowPayload {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedPackage {
     pub scope: ResourceScope,
-    pub generation: u64,
+    pub generation: rocky_core::KeyEpoch,
     pub kind: PackageKind,
     pub(crate) bytes: Vec<u8>,
 }
 impl EncryptedPackage {
     pub fn seal(
         scope: ResourceScope,
-        generation: u64,
+        generation: rocky_core::KeyEpoch,
         kind: PackageKind,
         key: &[u8; 32],
         bytes: &[u8],
     ) -> Result<Self, Error> {
-        if generation == 0 || bytes.len() > rocky_core::MAX_PAYLOAD_BYTES {
+        if !generation.valid() || bytes.len() > rocky_core::MAX_PAYLOAD_BYTES {
             return Err(denied("package quota/generation"));
         }
         let encrypted = encrypt(key, &encode(&(scope, generation, &kind))?, bytes)?;
@@ -380,7 +380,7 @@ impl EncryptedPackage {
     }
     pub fn commitment(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.encrypted-package.v1",
+            "rocky.encrypted-package.v2",
             &encode(self)?,
         ))
     }

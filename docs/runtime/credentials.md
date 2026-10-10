@@ -110,23 +110,24 @@ Local projections are plaintext at rest as well; see
 
 ## Key epochs and rotation
 
-A reader scope's key has a generation, its key epoch. `SecureConfig.keys` may
-hold several epochs per scope; the highest is current and seals every new
-write, the others only open what they sealed. Every frame, bundle member,
-command part, effect event and package names the epoch that sealed it.
+An epoch is `{ generation, secret_hash }`, where the hash is domain-separated
+from other commitments. `SecureConfig.keys` holds multiple identities per
+scope. Writers choose the highest generation and, among its siblings, the
+lowest hash. Every frame, bundle member, command part, effect event and package
+names the complete identity that sealed it. See
+[decision 0050](../decisions/0050-concurrent-key-epochs.md).
 
-- `install_key_epoch` adds an epoch. A higher one rotates: later writes use it,
-  every session ends, and the previous key stays in memory. A lower one is an
-  earlier epoch kept for retained ciphertext. The same key again does nothing;
-  a different key for a known epoch is refused.
-- `secure_key_epochs` records the fingerprint of every earlier epoch next to
-  the current one in `secure_keys`. No secret key is stored.
-- At open a configured current epoch newer than the record completes an
-  interrupted rotation; an older one is refused as a rollback.
-- A frame whose epoch the replica lacks waits as pending; it is not rejected.
-- History is never sealed again and original signed bytes are never rewritten.
-  A checkpoint sealed before a rotation is not served; maintenance seals a new
-  one under the current epoch.
+- `install_key_epoch` retains siblings. Installing a new winner ends sessions;
+  later writes use it, while every earlier key still opens its own ciphertext.
+  The same identity and key again does nothing. The same identity with other
+  bytes, or key material held under another scope, is refused.
+- `secure_keys` records the winning identity and table-key fingerprint;
+  `secure_key_epochs` records retained identities. No secret is stored there.
+- Reopen completes an interrupted installation from the configured identities;
+  a rollback omitting the recorded winner is refused.
+- A frame whose sibling the replica lacks waits as pending.
+- History and signed bytes are never rewritten. Checkpoint offers are sealed
+  under the held winner; a stale offer is replaced before serving.
 
 ### Retaining historical keys
 
@@ -135,8 +136,7 @@ operation was sealed with it, that is after a checkpoint covered them and they
 were pruned. The current epoch is evicted with `evict_key` instead. Recovery
 packages carry the original frames of every epoch; a recipient needs each
 epoch's key to read them all. The SDK retains epochs a device already holds and
-never retires them automatically. Enrollment and renewal deliver only current
-keys; [checkpoint bootstrap](sdk-bootstrapping.md) supplies earlier rows to a new
+never retires them automatically. Enrollment and renewal deliver every sibling of the current generation; [checkpoint bootstrap](sdk-bootstrapping.md) supplies earlier rows to a new
 device or one that missed intervening epochs.
 
 ### Revocation in the SDK
@@ -157,6 +157,21 @@ secret this issuer holds rotates, including an unrecorded delegate. Then it:
    and teaches the replica;
 4. commits the tombstone into the device's [registry](issuer-registry.md)
    record, then clears and saves the intent before returning success.
+
+An epoch records the actual IDs of the revocations its issuer knew when
+creating it. After concurrent revocations meet, an issuer rotates only scopes
+that a newly learned statement exposed: the winner lacks that statement's ID
+and its device could read the scope. The registry supplies that selection;
+an unrecorded device uses the broad fallback. Revoking a known non-reader
+leaves the scope unchanged. Once issuers hold the same statements, concurrent
+superseding epochs record the same IDs and the sibling order settles them
+without another rotation.
+
+The exposure window runs from the concurrent revocations until the superseding
+generation reaches each writer. In that window a revoked device can open rows
+under a sibling whose secret it already holds. It cannot open rows under the
+superseding secret. One renewal delivers that generation to an offline writer.
+Status lists siblings and identifies the winner writers use.
 
 The tombstone transaction is the durable completion marker. `identity.json`
 and SQLite are separate stores, so clearing the JSON redo intent is cleanup

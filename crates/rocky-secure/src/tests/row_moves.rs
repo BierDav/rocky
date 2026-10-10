@@ -426,7 +426,7 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
     );
     for name in ["items", "attachments"] {
         let checkpoint = b.checkpoint(f.scope(name, partitions[1])).await.unwrap();
-        assert_eq!(checkpoint.statement.format, 7);
+        assert_eq!(checkpoint.statement.format, 8);
         assert_eq!(checkpoint.statement.moves.count, 1);
         b.rebuild_projection(f.scope(name, partitions[1]))
             .await
@@ -555,11 +555,7 @@ fn clone_config(c: &SecureConfig) -> SecureConfig {
         keys: c
             .keys
             .iter()
-            .map(|key| KeyMaterial {
-                scope: key.scope,
-                generation: key.generation,
-                key: key.key,
-            })
+            .map(|key| KeyMaterial::at(key.scope, key.generation, key.key))
             .collect(),
     }
 }

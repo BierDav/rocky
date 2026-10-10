@@ -42,16 +42,8 @@ async fn encrypted_commands_recover_lost_reply_and_atomic_multiscope_rollback() 
         node: config.node.clone(),
         credentials: config.credentials.clone(),
         keys: vec![
-            KeyMaterial {
-                scope: fixture.public,
-                generation: 1,
-                key: [11; 32],
-            },
-            KeyMaterial {
-                scope: fixture.private,
-                generation: 1,
-                key: [22; 32],
-            },
+            KeyMaterial::new(fixture.public, 1, [11; 32]),
+            KeyMaterial::new(fixture.private, 1, [22; 32]),
         ],
     };
     let coordinator = coordinator(&fixture, &config);
@@ -326,11 +318,7 @@ async fn encrypted_result_subset_reordering_missing_keys_and_private_artifacts()
             .complete
     );
     reader
-        .install_key(KeyMaterial {
-            scope: fixture.public,
-            generation: 1,
-            key: [11; 32],
-        })
+        .install_key(KeyMaterial::new(fixture.public, 1, [11; 32]))
         .await
         .unwrap();
     assert!(
@@ -341,7 +329,7 @@ async fn encrypted_result_subset_reordering_missing_keys_and_private_artifacts()
             .complete
     );
     let mut tampered = filtered_first;
-    tampered.parts[0].generation += 1;
+    tampered.parts[0].generation.generation += 1;
     assert!(
         reader
             .receive_encrypted_result(tampered, &coordinator)
@@ -781,11 +769,7 @@ async fn command_companions_wait_for_keys_and_require_proven_deletion() {
         Companion::Unavailable
     );
     reader
-        .install_key(KeyMaterial {
-            scope: fixture.private,
-            generation: 1,
-            key: [22; 32],
-        })
+        .install_key(KeyMaterial::new(fixture.private, 1, [22; 32]))
         .await
         .unwrap();
     assert!(
@@ -921,7 +905,7 @@ async fn retained_preparation_is_verified_before_confirmation() {
             .unwrap()
     };
     let mut corrupt = ConfirmedCommand::from_bytes(&original).unwrap();
-    corrupt.parts[0].generation += 1;
+    corrupt.parts[0].generation.generation += 1;
     {
         let inner = replica.inner.lock().await;
         inner
@@ -1097,16 +1081,8 @@ async fn confirmed_history_is_audited_once_per_open_and_then_incrementally() {
         node: config.node.clone(),
         credentials: config.credentials.clone(),
         keys: vec![
-            KeyMaterial {
-                scope: fixture.public,
-                generation: 1,
-                key: [11; 32],
-            },
-            KeyMaterial {
-                scope: fixture.private,
-                generation: 1,
-                key: [22; 32],
-            },
+            KeyMaterial::new(fixture.public, 1, [11; 32]),
+            KeyMaterial::new(fixture.private, 1, [22; 32]),
         ],
     };
     let coordinator = coordinator(&fixture, &config);

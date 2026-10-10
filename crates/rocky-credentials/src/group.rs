@@ -14,11 +14,12 @@ use std::collections::BTreeSet;
 
 /// Length of a group secret and of every table key derived from it.
 pub const GROUP_SECRET_LEN: usize = 32;
+pub const MAX_GROUP_ENVELOPE_BYTES: usize = 128 * 1024;
 const SEALED_LEN: usize = GROUP_SECRET_LEN + SEAL_OVERHEAD;
-const ENVELOPE_VERSION: u32 = 1;
-const SIGNED: &str = "rocky.group-secret-envelope.v1";
-const CONTEXT: &str = "rocky.group-secret-envelope.context.v1";
-const WRAPPING: &str = "rocky.group-secret-envelope.key.v1";
+const ENVELOPE_VERSION: u32 = 2;
+const SIGNED: &str = "rocky.group-secret-envelope.v2";
+const CONTEXT: &str = "rocky.group-secret-envelope.context.v2";
+const WRAPPING: &str = "rocky.group-secret-envelope.key.v2";
 const DERIVATION: &[u8] = b"rocky.group-table-key.v1";
 
 fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
@@ -80,7 +81,8 @@ struct Body {
     version: u32,
     manifest: Commitment,
     group: Commitment,
-    epoch: u64,
+    epoch: rocky_core::KeyEpoch,
+    statements: Vec<Commitment>,
     issuer: PublicKey,
     recipient: PublicKey,
     ephemeral: [u8; 32],
@@ -91,7 +93,8 @@ struct Context<'a> {
     version: u32,
     manifest: &'a Commitment,
     group: &'a Commitment,
-    epoch: u64,
+    epoch: rocky_core::KeyEpoch,
+    statements: Vec<Commitment>,
     issuer: &'a PublicKey,
     recipient: &'a PublicKey,
     ephemeral: &'a [u8; 32],
@@ -105,6 +108,7 @@ impl Body {
                 manifest: &self.manifest,
                 group: &self.group,
                 epoch: self.epoch,
+                statements: self.statements.clone(),
                 issuer: &self.issuer,
                 recipient: &self.recipient,
                 ephemeral: &self.ephemeral,
@@ -124,7 +128,12 @@ impl Body {
         if self.version != ENVELOPE_VERSION {
             return Err(denied("unsupported group secret envelope version"));
         }
-        if self.epoch == 0 || self.epoch > i64::MAX as u64 || self.sealed.len() != SEALED_LEN {
+        if self.statements.len() > crate::MAX_LIVE_REVOCATIONS
+            || self.statements.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(denied("invalid group epoch revocation IDs"));
+        }
+        if !self.epoch.valid() || self.sealed.len() != SEALED_LEN {
             return Err(denied("invalid group secret envelope metadata"));
         }
         Ok(())
@@ -156,6 +165,25 @@ impl GroupSecretEnvelope {
         secret: [u8; GROUP_SECRET_LEN],
         recipient: PublicKey,
     ) -> Result<Self, Error> {
+        Self::seal_recorded(
+            issuer,
+            manifest,
+            group,
+            epoch,
+            secret,
+            recipient,
+            Vec::new(),
+        )
+    }
+    pub fn seal_recorded(
+        issuer: &PrivateKey,
+        manifest: Commitment,
+        group: Commitment,
+        epoch: u64,
+        secret: [u8; GROUP_SECRET_LEN],
+        recipient: PublicKey,
+        statements: Vec<Commitment>,
+    ) -> Result<Self, Error> {
         let point = CompressedEdwardsY(*recipient.as_bytes())
             .decompress()
             .filter(|point| point.is_torsion_free() && !point.is_small_order())
@@ -167,7 +195,8 @@ impl GroupSecretEnvelope {
             version: ENVELOPE_VERSION,
             manifest,
             group,
-            epoch,
+            epoch: rocky_core::KeyEpoch::new(epoch, &secret),
+            statements,
             issuer: issuer.public_key(),
             recipient,
             ephemeral: MontgomeryPoint::mul_base_clamped(ephemeral).to_bytes(),
@@ -185,7 +214,7 @@ impl GroupSecretEnvelope {
         issuer: PublicKey,
         manifest: Commitment,
         group: Commitment,
-        epoch: u64,
+        epoch: rocky_core::KeyEpoch,
     ) -> Result<(), Error> {
         self.body.validate()?;
         if self.body.issuer != issuer
@@ -206,7 +235,7 @@ impl GroupSecretEnvelope {
         issuer: PublicKey,
         manifest: Commitment,
         group: Commitment,
-        epoch: u64,
+        epoch: rocky_core::KeyEpoch,
     ) -> Result<[u8; GROUP_SECRET_LEN], Error> {
         self.verify(issuer, manifest, group, epoch)?;
         if recipient.public_key() != self.body.recipient {
@@ -218,13 +247,20 @@ impl GroupSecretEnvelope {
         let shared = MontgomeryPoint(self.body.ephemeral)
             .mul_clamped(scalar)
             .to_bytes();
-        crate::enroll::open(
+        let secret = crate::enroll::open(
             self.body.wrapping_key(shared)?,
             &self.body.aad()?,
             &self.body.sealed,
         )?
         .try_into()
-        .map_err(|_| denied("invalid group secret length"))
+        .map_err(|_| denied("invalid group secret length"))?;
+        if rocky_core::KeyEpoch::new(epoch.generation, &secret) != epoch {
+            return Err(denied("group secret epoch identity mismatch"));
+        }
+        Ok(secret)
+    }
+    pub fn statements(&self) -> &[Commitment] {
+        &self.body.statements
     }
     pub fn recipient(&self) -> PublicKey {
         self.body.recipient
@@ -232,14 +268,18 @@ impl GroupSecretEnvelope {
     pub fn group(&self) -> Commitment {
         self.body.group
     }
-    pub fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> rocky_core::KeyEpoch {
         self.body.epoch
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        encode(self)
+        let bytes = encode(self)?;
+        if bytes.len() > MAX_GROUP_ENVELOPE_BYTES {
+            return Err(denied("group envelope byte capacity reached"));
+        }
+        Ok(bytes)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let envelope: Self = decode_bounded(bytes, 4096)?;
+        let envelope: Self = decode_bounded(bytes, MAX_GROUP_ENVELOPE_BYTES)?;
         envelope.body.validate()?;
         Ok(envelope)
     }

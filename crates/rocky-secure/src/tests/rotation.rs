@@ -7,11 +7,7 @@ const OLD: [u8; 32] = [11; 32];
 const NEW: [u8; 32] = [77; 32];
 
 fn key(scope: ResourceScope, generation: u64, key: [u8; 32]) -> KeyMaterial {
-    KeyMaterial {
-        scope,
-        generation,
-        key,
-    }
+    KeyMaterial::new(scope, generation, key)
 }
 fn reader(f: &Fixture) -> Vec<ResourceGrant> {
     vec![grant(f.public, &[Right::Read, Right::Custody], &[])]
@@ -71,7 +67,13 @@ async fn insert(replica: &EncryptedReplica<Employees>, f: &Fixture, row: u8) -> 
         .unwrap()
 }
 fn generation(frame: &EncryptedFrame) -> u64 {
-    frame.operation().unwrap().header.extensions.generation
+    frame
+        .operation()
+        .unwrap()
+        .header
+        .extensions
+        .generation
+        .generation
 }
 async fn rows(replica: &EncryptedReplica<Employees>, f: &Fixture) -> usize {
     replica.snapshot(f.public).await.unwrap().rows.len()
@@ -117,7 +119,15 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
         .install_key_epoch(key(f.public, 2, NEW))
         .await
         .unwrap();
-    assert_eq!(issuer.key_epochs(f.public).await, vec![1, 2]);
+    assert_eq!(
+        issuer
+            .key_epochs(f.public)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     assert!(staged.commit([9; 32]).await.is_err());
     assert!(session.page(f.public, None, 1).await.is_err());
     assert!(!issuer.handle_committed([9; 32]).await.unwrap());
@@ -129,7 +139,11 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
         .unwrap();
     assert!(
         issuer
-            .install_key_epoch(key(f.public, 2, [78; 32]))
+            .install_key_epoch(KeyMaterial::at(
+                f.public,
+                rocky_core::KeyEpoch::new(2, &NEW),
+                [78; 32]
+            ))
             .await
             .is_err()
     );
@@ -213,7 +227,15 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
     // what was saved finishes the rotation.
     let both = || vec![key(f.public, 1, OLD), key(f.public, 2, NEW)];
     let replica = open(both()).await.unwrap();
-    assert_eq!(replica.key_epochs(f.public).await, vec![1, 2]);
+    assert_eq!(
+        replica
+            .key_epochs(f.public)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     assert_eq!(rows(&replica, &f).await, 1);
     assert_eq!(generation(&insert(&replica, &f, 2).await), 2);
     drop(replica);
@@ -234,9 +256,12 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
             .is_err()
     );
     assert!(
-        open(vec![key(f.public, 1, OLD), key(f.public, 2, [78; 32])])
-            .await
-            .is_err()
+        open(vec![
+            key(f.public, 1, OLD),
+            KeyMaterial::at(f.public, rocky_core::KeyEpoch::new(2, &NEW), [78; 32])
+        ])
+        .await
+        .is_err()
     );
     assert_eq!(rows(&open(both()).await.unwrap(), &f).await, 2);
 }
@@ -271,7 +296,18 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         )
         .await
         .unwrap();
-    assert_eq!(package.inventory.key_epochs, [(f.public, 2)].into());
+    assert_eq!(
+        package.inventory.key_epochs,
+        [(
+            f.public,
+            [
+                rocky_core::KeyEpoch::new(1, &OLD),
+                rocky_core::KeyEpoch::new(2, &NEW)
+            ]
+            .into()
+        )]
+        .into()
+    );
     assert_eq!(package.inventory.frontier.len(), 2);
     let restored = EncryptedReplica::open(dir.path().join("bob.db"), f.app(), recipient)
         .await
@@ -282,11 +318,21 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .unwrap();
     assert_eq!(rows(&restored, &f).await, 2);
     // The current epoch is not retired, and epoch 1 still opens a retained write.
-    assert!(replica.retire_key_epoch(f.public, 2).await.is_err());
-    assert!(replica.retire_key_epoch(f.public, 1).await.is_err());
+    assert!(
+        replica
+            .retire_key_epoch(f.public, rocky_core::KeyEpoch::new(2, &NEW))
+            .await
+            .is_err()
+    );
+    assert!(
+        replica
+            .retire_key_epoch(f.public, rocky_core::KeyEpoch::new(1, &OLD))
+            .await
+            .is_err()
+    );
     // A checkpoint under the new key covers both epochs.
     let signed = replica.checkpoint(f.public).await.unwrap();
-    assert_eq!(signed.statement.key_epoch, 2);
+    assert_eq!(signed.statement.key_epoch.generation, 2);
     assert_eq!(signed.statement.operations, 2);
     assert_eq!(replica.audit(f.public).await.unwrap().rows, 2);
     // A rotation with no later write still seals the next checkpoint.
@@ -295,7 +341,7 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .await
         .unwrap();
     let resealed = replica.checkpoint(f.public).await.unwrap();
-    assert_eq!(resealed.statement.key_epoch, 3);
+    assert_eq!(resealed.statement.key_epoch.generation, 3);
     assert_eq!(resealed.statement.operations, 2);
 
     // A scope that never wrote under an earlier epoch drops it at once.
@@ -307,12 +353,36 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .install_key_epoch(key(f.private, 1, [21; 32]))
         .await
         .unwrap();
-    assert_eq!(replica.key_epochs(f.private).await, vec![1, 2]);
+    assert_eq!(
+        replica
+            .key_epochs(f.private)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     let session = replica.session([f.private].into()).await.unwrap();
-    replica.retire_key_epoch(f.private, 1).await.unwrap();
-    assert_eq!(replica.key_epochs(f.private).await, vec![2]);
+    replica
+        .retire_key_epoch(f.private, rocky_core::KeyEpoch::new(1, &[21; 32]))
+        .await
+        .unwrap();
+    assert_eq!(
+        replica
+            .key_epochs(f.private)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
     assert!(session.status().await.is_err());
-    assert!(replica.retire_key_epoch(f.private, 1).await.is_err());
+    assert!(
+        replica
+            .retire_key_epoch(f.private, rocky_core::KeyEpoch::new(1, &[21; 32]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -343,7 +413,7 @@ async fn a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write
         learned.digest(now().unwrap()).unwrap()
     );
     assert_ne!(after.statement.revocations, before.statement.revocations);
-    assert_eq!(after.statement.key_epoch, 1);
+    assert_eq!(after.statement.key_epoch.generation, 1);
     assert_eq!(after.statement.operations, before.statement.operations);
     assert_eq!(after.statement.rows, before.statement.rows);
     assert_eq!(after.statement.previous, Some(before.id().unwrap()));
@@ -372,11 +442,218 @@ async fn reusing_another_scopes_key_names_the_collision_and_keeps_epochs() {
             .contains("already installed under another scope or epoch"),
         "{error}"
     );
-    assert_eq!(replica.key_epochs(f.public).await, vec![1]);
-    assert!(replica.key_epochs(f.private).await.is_empty());
+    assert_eq!(
+        replica
+            .key_epochs(f.public)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(
+        replica
+            .key_epochs(f.private)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
     replica
         .install_key_epoch(key(f.private, 1, NEW))
         .await
         .unwrap();
-    assert_eq!(replica.key_epochs(f.private).await, vec![1]);
+    assert_eq!(
+        replica
+            .key_epochs(f.private)
+            .await
+            .into_iter()
+            .map(|epoch| epoch.generation)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[tokio::test]
+async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (PrivateKey::new(), PrivateKey::new());
+    let mut siblings = [[77; 32], [78; 32]];
+    siblings.sort_by_key(|secret| rocky_core::KeyEpoch::new(2, secret));
+    let (loser, winner) = (siblings[0], siblings[1]);
+    let epoch = |secret: &[u8; 32]| rocky_core::KeyEpoch::new(2, secret);
+    let ac = config(&f, &a, f.full(), vec![key(f.public, 2, loser)]);
+    let bc = config(&f, &b, f.full(), vec![key(f.public, 2, winner)]);
+    let credentials = bc.credentials.clone();
+    let left = EncryptedReplica::open(dir.path().join("left"), f.app(), ac)
+        .await
+        .unwrap();
+    let right = EncryptedReplica::open(dir.path().join("right"), f.app(), bc)
+        .await
+        .unwrap();
+    let l = insert(&left, &f, 1).await;
+    let r = insert(&right, &f, 2).await;
+    let checkpoint = left.checkpoint(f.public).await.unwrap();
+    assert_eq!(checkpoint.statement.key_epoch, epoch(&loser));
+    assert_eq!(
+        left.receive(r.clone()).await.unwrap(),
+        ReceiveStatus::MissingKey
+    );
+    assert_eq!(
+        right.receive(l.clone()).await.unwrap(),
+        ReceiveStatus::MissingKey
+    );
+    left.install_key_epoch(key(f.public, 2, winner))
+        .await
+        .unwrap();
+    right
+        .install_key_epoch(key(f.public, 2, loser))
+        .await
+        .unwrap();
+    assert_eq!(rows(&left, &f).await, 2);
+    assert_eq!(rows(&right, &f).await, 2);
+    assert_eq!(
+        left.checkpoint_offer(b.public_key(), &credentials, f.public)
+            .await
+            .unwrap()
+            .unwrap()
+            .statement
+            .key_epoch,
+        epoch(&winner)
+    );
+    assert!(
+        left.retire_key_epoch(f.public, epoch(&loser))
+            .await
+            .is_err()
+    );
+    for (replica, id) in [(&left, 3), (&right, 4)] {
+        let next = insert(replica, &f, id).await;
+        assert_eq!(
+            next.operation().unwrap().header.extensions.generation,
+            epoch(&winner)
+        );
+    }
+    assert_eq!(
+        left.checkpoint(f.public).await.unwrap().statement.key_epoch,
+        epoch(&winner)
+    );
+    for frame in [&l, &r] {
+        left.acknowledge(b.public_key(), &credentials, frame.id().unwrap(), true)
+            .await
+            .unwrap();
+    }
+    left.set_retention_policy(
+        f.public,
+        RetentionPolicy {
+            required: [b.public_key()].into(),
+            copies: 1,
+            window: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(left.prune(f.public).await.unwrap().pruned, 2);
+    left.retire_key_epoch(f.public, epoch(&loser))
+        .await
+        .unwrap();
+    assert_eq!(left.key_epochs(f.public).await, vec![epoch(&winner)]);
+}
+
+#[tokio::test]
+async fn the_257th_sibling_is_refused_without_changing_the_winner() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    let keys = (0..256u64)
+        .map(|index| {
+            key(
+                f.public,
+                1,
+                rocky_core::commitment("test.sibling", &index.to_be_bytes()),
+            )
+        })
+        .collect();
+    let replica = EncryptedReplica::open(
+        dir.path().join("capacity"),
+        f.app(),
+        config(&f, &node, f.full(), keys),
+    )
+    .await
+    .unwrap();
+    let before = replica.key_epochs(f.public).await;
+    let error = replica
+        .install_key_epoch(key(f.public, 1, [255; 32]))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("key epoch capacity reached"));
+    assert_eq!(replica.key_epochs(f.public).await, before);
+}
+
+#[tokio::test]
+async fn concurrent_revocations_list_the_exposure_window_and_close_it_at_the_superseding_writer() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (alice, bob, carol, dave) = (
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+        PrivateKey::new(),
+    );
+    let open = |name: &'static str, node: &PrivateKey| {
+        EncryptedReplica::open(
+            dir.path().join(name),
+            f.app(),
+            config(&f, node, f.full(), vec![key(f.public, 1, OLD)]),
+        )
+    };
+    let a = open("a.db", &alice).await.unwrap();
+    let b = open("b.db", &bob).await.unwrap();
+    let original = insert(&a, &f, 1).await;
+    let (a_secret, b_secret, closed_secret) = ([31; 32], [47; 32], [83; 32]);
+    let a_set = revoking(&f, &[carol.public_key()]);
+    let b_set = revoking(&f, &[dave.public_key()]);
+    a.learn_revocations(&a_set).await.unwrap();
+    b.learn_revocations(&b_set).await.unwrap();
+    a.install_key_epoch(key(f.public, 2, a_secret))
+        .await
+        .unwrap();
+    b.install_key_epoch(key(f.public, 2, b_secret))
+        .await
+        .unwrap();
+    let a_row = insert(&a, &f, 2).await;
+    let b_row = insert(&b, &f, 3).await;
+    for replica in [&a, &b] {
+        replica.learn_revocations(&a_set).await.unwrap();
+        replica.learn_revocations(&b_set).await.unwrap();
+        replica
+            .install_key_epoch(key(f.public, 3, closed_secret))
+            .await
+            .unwrap();
+    }
+    let after_a = insert(&a, &f, 4).await;
+    let after_b = insert(&b, &f, 5).await;
+    let frames = [original, a_row, b_row, after_a, after_b];
+    let opens = |held: &[[u8; 32]]| -> Vec<usize> {
+        frames
+            .iter()
+            .enumerate()
+            .filter_map(|(index, frame)| {
+                let operation = frame.operation().unwrap();
+                let aad = encode(&operation.header.extensions).unwrap();
+                held.iter()
+                    .any(|secret| crate::wire::decrypt(secret, &aad, &frame.body).is_ok())
+                    .then_some(index + 1)
+            })
+            .collect()
+    };
+    // Carol was revoked by A; B's concurrent rotation still delivered its
+    // sibling to her. Dave was revoked by B and still received A's sibling.
+    assert_eq!(opens(&[OLD, b_secret]), [1, 3]);
+    assert_eq!(opens(&[OLD, a_secret]), [1, 2]);
+    assert_eq!(opens(&[closed_secret]), [4, 5]);
+    assert_eq!(generation(&frames[3]), 3);
+    assert_eq!(generation(&frames[4]), 3);
 }

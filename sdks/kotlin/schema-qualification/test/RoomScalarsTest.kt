@@ -77,16 +77,16 @@ class RoomScalarsTest {
             val database = RockyDatabase.local(File(directory, "issuer"), grouped)
             try {
                 val list = JsonArray(listOf(rocky.text("A")))
-                assertEquals(1, database.partitions.create("list", list).getValue("epoch").jsonPrimitive.int)
+                assertEquals(1, database.partitions.create("list", list).getValue("epoch").jsonObject.getValue("generation").jsonPrimitive.int)
                 val status = database.partitions.status("list", list)
-                assertEquals("[1]", status.getValue("epochs").toString())
+                assertEquals(listOf(1L), status.getValue("epochs").jsonArray.map { rocky.KeyEpoch.fromJson(it).generation })
                 val tables = status.getValue("tables").jsonArray.map { it.jsonObject }
                 assertEquals(listOf("attachments", "items", "lists"), tables.map { it.getValue("table").jsonPrimitive.content }.sorted())
-                assertTrue(tables.all { it.getValue("epochs").toString() == "[1]" })
+                assertTrue(tables.all { it.getValue("epochs") == status.getValue("epochs") && it.getValue("current") == status.getValue("current") })
                 val device = rocky.Credentials.prepare(File(directory, "reader"))
                 val shared = database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))))
                 assertEquals(1, shared.getValue("envelopes").jsonArray.size)
-                assertFailsWith<RockyException> { database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))), epoch = 2) }
+                assertFailsWith<RockyException> { database.partitions.share("list", list, JsonArray(listOf(device.getValue("node"))), epoch = rocky.KeyEpoch(2, "0".repeat(64))) }
                 assertFailsWith<RockyException> { database.partitions.subscribe("list", list, omit = listOf("photos")) }
             } finally {
                 database.close()

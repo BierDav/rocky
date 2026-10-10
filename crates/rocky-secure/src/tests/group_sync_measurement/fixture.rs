@@ -252,16 +252,12 @@ impl Fixture {
     }
     pub(super) fn key(&self, name: &str, partition: i64) -> KeyMaterial {
         if name == "products" {
-            return KeyMaterial {
-                scope: self.scope(name, 0),
-                generation: 1,
-                key: [8; 32],
-            };
+            return KeyMaterial::new(self.scope(name, 0), 1, [8; 32]);
         }
-        KeyMaterial {
-            scope: self.scope(name, partition),
-            generation: 1,
-            key: rocky_credentials::derive_table_key(
+        KeyMaterial::new(
+            self.scope(name, partition),
+            1,
+            rocky_credentials::derive_table_key(
                 &[7; 32],
                 self.domain,
                 self.schema
@@ -272,7 +268,7 @@ impl Fixture {
                 1,
             )
             .unwrap(),
-        }
+        )
     }
     pub(super) fn write(&self, name: &str, partition: i64) -> RowWrite {
         let app = self.app();

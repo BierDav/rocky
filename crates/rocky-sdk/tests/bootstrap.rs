@@ -160,7 +160,15 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     assert!(!member_path.join("bootstrap.json").exists());
     let identity: serde_json::Value =
         serde_json::from_slice(&std::fs::read(member_path.join("identity.json"))?)?;
-    assert_eq!(identity["keys"]["items"], json!([2]));
+    assert_eq!(
+        identity["keys"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch["generation"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2)]
+    );
     let file = rusqlite::Connection::open(member_path.join("rocky.sqlite"))?;
     let imported: i64 =
         file.query_row("SELECT COUNT(*) FROM secure_checkpoint_rows", [], |row| {
@@ -177,7 +185,15 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     member.ok(json!({"type": "renew"})).await;
     let renewed: serde_json::Value =
         serde_json::from_slice(&std::fs::read(member_path.join("identity.json"))?)?;
-    assert_eq!(renewed["keys"]["items"], json!([2]));
+    assert_eq!(
+        renewed["keys"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch["generation"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2)]
+    );
     a.add(2, "tail").await;
     member.sync().await.expect("ordinary tail sync");
     assert_eq!(member.titles().await, ["before revocation", "tail"]);
@@ -374,7 +390,15 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     );
     let identity: serde_json::Value =
         serde_json::from_slice(&std::fs::read(b_path.join("identity.json"))?)?;
-    assert_eq!(identity["keys"]["items"], json!([1, 3]));
+    assert_eq!(
+        identity["keys"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|epoch| epoch["generation"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
     b.sync().await.expect("checkpoint refresh after renewal");
     assert_eq!(a.items().await, b.items().await);
     assert_eq!(b.titles().await.len(), 3);

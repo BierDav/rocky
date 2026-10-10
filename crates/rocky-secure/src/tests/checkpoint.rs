@@ -166,7 +166,7 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     assert_eq!(statement.definition, f.app().definition().hash());
     assert_eq!((statement.schema, statement.handler), (1, 1));
     assert_eq!(statement.revocations, crate::tests::unrevoked());
-    assert_eq!(statement.key_epoch, 1);
+    assert_eq!(statement.key_epoch.generation, 1);
     assert_eq!((statement.sequence, statement.previous), (1, None));
     assert_eq!(statement.frontier.len(), 1);
     assert_eq!(statement.frontier[0].author, node.public_key());

@@ -517,11 +517,7 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
                 )
                 .unwrap(),
             ]),
-            keys: vec![KeyMaterial {
-                scope: f.public,
-                generation: 1,
-                key: [11; 32],
-            }],
+            keys: vec![KeyMaterial::new(f.public, 1, [11; 32])],
         }
     };
     let dir = TempDir::new().unwrap();

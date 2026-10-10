@@ -213,15 +213,15 @@ impl Typed {
         ])
     }
     fn key(&self, scope: ResourceScope) -> KeyMaterial {
-        KeyMaterial {
+        KeyMaterial::new(
             scope,
-            generation: 1,
-            key: if scope == self.items {
+            1,
+            if scope == self.items {
                 [31; 32]
             } else {
                 [32; 32]
             },
-        }
+        )
     }
     async fn open(
         &self,
@@ -1575,7 +1575,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 6);
+    assert_eq!(operation.header.extensions.row_format, 7);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
         .await
@@ -1847,7 +1847,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 7);
+    assert_eq!(signed.statement.format, 8);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 

@@ -268,11 +268,7 @@ async fn group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step() 
                     .config
                     .keys
                     .iter()
-                    .map(|key| KeyMaterial {
-                        scope: key.scope,
-                        generation: key.generation,
-                        key: key.key,
-                    })
+                    .map(|key| KeyMaterial::at(key.scope, key.generation, key.key))
                     .collect(),
             }
         };
@@ -481,11 +477,7 @@ async fn partition_checkpoint_rebuilds_keyless_support_and_base_import_preserves
     let live = RowIdentity::new(1, 1).unwrap().integer();
     let dead = RowIdentity::new(1, 2).unwrap().integer();
     writer
-        .install_key(KeyMaterial {
-            scope: f.scope("products", 0),
-            generation: 1,
-            key: [7; 32],
-        })
+        .install_key(KeyMaterial::new(f.scope("products", 0), 1, [7; 32]))
         .await
         .unwrap();
     for device in [&writer, &child] {

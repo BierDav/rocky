@@ -153,11 +153,7 @@ async fn registration_does_not_authorize_accounting_and_learned_deletion_revokes
         revocations: RevocationSet::new(),
         node: node.clone(),
         credentials,
-        keys: vec![KeyMaterial {
-            scope: resource,
-            generation: 1,
-            key: [6; 32],
-        }],
+        keys: vec![KeyMaterial::new(resource, 1, [6; 32])],
     };
     let delegated =
         SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)

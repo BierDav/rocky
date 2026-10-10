@@ -6,7 +6,9 @@ use rocky_credentials::ProviderError;
 const SCHEMA: &str = r#"{"application":"revocation_faults","version":1,"format":4,"tables":[
  {"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
- {"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
+ {"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
+ {"name":"labels","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
+ {"name":"attachments","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 
 /// Keys in memory: the file store syncs every key, which dominated this test.
 /// A copy carries the template's keys to one stop.
@@ -122,6 +124,14 @@ fn reopen_completes_each_revocation_boundary_with_one_tombstone_and_the_same_sta
         (Stage::Key, 3),
         (Stage::Key, 4),
         (Stage::Key, 5),
+        (Stage::Key, 6),
+        (Stage::Key, 7),
+        (Stage::Table, 0),
+        (Stage::Table, 1),
+        (Stage::Table, 2),
+        (Stage::Table, 3),
+        (Stage::Table, 4),
+        (Stage::Table, 5),
         (Stage::Signed, 0),
         (Stage::Renewed, 0),
         (Stage::Tombstone, 0),
@@ -194,13 +204,10 @@ async fn stop_at(
     let mut roles: Vec<String> = intent
         .keys
         .iter()
-        .map(|(name, epoch)| crate::enrollment::key_role(name, *epoch))
+        .map(|(name, epoch)| format!("rotation.reader.{name}.{epoch}"))
         .collect();
     for (address, epoch) in &intent.groups {
-        roles.push(crate::groups::secret_role(
-            &saved.groups[address].address,
-            *epoch,
-        ));
+        roles.push(format!("rotation.partition.{address}.{epoch}"));
     }
     let made: Vec<_> = roles
         .iter()
@@ -224,6 +231,17 @@ async fn stop_at(
     };
     let reopened = crate::Database::open(open())?.database;
     let completed = Settings::load(&root.path().join("identity.json"))?;
+    let session = reopened.session();
+    for list in ["L", "M"] {
+        let response: Value = serde_json::from_str(&session.call(json!({"version":1,"scope":serde_json::from_str::<Value>(&reopened.scope())?,"request":{"type":"partition_status","group":"list","values":[{"type":"text","value":list}]}}).to_string()).await?)?;
+        let status = &response["value"];
+        assert_eq!(response["status"], "ok");
+        for table in status["tables"].as_array().ok_or("group tables")? {
+            assert_eq!(table["epochs"], status["epochs"], "{stop:?}");
+            assert_eq!(table["current"], status["current"], "{stop:?}");
+        }
+    }
+    session.close().await;
     assert!(
         completed
             .authority
@@ -237,11 +255,22 @@ async fn stop_at(
     );
     assert_eq!(completed.revocations.len(), 1);
     for (name, target) in &intent.keys {
-        assert_eq!(completed.keys[name], vec![1, *target], "{stop:?}");
+        assert_eq!(
+            completed.keys[name]
+                .iter()
+                .map(|epoch| epoch.generation)
+                .collect::<Vec<_>>(),
+            vec![1, *target],
+            "{stop:?}"
+        );
     }
     for (address, target) in &intent.groups {
         assert_eq!(
-            completed.groups[address].epochs,
+            completed.groups[address]
+                .epochs
+                .iter()
+                .map(|epoch| epoch.generation)
+                .collect::<Vec<_>>(),
             vec![1, *target],
             "{stop:?}"
         );
@@ -267,5 +296,68 @@ async fn stop_at(
         assert_eq!(vault.get(role)?, key);
     }
     again.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn received_sibling_resumes_after_each_table_installation() -> Result<(), Failure> {
+    let template = tempfile::tempdir()?;
+    let keys = Keys::default();
+    let node = issuer(template.path(), Arc::new(keys.clone())).await?;
+    let client = node.client(1)?;
+    let request =
+        json!({"type":"partition_create","group":"list","values":[{"type":"text","value":"L"}]});
+    node.dispatch(&client, &request).await?;
+    let settings = node.settings.lock().await.clone();
+    let record = settings.groups.values().next().ok_or("group")?;
+    let secret = [245; 32];
+    let envelope = rocky_credentials::GroupSecretEnvelope::seal(
+        &PrivateKey::from_bytes(&node.vault.get("publisher")?),
+        node.domain.manifest().hash(),
+        record.address,
+        1,
+        secret,
+        PrivateKey::from_bytes(&node.vault.get("node")?).public_key(),
+    )?
+    .to_bytes()?;
+    drop(client);
+    drop(node);
+    for passed in 0..3 {
+        let root = tempfile::tempdir()?;
+        copy_tree(template.path(), root.path())?;
+        let store: Arc<dyn crate::SecretStore> = Arc::new(keys.copy()?);
+        let node = reload(root.path(), store.clone()).await?;
+        let client = node.client(1)?;
+        fault::STOP.with(|stop| stop.set(Some((fault::Stage::Table, passed))));
+        let error = node.dispatch(&client, &json!({"type":"partition_install","group":"list","values":[{"type":"text","value":"L"}],"envelope":envelope})).await.unwrap_err();
+        assert!(
+            fault::STOP.with(|stop| stop.get()).is_none(),
+            "before table {passed}: {error}"
+        );
+        drop(client);
+        drop(node);
+        let database = crate::Database::open(crate::Open {
+            directory: root.path(),
+            schema: SCHEMA,
+            secrets: Some(store),
+            network: None,
+            commands: None,
+        })?
+        .database;
+        let settings = Settings::load(&root.path().join("identity.json"))?;
+        let epochs = &settings.groups.values().next().ok_or("group")?.epochs;
+        assert_eq!(epochs.len(), 2);
+        assert!(epochs.contains(&rocky_core::KeyEpoch::new(1, &secret)));
+        let session = database.session();
+        let reply: Value = serde_json::from_str(&session.call(json!({"version":1,"scope":serde_json::from_str::<Value>(&database.scope())?,"request":{"type":"partition_status","group":"list","values":[{"type":"text","value":"L"}]}}).to_string()).await?)?;
+        assert_eq!(reply["status"], "ok");
+        let status = &reply["value"];
+        for table in status["tables"].as_array().ok_or("tables")? {
+            assert_eq!(table["epochs"], status["epochs"]);
+            assert_eq!(table["current"], status["current"]);
+        }
+        session.close().await;
+        database.close().await?;
+    }
     Ok(())
 }

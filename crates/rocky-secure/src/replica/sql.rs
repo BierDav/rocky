@@ -889,6 +889,32 @@ impl<A: RowApplication> SecureSql<A> {
                 .row_id(typed.domain.domain, &projected.table, anchor)
                 .map_err(capture_error)?;
             let fields = |image: &Vec<SqlValue>| typed.rows.fields(&projected.table, image);
+            // A SQL deletion removes the natural key, including held hidden incarnations.
+            if after.is_none() && before.is_some() {
+                let held = collect_rows(inner.conn.query(
+                    "SELECT r.fields FROM secure_row_keys k JOIN secure_rows r ON r.scope=k.scope AND r.row=k.row WHERE k.scope=? AND k.key=?",
+                    [encode(&scope)?, row.to_vec()],
+                ).await?).await?;
+                let visible = before
+                    .as_ref()
+                    .map(fields)
+                    .transpose()
+                    .map_err(capture_error)?;
+                for held in held {
+                    let [SqlValue::Blob(bytes)] = held.as_slice() else {
+                        return Err(Error::Corrupt("SQL deleted incarnation".into()));
+                    };
+                    let record: Materialized = decode(bytes)?;
+                    if !record.deleted && Some(&record.fields) != visible.as_ref() {
+                        writes.push(RowWrite::changed(RowChange {
+                            scope,
+                            row,
+                            before: Some(record.fields),
+                            after: None,
+                        }));
+                    }
+                }
+            }
             let reinserted = touched.deleted && before.is_some() && after.is_some();
             let assigned = if before.is_none() || after.is_none() {
                 BTreeSet::new()

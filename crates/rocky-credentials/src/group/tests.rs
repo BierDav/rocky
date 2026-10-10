@@ -64,6 +64,8 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
     let bob = PrivateKey::new();
     let outsider = PrivateKey::new();
     let (manifest, group) = ([9; 32], [4; 32]);
+    let epoch = rocky_core::KeyEpoch::new(1, &[7; 32]);
+    let next = rocky_core::KeyEpoch::new(2, &[7; 32]);
     let recipients = [alice.public_key(), bob.public_key()].into();
     let envelopes =
         GroupSecretEnvelope::seal_many(&issuer, manifest, group, 1, [7; 32], &recipients).unwrap();
@@ -74,30 +76,32 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
             .find(|envelope| envelope.recipient() == recipient.public_key())
             .unwrap();
         let decoded = GroupSecretEnvelope::from_bytes(&envelope.to_bytes().unwrap()).unwrap();
-        assert_eq!((decoded.group(), decoded.epoch()), (group, 1));
+        assert_eq!((decoded.group(), decoded.epoch()), (group, epoch));
         let open = |key: &PrivateKey, by: PublicKey, manifest, group, epoch| {
             decoded.open(key, by, manifest, group, epoch)
         };
         assert_eq!(
-            open(recipient, issuer.public_key(), manifest, group, 1).unwrap(),
+            open(recipient, issuer.public_key(), manifest, group, epoch).unwrap(),
             [7; 32]
         );
-        assert!(open(&outsider, issuer.public_key(), manifest, group, 1).is_err());
-        assert!(open(recipient, outsider.public_key(), manifest, group, 1).is_err());
-        assert!(open(recipient, issuer.public_key(), [8; 32], group, 1).is_err());
-        assert!(open(recipient, issuer.public_key(), manifest, [5; 32], 1).is_err());
-        assert!(open(recipient, issuer.public_key(), manifest, group, 2).is_err());
+        assert!(open(&outsider, issuer.public_key(), manifest, group, epoch).is_err());
+        assert!(open(recipient, outsider.public_key(), manifest, group, epoch).is_err());
+        assert!(open(recipient, issuer.public_key(), [8; 32], group, epoch).is_err());
+        assert!(open(recipient, issuer.public_key(), manifest, [5; 32], epoch).is_err());
+        assert!(open(recipient, issuer.public_key(), manifest, group, next).is_err());
         let mut tampered = decoded.clone();
         tampered.body.sealed[20] ^= 1;
         assert!(
             tampered
-                .verify(issuer.public_key(), manifest, group, 1)
+                .verify(issuer.public_key(), manifest, group, epoch)
                 .is_err()
         );
         // A valid issuer signature cannot transplant existing ciphertext.
         for change in [
-            |body: &mut Body| body.epoch = 2,
+            |body: &mut Body| body.epoch.generation = 2,
             |body: &mut Body| body.group = [5; 32],
+            |body: &mut Body| body.epoch.secret_hash[0] ^= 1,
+            |body: &mut Body| body.statements.push([9; 32]),
             |body: &mut Body| body.ephemeral = [0; 32],
         ] {
             let mut tampered = decoded.clone();
@@ -116,7 +120,7 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
         truncated.signature = issuer.sign(&signing_bytes(SIGNED, &truncated.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&truncated.to_bytes().unwrap()).is_err());
         let mut versioned = decoded.clone();
-        versioned.body.version = 2;
+        versioned.body.version = 1;
         versioned.signature = issuer.sign(&signing_bytes(SIGNED, &versioned.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&versioned.to_bytes().unwrap()).is_err());
     }

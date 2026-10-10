@@ -36,9 +36,14 @@ async fn join(
     )?)
 }
 fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
-    Ok(serde_json::from_slice(&std::fs::read(
-        root.join(name).join("identity.json"),
-    )?)?)
+    let mut identity: Value =
+        serde_json::from_slice(&std::fs::read(root.join(name).join("identity.json"))?)?;
+    for epochs in identity["keys"].as_object_mut().ok_or("keys")?.values_mut() {
+        for epoch in epochs.as_array_mut().ok_or("epochs")? {
+            *epoch = epoch["generation"].clone();
+        }
+    }
+    Ok(identity)
 }
 async fn revocations(device: &Device) -> Value {
     device.ok(json!({"type": "session"})).await["revocations"].clone()

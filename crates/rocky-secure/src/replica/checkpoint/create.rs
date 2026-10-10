@@ -253,7 +253,7 @@ impl<A: RowApplication> Inner<A> {
         &mut self,
         scope: ResourceScope,
         id: i64,
-        generation: u64,
+        generation: rocky_core::KeyEpoch,
         record: Record,
     ) -> Result<Step, Error> {
         let verified = transaction!(self, |inner| {

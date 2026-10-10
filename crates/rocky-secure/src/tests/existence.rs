@@ -208,10 +208,12 @@ impl Erp {
                 credentials: credentials.clone(),
                 keys: tables
                     .iter()
-                    .map(|table| KeyMaterial {
-                        scope: self.scope(table),
-                        generation: 1,
-                        key: rocky_core::commitment("erp.key", table.as_bytes()),
+                    .map(|table| {
+                        KeyMaterial::new(
+                            self.scope(table),
+                            1,
+                            rocky_core::commitment("erp.key", table.as_bytes()),
+                        )
                     })
                     .collect(),
             },
@@ -1223,7 +1225,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 7);
+    assert_eq!(before_horizon.statement.format, 8);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1247,7 +1249,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 7);
+    assert_eq!(checkpoint.statement.format, 8);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1354,7 +1356,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v9");
+    assert_eq!(identity, "rocky.encrypted-replica.v10");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1385,10 +1387,12 @@ async fn horizon_recovery_refuses_packages_that_cannot_preserve_the_declaration(
         credentials: erp.credentials(node, erp.grants(&TABLES)),
         keys: TABLES
             .iter()
-            .map(|table| KeyMaterial {
-                scope: erp.scope(table),
-                generation: 1,
-                key: rocky_core::commitment("erp.key", table.as_bytes()),
+            .map(|table| {
+                KeyMaterial::new(
+                    erp.scope(table),
+                    1,
+                    rocky_core::commitment("erp.key", table.as_bytes()),
+                )
             })
             .collect(),
     });
@@ -1598,7 +1602,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 7);
+    assert_eq!(a.statement.format, 8);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(

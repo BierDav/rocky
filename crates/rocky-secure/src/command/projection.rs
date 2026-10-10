@@ -411,7 +411,7 @@ impl<A: RowCommandApplication> Inner<A> {
                     "INSERT INTO secure_keys VALUES(?,?,?) ON CONFLICT(scope) DO NOTHING",
                     bindings(vec![
                         SqlValue::Blob(encode(scope)?),
-                        SqlValue::Integer(key.generation as i64),
+                        SqlValue::Blob(encode(&key.generation)?),
                         SqlValue::Blob(
                             rocky_core::commitment("rocky.scope-key.v1", &key.key).to_vec(),
                         ),

@@ -18,11 +18,7 @@ fn again(config: &SecureConfig) -> SecureConfig {
         keys: config
             .keys
             .iter()
-            .map(|key| KeyMaterial {
-                scope: key.scope,
-                generation: key.generation,
-                key: key.key,
-            })
+            .map(|key| KeyMaterial::at(key.scope, key.generation, key.key))
             .collect(),
     }
 }

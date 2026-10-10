@@ -62,11 +62,12 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 .scopes
                 .iter()
                 .any(|scope| !new.inventory.scopes.contains(scope))
-            || old
-                .inventory
-                .key_epochs
-                .iter()
-                .any(|(scope, epoch)| new.inventory.key_epochs.get(scope) < Some(epoch))
+            || old.inventory.key_epochs.iter().any(|(scope, epoch)| {
+                new.inventory
+                    .key_epochs
+                    .get(scope)
+                    .is_none_or(|next| !epoch.is_subset(next))
+            })
         {
             return Err(denied("retention successor is incompatible"));
         }

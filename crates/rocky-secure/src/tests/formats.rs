@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 #[tokio::test]
 async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     let f = Fixture::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 8] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();
@@ -49,7 +49,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();
@@ -119,7 +119,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 7] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 8] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
@@ -182,19 +182,20 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     let extensions = crate::wire::Extensions {
         manifest: f.app().definition().hash(),
         scope: f.public,
-        generation: 1,
+        generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
         credentials: f.credentials(&sender, f.full()),
         author: None,
-        row_format: 6,
+        row_format: 7,
         partition: None,
     };
     for (envelope_version, body_version, message) in [
-        (0, 3, "unsupported creation witness format"),
-        (2, 3, "unsupported creation witness format"),
+        (0, 4, "unsupported creation witness format"),
+        (2, 4, "unsupported creation witness format"),
         (1, 0, "unsupported bundle version"),
         (1, 1, "unsupported bundle version"),
         (1, 2, "unsupported bundle version"),
-        (1, 4, "unsupported bundle version"),
+        (1, 3, "unsupported bundle version"),
+        (1, 5, "unsupported bundle version"),
     ] {
         let plaintext = encode(&Envelope {
             version: envelope_version,

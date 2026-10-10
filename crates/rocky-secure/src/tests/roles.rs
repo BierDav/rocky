@@ -60,11 +60,7 @@ async fn open_node(
         credentials: credentials.clone(),
         keys: keyed
             .iter()
-            .map(|scope| KeyMaterial {
-                scope: *scope,
-                generation: 1,
-                key: key_of(scope),
-            })
+            .map(|scope| KeyMaterial::new(*scope, 1, key_of(scope)))
             .collect(),
     };
     Node {

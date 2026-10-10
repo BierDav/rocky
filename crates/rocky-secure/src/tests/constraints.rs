@@ -175,11 +175,7 @@ impl Shop {
                 // Keys are per table; both tables share one reader scope.
                 keys: [(self.lists, 44), (self.items, 45)]
                     .into_iter()
-                    .map(|(scope, byte)| KeyMaterial {
-                        scope,
-                        generation: 1,
-                        key: [byte; 32],
-                    })
+                    .map(|(scope, byte)| KeyMaterial::new(scope, 1, [byte; 32]))
                     .collect(),
             },
         )

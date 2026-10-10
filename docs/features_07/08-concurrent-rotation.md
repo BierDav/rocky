@@ -1,6 +1,8 @@
 # 8. Concurrent rotation
 
-Status: not started.
+Status: complete, 2026-10-10.
+Implementation: [decision 0050](../decisions/0050-concurrent-key-epochs.md).
+Coverage and measurements: [phase evidence](08-concurrent-rotation-evidence.md).
 Owner: `rocky-secure` key epochs, frames and checkpoints; `rocky-credentials`
 group secrets and envelopes; `rocky-sdk` rotation, renewal key lists and key
 store. Depends on [phase 7](07-registry-revocation.md). Wave 2.

@@ -271,7 +271,7 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         let made: Vec<Option<[u8; 32]>> = intent
             .keys
             .iter()
-            .map(|(name, epoch)| vault.find(&key_role(name, *epoch)))
+            .map(|(name, epoch)| vault.find(&format!("rotation.reader.{name}.{epoch}")))
             .collect::<Result<_, _>>()?;
         let mut reopened = Settings::load(&path)?;
         let keys = reopened.rotate(&vault)?.ok_or("the intent was lost")?;
@@ -290,13 +290,19 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         );
         assert_eq!(keys.len(), 3);
         for ((name, epoch, key), before) in keys.iter().zip(made) {
-            assert_eq!(intent.keys.get(name), Some(epoch));
+            assert_eq!(intent.keys.get(name), Some(&epoch.generation));
             if let Some(before) = before {
                 assert_eq!(before, *key, "{stop:?}: {name}");
             }
             assert_eq!(vault.find(&key_role(name, *epoch))?, Some(*key));
         }
-        assert_eq!(reopened.keys["items"], [1, 2]);
+        assert_eq!(
+            reopened.keys["items"]
+                .iter()
+                .map(|epoch| epoch.generation)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
         // Completed once: nothing is left to do at the next open.
         assert!(Settings::load(&path)?.rotate(&vault)?.is_none());
     }
@@ -417,5 +423,222 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
         assert!(renew(issuer, registry, &revoked_user, &revoked_root).is_err());
         renew(issuer, registry, &kept_user, &kept_root)?;
     }
+    Ok(())
+}
+
+/// Independent issuer vaults with the same domain, without filesystem key I/O.
+#[derive(Default)]
+struct EpochKeys(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
+impl crate::SecretStore for EpochKeys {
+    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "keys poisoned")?
+            .get(name)
+            .cloned())
+    }
+    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+        self.0
+            .lock()
+            .map_err(|_| "keys poisoned")?
+            .insert(name.into(), bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&self, name: &str) -> Result<(), Failure> {
+        self.0.lock().map_err(|_| "keys poisoned")?.remove(name);
+        Ok(())
+    }
+}
+
+#[test]
+fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_stop_rotating()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let av = a.vault(&store);
+    let domain = a.domain()?;
+    let mut partition = GroupPartition::resolve(
+        &domain,
+        Some("list"),
+        None,
+        vec![rocky_core::SqlValue::Text("L".into())],
+    )?;
+    let initial_secret = [19; 32];
+    let initial = rocky_core::KeyEpoch::new(1, &initial_secret);
+    partition.record.hold(initial)?;
+    let address = crate::groups::record_key(&partition.record.address);
+    av.put(
+        &secret_role(&partition.record.address, initial),
+        &initial_secret,
+    )?;
+    a.groups.insert(address.clone(), partition.record.clone());
+    let mut b = a.clone();
+    b.installation = "second-issuer".into();
+    let bv = b.vault(&store);
+    for role in a.roles() {
+        if !matches!(role.as_str(), "node" | "user")
+            && let Some(key) = av.find(&role)?
+        {
+            bv.put(&role, &key)?;
+        }
+    }
+    bv.create("node")?;
+    bv.create("user")?;
+    b.credentials = b.renew_locally(&bv)?;
+    let mut registry = Registry::default();
+    let readers = [
+        PrivateKey::new().public_key(),
+        PrivateKey::new().public_key(),
+    ];
+    for node in readers {
+        registry.records.insert(
+            node,
+            registry::Record {
+                device: Some(registry::Device {
+                    user: PrivateKey::new().public_key(),
+                    kind: registry::Kind::Paired,
+                    profile: Some(Profile::Reader {
+                        scopes: ["lists".into()].into(),
+                    }),
+                    issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
+                    command: command_identity(node),
+                    enrolled: now()?,
+                }),
+                ..Default::default()
+            },
+        );
+    }
+    a.begin_revocation(readers[0], &registry)?;
+    a.rotate(&av)?;
+    a.authority.as_mut().ok_or("authority")?.rotation = None;
+    b.begin_revocation(readers[1], &registry)?;
+    b.rotate(&bv)?;
+    b.authority.as_mut().ok_or("authority")?.rotation = None;
+    let sibling_a = a.groups[&address].current().ok_or("epoch")?;
+    let sibling_b = b.groups[&address].current().ok_or("epoch")?;
+    assert_eq!(sibling_a.generation, 2);
+    assert_eq!(sibling_b.generation, 2);
+    assert_ne!(sibling_a, sibling_b);
+    let statements = b.revocations.clone();
+    a.learn_revocations(&statements)?;
+    b.learn_revocations(&a.revocations)?;
+    // Each issuer learns the other's keys and statements while partitioned from
+    // the resulting superseding secret, so both start generation 3.
+    let (a_before, b_before) = (a.clone(), b.clone());
+    for (from, source, to, target) in [(&a_before, &av, &mut b, &bv), (&b_before, &bv, &mut a, &av)]
+    {
+        for (name, epochs) in &from.keys {
+            for epoch in epochs {
+                to.hold(target, name, *epoch, &source.get(&key_role(name, *epoch))?)?;
+            }
+        }
+        to.epoch_statements.extend(from.epoch_statements.clone());
+        for epoch in &from.groups[&address].epochs {
+            target.put(
+                &secret_role(&partition.record.address, *epoch),
+                &source.get(&secret_role(&partition.record.address, *epoch))?,
+            )?;
+            to.groups.get_mut(&address).ok_or("group")?.hold(*epoch)?;
+            let role = secret_role(&partition.record.address, *epoch);
+            if let Some(ids) = from.epoch_statements.get(&role) {
+                to.epoch_statements.insert(role, ids.clone());
+            }
+        }
+    }
+    assert!(a.begin_exposure_rotation(&registry)?);
+    assert!(b.begin_exposure_rotation(&registry)?);
+    a.rotate(&av)?;
+    b.rotate(&bv)?;
+    for settings in [&mut a, &mut b] {
+        settings.authority.as_mut().ok_or("authority")?.rotation = None;
+    }
+    let superseding = [
+        a.groups[&address].current().ok_or("epoch")?,
+        b.groups[&address].current().ok_or("epoch")?,
+    ];
+    assert_ne!(superseding[0], superseding[1]);
+    for epoch in superseding {
+        assert_eq!(epoch.generation, 3);
+    }
+    // Every delivery is a real sealed renewal payload, including both current
+    // siblings. Ten exchange rounds must not create generation 4.
+    for round in 0..10 {
+        let (a_before, b_before) = (a.clone(), b.clone());
+        for (source, source_vault, target, target_vault, path) in [
+            (&a_before, &av, &mut b, &bv, root.path().join("b.json")),
+            (&b_before, &bv, &mut a, &av, root.path().join("a.json")),
+        ] {
+            let target_node = PrivateKey::from_bytes(&target_vault.get("node")?);
+            let issuer = PrivateKey::from_bytes(&source_vault.get("node")?).public_key();
+            let (request, secret) =
+                RenewRequest::sign(&target_node, issuer, target.credentials.clone(), now()?)?;
+            let reply = Renewal::from_bytes(&source.answer_epochs(
+                source_vault,
+                &request.to_bytes()?,
+                &registry,
+            )?)?;
+            let sealed = Sealed::parse(&reply.open(source.publisher, &request, &secret)?)?;
+            let keys = sealed
+                .keys
+                .iter()
+                .flat_map(|(name, epochs)| {
+                    epochs
+                        .iter()
+                        .map(move |(epoch, key)| Ok((name.clone(), *epoch, hex32(key)?)))
+                })
+                .collect::<Result<Vec<_>, Failure>>()?;
+            target.adopt(
+                &path,
+                target_vault,
+                &Renewed {
+                    revocations: reply.revocations,
+                    chain: target.credentials.clone(),
+                    keys,
+                    groups: sealed.groups,
+                    epoch_statements: sealed.epoch_statements,
+                    profile: None,
+                    issuers: Vec::new(),
+                },
+            )?;
+            assert!(!target.begin_exposure_rotation(&registry)?, "round {round}");
+            assert_eq!(
+                target.groups[&address].current(),
+                superseding.into_iter().max()
+            );
+        }
+    }
+    // A recorded custody device read neither the collection nor the group.
+    let nonreader = PrivateKey::new().public_key();
+    registry.records.insert(
+        nonreader,
+        registry::Record {
+            device: Some(registry::Device {
+                user: PrivateKey::new().public_key(),
+                kind: registry::Kind::Paired,
+                profile: Some(Profile::Custody {
+                    scopes: ["lists".into()].into(),
+                }),
+                issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
+                command: command_identity(nonreader),
+                enrolled: now()?,
+            }),
+            ..Default::default()
+        },
+    );
+    let before = a.groups[&address].epochs.clone();
+    let before_keys = a.keys.clone();
+    assert_eq!(b.keys, before_keys);
+    a.begin_revocation(nonreader, &registry)?;
+    a.rotate(&av)?;
+    a.authority.as_mut().ok_or("authority")?.rotation = None;
+    b.learn_revocations(&a.revocations)?;
+    assert!(!a.begin_exposure_rotation(&registry)?);
+    assert!(!b.begin_exposure_rotation(&registry)?);
+    assert_eq!(a.groups[&address].epochs, before);
+    assert_eq!(b.groups[&address].epochs, before);
+    assert_eq!(a.keys, before_keys);
+    assert_eq!(b.keys, before_keys);
     Ok(())
 }

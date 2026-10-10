@@ -82,14 +82,16 @@ pub(super) fn config<A: RowCommandApplication>(
         credentials: CredentialChain(vec![root, leaf]),
         keys: scopes
             .into_iter()
-            .map(|scope| KeyMaterial {
-                scope,
-                generation: 1,
-                key: if scope == invocation_scope {
-                    [11; 32]
-                } else {
-                    [12; 32]
-                },
+            .map(|scope| {
+                KeyMaterial::new(
+                    scope,
+                    1,
+                    if scope == invocation_scope {
+                        [11; 32]
+                    } else {
+                        [12; 32]
+                    },
+                )
             })
             .collect(),
     }

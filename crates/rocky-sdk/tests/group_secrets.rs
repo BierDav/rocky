@@ -142,11 +142,28 @@ impl Peer {
             .map(|table| {
                 (
                     table["table"].as_str().unwrap().to_owned(),
-                    table["epochs"].clone(),
+                    json!(
+                        table["epochs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|epoch| epoch["generation"].clone())
+                            .collect::<Vec<_>>()
+                    ),
                 )
             })
             .collect();
-        (status["epochs"].clone(), tables)
+        (
+            json!(
+                status["epochs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|epoch| epoch["generation"].clone())
+                    .collect::<Vec<_>>()
+            ),
+            tables,
+        )
     }
     /// Selector grants of whole-row `rights` on list `list` of `tables`.
     async fn grants(&self, list: &str, tables: &[&str], rights: &[&str]) -> Value {
@@ -228,7 +245,7 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
     let created = issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
         .await;
-    assert_eq!(created["epoch"], 1);
+    assert_eq!(created["epoch"]["generation"], 1);
     // Creating again is idempotent: the same secret and epoch.
     assert_eq!(
         issuer
@@ -291,7 +308,7 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
         .install("A", &envelopes[0]["envelope"])
         .await
         .unwrap();
-    assert_eq!(installed["epoch"], 1);
+    assert_eq!(installed["epoch"]["generation"], 1);
     let (secrets, tables) = reader.epochs("A").await;
     assert_eq!(secrets, json!([1]));
     assert!(uniform(&tables, json!([1])), "{tables:?}");
@@ -360,16 +377,16 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let created = issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("C")}))
         .await;
-    assert_eq!(created["epoch"], 1);
+    assert_eq!(created["epoch"]["generation"], 1);
 
     // Sharing refuses the revoked device and any epoch but the current.
     let refused = issuer.share("A", &[&removed_device]).await.unwrap_err();
     assert!(refused.contains("revoked"), "{refused}");
     let refused = issuer
-        .reply(json!({"type":"partition_share","group":"list","values":values("A"),"recipients":[remaining_device.node],"epoch":1}))
+        .reply(json!({"type":"partition_share","group":"list","values":values("A"),"recipients":[remaining_device.node],"epoch":created["epoch"]}))
         .await
         .unwrap_err();
-    assert!(refused.contains("current epoch 2"), "{refused}");
+    assert!(refused.contains("current epoch"), "{refused}");
     // Its user is revoked too: a fresh node key under it gets no grant.
     let (_, fresh) = prepare(&root.path().join("fresh"));
     let renamed = DeviceKeys {
@@ -384,7 +401,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
 
     // One new envelope per remaining reader delivers the new epoch.
     let shared = issuer.share("A", &[&remaining_device]).await.unwrap();
-    assert_eq!(shared["epoch"], 2);
+    assert_eq!(shared["epoch"]["generation"], 2);
     let envelope = &shared["envelopes"][0]["envelope"];
     assert!(removed.install("A", envelope).await.is_err());
     remaining.install("A", envelope).await.unwrap();

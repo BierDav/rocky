@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -56,6 +56,8 @@ const SKEW: u64 = 300;
 /// Prefixes a pseudonym request a member sends an issuer over the renewal
 /// protocol; the answer is the assigned chain.
 pub(crate) const AUTHOR: &[u8] = b"rocky.sdk.author.v1\n";
+type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
+pub(crate) const EPOCHS: &[u8] = b"rocky.sdk.epochs.v1\n";
 pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
 const TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -108,9 +110,11 @@ pub struct Settings {
     /// What this device was enrolled as.
     pub profile: Profile,
     /// The key epochs held of each collection this device reads, ascending.
-    pub keys: BTreeMap<String, Vec<u64>>,
+    pub keys: BTreeMap<String, Vec<rocky_core::KeyEpoch>>,
     /// Group partitions known here, by group address.
     pub groups: BTreeMap<String, GroupRecord>,
+    /// Revocation statement IDs held when each epoch was sealed, by secret role.
+    pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// Present on a device that holds the publisher key.
     pub authority: Option<Issuing>,
     /// The issuers that renew this device, by node key. Their routes are
@@ -210,6 +214,7 @@ pub struct Claim {
 pub struct Rotation {
     pub node: PublicKey,
     pub statement: Revocation,
+    pub statements: Vec<Commitment>,
     pub keys: BTreeMap<String, u64>,
     pub groups: BTreeMap<String, u64>,
 }
@@ -353,6 +358,8 @@ struct Enrollment {
     capability: SignedCapability,
     profile: Profile,
     keys: Keys,
+    groups: Vec<GroupDelivery>,
+    epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// The enrolling issuer's node key, which sync sessions pin.
     issuer: PublicKey,
     ttl: u64,
@@ -371,15 +378,23 @@ struct Enrollment {
     issuers: Vec<String>,
 }
 /// Reader keys in transit: collection, key epoch, hexadecimal key.
-type Keys = BTreeMap<String, BTreeMap<u64, String>>;
+type Keys = BTreeMap<String, Vec<(rocky_core::KeyEpoch, String)>>;
 /// What a renewal seals to its device: reader keys and the contacts of the
 /// other issuers the answering issuer reaches.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Sealed {
     keys: Keys,
+    groups: Vec<GroupDelivery>,
+    epoch_statements: BTreeMap<String, Vec<Commitment>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     issuers: Vec<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EpochRequest {
+    pub request: Vec<u8>,
+    pub revocations: RevocationSet,
 }
 impl Sealed {
     fn parse(bytes: &[u8]) -> Result<Self, Failure> {
@@ -466,7 +481,8 @@ pub struct Supplied {
     /// device then delegates to its own node.
     pub credentials: Credentials,
     /// Collection, key epoch and key of every collection the grants read.
-    pub keys: Vec<(String, u64, [u8; 32])>,
+    pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
+    pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
     /// Contacts of the issuers that renew this device.
     pub issuers: Vec<String>,
 }
@@ -496,7 +512,9 @@ impl Terms {
 pub struct Renewed {
     pub revocations: RevocationSet,
     pub chain: CredentialChain,
-    pub keys: Vec<(String, u64, [u8; 32])>,
+    pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
+    pub epoch_statements: BTreeMap<String, Vec<Commitment>>,
+    pub groups: Vec<GroupDelivery>,
     /// What the grants amount to when they changed, as supplied ones may.
     pub profile: Option<Profile>,
     /// Contacts of further issuers the answering issuer reaches.
@@ -519,12 +537,12 @@ fn hex32(text: &str) -> Result<[u8; 32], Failure> {
 }
 /// The key provider role of a collection's reader key at `epoch`. Epoch 1
 /// keeps the name it had before key epochs.
-pub(crate) fn key_role(collection: &str, epoch: u64) -> String {
-    if epoch == 1 {
-        format!("reader.{collection}")
-    } else {
-        format!("reader.{collection}.{epoch}")
-    }
+pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String {
+    format!(
+        "reader.{collection}.{}.{}",
+        epoch.generation,
+        HEXLOWER.encode(&epoch.secret_hash)
+    )
 }
 /// The key provider role of this device's pseudonym key in `collection`.
 fn pseudonym_role(collection: &str) -> String {
@@ -704,6 +722,23 @@ impl Settings {
                 .any(|node| !settings.issuers.contains(node))
         {
             return Err("identity holds too many peers".into());
+        }
+        for epochs in settings
+            .keys
+            .values()
+            .chain(settings.groups.values().map(|group| &group.epochs))
+        {
+            if epochs.len() > MAX_EPOCHS
+                || epochs.iter().any(|epoch| !epoch.valid())
+                || epochs.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err("invalid retained key epochs".into());
+            }
+        }
+        for ids in settings.epoch_statements.values() {
+            if ids.len() > MAX_LIVE_REVOCATIONS || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err("invalid epoch revocation IDs".into());
+            }
         }
         Ok(settings)
     }
@@ -928,11 +963,11 @@ impl Settings {
         let mut keys = Vec::new();
         for (name, scope) in domain.scopes() {
             for epoch in self.keys.get(name).into_iter().flatten() {
-                keys.push(KeyMaterial {
-                    scope,
-                    generation: *epoch,
-                    key: vault.get(&key_role(name, *epoch))?,
-                });
+                let key = vault.get(&key_role(name, *epoch))?;
+                if rocky_core::KeyEpoch::new(epoch.generation, &key) != *epoch {
+                    return Err("reader key epoch identity mismatch".into());
+                }
+                keys.push(KeyMaterial::at(scope, *epoch, key));
             }
         }
         Ok(SecureConfig {
@@ -959,11 +994,28 @@ impl Settings {
         .collect();
         for (name, epochs) in &self.keys {
             roles.extend(epochs.iter().map(|epoch| key_role(name, *epoch)));
+            roles.extend(
+                epochs
+                    .iter()
+                    .map(|epoch| format!("rotation.reader.{name}.{}", epoch.generation)),
+            );
+            roles.push(format!("generation.reader.{name}"));
         }
         if let Ok(domain) = self.domain() {
             roles.extend(domain.scopes().map(|(name, _)| pseudonym_role(name)));
         }
         for record in self.groups.values() {
+            roles.push(format!(
+                "prepared.partition.{}",
+                crate::groups::record_key(&record.address)
+            ));
+            roles.extend(record.epochs.iter().map(|epoch| {
+                format!(
+                    "rotation.partition.{}.{}",
+                    crate::groups::record_key(&record.address),
+                    epoch.generation
+                )
+            }));
             roles.extend(
                 record
                     .epochs
@@ -977,12 +1029,15 @@ impl Settings {
                 rotation
                     .keys
                     .iter()
-                    .map(|(name, epoch)| key_role(name, *epoch)),
+                    .map(|(name, epoch)| format!("rotation.reader.{name}.{epoch}")),
             );
             roles.extend(rotation.groups.iter().filter_map(|(address, epoch)| {
-                self.groups
-                    .get(address)
-                    .map(|record| secret_role(&record.address, *epoch))
+                self.groups.get(address).map(|record| {
+                    format!(
+                        "rotation.partition.{}.{epoch}",
+                        crate::groups::record_key(&record.address)
+                    )
+                })
             }));
         }
         roles
@@ -1027,8 +1082,10 @@ impl Settings {
         // The registry's key is made like any collection's.
         let mut keys = BTreeMap::new();
         for (name, _) in bound.scopes() {
-            vault.create(&key_role(name, 1))?;
-            keys.insert(name.to_owned(), vec![1]);
+            let key = random::<32>();
+            let epoch = rocky_core::KeyEpoch::new(1, &key);
+            vault.put(&key_role(name, epoch), &key)?;
+            keys.insert(name.to_owned(), vec![epoch]);
         }
         let manifest = SignedManifest::sign(&bound.manifest(), &publisher)?;
         let mut settings = Self {
@@ -1056,6 +1113,7 @@ impl Settings {
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
+            epoch_statements: BTreeMap::new(),
         };
         let grants = grants_of(&Profile::Issuer, &bound)?;
         let capability = settings.issue(
@@ -1129,16 +1187,164 @@ impl Settings {
             if !reads(grants, scope) {
                 continue;
             }
-            if let Some(epoch) = self.keys.get(name).and_then(|epochs| epochs.iter().max()) {
-                keys.entry(name.to_owned()).or_default().insert(
-                    *epoch,
-                    HEXLOWER.encode(&vault.get(&key_role(name, *epoch))?),
-                );
+            if let Some(epochs) = self.keys.get(name) {
+                let generation = epochs.iter().map(|epoch| epoch.generation).max();
+                for epoch in epochs
+                    .iter()
+                    .filter(|epoch| Some(epoch.generation) == generation)
+                {
+                    keys.entry(name.to_owned()).or_default().push((
+                        *epoch,
+                        HEXLOWER.encode(&vault.get(&key_role(name, *epoch))?),
+                    ));
+                }
             }
         }
         Ok(keys)
     }
 
+    fn groups_for(
+        &self,
+        vault: &Vault,
+        node: PublicKey,
+        capability: &rocky_credentials::Capability,
+        all: bool,
+    ) -> Result<Vec<GroupDelivery>, Failure> {
+        let domain = self.domain()?;
+        let grants = capability.extended()?.partitions;
+        let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+        let mut deliveries = Vec::new();
+        for partition in self.partitions(&domain)? {
+            let Some(current) = partition.record.current() else {
+                continue;
+            };
+            if !partition.members.iter().all(|member| {
+                grants.iter().any(|grant| {
+                    grant
+                        .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|grant| {
+                            grant.rows == RowSelection::All && grant.rights.contains(&Right::Read)
+                        })
+                })
+            }) {
+                continue;
+            }
+            let mut record = partition.record.clone();
+            if !all {
+                record
+                    .epochs
+                    .retain(|epoch| epoch.generation == current.generation);
+            }
+            let mut envelopes = Vec::new();
+            for epoch in &record.epochs {
+                let role = secret_role(&record.address, *epoch);
+                envelopes.push(
+                    rocky_credentials::GroupSecretEnvelope::seal_recorded(
+                        &publisher,
+                        domain.manifest().hash(),
+                        record.address,
+                        epoch.generation,
+                        vault.get(&role)?,
+                        node,
+                        self.epoch_statements
+                            .get(&role)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )?
+                    .to_bytes()?,
+                );
+            }
+            deliveries.push((record, envelopes));
+        }
+        Ok(deliveries)
+    }
+    fn adopt_groups(
+        &mut self,
+        vault: &Vault,
+        deliveries: &[(GroupRecord, Vec<Vec<u8>>)],
+    ) -> Result<(), Failure> {
+        let domain = self.domain()?;
+        let node = PrivateKey::from_bytes(&vault.get("node")?);
+        for (offered, envelopes) in deliveries {
+            let partition = GroupPartition::of(&domain, offered)?;
+            if partition
+                .members
+                .iter()
+                .any(|member| !self.reads_partition(member))
+            {
+                return Err("group renewal requires read permission on every member".into());
+            }
+            let address = crate::groups::record_key(&offered.address);
+            let mut record = self
+                .groups
+                .get(&address)
+                .cloned()
+                .unwrap_or_else(|| GroupRecord {
+                    epochs: Vec::new(),
+                    ..offered.clone()
+                });
+            for bytes in envelopes {
+                let envelope = rocky_credentials::GroupSecretEnvelope::from_bytes(bytes)?;
+                let epoch = envelope.epoch();
+                if !offered.epochs.contains(&epoch) {
+                    return Err("group renewal epoch mismatch".into());
+                }
+                let secret = envelope.open(
+                    &node,
+                    self.publisher,
+                    domain.manifest().hash(),
+                    offered.address,
+                    epoch,
+                )?;
+                record.admit(epoch)?;
+                let role = secret_role(&record.address, epoch);
+                if vault.find(&role)?.is_some_and(|held| held != secret) {
+                    return Err("group secret differs from retained epoch".into());
+                }
+                vault.put(&role, &secret)?;
+                record.hold(epoch)?;
+                if self
+                    .epoch_statements
+                    .get(&role)
+                    .is_some_and(|held| held != envelope.statements())
+                {
+                    return Err("group epoch revocation IDs differ from retained metadata".into());
+                }
+                self.epoch_statements
+                    .insert(role, envelope.statements().to_vec());
+            }
+            self.groups.insert(address, record);
+        }
+        Ok(())
+    }
+    fn statements_for(&self, keys: &Keys) -> BTreeMap<String, Vec<Commitment>> {
+        keys.iter()
+            .flat_map(|(name, epochs)| epochs.iter().map(move |(epoch, _)| key_role(name, *epoch)))
+            .map(|role| {
+                let ids = self
+                    .epoch_statements
+                    .get(&role)
+                    .cloned()
+                    .unwrap_or_default();
+                (role, ids)
+            })
+            .collect()
+    }
+    fn statements_for_keys(&self, keys: &[NewKey]) -> BTreeMap<String, Vec<Commitment>> {
+        keys.iter()
+            .map(|(name, epoch, _)| {
+                let role = key_role(name, *epoch);
+                let ids = self
+                    .epoch_statements
+                    .get(&role)
+                    .cloned()
+                    .unwrap_or_default();
+                (role, ids)
+            })
+            .collect()
+    }
     /// Opens a new invitation for `profile`, replacing an earlier one.
     pub async fn invite(
         &mut self,
@@ -1262,6 +1468,8 @@ impl Settings {
             registry.get(&request.node),
         )?;
         let enrollment = Enrollment {
+            groups: self.groups_for(vault, request.node, &issued.capability, false)?,
+            epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
             mesh: self.mesh,
             domain: self.domain,
             manifest: self.manifest.clone(),
@@ -1368,6 +1576,7 @@ impl Settings {
             known,
         )?;
         let supplied = Supplied {
+            epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
             domain: self.domain,
             credentials: Credentials {
@@ -1465,6 +1674,7 @@ impl Settings {
             )?;
         }
         let supplied = Supplied {
+            epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
             domain: self.domain,
             credentials: Credentials {
@@ -1525,7 +1735,7 @@ impl Settings {
                 .scopes()
                 .find(|(collection, _)| collection == name)
                 .map(|(_, scope)| scope);
-            if !scope.is_some_and(|scope| reads(&grants, scope)) || *epoch == 0 {
+            if !scope.is_some_and(|scope| reads(&grants, scope)) || !epoch.valid() {
                 return Err(
                     "a supplied key is for a collection the credentials do not read".into(),
                 );
@@ -1543,6 +1753,8 @@ impl Settings {
         Ok(Renewed {
             revocations: credentials.revocations.clone(),
             chain,
+            epoch_statements: supplied.epoch_statements.clone(),
+            groups: Vec::new(),
             keys,
             profile: Some(profile_of(&grants, &domain)),
             issuers: Vec::new(),
@@ -2157,6 +2369,7 @@ impl Settings {
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
+            epoch_statements: BTreeMap::new(),
         };
         let domain = settings.domain()?;
         if credentials.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
@@ -2171,6 +2384,7 @@ impl Settings {
                 settings.credentials.0.push(last);
             }
         }
+        settings.epoch_statements = supplied.epoch_statements.clone();
         settings.learn_revocations(&credentials.revocations)?;
         let (grants, _) = settings.credentials.verify_selectors(
             settings.publisher,
@@ -2195,7 +2409,7 @@ impl Settings {
             .filter(|(_, scope)| reads(&grants, *scope))
             .collect();
         for (name, epoch, key) in &supplied.keys {
-            if !readable.contains_key(name.as_str()) || *epoch == 0 {
+            if !readable.contains_key(name.as_str()) || !epoch.valid() {
                 return Err(
                     "a supplied key is for a collection the credentials do not read".into(),
                 );
@@ -2223,11 +2437,17 @@ impl Settings {
         &mut self,
         vault: &Vault,
         name: &str,
-        epoch: u64,
+        epoch: rocky_core::KeyEpoch,
         key: &[u8; 32],
     ) -> Result<bool, Failure> {
+        if !epoch.valid() || rocky_core::KeyEpoch::new(epoch.generation, key) != epoch {
+            return Err("reader key epoch identity mismatch".into());
+        }
         let epochs = self.keys.entry(name.to_owned()).or_default();
         if epochs.contains(&epoch) {
+            if vault.get(&key_role(name, epoch))? != *key {
+                return Err("reader key differs from retained epoch".into());
+            }
             return Ok(false);
         }
         if epochs.len() >= MAX_EPOCHS {
@@ -2326,11 +2546,13 @@ impl Joining {
             author_high_water: 0,
             author_issuer: None,
             groups: BTreeMap::new(),
+            epoch_statements: BTreeMap::new(),
         };
         let domain = settings.domain()?;
         if settings.manifest()?.verify(settings.publisher)?.hash() != domain.manifest().hash() {
             return Err("the domain's manifest differs from this application schema".into());
         }
+        settings.epoch_statements = enrollment.epoch_statements.clone();
         settings.learn_revocations(&enrollment.revocations)?;
         // The device receives what the invitation said, no more and no less.
         let grants = grants_of(&invite.profile, &domain)?;
@@ -2373,6 +2595,7 @@ impl Joining {
             }
             settings.minting = enrollment.authors.map(Minting::fresh);
         }
+        settings.adopt_groups(&vault, &enrollment.groups)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
         std::fs::remove_file(Intent::path(path, false))?;
@@ -2380,6 +2603,160 @@ impl Joining {
     }
 }
 impl Settings {
+    pub(crate) fn answer_epochs(
+        &self,
+        vault: &Vault,
+        bytes: &[u8],
+        registry: &Registry,
+    ) -> Result<Vec<u8>, Failure> {
+        if !self.issuer() {
+            return Err("only an issuer delivers epochs".into());
+        }
+        let request = RenewRequest::from_bytes(bytes)?;
+        if self.revoked_device(&request.node, registry) {
+            return Err("device was revoked".into());
+        }
+        let domain = self.domain()?;
+        let prior = request.verify(
+            PrivateKey::from_bytes(&vault.get("node")?).public_key(),
+            self.publisher,
+            domain.manifest().hash(),
+            (now()?, SKEW),
+        )?;
+        let all = reads(&prior.grants, domain.registry());
+        let mut keys = Keys::new();
+        for (name, scope) in domain.scopes() {
+            if reads(&prior.grants, scope) {
+                let epochs = self.keys.get(name).ok_or("missing epoch collection")?;
+                let generation = epochs
+                    .iter()
+                    .max()
+                    .ok_or("empty epoch collection")?
+                    .generation;
+                for epoch in epochs
+                    .iter()
+                    .filter(|epoch| all || epoch.generation == generation)
+                {
+                    keys.entry(name.to_owned()).or_default().push((
+                        *epoch,
+                        HEXLOWER.encode(&vault.get(&key_role(name, *epoch))?),
+                    ));
+                }
+            }
+        }
+        let sealed = Sealed {
+            epoch_statements: self.statements_for(&keys),
+            keys,
+            groups: self.groups_for(vault, request.node, prior, all)?,
+            issuers: self.issuer_contacts(&[request.node])?,
+        };
+        let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+        Ok(Renewal::seal_current(
+            &Authority {
+                publisher: &publisher,
+                manifest: domain.manifest().hash(),
+            },
+            &request,
+            self.revocations.clone(),
+            now()?,
+            &serde_json::to_vec(&sealed)?,
+        )?
+        .to_bytes()?)
+    }
+    pub(crate) async fn request_epochs(
+        &self,
+        vault: &Vault,
+        transport: &dyn Transport,
+        first: Option<PublicKey>,
+    ) -> Result<Renewed, Failure> {
+        let node = PrivateKey::from_bytes(&vault.get("node")?);
+        let mut failure: Failure = ServiceError::NoRoute {
+            peer: "an issuer",
+            network: transport.kind().into(),
+        }
+        .into();
+        for issuer in self
+            .issuers
+            .iter()
+            .filter(|issuer| first.is_none_or(|first| **issuer == first))
+        {
+            let addresses = self
+                .enrollment_routes
+                .get(issuer)
+                .or_else(|| self.peers.get(issuer))
+                .map(|contact| contact.addresses(transport.kind()))
+                .unwrap_or_default();
+            if addresses.is_empty() {
+                continue;
+            }
+            let (request, secret) =
+                RenewRequest::sign(&node, *issuer, self.credentials.clone(), now()?)?;
+            let message = [
+                EPOCHS,
+                &serde_json::to_vec(&EpochRequest {
+                    request: request.to_bytes()?,
+                    revocations: self.revocations.clone(),
+                })?,
+            ]
+            .concat();
+            let bytes = match exchange(transport, &addresses, Protocol::Renew, &message).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    failure = error;
+                    continue;
+                }
+            };
+            let reply = Renewal::from_bytes(&bytes)?;
+            let payload = reply.open(self.publisher, &request, &secret)?;
+            if reply.capability.id()?
+                != self
+                    .credentials
+                    .0
+                    .first()
+                    .ok_or("empty epoch request chain")?
+                    .id()?
+            {
+                return Err("epoch delivery changed credentials".into());
+            }
+            let Sealed {
+                keys: delivered,
+                groups,
+                epoch_statements,
+                issuers,
+            } = Sealed::parse(&payload)?;
+            let mut keys = Vec::new();
+            let domain = self.domain()?;
+            for (name, epochs) in delivered {
+                let scope = domain
+                    .scopes()
+                    .find(|(collection, _)| *collection == name)
+                    .map(|(_, scope)| scope)
+                    .ok_or("unknown epoch collection")?;
+                if !reads(self.grants(), scope) {
+                    return Err("epoch delivery exceeds read grants".into());
+                }
+                for (epoch, key) in epochs {
+                    if !self
+                        .keys
+                        .get(&name)
+                        .is_some_and(|held| held.contains(&epoch))
+                    {
+                        keys.push((name.clone(), epoch, hex32(&key)?));
+                    }
+                }
+            }
+            return Ok(Renewed {
+                revocations: reply.revocations,
+                chain: self.credentials.clone(),
+                keys,
+                groups,
+                epoch_statements,
+                profile: None,
+                issuers,
+            });
+        }
+        Err(failure)
+    }
     /// Renews this device's credentials. A member asks its issuers in
     /// turn, `first` before the others. An issuer signs its own; with
     /// `learn` it first asks the other issuers, which is how it hears of
@@ -2403,6 +2780,8 @@ impl Settings {
                 revocations: self.revocations.clone(),
                 chain: self.renew_locally(vault)?,
                 keys: Vec::new(),
+                epoch_statements: BTreeMap::new(),
+                groups: Vec::new(),
                 profile: None,
                 issuers: Vec::new(),
             });
@@ -2479,6 +2858,8 @@ impl Settings {
         let chain = next.chain(renewal.capability, &user, &node, &domain)?;
         let Sealed {
             keys: received,
+            groups,
+            epoch_statements,
             issuers,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
@@ -2488,7 +2869,7 @@ impl Settings {
             }
             let held = self.keys.get(name);
             for (epoch, key) in received.get(name).into_iter().flatten() {
-                if *epoch != 0 && !held.is_some_and(|held| held.contains(epoch)) {
+                if epoch.valid() && !held.is_some_and(|held| held.contains(epoch)) {
                     keys.push((name.to_owned(), *epoch, hex32(key)?));
                 }
             }
@@ -2496,6 +2877,8 @@ impl Settings {
         Ok(Renewed {
             revocations: renewal.revocations,
             chain,
+            groups,
+            epoch_statements,
             keys,
             profile: None,
             issuers,
@@ -2549,6 +2932,8 @@ impl Settings {
         let chain = next.chain(renewal.capability, &user, &node, &domain)?;
         let Sealed {
             keys: received,
+            groups,
+            epoch_statements,
             issuers,
         } = Sealed::parse(&sealed)?;
         let mut keys = Vec::new();
@@ -2558,7 +2943,7 @@ impl Settings {
             }
             let held = self.keys.get(name);
             for (epoch, key) in received.get(name).into_iter().flatten() {
-                if *epoch != 0 && !held.is_some_and(|held| held.contains(epoch)) {
+                if epoch.valid() && !held.is_some_and(|held| held.contains(epoch)) {
                     keys.push((name.to_owned(), *epoch, hex32(key)?));
                 }
             }
@@ -2566,6 +2951,8 @@ impl Settings {
         Ok(Renewed {
             revocations: renewal.revocations,
             chain,
+            groups,
+            epoch_statements,
             keys,
             profile: None,
             issuers,
@@ -2578,7 +2965,7 @@ impl Settings {
         path: &Path,
         vault: &Vault,
         renewed: &Renewed,
-    ) -> Result<Vec<(String, u64, [u8; 32])>, Failure> {
+    ) -> Result<Vec<(String, rocky_core::KeyEpoch, [u8; 32])>, Failure> {
         let mut draft = self.clone();
         let mut held = Vec::new();
         for (name, epoch, key) in &renewed.keys {
@@ -2586,8 +2973,22 @@ impl Settings {
                 held.push((name.clone(), *epoch, *key));
             }
         }
+        for (role, ids) in &renewed.epoch_statements {
+            if ids.len() > MAX_LIVE_REVOCATIONS || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err("invalid epoch revocation IDs".into());
+            }
+            if draft
+                .epoch_statements
+                .get(role)
+                .is_some_and(|held| held != ids)
+            {
+                return Err("epoch revocation IDs differ from retained metadata".into());
+            }
+            draft.epoch_statements.insert(role.clone(), ids.clone());
+        }
         draft.learn_revocations(&renewed.revocations)?;
         draft.credentials = renewed.chain.clone();
+        draft.adopt_groups(vault, &renewed.groups)?;
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
         // Changing or removing a range must never rewind its allocator.
@@ -2601,7 +3002,9 @@ impl Settings {
                 next: range.first.max(draft.author_high_water),
             });
         }
-        draft.save(path)?;
+        if serde_json::to_vec(&draft)? != serde_json::to_vec(self)? {
+            draft.save(path)?;
+        }
         *self = draft;
         Ok(held)
     }
@@ -2675,6 +3078,8 @@ impl Settings {
             manifest: current,
         };
         let sealed = Sealed {
+            groups: self.groups_for(vault, request.node, prior, false)?,
+            epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &prior.grants)?),
             keys: self.keys_for(vault, &domain, &prior.grants)?,
             issuers: self.issuer_contacts(&[request.node])?,
         };
@@ -2841,10 +3246,16 @@ impl Settings {
             if epochs.len() >= MAX_EPOCHS {
                 return Err("key epoch capacity reached".into());
             }
-            let held = epochs.iter().max().copied().unwrap_or(0);
+            let held = epochs
+                .iter()
+                .map(|epoch| epoch.generation)
+                .max()
+                .unwrap_or(0);
             keys.insert(
                 name.clone(),
-                held.checked_add(1).ok_or("key epoch overflow")?,
+                held.checked_add(1)
+                    .filter(|generation| *generation <= i64::MAX as u64)
+                    .ok_or("key epoch overflow")?,
             );
         }
         // The group secret is the unit: one new secret per group partition
@@ -2866,8 +3277,14 @@ impl Settings {
                     .as_ref()
                     .is_some_and(|record| record.selects(&partition));
             if let (true, Some(held)) = (read, partition.record.current()) {
-                let target = held.checked_add(1).ok_or("group secret epoch overflow")?;
-                partition.record.admit(target)?;
+                let target = held
+                    .generation
+                    .checked_add(1)
+                    .filter(|generation| *generation <= i64::MAX as u64)
+                    .ok_or("group secret epoch overflow")?;
+                if partition.record.epochs.len() >= crate::groups::MAX_GROUP_EPOCHS {
+                    return Err("group secret epoch capacity reached".into());
+                }
                 groups.insert(crate::groups::record_key(&partition.record.address), target);
             }
         }
@@ -2879,11 +3296,138 @@ impl Settings {
         }
         self.issuing("revokes devices")?.rotation = Some(Rotation {
             node,
+            statements: {
+                let mut ids = self
+                    .revocations
+                    .statements()
+                    .map(|signed| signed.statement.id())
+                    .collect::<Result<Vec<_>, _>>()?;
+                ids.push(statement.id()?);
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            },
             statement,
             keys,
             groups,
         });
         Ok(())
+    }
+    /// Saves a superseding generation only for uncovered revocations of readers.
+    pub(crate) fn begin_exposure_rotation(&mut self, registry: &Registry) -> Result<bool, Failure> {
+        if !self.issuer()
+            || self
+                .authority
+                .as_ref()
+                .is_some_and(|a| a.rotation.is_some())
+        {
+            return Ok(false);
+        }
+        let domain = self.domain()?;
+        let mut keys = BTreeMap::new();
+        let mut groups = BTreeMap::new();
+        let mut trigger = None;
+        for signed in self.revocations.statements() {
+            let id = signed.statement.id()?;
+            let records: Vec<_> = signed
+                .statement
+                .nodes
+                .iter()
+                .map(|node| {
+                    registry
+                        .get(node)
+                        .filter(|record| record.device.is_some() || !record.grants.is_empty())
+                        .map(Revoking::of)
+                })
+                .collect();
+            for (name, epochs) in &self.keys {
+                let Some(current) = epochs.iter().max() else {
+                    continue;
+                };
+                let covered = self
+                    .epoch_statements
+                    .get(&key_role(name, *current))
+                    .is_some_and(|ids| ids.contains(&id));
+                let read = records.iter().any(|record| {
+                    record.as_ref().is_none_or(|record| {
+                        record
+                            .profile
+                            .as_ref()
+                            .is_some_and(|profile| profile.reads(name))
+                    })
+                });
+                if !covered && read {
+                    if epochs.len() >= MAX_EPOCHS {
+                        return Err("key epoch capacity reached".into());
+                    }
+                    keys.insert(
+                        name.clone(),
+                        current
+                            .generation
+                            .checked_add(1)
+                            .filter(|generation| *generation <= i64::MAX as u64)
+                            .ok_or("key epoch overflow")?,
+                    );
+                    trigger = Some(signed.statement.clone());
+                }
+            }
+            for partition in self.partitions(&domain)? {
+                let Some(current) = partition.record.current() else {
+                    continue;
+                };
+                let covered = self
+                    .epoch_statements
+                    .get(&secret_role(&partition.record.address, current))
+                    .is_some_and(|ids| ids.contains(&id));
+                let read = records.iter().any(|record| {
+                    record.as_ref().is_none_or(|record| {
+                        record.profile.as_ref().is_some_and(|profile| {
+                            partition
+                                .members
+                                .iter()
+                                .any(|member| profile.reads(&member.table))
+                        }) || record.selects(&partition)
+                    })
+                });
+                if !covered && read {
+                    if partition.record.epochs.len() >= crate::groups::MAX_GROUP_EPOCHS {
+                        return Err("group secret epoch capacity reached".into());
+                    }
+                    groups.insert(
+                        crate::groups::record_key(&partition.record.address),
+                        current
+                            .generation
+                            .checked_add(1)
+                            .filter(|generation| *generation <= i64::MAX as u64)
+                            .ok_or("group epoch overflow")?,
+                    );
+                    trigger = Some(signed.statement.clone());
+                }
+            }
+        }
+        let Some(statement) = trigger else {
+            return Ok(false);
+        };
+        let node = statement
+            .nodes
+            .iter()
+            .next()
+            .copied()
+            .ok_or("rotation statement names no device")?;
+        let mut statements = self
+            .revocations
+            .statements()
+            .map(|signed| signed.statement.id())
+            .collect::<Result<Vec<_>, _>>()?;
+        statements.sort_unstable();
+        self.issuing("rotates exposed scopes")?.rotation = Some(Rotation {
+            node,
+            statement,
+            statements,
+            keys,
+            groups,
+        });
+        Ok(true)
     }
     /// Prepares a begun revocation: a fresh key epoch for every collection
     /// and group partition it names, the signed statement joins the set and
@@ -2896,6 +3440,7 @@ impl Settings {
         let Some(Rotation {
             node,
             statement,
+            statements: ids,
             keys: targets,
             groups,
         }) = self
@@ -2910,11 +3455,15 @@ impl Settings {
         for (name, epoch) in targets {
             // The intent was saved first: a key missing here was never
             // used, so making it is not replacing one.
-            let role = key_role(&name, epoch);
+            let role = format!("rotation.reader.{name}.{epoch}");
             let key = match vault.find(&role)? {
                 Some(key) => key,
                 None => vault.create(&role)?,
             };
+            let epoch = rocky_core::KeyEpoch::new(epoch, &key);
+            vault.put(&key_role(&name, epoch), &key)?;
+            self.epoch_statements
+                .insert(key_role(&name, epoch), ids.clone());
             let epochs = self.keys.entry(name.clone()).or_default();
             if !epochs.contains(&epoch) {
                 epochs.push(epoch);
@@ -2929,21 +3478,32 @@ impl Settings {
                 .get(&address)
                 .cloned()
                 .ok_or("a rotated group partition is unknown")?;
-            let role = secret_role(&record.address, epoch);
-            if vault.find(&role)?.is_none() {
-                vault.create(&role)?;
-            }
+            let role = format!(
+                "rotation.partition.{}.{epoch}",
+                crate::groups::record_key(&record.address)
+            );
+            let secret = match vault.find(&role)? {
+                Some(secret) => secret,
+                None => vault.create(&role)?,
+            };
+            let epoch = rocky_core::KeyEpoch::new(epoch, &secret);
+            vault.put(&secret_role(&record.address, epoch), &secret)?;
+            self.epoch_statements
+                .insert(secret_role(&record.address, epoch), ids.clone());
             record.hold(epoch)?;
             self.groups.insert(address, record);
             fault::check(fault::Stage::Key)?;
         }
         let domain = self.domain()?;
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-        let signed = Authority {
-            publisher: &publisher,
-            manifest: domain.manifest().hash(),
-        }
-        .revoke(statement, &PrivateKey::from_bytes(&vault.get("node")?))?;
+        let signed = match self.revocations.get(&statement.id()?) {
+            Some(held) => held.clone(),
+            None => Authority {
+                publisher: &publisher,
+                manifest: domain.manifest().hash(),
+            }
+            .revoke(statement, &PrivateKey::from_bytes(&vault.get("node")?))?,
+        };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;
         self.credentials = self.renew_locally(vault)?;
@@ -2969,7 +3529,7 @@ impl Settings {
 }
 
 /// A key `rotate` made: collection, key epoch and key.
-pub type NewKey = (String, u64, [u8; 32]);
+pub type NewKey = (String, rocky_core::KeyEpoch, [u8; 32]);
 
 /// Deterministic interruptions of `rotate`, for its fault sweep.
 pub(crate) mod fault {
@@ -2978,6 +3538,7 @@ pub(crate) mod fault {
     pub enum Stage {
         Begun,
         Key,
+        Table,
         Signed,
         Renewed,
         Tombstone,

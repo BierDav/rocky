@@ -11,6 +11,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -48,7 +50,7 @@ private fun StatusCard(state: SyncState, now: Long, onOnline: (Boolean) -> Unit,
                 Spacer(Modifier.weight(1f))
                 Text("Online", style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.width(8.dp))
-                Switch(online, onOnline)
+                Switch(online, onOnline, Modifier.semantics { contentDescription = "Online" })
             }
             Fact("State", state.readiness?.state?.name?.lowercase() ?: "…")
             Fact("Last sync", "${ago(connection.atEpochMillis, now)} · ${connection.peers} peer${if (connection.peers == 1) "" else "s"} reached")

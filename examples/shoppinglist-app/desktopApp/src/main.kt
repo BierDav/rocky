@@ -31,7 +31,7 @@ fun main(args: Array<String>) {
     val name = runCatching { InetAddress.getLocalHost().hostName.substringBefore('.') }.getOrDefault("Desktop")
     val graph = ShoppingGraph(
         ShoppingPlatform(
-            directory,
+            directory.absolutePath,
             name,
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
             commands = ::publicCoordination,

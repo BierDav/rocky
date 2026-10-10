@@ -35,6 +35,26 @@ val runtime = tasks.register<RockyRuntime>("rockyRuntime") {
     sources.from(RUST_SOURCES.map { File(rootDir, "../../../$it") })
 }
 
+/** Records provenance inside the AAR, alongside the binary it describes. */
+abstract class RuntimeProvenance : DefaultTask() {
+    @get:Input abstract val digest: Property<String>
+
+    @get:OutputDirectory abstract val metadata: DirectoryProperty
+
+    @TaskAction
+    fun write() {
+        metadata.get().asFile.resolve("rocky-runtime-rust-sources.txt").apply {
+            parentFile.mkdirs()
+            writeText(digest.get() + "\n")
+        }
+    }
+}
+
+val provenance = tasks.register<RuntimeProvenance>("runtimeProvenance") {
+    digest.set(providers.provider { rustSourcesDigest(repository.toPath()) })
+    metadata.set(layout.buildDirectory.dir("runtime-provenance"))
+}
+
 android {
     namespace = "rocky.runtime"
     compileSdk = 35
@@ -43,7 +63,10 @@ android {
 }
 
 androidComponents {
-    onVariants { variant -> variant.sources.jniLibs?.addGeneratedSourceDirectory(runtime, RockyRuntime::libraries) }
+    onVariants { variant ->
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(runtime, RockyRuntime::libraries)
+        variant.sources.assets?.addGeneratedSourceDirectory(provenance, RuntimeProvenance::metadata)
+    }
 }
 
 publishing {

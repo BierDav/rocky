@@ -12,7 +12,7 @@ import kotlin.test.*
 class ApprovalsTest {
     private val coordinator = DevelopmentCoordinator()
     private fun platform(root: File, name: String) = ShoppingPlatform(
-        File(root, name),
+        File(root, name).absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
         transport = { PeerTransport.Tcp("127.0.0.1:0") },

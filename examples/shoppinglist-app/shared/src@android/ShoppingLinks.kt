@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -21,9 +23,15 @@ class ShoppingLinks(
     private val graph: ShoppingGraph,
     /** Records the transport the next create or join uses. */
     private val chooseTransport: (String?) -> Unit,
-    private val scope: CoroutineScope,
+    scope: CoroutineScope,
 ) {
+    private val work = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
+    private val result = MutableStateFlow<String?>(null)
+    val status = result.asStateFlow()
     private val debuggable get() = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+    /** Stops this handler's drivers before replacing its installation. */
+    suspend fun close() = work.coroutineContext.job.cancelAndJoin()
 
     fun handle(intent: Intent?) {
         val link = intent?.dataString?.let(AppLink::parse) ?: return
@@ -38,9 +46,13 @@ class ShoppingLinks(
 
     private fun drive(parameters: Map<String, String>) {
         val session = graph.session
-        scope.launch {
+        work.launch {
             try {
-                parameters["step"]?.let { Log.i(TAG, "started $it") }
+                parameters["step"]?.let {
+                    Log.i(TAG, "started $it")
+                    result.value = "started $it"
+                }
+                val lines = mutableListOf<String>()
                 parameters["invitation"]?.let { invitation ->
                     if (session.state.value == SessionState.Setup) {
                         chooseTransport(parameters["transport"])
@@ -50,58 +62,22 @@ class ShoppingLinks(
                 }
                 val opened = session.state.first { it is SessionState.Open || it is SessionState.Failed }
                 val node = (opened as? SessionState.Open)?.node ?: throw (opened as SessionState.Failed).error
-                run(node, parameters)
-                parameters["step"]?.let { Log.i(TAG, "done $it") }
+                driveShopping(node, parameters) {
+                    lines += it
+                    Log.i(TAG, it)
+                }
+                parameters["step"]?.let {
+                    Log.i(TAG, "done $it")
+                    result.value = (lines + "done $it").joinToString("\n")
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
-                parameters["step"]?.let { Log.i(TAG, "failed $it ${error.message}") }
+                parameters["step"]?.let {
+                    Log.i(TAG, "failed $it ${error.message}")
+                    result.value = "failed $it ${error.message}"
+                }
                 Log.e(TAG, "driver step failed", error)
-            }
-        }
-    }
-
-    private suspend fun run(node: ShoppingNode, parameters: Map<String, String>) {
-        val repository = node.repository
-        val rocky = node.rocky
-        suspend fun list(title: String?) = repository.lists().first().let { lists ->
-            if (title == null) lists.firstOrNull()?.id else lists.firstOrNull { it.title == title }?.id
-        }
-        suspend fun item(title: String) = repository.lists().first().firstNotNullOfOrNull { list ->
-            repository.observe(list.id).first().firstOrNull { it.title == title }
-        } ?: error("no item $title")
-        if ("contact" in parameters) rocky.contact().let { Log.i(TAG, "contact ${it.node} ${it.uri}") }
-        parameters["peer"]?.let { Log.i(TAG, "peer " + rocky.addPeer(it)) }
-        parameters["forget"]?.let { rocky.removePeer(it) }
-        parameters["online"]?.let { rocky.setOnline(it.toBoolean()) }
-        parameters["add"]?.let { title ->
-            // Drivers add to the named or first list, which they create on first use.
-            val target = list(parameters["list"]) ?: repository.createList(parameters["list"] ?: "Shopping")
-            repository.add(target, title)
-        }
-        parameters["share"]?.let { title ->
-            val target = list(title) ?: error("no list $title")
-            val devices = parameters["to"]?.let { listOf(it).also { to -> repository.share(target, to) } } ?: repository.shareWithDevices(target)
-            devices.forEach { device -> Log.i(TAG, "share $device") }
-        }
-        parameters["check"]?.let { title -> item(title).let { repository.check(it.list, it.id, !it.completed) } }
-        parameters["move"]?.let { title ->
-            val moved = item(title)
-            repository.move(moved.list, moved.id, list(parameters["to"]) ?: error("no target list"))
-        }
-        if ("sync" in parameters) {
-            rocky.syncOnce().let { status ->
-                Log.i(TAG, "sync ${status.state} ${status.error.orEmpty()}")
-                rocky.peers().forEach { peer -> Log.i(TAG, "sync peer ${peer.node} ${peer.state} ${peer.error.orEmpty()}") }
-            }
-        }
-        if ("status" in parameters) {
-            for (list in repository.lists().first()) {
-                Log.i(TAG, "status ${list.title}: " + rocky.list(list.id).status())
-            }
-        }
-        if ("dump" in parameters) {
-            for (list in repository.lists().first()) {
-                val items = repository.observe(list.id).first()
-                Log.i(TAG, "dump ${list.title}: " + items.joinToString(",") { it.title + if (it.completed) " [x]" else "" })
             }
         }
     }

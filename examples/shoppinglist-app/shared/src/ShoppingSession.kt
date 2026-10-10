@@ -7,7 +7,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import rocky.ReadinessState
 import rocky.RockyDatabase
-import java.io.File
 
 /** Where the app stands: setting up, opening, open, or failed to open. */
 sealed interface SessionState {
@@ -56,8 +55,8 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
         }
         start {
             revoked.node.close()
-            val archive = File(platform.directory.parentFile, "${platform.directory.name}-revoked-${revoked.node.self.take(12)}-${System.currentTimeMillis()}")
-            check(platform.directory.renameTo(archive)) { "Could not save the revoked household copy" }
+            val archive = "${platform.directory}-revoked-${revoked.node.self.take(12)}-${epochMillis()}"
+            check(moveDirectory(platform.directory, archive)) { "Could not save the revoked household copy" }
             lastOpen = { ShoppingNode.join(platform, pairing) }
             lastOpen()
         }
@@ -91,7 +90,7 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
     /** After a failed setup: removes what it left, so another code can be used. */
     fun startOver() {
         if (state.value !is SessionState.Failed || RockyDatabase.exists(platform.directory)) return
-        platform.directory.deleteRecursively()
+        removeDirectory(platform.directory)
         mutableState.value = SessionState.Setup
     }
 

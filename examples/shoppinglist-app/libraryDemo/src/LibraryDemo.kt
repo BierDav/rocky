@@ -11,7 +11,7 @@ fun main() = runBlocking {
     val directory = File(requireNotNull(System.getenv("ROCKY_DEMO_DATA")))
     val creatorDirectory = File(directory, "creator")
     fun platform(directory: File, name: String) = ShoppingPlatform(
-        directory,
+        directory.absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
     )

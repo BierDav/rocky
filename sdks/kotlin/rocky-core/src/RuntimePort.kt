@@ -84,7 +84,8 @@ sealed interface PeerTransport {
      * The starter's own iroh endpoint. `relay` is `default`, `staging`, `disabled` or a relay URL. `lookup` is where
      * endpoint addresses are published and resolved: `default` (n0's DNS service), `disabled` or a pkarr relay URL.
      * `topic` finds domain members through a rendezvous record on the lookup service, `local` on the local network
-     * over mDNS. See `docs/runtime/sdk-transports.md#discovery`.
+     * over mDNS. Disabling `local` also disables multicast gateway discovery.
+     * See `docs/runtime/sdk-transports.md#discovery`.
      */
     data class Iroh(
         val relay: String = "default",

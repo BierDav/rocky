@@ -13,10 +13,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import org.example.examples.shopping.Approval
 import org.example.examples.shopping.Coordinated
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 
 /**
  * Purchase approvals as strong commands: any device asks, a trusted device approves or declines, and the coordination
@@ -201,4 +197,4 @@ private fun AskDialog(onDismiss: () -> Unit, onAsk: (String, String) -> Unit) {
 }
 
 /** A local date, such as a deadline or an expiry. */
-internal fun date(epochSeconds: Long): String = DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM, FormatStyle.SHORT).withZone(ZoneId.systemDefault()).format(Instant.ofEpochSecond(epochSeconds))
+internal fun date(epochSeconds: Long): String = org.example.examples.shopping.formatDate(epochSeconds)

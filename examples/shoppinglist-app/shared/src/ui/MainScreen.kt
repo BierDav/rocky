@@ -106,7 +106,7 @@ fun SyncBadge(state: SyncState, onClick: () -> Unit) {
     )
 }
 
-internal fun currentMillis(): Long = System.currentTimeMillis()
+internal fun currentMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
 /** How long ago [epochMillis] was, coarsely. */
 internal fun ago(epochMillis: Long?, now: Long = currentMillis()): String {

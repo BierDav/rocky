@@ -36,7 +36,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     private val invitationsLock = Mutex()
 
     /** Choices by native invitation event, including enrollments the collector has not processed yet. */
-    private val pending = sortedMapOf<Long, PairingCode>()
+    private val pending = mutableMapOf<Long, PairingCode>()
 
     fun devices(): Flow<List<DeviceRow>> = database.devices().observe().settledOnRocky()
 
@@ -80,7 +80,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         val invitation = rocky.pairing(kind.profile)
         val code = PairingCode(kind, name, invitation.uri)
         pending[invitation.sequence] = code
-        if (pending.size > 512) pending.remove(pending.firstKey())
+        if (pending.size > 512) pending.remove(pending.keys.minOrNull())
         // Other trusted devices list it too; members cannot read `invitations`.
         attempt("list the invitation") {
             trusted.openInvitation(self, kind.name.lowercase(), name, code.toString(), invitation.expiresAtEpochSeconds)
@@ -149,7 +149,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
             val known = devices().first().any { it.node == enrolled.node }
             val choice = invitationsLock.withLock {
-                val sequence = pending.keys.lastOrNull { it < enrolled.sequence }
+                val sequence = pending.keys.filter { it < enrolled.sequence }.maxOrNull()
                 sequence?.let { pending.remove(it) }?.also { code ->
                     attempt("close the invitation") { trusted.closeInvitation(self, code.toString()) }
                 }

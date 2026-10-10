@@ -1,0 +1,8 @@
+product: ios/app
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../../marketShared
+  - $compose.ui
+settings:
+  compose: enabled

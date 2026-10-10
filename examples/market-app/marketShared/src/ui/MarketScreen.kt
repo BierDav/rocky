@@ -46,18 +46,20 @@ private val TicketState.unresolved get() = this in setOf(TicketState.Queued, Tic
 
 /** The market's one screen: listings with their confirmed stock, a reserve action and the latest ticket's state. */
 @Composable
-fun MarketScreen(market: Market) {
+fun MarketScreen(market: Market, foreground: Boolean = true) {
     val offers by market.offers().collectAsState(emptyList())
     val holds by market.holds().collectAsState(emptyList())
+    val connection by market.rocky.status.collectAsState()
     var ticket by remember { mutableStateOf<Ticket<Remaining, Shortfall>?>(null) }
     var failure by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val owner = market.isOwner
 
-    LaunchedEffect(market) { market.maintain() }
+    LaunchedEffect(market, foreground) { if (foreground) market.maintain() }
     // An unresolved ticket runs again until it settles; the same ticket, never a new one.
-    LaunchedEffect(ticket?.handle) {
+    LaunchedEffect(ticket?.handle, foreground) {
+        if (!foreground) return@LaunchedEffect
         val handle = ticket?.handle ?: return@LaunchedEffect
         while (ticket?.state?.unresolved == true || ticket?.state == TicketState.Confirmed) {
             delay(2_000)
@@ -78,6 +80,7 @@ fun MarketScreen(market: Market) {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Market", style = MaterialTheme.typography.headlineSmall)
         Text(describe(ticket, failure), Modifier.testTag("ticket"))
+        connection.error?.let { Text("Peer connection: $it") }
         if (owner) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(title, { title = it }, Modifier.weight(1f), label = { Text("New listing") }, singleLine = true)

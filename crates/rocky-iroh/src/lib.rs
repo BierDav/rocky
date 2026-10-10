@@ -31,7 +31,7 @@ pub use iroh;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
     address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
-    endpoint::{Connection, RecvStream, SendStream, presets},
+    endpoint::{Connection, PortmapperConfig, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
 
@@ -515,6 +515,10 @@ impl Options {
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&secret))
             .relay_mode(relay_mode);
+        // Gateway discovery also uses multicast; a manual/local-disabled path must not probe it.
+        if !self.local || local_unavailable().is_some() {
+            builder = builder.portmapper_config(PortmapperConfig::Disabled);
+        }
         match self.lookup.as_deref().unwrap_or("default") {
             "disabled" => {}
             "default" => {

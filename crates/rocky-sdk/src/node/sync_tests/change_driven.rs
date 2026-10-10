@@ -76,6 +76,56 @@ async fn rows(node: &Node) -> Result<Vec<String>, Failure> {
         .collect()
 }
 
+#[tokio::test]
+async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> Result<(), Failure> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let issuer = enrolled(&root.path().join("issuer"), &hub, "issuer", None).await?;
+            issuer
+                .dispatch(
+                    &*issuer.client(1)?,
+                    &json!({"type":"pairing", "profile":{"kind":"reader", "scopes":["items"]}}),
+                )
+                .await?;
+            let token = issuer.vault.get("invitation")?;
+            let request = rocky_credentials::PairRequest::new(
+                &token,
+                "00".repeat(32),
+                PrivateKey::new().public_key(),
+                PrivateKey::new().public_key(),
+                commitment(
+                    "rocky.sdk.schema.v1",
+                    &serde_json::to_vec(&Schema::parse(SCHEMA)?)?,
+                ),
+            )
+            .with_routes(&token, vec![("memory".into(), "member".into())])
+            .to_bytes()?;
+            let before = *issuer.sync_events.borrow();
+            let (mut caller, server) = tokio::io::duplex(64 * 1024);
+            let serving = issuer.clone();
+            let served = tokio::task::spawn_local(async move {
+                serving.serve(Protocol::Pair, Box::new(server)).await
+            });
+            caller.write_u32(u32::try_from(request.len())?).await?;
+            caller.write_all(&request).await?;
+            let length = caller.read_u32().await? as usize;
+            assert_eq!(*issuer.sync_events.borrow(), before);
+            let mut reply = vec![0; length];
+            caller.read_exact(&mut reply).await?;
+            let reply: Value = serde_json::from_slice(&reply)?;
+            assert!(reply["reply"].is_string(), "{reply}");
+            assert_eq!(*issuer.sync_events.borrow(), before);
+            caller.shutdown().await?;
+            served.await??;
+            assert_eq!(*issuer.sync_events.borrow(), before.wrapping_add(1));
+            Ok(())
+        })
+        .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_joined_member_receives_later_writes_without_a_poll_or_contact_copy()
 -> Result<(), Failure> {

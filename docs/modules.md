@@ -363,7 +363,7 @@ build, package and qualify the SDK ([build tooling](../sdks/kotlin/README.md#bui
 `examples/shoppinglist-app` is a Kotlin-only Compose Multiplatform consumer whose typed Room entities
 and DAOs run on Rocky's file, with a DAO repository, Metro graph, screen ViewModels, QR pairing and visible
 [background activity](runtime/activity.md);
-`androidApp` is its Android app, and `qualification` the multi-process
+`androidApp` and `shoppingIos` are its platform hosts, and `qualification` the multi-process
 [shopping qualification](runtime/shopping-qualification.md) harness. Its exported Room
 schema qualifies Kotlin import. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
 driver's pinned acceptance fixture and runs the same DAOs on Rocky's file.
@@ -377,9 +377,14 @@ out as the shopping example with prefixed module names, since module names are
 unique in the workspace. `marketShared` holds the schema, the `Reserve` and
 `Restock` commands and handlers, Room DAOs over the command-controlled tables
 and the one screen, with no platform file API; `marketDesktop` and
-`marketAndroid` are the applications and `marketQualification` the multi-process
+`marketAndroid` and `marketIos` are the applications and `marketQualification` the multi-process
 [market qualification](runtime/market-qualification.md) harness against three
 voters.
+
+`examples/pairing-ui` owns the QR display and platform camera scanner used by
+both Compose examples. QRose displays codes on all targets; EasyQRScan supplies
+the shared Android/iOS scanner under `src@mobile`. iOS asks for camera access
+only; camera-less simulators and desktop use the common paste fields.
 
 ## Finding details
 

@@ -19,7 +19,7 @@ import kotlin.test.*
 /** Device kinds: list keys reach full devices on their own, and partial devices only when shared. */
 class HouseholdTest {
     private fun platform(root: File, name: String) = ShoppingPlatform(
-        File(root, name),
+        File(root, name).absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
         transport = { PeerTransport.Tcp("127.0.0.1:0") },

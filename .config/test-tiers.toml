@@ -21,6 +21,9 @@ suite = "10s"
 # The shopping release hub gate remains e2e; no budget exception is added.
 # Phase 18 endpoint socket-rebind and borrowed-ownership tests use real
 # loopback sockets; kind(test) includes them with the unchanged 2 s budget.
+# Phase 21 Kotlin/Native application tests run in check-ios on macOS, enforce
+# the same 2 s integration budget, and are outside nextest. The agent-device
+# procedure is e2e (15 min). No Rust filter or budget exception is needed.
 [integration]
 per-test = "2s"
 suite = "5m"

@@ -22,6 +22,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import org.example.examples.pairing.QrCode
 import org.example.examples.shopping.NodeKind
 import org.example.examples.shopping.PairingCode
 import org.example.examples.shopping.Purge

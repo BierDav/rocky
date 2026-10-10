@@ -13,7 +13,7 @@ import org.example.examples.market.MarketNode
 import org.example.examples.market.MarketPlatform
 import org.example.examples.market.MarketSchema
 import org.example.examples.market.Opening
-import org.example.examples.market.ui.MarketScreen
+import org.example.examples.market.ui.MarketApp
 import rocky.PeerTransport
 import rocky.RockyDatabase
 import rocky.SecretStore
@@ -84,6 +84,6 @@ fun main(args: Array<String>) {
             },
             title = "Market",
             state = rememberWindowState(width = 480.dp, height = 720.dp),
-        ) { MaterialTheme { MarketScreen(node.market) } }
+        ) { MaterialTheme { MarketApp(node, "", true) { _, _ -> } } }
     }
 }

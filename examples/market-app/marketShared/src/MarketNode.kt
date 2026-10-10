@@ -13,7 +13,7 @@ sealed interface Opening {
     data object Create : Opening
 
     /** Joins with an invitation from an issuer. */
-    data class Join(val invitation: String) : Opening
+    data class Join(val invitation: String, val directAddress: String? = null) : Opening
 
     /** Opens the existing installation. */
     data object Resume : Opening
@@ -54,7 +54,12 @@ class MarketNode private constructor(private val room: RockyRoom<MarketDatabase>
          * credentials hold `Execute` decide commands.
          */
         suspend fun open(platform: MarketPlatform, opening: Opening): MarketNode {
-            val rocky = platform.open(opening, CommandRuntime(ServiceCoordinator(platform.trustBundle), MarketHandlers))
+            val routed = if (opening is Opening.Join && !opening.directAddress.isNullOrBlank()) {
+                Opening.Join(directInvitation(opening.invitation, opening.directAddress))
+            } else {
+                opening
+            }
+            val rocky = platform.open(routed, CommandRuntime(ServiceCoordinator(platform.trustBundle), MarketHandlers))
             return try {
                 val room = platform.room().buildOnRocky(rocky)
                 MarketNode(room, Market(rocky, room.room, platform.secrets, platform.secureRandom))

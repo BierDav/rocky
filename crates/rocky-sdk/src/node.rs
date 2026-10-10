@@ -2541,15 +2541,21 @@ impl Node {
                 absorbed
             }
             Protocol::Pair => {
-                answer(stream, async |request| {
+                let mut enrolled = false;
+                let answered = answer(stream, async |request| {
                     if let Some(reply) = self.forward_enrollment(Protocol::Pair, &request).await? {
                         return Ok(reply);
                     }
                     let reply = Box::pin(self.answer_pair(&request)).await?;
-                    self.wake_sync();
+                    enrolled = true;
                     Ok(reply)
                 })
-                .await
+                .await;
+                // The joining peer must receive enrollment before we dial its return routes.
+                if answered.is_ok() && enrolled {
+                    self.wake_sync();
+                }
+                answered
             }
             Protocol::Renew => {
                 answer(stream, async |request| {

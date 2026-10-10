@@ -43,5 +43,9 @@ object RuntimeArtifact {
     /** The POM property recording [rustSourcesDigest] of the sources it was built from. */
     const val DIGEST_PROPERTY = "rocky.rust-sources"
 
-    fun directory(): Path = Path(System.getProperty("user.home"), ".m2/repository", GROUP.replace('.', '/'), NAME, VERSION)
+    fun directory(): Path {
+        val repository = System.getProperty("maven.repo.local")?.let(::Path)
+            ?: Path(System.getProperty("user.home"), ".m2/repository")
+        return repository / GROUP.replace('.', '/') / NAME / VERSION
+    }
 }

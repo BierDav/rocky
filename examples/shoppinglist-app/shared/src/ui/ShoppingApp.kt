@@ -19,31 +19,55 @@ import org.example.examples.shopping.ShoppingSession
 
 /** The whole app: setup until this device belongs to a household, then its lists, devices and sync. */
 @Composable
-fun ShoppingApp(graph: ShoppingGraph) {
-    // A desktop window may not own ViewModels; the app then keeps them for its lifetime.
-    val parentOwner = LocalViewModelStoreOwner.current
-    val owner = parentOwner ?: remember {
+fun ShoppingApp(graph: ShoppingGraph, reset: (() -> Unit)? = null) {
+    // A replacement installation must not reuse ViewModels bound to the old session.
+    val owner = remember(graph) {
         object : ViewModelStoreOwner {
             override val viewModelStore = ViewModelStore()
         }
     }
     DisposableEffect(owner) {
-        onDispose { if (parentOwner == null) owner.viewModelStore.clear() }
+        onDispose { owner.viewModelStore.clear() }
     }
     CompositionLocalProvider(LocalMetroViewModelFactory provides graph.metroViewModelFactory, LocalViewModelStoreOwner provides owner) {
         ShoppingTheme {
             NetworkPermissions()
             Surface(Modifier.fillMaxSize()) {
                 val state = graph.session.state.collectAsState().value
-                when (state) {
-                    SessionState.Opening -> Opening()
-                    SessionState.Setup, is SessionState.Failed -> SetupScreen()
-                    is SessionState.Open -> MainScreen()
-                    is SessionState.Revoked -> RevokedScreen()
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f)) {
+                        when (state) {
+                            SessionState.Opening -> Opening()
+                            SessionState.Setup, is SessionState.Failed -> SetupScreen()
+                            is SessionState.Open -> MainScreen()
+                            is SessionState.Revoked -> RevokedScreen()
+                        }
+                    }
+                    reset?.let { ResetShopping(it, state != SessionState.Opening) }
                 }
                 graph.session.offer.collectAsState().value?.let { offer -> OfferDialog(offer, state, graph.session) }
             }
         }
+    }
+}
+
+@Composable
+private fun ResetShopping(reset: () -> Unit, enabled: Boolean) {
+    var confirming by remember { mutableStateOf(false) }
+    TextButton({ confirming = true }, enabled = enabled) { Text("Reset Shopping") }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Reset Shopping on this device?") },
+            text = { Text("Remove local lists and household setup. Unsynced changes will be lost. Other devices keep their copies.") },
+            confirmButton = {
+                TextButton({
+                    confirming = false
+                    reset()
+                }, enabled = enabled) { Text("Reset") }
+            },
+            dismissButton = { TextButton({ confirming = false }) { Text("Cancel") } },
+        )
     }
 }
 

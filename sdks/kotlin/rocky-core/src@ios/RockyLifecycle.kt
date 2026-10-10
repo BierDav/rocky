@@ -55,6 +55,9 @@ class RockyLifecycle internal constructor(initialForeground: Boolean, private va
         Unit
     }
 
+    /** Apply the combined visibility of a scene-based host; inactive scenes do not imply background. */
+    fun sceneVisibility(foreground: Boolean) = visible(foreground)
+
     private fun visible(state: Boolean) = lock.withLock {
         foreground = state
         followed.values.forEach { it.trySend(state) }

@@ -20,6 +20,9 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import dev.zacsweers.metrox.viewmodel.metroViewModel
+import org.example.examples.pairing.CodeScanner
+import org.example.examples.pairing.PasteCode
+import org.example.examples.pairing.canScanCodes
 import org.example.examples.shopping.SessionState
 import org.example.examples.shopping.ShoppingSession
 
@@ -100,6 +103,7 @@ internal fun JoinHouseholdCard(onJoin: (String) -> Unit, enabled: Boolean = true
                 }
             }
             OutlinedTextField(code, { code = it }, Modifier.fillMaxWidth(), label = { Text("…or paste the code") }, singleLine = true)
+            PasteCode("Paste code", { code = it })
             Button(onClick = { onJoin(code) }, enabled = enabled && code.isNotBlank()) { Text(joinLabel) }
         }
     }

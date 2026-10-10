@@ -140,7 +140,7 @@ The [Room entities](shared/src/ShoppingDatabase.kt) and
 Screens and their ViewModels are under `shared/src/ui`.
 
 ```kotlin
-val platform = ShoppingPlatform(directory, "Desktop",
+val platform = ShoppingPlatform(directory.absolutePath, "Desktop",
     room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) })
 val node = ShoppingNode.create(platform)
 try {
@@ -177,3 +177,21 @@ lock. `demo` runs a console walkthrough over the same node and repository.
 The multi-process qualification uses manual sync and a keyless custody peer;
 Android device qualification is documented in
 [shopping devices](../../docs/runtime/shopping-devices.md).
+
+## iOS
+
+`shared` builds unchanged screens and logic for `iosArm64` and
+`iosSimulatorArm64`; `iosApp/shoppingIos` supplies the Compose host, Room path,
+Keychain store and lifecycle observer. Build and test both examples with
+`./examples/shoppinglist-app/check-ios`. Pair by scanning with camera permission
+on a device, or paste on a simulator. External `rocky-shopping://pair` links
+remain offers requiring confirmation. Debug-only drive links reuse the Android
+qualification actions; release builds ignore them.
+See [the device procedure](../../docs/runtime/shopping-devices.md#ios-procedure)
+and [evidence and signing limits](../../docs/features_07/21-ios-applications-evidence.md).
+
+On Android and iOS, **Reset Shopping** asks for confirmation, then closes this device's
+session and returns to **Start a household** / **Join a household**. It removes
+local lists and household setup, including unsynced changes, and selects a
+fresh secret namespace. Other devices keep their copies. **Cancel** keeps
+the current household open.

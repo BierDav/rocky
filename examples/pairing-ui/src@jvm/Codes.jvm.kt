@@ -1,4 +1,4 @@
-package org.example.examples.shopping.ui
+package org.example.examples.pairing
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier

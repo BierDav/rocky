@@ -5,7 +5,16 @@ import rocky.ReplicaRole
 import kotlin.test.*
 
 class PairingCodeTest {
-    @Test fun `pairing codes keep the kind, the name and the invitation`() {
+    @Test fun unicodeAndReservedBytesRoundTripAndMalformedEscapesAreRefused() {
+        val link = AppLink("pair", mapOf("name" to "Müller 🛒 + /?&=#%", "empty" to ""))
+        assertEquals(link, AppLink.parse(link.toString()))
+        assertEquals(AppLink("pair", mapOf("x" to "a+b c")), AppLink.parse("rocky-shopping://pair?x=a%2Bb+c"))
+        assertNull(AppLink.parse("rocky-shopping://pair?x=%"))
+        assertNull(AppLink.parse("rocky-shopping://pair?x=%GG"))
+        assertNull(AppLink.parse("rocky-shopping://pair?x=two words"))
+    }
+
+    @Test fun pairingCodesKeepKindNameAndInvitation() {
         for (kind in NodeKind.entries) {
             val code = PairingCode(kind, "Kitchen tablet: 2 & more", "rocky://join/abc?x=1&y=%2F")
             assertTrue(code.toString().startsWith("rocky-shopping://pair?kind=${kind.name.lowercase()}&"))

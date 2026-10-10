@@ -170,6 +170,8 @@ device's stored transport key, so its address is stable.
 - `lookup`: `default` publishes and resolves endpoint addresses through n0's
   DNS service, `disabled` nowhere, anything else is a pkarr relay URL.
 - `topic`, `local`: the two [discovery](#discovery) paths.
+  Disabling `local` also disables multicast gateway discovery for port mapping.
+  Physical iOS disables gateway discovery when local discovery is unavailable.
 - `bind`: a local socket address. Without relay and lookup, peers know only
   addresses in invitations, contacts and local announcements: use a fixed port.
 

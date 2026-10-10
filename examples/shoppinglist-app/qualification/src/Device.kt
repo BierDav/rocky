@@ -63,6 +63,8 @@ private class DeviceProcess {
         fun directory() = File(request.text("directory"))
         val list = { request.long("list") }
         return when (request.text("op")) {
+            "schema" -> Json.parseToJsonElement(ShoppingSchema.json())
+
             "create" -> opened(directory()) {
                 RockyDatabase.create(directory(), ShoppingSchema, tcp(), automaticSync = false)
             }

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Both applications share the platform matrix; signing is a separate device gate.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+./kotlin build -p iosArm64 -p iosSimulatorArm64 -m shared -m marketShared
+./kotlin test -p iosSimulatorArm64 -m shared -m marketShared
+./kotlin build -p iosSimulatorArm64 -m shoppingIos -m marketIos

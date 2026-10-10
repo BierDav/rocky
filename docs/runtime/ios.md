@@ -69,6 +69,10 @@ Register `rocky.ios.RockyLifecycle.register()` on the main thread at startup.
 `UIApplicationDidEnterBackgroundNotification` and
 `UIApplicationWillEnterForegroundNotification`. Each database has one ordered
 worker and a conflated pending state: rapid changes finish in the latest state.
+For a SwiftUI or other scene-based host, forward the combined scene visibility
+with `sceneVisibility(true)` on active and `sceneVisibility(false)` on
+background. Ignore inactive transitions; with multiple scenes, remain visible
+while any scene is active. This feeds the same ordered worker.
 Callbacks run on that worker. Handle errors explicitly, especially when the
 application owns the endpoint. `unfollow` leaves the database in its current
 state; `unregister` removes observers and workers. Neither closes a database,

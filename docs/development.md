@@ -232,6 +232,15 @@ not additions to the Rust unit tier. The lifecycle gate enforces 2 s for each
 of its seven tests; the packaged consumer enforces the same budget. See
 [iOS](runtime/ios.md).
 
+Phase 21 adds `./examples/shoppinglist-app/check-ios`: common pairing tests on
+Kotlin/Native, real Room shopping persistence and native market command/ticket
+regressions, and both simulator app builds. `IosShoppingTest` and `IosMarketTest`
+are platform integration tests and enforce the same 2 s budget in their bodies.
+The `qualify-ios` agent-device procedure is e2e and enforces the 15 min suite
+budget excluding build. These are outside `scripts/test-tiers`' Rust/nextest
+catalog; `.config/test-tiers.toml` records that boundary, with no new exception.
+The macOS CI job runs both gates. See [Phase 21 evidence](features_07/21-ios-applications-evidence.md).
+
 ## Android
 
 The [Android runtime](../sdks/kotlin/android-runtime/README.md) is a small Gradle build

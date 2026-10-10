@@ -15,9 +15,24 @@ sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMave
 ```
 
 Run it once, and again after the Rust sources change. Every build of
-`rocky-runtime-android` compares the digest of the Rust sources recorded in the
-published POM with the current sources, and fails with this command when they differ.
+`rocky-runtime-android` checks the current sources against both the published
+POM and provenance embedded inside the AAR on every build. Its generated
+resource records the AAR's content hash, so another workspace replacing the
+shared Maven-local artifact invalidates dependent app builds. A mismatch fails
+with the publication command; a cached check cannot silently accept another wire version.
 Desktop builds never resolve the artifact.
+
+Parallel workspaces can select a private Maven-local repository with the standard
+`maven.repo.local` JVM property. Use the same path for publication and consumption:
+
+```sh
+sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime \
+    -Dmaven.repo.local="$PWD/local/android-maven" publishToMavenLocal
+KOTLIN_CLI_JAVA_OPTIONS="-Dmaven.repo.local=$PWD/local/android-maven" \
+    ./kotlin build -p android -m marketAndroid
+```
+
+The provenance check honors that property as the toolchain's resolver does.
 
 `buildSrc` compiles the [toolchain plugins' helpers](../tooling/build-logic/src), so the
 runtime is built the same way as everywhere else: a stripped release library per ABI,

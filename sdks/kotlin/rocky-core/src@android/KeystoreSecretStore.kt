@@ -90,7 +90,8 @@ class KeystoreSecretStore(
     private fun path(name: String): File {
         require(
             name.isNotEmpty() &&
-                name.length <= 128 &&
+                // Leave five bytes for the atomic replacement file on a 255-byte filesystem.
+                name.length <= 250 &&
                 !name.startsWith(".") &&
                 name.all { it in 'a'..'z' || it in '0'..'9' || it in "._-" },
         ) { "invalid secret name" }

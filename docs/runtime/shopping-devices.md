@@ -1,7 +1,7 @@
-# Shopping on Android devices
+# Shopping on devices
 
 Device runs of the [shopping qualification](shopping-qualification.md). The
-JVM harness proves the scenarios; this page records what ran on Android.
+JVM harness proves the scenarios; this page records Android and iOS procedures.
 
 ## Device kinds
 
@@ -140,3 +140,76 @@ lost): the 30 s pairing exchange elapsed and the app reported `open failed`. The
 same build passed every step in under a second over `adb reverse`, so these are
 network failures. The examples do not retry a failed join; such timeouts surface
 as `deadline has elapsed` rather than a classified unreachable error.
+
+## iOS procedure
+
+Both applications build their shared Compose sources for arm64 simulators and
+arm64 iPhones. Run `./examples/shoppinglist-app/check-ios` on macOS/Xcode, then
+install `Shopping.app` and `Market.app` with `agent-device install`. The apps use
+[iOS Keychain and lifecycle](ios.md), with starter iroh endpoints. Their only
+usage-description permission is the camera. Local discovery on an iPhone is
+unavailable; neither app carries a multicast entitlement or a local-network
+usage description. Both iOS hosts explicitly disable mDNS and pair using
+invitations. A simulator without a camera offers a paste field. System Paste consent may
+appear on this host's iOS 27 simulator; the procedure accepts only the named
+example's clipboard dialog.
+
+The reproducible single-simulator gate is
+`./examples/shoppinglist-app/qualify-ios --device SIMULATOR_UDID --bundle BUNDLE`.
+It requires fresh example installations and three loopback voters from
+`scripts/coordinator-local`. It writes named expectations and command output
+under `local/phase21-evidence`, and enforces the 15-minute e2e budget after
+build. CI builds both apps and owns this procedure in its macOS job.
+
+1. Open Shopping with `agent-device open org.example.rockyshopping --foreground`.
+   Expect **Start a household**. Choose **Start**; expect **Create your first list**.
+2. Choose **Sync**, disable **Online**, and return to **Lists**. Create **Offline
+   groceries**, add **Milk**, and expect **Milk** in the list. The automated gate
+   uses the debug drive link for these same repository writes and waits for
+   **done offline-write** and **Milk**.
+3. Run `agent-device home`, then open Shopping in the foreground. Expect **Milk**.
+   Relaunch the example and expect **Milk** again. These establish local
+   persistence; they do not establish cross-device convergence.
+4. For a simulator/emulator pair, enroll both through the existing trusted
+   device's **Devices → Add device** flow (full or trusted as the procedure
+   needs). Paste the pairing code on the simulator; scan it on a signed iPhone.
+   Expect the named list on both devices before disconnecting either.
+5. Run `./examples/shoppinglist-app/qualify-ios-pair` with `--ios-device`,
+   `--android-device`, both `--ios-shopping` / `--android-shopping` artifacts,
+   both `--ios-market` / `--android-market` artifacts, `--peer` and `--bundle`
+   from `emulator-service`. Add `--emulator-routes` for market: it enters
+   the host/emulator NAT address in the market’s **Direct pairing address
+   (optional)** field, leaving identity, credentials and token intact, and
+   removes its UDP redirects afterward. Android's raw UDP redirection replies
+   from a different NAT port; the reusable `market-app/emulator_udp.py` utility
+   normalizes that route while forwarding the real datagrams. The shared app
+   selects one IP route and retains any issuer relay fallback.
+   Market uses isolated iroh for this procedure: Android’s existing
+   launch extra and the iOS debug-only `-qualification-loopback YES` argument. Shopping
+   configures both reverse and forward TCP routes so custody can reach the
+   emulator’s listener and push new rows without polling.
+   `--scenario shopping` and `--scenario market` run the slices independently;
+   `--market-owner ios|android` isolates one reservation direction. Each slice
+   records its own expectation file. It removes only the example installations
+   so both markets use fresh identities. Its host enrolls both shopping devices,
+   stops, and verifies named expectations through `agent-device`.
+   First expect **Offline groceries** on both devices through the host custody
+   peer. Then take the simulator offline and add **Milk** to that shared list.
+   Restore connectivity while it is backgrounded, then foreground it. Without
+   pressing **Sync now**, expect **Milk** on the Android emulator. Keep the
+   enrollment host stopped and remove its contact from both devices so the
+   result proves custody delivery. Record both named row expectations.
+6. On a signed iPhone, repeat install, pairing by the camera, offline write,
+   background and resume. Expect the named list and row after each transition.
+   Device signing is required; simulator success cannot replace this step.
+
+Phase 20 has not landed in this workspace. The pair/share/revoke iOS procedure
+on its roster-free schema remains owned by the later landing phase, as the
+[Phase 21 brief](../features_07/21-shopping-and-market-on-ios.md) specifies.
+Debug simulator configuration accepts a certified local service bundle. Long
+qualification links are staged in bounded chunks because agent-device truncates
+its iOS URL entry. These controls are disabled in release builds. The bundled
+public service certificate validates against its original root and signature;
+see the evidence for the corrected CBOR transcription.
+
+First runs and unverified gates are in [Phase 21 evidence](../features_07/21-ios-applications-evidence.md).

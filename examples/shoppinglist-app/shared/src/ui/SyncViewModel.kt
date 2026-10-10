@@ -49,7 +49,7 @@ class SyncViewModel(session: ShoppingSession) : NodeViewModel(session) {
         val holdings = combine(node.repository.lists(), merge(ticks, events.map { })) { lists, _ -> lists }
             .conflate()
             .map { lists -> lists.map { ListHolding(it, runCatching { rocky.list(it.id).status() }.getOrNull()) } }
-        val log = merge(events.map { Entry.Event(it) }, node.household.deliveries.map { Entry.Note(it, System.currentTimeMillis()) })
+        val log = merge(events.map { Entry.Event(it) }, node.household.deliveries.map { Entry.Note(it, kotlin.time.Clock.System.now().toEpochMilliseconds()) })
             .runningFold(emptyList<Entry>()) { kept, entry -> (listOf(entry) + kept).take(KEPT) }
         val identity = flow { emit(rocky.session()) }
         // Served sessions grew since the last look: some device synced with this one.

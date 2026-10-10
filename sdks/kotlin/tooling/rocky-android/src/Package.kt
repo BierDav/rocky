@@ -22,9 +22,9 @@ private val ROOM = listOf(
 
 /**
  * Fails unless Maven local holds the runtime AAR built from the current Rust sources, naming the Gradle
- * command that publishes it. Its output directory stays empty; contributing it makes every build verify.
+ * command that publishes it. Its content digest invalidates dependents after another workspace publishes.
  */
-@TaskAction
+@TaskAction(executionAvoidance = ExecutionAvoidance.Disabled)
 fun verifyRuntime(repositoryRoot: String, @Input rustSources: List<Path>, @Output verified: Path) {
     val pom = RuntimeArtifact.directory() / "${RuntimeArtifact.NAME}-${RuntimeArtifact.VERSION}.pom"
     val publish = "sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal"
@@ -33,7 +33,17 @@ fun verifyRuntime(repositoryRoot: String, @Input rustSources: List<Path>, @Outpu
     check(published == rustSourcesDigest(Path(repositoryRoot))) {
         "Rocky's Android runtime in Maven local was built from other Rust sources; run $publish"
     }
-    recreate(verified)
+    val runtime = RuntimeArtifact.directory() / "${RuntimeArtifact.NAME}-${RuntimeArtifact.VERSION}.aar"
+    check(runtime.exists()) { "Rocky's Android runtime AAR is missing; run $publish" }
+    ZipFile(runtime.toFile()).use { archive ->
+        val entry = archive.getEntry("assets/rocky-runtime-rust-sources.txt")
+        val embedded = entry?.let { archive.getInputStream(it).bufferedReader().use { reader -> reader.readText().trim() } }
+        check(embedded == published) { "Rocky's Android runtime AAR and source provenance differ; run $publish" }
+        for (abi in Android.ABIS) {
+            check(archive.getEntry("jni/${abi.name}/librocky_uniffi.so") != null) { "Rocky's Android runtime has no ${abi.name} library; run $publish" }
+        }
+    }
+    (recreate(verified) / "META-INF/rocky-runtime.digest").createParentDirectories().writeText("$published\n${sha256(runtime)}\n")
 }
 
 /**

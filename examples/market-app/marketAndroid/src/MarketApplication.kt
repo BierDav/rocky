@@ -18,6 +18,7 @@ import java.security.SecureRandom
 
 /** Where the app stands: opening, open, or why it is not. */
 sealed interface AppState {
+    data object Opening : AppState
     data class Waiting(val message: String) : AppState
     data class Open(val node: MarketNode) : AppState
 }
@@ -27,7 +28,7 @@ sealed interface AppState {
  * launch is driven over adb with the service's bundle and `create` or `join`; see `examples/market-app/README.md`.
  */
 class MarketApplication : Application() {
-    private val state = MutableStateFlow<AppState>(AppState.Waiting("Opening"))
+    private val state = MutableStateFlow<AppState>(AppState.Opening)
     val current: StateFlow<AppState> = state.asStateFlow()
     private lateinit var lifecycle: RockyLifecycle
     private val opening = Mutex()
@@ -40,6 +41,17 @@ class MarketApplication : Application() {
         lifecycle = RockyLifecycle.register(this)
     }
 
+    /** Common setup screen: the same service bundle and opening choices as the iOS app. */
+    suspend fun openFromUi(bundle: String, opening: Opening) {
+        val intent = Intent().putExtra("bundle", Base64.encodeToString(bundle.toByteArray(), Base64.NO_WRAP))
+        when (opening) {
+            Opening.Create -> intent.putExtra("create", true)
+            is Opening.Join -> intent.putExtra("join", opening.invitation).putExtra("direct-address", opening.directAddress)
+            Opening.Resume -> {}
+        }
+        open(intent)
+    }
+
     /** Opens once per process: the existing market, or the one the launching [intent] names. */
     suspend fun open(intent: Intent) = opening.withLock { openOnce(intent) }
 
@@ -50,11 +62,11 @@ class MarketApplication : Application() {
         val opening = when {
             RockyDatabase.exists(File(directory, "rocky")) -> Opening.Resume
             intent.getBooleanExtra("create", false) -> Opening.Create
-            intent.getStringExtra("join") != null -> Opening.Join(intent.getStringExtra("join").orEmpty())
+            intent.getStringExtra("join") != null -> Opening.Join(intent.getStringExtra("join").orEmpty(), intent.getStringExtra("direct-address"))
             else -> return state.emit(AppState.Waiting("No market yet: launch with a bundle and create or join"))
         }
         if (!bundle.isFile) return state.emit(AppState.Waiting("No coordination service bundle"))
-        // Relays and discovery off: the voters and peers are reached at the bundle's and contacts' addresses.
+        // Relays and discovery off: the voters and peers use the bundle's and contacts' addresses.
         val transport = if (loopback.isFile) PeerTransport.Iroh.isolated(bind = "0.0.0.0:0") else PeerTransport.Iroh()
         val secrets = KeystoreSecretStore(this)
         val random = SecureRandom()
@@ -72,6 +84,7 @@ class MarketApplication : Application() {
             secrets = secrets,
             secureRandom = { ByteArray(it).also(random::nextBytes) },
         )
+        state.emit(AppState.Opening)
         state.emit(
             try {
                 val node = MarketNode.open(platform, opening)

@@ -96,6 +96,8 @@ backgrounded is replaced by a fresh one; nothing restores open handles.
 - Files hold only the sealed form, bound to their name as associated data, in `noBackupFilesDir/rocky-secrets`:
   `RKSS`, format byte `1`, the 12-byte nonce, then ciphertext and tag. They are written atomically and
   synced. A secret is plaintext only in process memory, where the runtime signs and decrypts with it.
+- Names accept the vault’s current group-epoch roles (up to 250 ASCII bytes);
+  five bytes remain for the temporary filename used by atomic replacement.
 - A name with no file loads as absent, so `Vault` reports a missing secret and never makes one.
 - A file that does not open fails loudly: a lost Keystore key, a file moved to another name or altered
   bytes are errors, never an absent secret. A new key is refused while sealed files exist, since it

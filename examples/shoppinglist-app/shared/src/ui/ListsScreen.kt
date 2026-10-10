@@ -271,6 +271,7 @@ internal fun NameDialog(title: String, initial: String, onDismiss: () -> Unit, o
                 text,
                 { text = it },
                 Modifier.focusRequester(focus),
+                label = { Text("Name") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { if (text.isNotBlank()) onConfirm(text.trim()) }),

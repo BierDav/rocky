@@ -9,7 +9,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import rocky.*
 import rocky.room.settledOnRocky
-import java.security.SecureRandom
 
 /** A request for approval as a device sees it. [requester] and [decider] are device names where known. */
 data class Approval(val key: String, val title: String, val note: String, val requester: String, val approved: Boolean?, val decider: String?)
@@ -143,12 +142,12 @@ class Approvals internal constructor(
             }
             val live = identities.filter { identity -> devices.any { it.node == identity.node } }
             val trusted = devices.filter { NodeKind.of(it.kind) == NodeKind.Trusted }.map { it.node }.toSet()
-            val members = Members(live.filter { it.node in trusted }.map { it.node }.toSortedSet(), live.map { it.node }.toSortedSet())
+            val members = Members(live.filter { it.node in trusted }.map { it.node }.sorted().toSet(), live.map { it.node }.sorted().toSet())
             if (self !in members.executors) {
                 mutableStatus.value = Coordinated.Waiting("Waiting for this device's identity to sync")
                 return@collectLatest
             }
-            val now = System.currentTimeMillis() / 1000
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds() / 1000
             when {
                 // The founder's first revision names its members once there are any; nothing was sent yet.
                 !row.applied && row.revision == 1L && row.members.isEmpty() -> attempt {
@@ -178,7 +177,7 @@ class Approvals internal constructor(
                     owner.control(row.revision, row.control, of(members.executors), of(members.invokers), LIFETIME_SECONDS)
                 }
                 refusals = 0
-                household.trusted.updateCoordination(row.revision, row.control, row.members, System.currentTimeMillis() / 1000 + LIFETIME_SECONDS, true)
+                household.trusted.updateCoordination(row.revision, row.control, row.members, kotlin.time.Clock.System.now().toEpochMilliseconds() / 1000 + LIFETIME_SECONDS, true)
                 return
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -224,6 +223,6 @@ class Approvals internal constructor(
         private const val RENEW_SECONDS = 7L * 86_400
 
         /** On the founding device only: the household's tenant key and registration, applied once online. */
-        internal suspend fun start(trusted: TrustedRows) = trusted.startCoordination(ByteArray(32).also(SecureRandom()::nextBytes), RockyDatabase.newHandle())
+        internal suspend fun start(trusted: TrustedRows) = trusted.startCoordination(randomBytes(32), RockyDatabase.newHandle())
     }
 }

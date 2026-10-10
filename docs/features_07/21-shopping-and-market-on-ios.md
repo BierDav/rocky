@@ -1,6 +1,14 @@
 # 21. Shopping and market on iOS
 
-Status: not started.
+Status: blocked by mixed Android/iOS device qualification. Physical Shopping
+persistence, camera pairing and a Market reservation are owner-confirmed.
+The public shopping bundle now verifies. See the evidence below for passing gates and
+remaining failures.
+Owner update, 2026-10-11: replace qr-kit with EasyQRScan after reported black camera
+previews. The owner later identified Device Hub mirroring as the source of
+the black image and confirmed the physical camera and QR scan work. QRose supplies code generation; this overrides
+the original dependency-retention choice below.
+Evidence: [Phase 21 runs](21-ios-applications-evidence.md).
 Owner: `examples/shoppinglist-app`, `examples/market-app`; the check
 workflow. Depends on [phase 18](18-ios-packaging-keychain-lifecycle.md) and
 [phase 19](19-market-example.md). Wave 2.

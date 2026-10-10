@@ -99,7 +99,7 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
             val me = recorded.firstOrNull { it.isSelf }
                 ?: HouseholdDevice(self.node, "This device", if (self.isIssuer) NodeKind.Trusted else null, true, null, emptyList())
             val others = (recorded + unrecorded).filter { !it.isSelf }
-            val now = System.currentTimeMillis() / 1000
+            val now = kotlin.time.Clock.System.now().toEpochMilliseconds() / 1000
             val invitations = opened.filter { it.expires > now }.mapNotNull { row ->
                 val pairing = runCatching { PairingCode.parse(row.code) }.getOrNull() ?: return@mapNotNull null
                 OpenInvitation(pairing, rows.firstOrNull { it.node == row.issuer }?.name ?: "Device ${row.issuer.take(6)}", row.issuer == self.node, row.expires)

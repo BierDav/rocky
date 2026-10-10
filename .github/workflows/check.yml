@@ -672,6 +672,29 @@ jobs:
           name: phase15-ios-evidence
           path: source/local/phase15-evidence
 
+      - name: Build and qualify the iOS applications
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir -p local/phase21-evidence
+          npm install --global agent-device@0.21.23
+          ./examples/shoppinglist-app/check-ios 2>&1 | tee local/phase21-evidence/build-and-tests.log
+          ./scripts/coordinator-local local/phase21-service 17300
+          trap 'kill $(cat local/phase21-service/voter-*.pid)' EXIT
+          simulator=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          print(next(d["udid"] for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["isAvailable"] and "iPhone" in d["name"]))
+          ')
+          agent-device boot --platform ios --udid "$simulator"
+          ./examples/shoppinglist-app/qualify-ios --device "$simulator" --bundle local/phase21-service/service/bundle.json
+
+      - name: Save Phase 21 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase21-ios-evidence
+          path: source/local/phase21-evidence
+
       - name: Save Phase 18 evidence
         if: always()
         uses: actions/upload-artifact@v4

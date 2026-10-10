@@ -1,10 +1,11 @@
 # The market's schema, commands, Room DAOs and its one screen; no platform file API, so phase 21 adds iOS only.
 product:
   type: kmp/lib
-  platforms: [jvm, android]
+  platforms: [jvm, android, iosArm64, iosSimulatorArm64]
 apply:
   - //project.module-template.yaml
 dependencies:
+  - ../../pairing-ui
   - ../../../sdks/kotlin/rocky-room: exported
   - $compose.runtime
   - $compose.foundation

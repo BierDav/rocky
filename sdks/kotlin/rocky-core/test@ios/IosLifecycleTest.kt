@@ -32,6 +32,10 @@ class IosLifecycleTest {
             withTimeout(1_000) { assertFalse(applied.receive()) }
             center.postNotificationName(UIApplicationWillEnterForegroundNotification, null)
             withTimeout(1_000) { assertTrue(applied.receive()) }
+            lifecycle.sceneVisibility(false)
+            withTimeout(1_000) { assertFalse(applied.receive()) }
+            lifecycle.sceneVisibility(true)
+            withTimeout(1_000) { assertTrue(applied.receive()) }
             repeat(10) {
                 center.postNotificationName(UIApplicationDidEnterBackgroundNotification, null)
                 center.postNotificationName(UIApplicationWillEnterForegroundNotification, null)

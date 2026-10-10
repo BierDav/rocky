@@ -14,6 +14,7 @@ mod holdings;
 mod horizon;
 mod identity;
 mod protection;
+pub(crate) use horizon::HorizonFinalization;
 pub use horizon::HorizonProgress;
 mod incoming;
 mod keys;
@@ -416,7 +417,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v11" {
+    if label != "rocky.encrypted-replica.v12" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));

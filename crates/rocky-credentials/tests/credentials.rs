@@ -1178,7 +1178,11 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
     let statement = HorizonStatement {
         format: HORIZON_FORMAT,
         manifest: domain.manifest.hash(),
-        revocations: [0; 32],
+        revocations: rocky_core::commitment(
+            "rocky.revocation-set.v1",
+            &p2panda_core::cbor::encode_cbor(&Vec::<[u8; 32]>::new()).unwrap(),
+        ),
+        policy: Vec::new(),
         scope: domain.resources[0].scope,
         sequence: 1,
         previous: None,
@@ -1233,7 +1237,24 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
         .unwrap();
     based.bases[0].rows = 1;
     assert!(SignedHorizon::sign(based, &domain.publisher).is_err());
+    let mut policy = statement.clone();
+    policy.policy = vec![[1; 32], [2; 32]];
+    assert!(SignedHorizon::sign(policy.clone(), &domain.publisher).is_err());
+    policy.revocations =
+        rocky_core::commitment("rocky.revocation-set.v1", &encode(&policy.policy).unwrap());
+    SignedHorizon::sign(policy.clone(), &domain.publisher)
+        .unwrap()
+        .verify(domain.publisher.public_key())
+        .unwrap();
+    policy.policy.reverse();
+    assert!(SignedHorizon::sign(policy.clone(), &domain.publisher).is_err());
+    policy.policy = vec![[1; 32], [1; 32]];
+    assert!(SignedHorizon::sign(policy, &domain.publisher).is_err());
     let mut expired = statement;
     expired.peers[0].expires = NOW;
+    let signed = SignedHorizon::sign(expired.clone(), &domain.publisher).unwrap();
+    signed.verify(domain.publisher.public_key()).unwrap();
+    assert_eq!(signed.statement.peers[0].deadline(NOW), NOW);
+    expired.peers[0].expires = 0;
     assert!(SignedHorizon::sign(expired, &domain.publisher).is_err());
 }

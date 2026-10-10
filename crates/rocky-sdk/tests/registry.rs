@@ -758,3 +758,29 @@ async fn a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer() ->
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn horizon_participants_come_from_unsynced_registry_records() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(&root.path().join("a"), None)?;
+    let keys = Database::device(&root.path().join("b"), None)?;
+    a.ok(json!({"type":"grant","device":keys,"profile":{"kind":"reader","scopes":["items"]}}))
+        .await;
+    let declared = a.ok(json!({"type":"horizon","collection":"items","action":"declare","participants":[keys.node]})).await;
+    assert_eq!(declared["waiting"], json!([keys.node]));
+    let bytes = data_encoding::HEXLOWER.decode(
+        declared["statement"]
+            .as_str()
+            .ok_or("statement")?
+            .as_bytes(),
+    )?;
+    let signed = rocky_credentials::SignedHorizon::from_bytes(&bytes)?;
+    let records = devices(&a).await;
+    let expires = records[&keys.node.to_hex()]["expires"]
+        .as_str()
+        .ok_or("expiry")?
+        .parse::<u64>()?;
+    assert_eq!(signed.statement.peers[0].expires, expires);
+    a.close().await;
+    Ok(())
+}

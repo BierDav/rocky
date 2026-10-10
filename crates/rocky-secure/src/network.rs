@@ -27,6 +27,8 @@ mod existence;
 mod frontiers;
 pub(crate) mod holdings;
 mod horizon;
+mod horizon_relay;
+use horizon_relay::HorizonRelayMessage;
 mod revocations;
 mod rows;
 use chains::{ChainMessage, ChainTable};
@@ -145,6 +147,7 @@ enum Message {
     Rows(RowMessage),
     Checkpoints(CheckpointMessage),
     Horizon(HorizonMessage),
+    HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
     Commands(CommandMessage),
@@ -176,6 +179,7 @@ families!(
     Rows(RowMessage),
     Checkpoints(CheckpointMessage),
     Horizon(HorizonMessage),
+    HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
     Commands(CommandMessage),
@@ -511,6 +515,7 @@ impl NativeSession {
             Message::Rows(message) => self.answer_rows(replica, message).await,
             Message::Checkpoints(message) => self.answer_checkpoints(replica, message).await,
             Message::Horizon(message) => self.answer_horizon(replica, message).await,
+            Message::HorizonRelay(message) => self.answer_horizon_relay(replica, message).await,
             Message::Frontiers(message) => self.answer_frontiers(replica, message).await,
             Message::Existence(message) => self.answer_existence(replica, message).await,
             Message::Delivery(_) => Err(denied("this peer serves no envelope delivery")),

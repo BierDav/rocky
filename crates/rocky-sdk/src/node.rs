@@ -2,6 +2,7 @@
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
 mod delivery;
+mod horizon;
 mod mesh;
 mod partition;
 mod registry;
@@ -1177,22 +1178,22 @@ impl Node {
                 if !self.settings.lock().await.issuer() {
                     return Err(refused("only an issuer declares a horizon"));
                 }
-                let nodes = match request.get("participants") {
-                    Some(nodes) => serde_json::from_value::<Vec<PublicKey>>(nodes.clone())?,
-                    None => self
-                        .replica
-                        .retention_policy(scope)
-                        .await?
-                        .ok_or("configure retention or name horizon participants explicitly")?
-                        .required
-                        .into_iter()
-                        .collect(),
-                };
-                let peers = self.replica.horizon_credentials(&nodes).await?;
-                let statement = self.replica.horizon_statement(scope, &peers).await?;
+                let mut statement = self
+                    .replica
+                    .horizon_statement_for_participants(scope, &[])
+                    .await?;
+                let scopes = std::iter::once(scope)
+                    .chain(statement.related.iter().map(|cut| cut.scope))
+                    .collect::<Vec<_>>();
+                statement.peers = self.horizon_participants(request, &scopes).await?;
                 let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
                 let signed = rocky_credentials::SignedHorizon::sign(statement, &publisher)?;
+                let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+                let participates = signed.statement.peers.iter().any(|peer| peer.node == own);
                 self.replica.receive_horizon(signed).await?;
+                if participates {
+                    self.replica.acknowledge_horizon(scope).await?;
+                }
                 self.wake_sync();
             }
             "admit" => {

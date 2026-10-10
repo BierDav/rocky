@@ -16,6 +16,9 @@ suite = "10s"
 # pure rocky-core epoch-order property and SDK capacity check stay in unit.
 # Phase 11: `tests::chains` (session chain table, stored chains, chains beside
 # a checkpoint page) uses real SQLite and is included by the rocky-secure filter.
+# Phase 13: partition_foreign_keys::horizon::relay tests use SQLite and
+# authenticated in-memory sessions, included by the rocky-secure filter.
+# The shopping release hub gate remains e2e; no budget exception is added.
 # Phase 18 endpoint socket-rebind and borrowed-ownership tests use real
 # loopback sockets; kind(test) includes them with the unchanged 2 s budget.
 [integration]

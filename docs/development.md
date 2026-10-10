@@ -148,6 +148,13 @@ The null-ordering pagination test in `rocky-runtime` opens a SQLite file and
 runs a Tokio runtime; it is explicitly classified as integration instead of
 unit. This corrects its tier without raising any budget.
 
+Phase 13's signed-policy checks run in the credentials integration target. The
+`rocky-secure` `tests::partition_foreign_keys::horizon::relay` scenarios run
+in integration through the existing package filter, as does the SDK horizon
+surface regression. The full shopping hub gate remains e2e; the Kotlin
+shopping harness runs in the existing shopping CI job. No exception is added.
+See [Phase 13 evidence](features_07/13-relayed-horizon-evidence.md).
+
 Phase 14's secret-store topic/eviction tests and in-process contact, ranking,
 request, refusal and custody scenarios run in integration. The `mesh` and
 `network::contacts::tests` modules are included explicitly in

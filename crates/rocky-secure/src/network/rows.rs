@@ -224,6 +224,7 @@ impl NativeSession {
         quota: usize,
     ) -> Result<CatchUp, Error> {
         self.ensure_holding(replica, &[scope]).await?;
+        self.relay_mergeable_horizon(replica, scope).await?;
         self.send(HorizonMessage::MergeableCut { scope }).await?;
         let HorizonMessage::MergeableState { signed, behind } =
             self.reply::<HorizonMessage>().await?

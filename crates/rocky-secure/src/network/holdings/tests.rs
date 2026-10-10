@@ -126,6 +126,13 @@ fn requests(
             max_rows: 1,
         }
         .into(),
+        horizon_relay::HorizonRelayMessage::Exchange {
+            scope,
+            signed: None,
+            acks: Vec::new(),
+            finalized: None,
+        }
+        .into(),
         HorizonMessage::MergeableCut { scope }.into(),
         HorizonMessage::Horizon { scope, after: None }.into(),
         HorizonMessage::HorizonRejoined {

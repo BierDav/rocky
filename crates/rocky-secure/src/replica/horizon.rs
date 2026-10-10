@@ -1,12 +1,15 @@
 //! Durable issuer statements and cut acknowledgments; `docs/runtime/mergeable-horizon.md`.
 mod bootstrap;
+mod relay;
 use super::existence::ExistenceBaseAttachment;
 use super::*;
+pub(crate) use relay::HorizonFinalization;
 use rocky_credentials::{
     HorizonAck, HorizonCut, HorizonLog, HorizonPeer, HorizonStatement, SignedHorizon,
 };
 
 pub(super) const SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS secure_horizon_relay_finalized(scope BLOB PRIMARY KEY,checkpoint BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_bootstrap(scope BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_mergeable_horizon(scope BLOB PRIMARY KEY,statement BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_horizon_pending(dependency BLOB NOT NULL,scope BLOB NOT NULL,PRIMARY KEY(dependency,scope)) WITHOUT ROWID",
@@ -144,7 +147,8 @@ impl<A: RowApplication> Inner<A> {
                     }
                     let parent_scope = typed.row_scope(parent, &values)?;
                     if !self.partitions.contains_key(&parent_scope)
-                        || !self.opening_keys().any(|key| key.scope == parent_scope)
+                        || (self.scope_key(scope).is_ok()
+                            && !self.opening_keys().any(|key| key.scope == parent_scope))
                     {
                         return Err(denied(
                             "hold the parent partition before declaring a horizon",
@@ -213,13 +217,26 @@ impl<A: RowApplication> Inner<A> {
         );
         Ok(HorizonCut { scope, logs, state })
     }
-    fn verify_horizon(&self, signed: &SignedHorizon) -> Result<(), Error> {
+    async fn verify_horizon(&self, signed: &SignedHorizon) -> Result<(), Error> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
-        if statement.manifest != self.manifest
-            || statement.revocations != self.revocation_digest()?
+        if statement.manifest != self.manifest {
+            return Err(denied("horizon manifest is not current"));
+        }
+        if statement
+            .policy
+            .iter()
+            .any(|id| self.config.revocations.get(id).is_none())
+            && self.mergeable_horizon(statement.scope).await?.as_deref() != Some(signed)
+            && self.horizon_bootstrap(statement.scope).await?.as_ref() != Some(signed)
         {
-            return Err(denied("horizon manifest or revocation set is not current"));
+            return Err(denied("horizon policy reference is unknown"));
+        }
+        if self.scope_key(statement.scope).is_err() {
+            if !roles::holds_whole(&self.local_grants(now()?)?, statement.scope) {
+                return Err(denied("horizon scope is not held"));
+            }
+            return Ok(());
         }
         let (related, existence) = self.horizon_dependencies(statement.scope)?;
         if existence
@@ -291,6 +308,9 @@ impl<A: RowApplication> Inner<A> {
             behind: Vec::new(),
         };
         for peer in &signed.statement.peers {
+            if self.config.revocations.revokes(&peer.node) {
+                continue;
+            }
             let mut rows = self
                 .conn
                 .query(
@@ -324,7 +344,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &[(PublicKey, CredentialChain)],
     ) -> Result<HorizonStatement, Error> {
         let inner = self.inner.lock().await;
-        let time = now()?;
         if peers.len() > 64 {
             return Err(Error::Quota {
                 resource: "horizon peers",
@@ -332,7 +351,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             });
         }
         inner.scope_key(scope)?;
-        let (parents, scopes) = inner.horizon_dependencies(scope)?;
+        let (parents, _) = inner.horizon_dependencies(scope)?;
         let mut required = BTreeMap::new();
         for (node, credentials) in peers {
             inner.authorize_peer(*node, credentials, scope)?;
@@ -364,6 +383,27 @@ impl<A: RowApplication> EncryptedReplica<A> {
             {
                 return Err(denied("duplicate horizon peer"));
             }
+        }
+        let peers = required.into_values().collect::<Vec<_>>();
+        drop(inner);
+        self.horizon_statement_for_participants(scope, &peers).await
+    }
+    /// Captures a cut for participants authorized by the caller's issuer registry.
+    pub async fn horizon_statement_for_participants(
+        &self,
+        scope: ResourceScope,
+        peers: &[HorizonPeer],
+    ) -> Result<HorizonStatement, Error> {
+        if peers.len() > 64 {
+            return Err(denied("horizon_participants_full: at most 64 participants"));
+        }
+        let inner = self.inner.lock().await;
+        let time = now()?;
+        inner.scope_key(scope)?;
+        let (parents, scopes) = inner.horizon_dependencies(scope)?;
+        let required: BTreeMap<_, _> = peers.iter().map(|peer| (peer.node, peer.clone())).collect();
+        if required.len() != peers.len() || peers.iter().any(|peer| peer.expires == 0) {
+            return Err(denied("duplicate or expired horizon participant"));
         }
         let previous = inner.mergeable_horizon(scope).await?;
         let mut related = Vec::new();
@@ -398,6 +438,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             format: rocky_credentials::HORIZON_FORMAT,
             manifest: inner.manifest,
             revocations: inner.revocation_digest()?,
+            policy: inner
+                .config
+                .revocations
+                .statements()
+                .filter(|signed| signed.statement.live(time))
+                .map(|signed| signed.id().map_err(credential))
+                .collect::<Result<BTreeSet<_>, _>>()?
+                .into_iter()
+                .collect(),
             scope,
             sequence: match &previous {
                 Some(signed) => signed
@@ -422,7 +471,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Stores a verified proposal. This does not finalize rows or release history.
     pub async fn receive_horizon(&self, signed: SignedHorizon) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
         if signed.statement.issued > now()? {
             return Err(denied("horizon issue time is in the future"));
         }
@@ -431,7 +480,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if previous.as_ref() == &signed {
                     return Ok(());
                 }
-                if signed.statement.sequence
+                if signed.statement.sequence == previous.statement.sequence
+                    && signed.statement.previous == previous.statement.previous
+                {
+                    if signed.id().map_err(credential)? > previous.id().map_err(credential)? {
+                        return Ok(());
+                    }
+                } else if signed.statement.sequence
                     != previous
                         .statement
                         .sequence
@@ -444,7 +499,42 @@ impl<A: RowApplication> EncryptedReplica<A> {
             } else if signed.statement.sequence != 1 {
                 return Err(denied("missing horizon predecessor"));
             }
-            inner.refuse_horizon_ahead(&signed.statement).await?;
+            let finalized_conflict =
+                if let Some(id) = inner.find_scope_id(signed.statement.scope).await? {
+                    inner
+                        .checkpoint_record(id, true)
+                        .await?
+                        .and_then(|record| record.signed)
+                        .and_then(|checkpoint| checkpoint.statement.finalized)
+                        .is_some_and(|held| {
+                            held.statement.sequence == signed.statement.sequence
+                                && held.as_ref() != &signed
+                        })
+                } else {
+                    false
+                };
+            let ahead = if inner.scope_key(signed.statement.scope).is_ok() {
+                match inner.refuse_horizon_ahead(&signed.statement).await {
+                    Ok(()) => false,
+                    Err(Error::Rejected(_)) => true,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                false
+            };
+            let sibling = inner
+                .mergeable_horizon(signed.statement.scope)
+                .await?
+                .is_some_and(|held| {
+                    held.statement.sequence == signed.statement.sequence
+                        && held.statement.previous == signed.statement.previous
+                });
+            if ahead && !sibling {
+                inner.refuse_horizon_ahead(&signed.statement).await?;
+            }
+            if finalized_conflict || ahead {
+                inner.conn.execute("INSERT INTO secure_horizon_bootstrap VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET statement=excluded.statement", [encode(&signed.statement.scope)?, signed.to_bytes().map_err(credential)?]).await?;
+            }
             inner.index_pending_horizon(&signed, true).await?;
             inner.conn.execute("INSERT INTO secure_mergeable_horizon VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET statement=excluded.statement", [encode(&signed.statement.scope)?, signed.to_bytes().map_err(credential)?]).await?;
             inner
@@ -466,7 +556,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .mergeable_horizon(scope)
             .await?
             .ok_or_else(|| denied("no horizon statement"))?;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
+        inner.ensure_horizon_current(scope).await?;
         inner.check_horizon_cut(&signed.statement).await?;
         let ack = HorizonAck::sign(signed.id().map_err(credential)?, &inner.config.node)
             .map_err(credential)?;
@@ -484,10 +575,43 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .mergeable_horizon(scope)
             .await?
             .ok_or_else(|| denied("no horizon statement"))?;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
         transaction!(inner, |inner| inner.store_horizon_ack(&signed, &ack).await)?;
         inner.flush()?;
         Ok(())
+    }
+    /// Bounded evidence for a held pending cut; finalized evidence travels in checkpoints.
+    pub(crate) async fn horizon_relay(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<(Option<Box<SignedHorizon>>, Vec<HorizonAck>), Error> {
+        let inner = self.inner.lock().await;
+        let signed = inner.mergeable_horizon(scope).await?;
+        let mut finalized = inner
+            .conn
+            .query(
+                "SELECT checkpoint FROM secure_horizon_relay_finalized WHERE scope=?",
+                [encode(&scope)?],
+            )
+            .await?;
+        if let Some(row) = finalized.next().await? {
+            let evidence: HorizonFinalization = decode(&row.get::<Vec<u8>>(0)?)?;
+            if evidence.checkpoint.statement.finalized.as_ref() == signed.as_ref() {
+                return Ok((None, Vec::new()));
+            }
+        }
+        if let Some(signed) = &signed
+            && let Some(id) = inner.find_scope_id(scope).await?
+            && inner
+                .checkpoint_record(id, true)
+                .await?
+                .and_then(|record| record.signed)
+                .is_some_and(|checkpoint| checkpoint.statement.finalized.as_ref() == Some(signed))
+        {
+            return Ok((None, Vec::new()));
+        }
+        let acks = inner.horizon_acknowledgments(scope).await?;
+        Ok((signed, acks))
     }
     /// Reports the persisted acknowledgment set and fixed expiry deadlines.
     /// Behind here is a protocol verdict, not permission to prune.
@@ -497,11 +621,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .mergeable_horizon(scope)
             .await?
             .ok_or_else(|| denied("no horizon statement"))?;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
         inner.horizon_progress_at(&signed, now()?).await
     }
 }
 impl<A: RowApplication> Inner<A> {
+    async fn horizon_acknowledgments(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Vec<HorizonAck>, Error> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT ack FROM secure_horizon_ack WHERE scope=? ORDER BY node",
+                [encode(&scope)?],
+            )
+            .await?;
+        let mut acks = Vec::new();
+        while let Some(row) = rows.next().await? {
+            acks.push(decode(&row.get::<Vec<u8>>(0)?)?);
+        }
+        Ok(acks)
+    }
     async fn store_horizon_ack(
         &self,
         signed: &SignedHorizon,
@@ -626,7 +767,11 @@ impl<A: RowApplication> Inner<A> {
                 .is_none_or(|incoming| {
                     incoming.statement.sequence < held.statement.sequence
                         || (incoming.statement.sequence == held.statement.sequence
-                            && incoming != &held)
+                            && incoming != &held
+                            && !(incoming.statement.previous == held.statement.previous
+                                && incoming
+                                    .id()
+                                    .is_ok_and(|id| held.id().is_ok_and(|other| id < other))))
                 })
         {
             return Err(denied("checkpoint would undo finalized horizon state"));
@@ -653,6 +798,9 @@ impl<A: RowApplication> Inner<A> {
                 && checkpoint.statement.finalized.as_ref() == Some(incoming);
             if incoming != &held
                 && !newer_finalized_cut
+                && !(incoming.statement.sequence == held.statement.sequence
+                    && incoming.statement.previous == held.statement.previous
+                    && incoming.id().map_err(credential)? < held.id().map_err(credential)?)
                 && (incoming.statement.previous != Some(held.id().map_err(credential)?)
                     || incoming.statement.sequence
                         != held
@@ -734,7 +882,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.sweep_chains().await
         })
     }
-    pub async fn horizon_credentials(
+    pub async fn cached_peer_credentials(
         &self,
         nodes: &[PublicKey],
     ) -> Result<Vec<(PublicKey, CredentialChain)>, Error> {
@@ -748,9 +896,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [node.as_bytes().to_vec()],
                 )
                 .await?;
-            let row = rows.next().await?.ok_or_else(|| {
-                denied("sync with the required device before declaring its credential deadline")
-            })?;
+            let row = rows
+                .next()
+                .await?
+                .ok_or_else(|| denied("peer credentials are not cached"))?;
             let digest = row
                 .get::<Vec<u8>>(0)?
                 .as_slice()
@@ -1137,7 +1286,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .mergeable_horizon(scope)
             .await?
             .ok_or_else(|| denied("no horizon statement"))?;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
         inner.ensure_horizon_current(scope).await?;
         let id = inner.scope_id(scope).await?;
         let previous = inner

@@ -291,7 +291,8 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     let kept = MAX_UNCONFIGURED_PEERS + 2;
     assert_eq!(a.recorded_peers().await, (kept, kept));
     // The two kept whatever the bound, and the most recent strangers, stay.
-    let present = async |key: &PrivateKey| a.horizon_credentials(&[key.public_key()]).await.is_ok();
+    let present =
+        async |key: &PrivateKey| a.cached_peer_credentials(&[key.public_key()]).await.is_ok();
     assert!(present(&configured).await && present(&full_node).await);
     assert!(present(&strangers[299]).await && present(&strangers[300 - 256]).await);
     assert!(!present(&strangers[0]).await && !present(&strangers[300 - 257]).await);

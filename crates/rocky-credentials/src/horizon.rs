@@ -5,7 +5,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope};
 use serde::{Deserialize, Serialize};
 
-pub const HORIZON_FORMAT: u32 = 3;
+pub const HORIZON_FORMAT: u32 = 4;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,8 @@ pub struct HorizonStatement {
     pub manifest: Commitment,
     /// The digest of the revocations the declaring issuer held.
     pub revocations: Commitment,
+    /// Sorted IDs authenticating the declaring policy, even after further revocations.
+    pub policy: Vec<Commitment>,
     pub scope: ResourceScope,
     pub sequence: u64,
     pub previous: Option<Commitment>,
@@ -75,6 +77,13 @@ impl HorizonStatement {
         };
         if self.format != HORIZON_FORMAT {
             return Err(denied("unsupported horizon format"));
+        }
+        if self.policy.len() > crate::MAX_LIVE_REVOCATIONS
+            || self.policy.windows(2).any(|pair| pair[0] >= pair[1])
+            || rocky_core::commitment("rocky.revocation-set.v1", &encode(&self.policy)?)
+                != self.revocations
+        {
+            return Err(denied("invalid horizon policy reference"));
         }
         if self.bases.len() != self.existence.len()
             || self.bases.iter().zip(&self.existence).any(|(base, cut)| {
@@ -109,7 +118,7 @@ impl HorizonStatement {
                 .any(|cut| cut.scope.domain != self.scope.domain || !logs_valid(&cut.logs))
             || self.peers.len() > 64
             || !self.peers.windows(2).all(|p| p[0].node < p[1].node)
-            || self.peers.iter().any(|peer| peer.expires <= self.issued)
+            || self.peers.iter().any(|peer| peer.expires == 0)
         {
             return Err(denied("invalid horizon statement"));
         }
@@ -221,7 +230,11 @@ mod tests {
         let statement = HorizonStatement {
             format: HORIZON_FORMAT,
             manifest: [6; 32],
-            revocations: [0; 32],
+            revocations: rocky_core::commitment(
+                "rocky.revocation-set.v1",
+                &encode(&Vec::<Commitment>::new()).unwrap(),
+            ),
+            policy: Vec::new(),
             scope,
             sequence: 1,
             previous: None,
@@ -237,7 +250,7 @@ mod tests {
         let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
         current.verify(issuer.public_key()).unwrap();
         assert_eq!(current.statement, statement);
-        for format in [0, 2, 4, u32::MAX] {
+        for format in [0, 2, 3, 5, u32::MAX] {
             let mut other = signed.clone();
             other.statement.format = format;
             assert_eq!(

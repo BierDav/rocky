@@ -3,7 +3,7 @@
 Qualified on 2026-10-09 by [phase 10](../features_06/10-qualification.md) on
 the JVM desktop profile (macOS arm64, loopback TCP), with each device in its own
 process, and its sharing and move steps on two Android emulators. Phone runs, the
-market scenario on devices and horizons through custody alone are [outstanding](#outstanding). This is not an Internet, NAT or relay claim.
+market scenario on devices are [outstanding](#outstanding). This is not an Internet, NAT or relay claim.
 
 ## Commands
 
@@ -32,7 +32,10 @@ checkpoints and stayed offline across the horizon, rebootstraps to the finalized
 state. `two_phones_never_online_together_pass_the_release_gate_through_custody`
 repeats it natively. Measured: see [evidence](#evidence).
 
-For the horizon, B meets A directly; see [outstanding](#outstanding).
+On 2026-10-10, [Phase 13](../features_07/13-relayed-horizon-evidence.md)
+qualified all nine horizons through keyless custody alone. A and B enroll and
+receive authors through local credential APIs, then alternate online; they
+never share a native session, including setup.
 
 ## Acceptance scenarios
 
@@ -120,6 +123,8 @@ and every reference between groups is refused natively and in Kotlin:
 ## Evidence
 
 Recorded on 2026-10-09; see the [phase brief](../features_06/10-qualification.md#evidence).
+The custody-only horizon rerun on 2026-10-10 passed the JVM gate in 35.747 s;
+see [Phase 13 evidence](../features_07/13-relayed-horizon-evidence.md).
 
 ## Outstanding
 
@@ -127,7 +132,6 @@ Recorded on 2026-10-09; see the [phase brief](../features_06/10-qualification.md
 | --- | --- |
 | Two-phone runs of the gate, moves and revocation | Two physical Android phones on the qualification host, running the [device procedure](shopping-devices.md#two-phone-procedure). Only one phone, in personal use, was attached; the procedure [passed on two emulators](shopping-devices.md#emulator-pair-2026-10-09) |
 | 6 Market on devices | Two phones competing for the last item, in [phase 22](../features_07/22-qualification.md). JVM processes and one emulator reservation passed; see [market qualification](market-qualification.md) |
-| Horizon through custody alone | A keyless node that admits signed horizon statements and forwards participants' signed acknowledgments; no such contract exists, so participants meet an issuer |
 | Internet, NAT and relays | A run over iroh relays between networks; only loopback and one LAN were used |
 
 The earlier single-phone LAN run is recorded in [shopping devices](shopping-devices.md).

@@ -325,7 +325,8 @@ async fn rows(
                         .acknowledge_mergeable_horizon(replica, *scope)
                         .await?;
                 }
-                if let Some(signed) = replica.admitted_horizon(*scope).await?
+                if replica.can_read_scope(*scope).await
+                    && let Some(signed) = replica.admitted_horizon(*scope).await?
                     && replica.finalized_horizon(*scope).await?.as_ref() != Some(&signed)
                     && !replica.horizon_rebootstrap_required(*scope).await?
                     && replica.horizon_progress(*scope).await?.waiting.is_empty()

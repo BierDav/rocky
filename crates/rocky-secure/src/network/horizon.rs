@@ -33,6 +33,10 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<bool, Error> {
+        if replica.admitted_horizon(scope).await?.is_none() {
+            return Ok(false);
+        }
+        self.relay_mergeable_horizon(replica, scope).await?;
         let Some(signed) = replica.admitted_horizon(scope).await? else {
             return Ok(false);
         };
@@ -51,6 +55,7 @@ impl NativeSession {
         self.send(HorizonMessage::HorizonAck { scope, ack }).await?;
         self.acknowledged("unexpected horizon acknowledgment")
             .await?;
+        self.relay_mergeable_horizon(replica, scope).await?;
         Ok(true)
     }
     pub(super) async fn answer_horizon<A: RowApplication>(
@@ -74,9 +79,6 @@ impl NativeSession {
                 self.send(Message::Acknowledged).await
             }
             HorizonMessage::HorizonAck { scope, ack } => {
-                if ack.node != self.peer {
-                    return Err(denied("horizon acknowledgment differs from session peer"));
-                }
                 replica.receive_horizon_ack(scope, ack).await?;
                 self.send(Message::Acknowledged).await
             }

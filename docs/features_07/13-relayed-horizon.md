@@ -1,6 +1,7 @@
 # 13. Relayed horizon
 
-Status: not started.
+Status: complete (2026-10-10). See
+[the evidence](13-relayed-horizon-evidence.md).
 Owner: `rocky-credentials` horizon statement; `rocky-secure` horizon and
 session; `rocky-sdk` horizon surface. Depends on
 [phase 5](05-issuer-registry.md) and

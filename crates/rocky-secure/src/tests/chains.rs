@@ -303,7 +303,13 @@ async fn a_horizon_credential_keeps_its_chain_until_a_renewal_replaces_it() {
         .unwrap();
     assert_eq!(a.chain_census().await.0, [b_chain.digest()].into());
     assert_eq!(
-        encode(&a.horizon_credentials(&[bob.public_key()]).await.unwrap()[0].1).unwrap(),
+        encode(
+            &a.cached_peer_credentials(&[bob.public_key()])
+                .await
+                .unwrap()[0]
+                .1
+        )
+        .unwrap(),
         encode(&b_chain).unwrap()
     );
     let renewed = Chain::new(f.credentials(&bob, f.full())).unwrap();
@@ -325,7 +331,7 @@ async fn an_earlier_session_version_is_refused() {
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
-    assert_eq!(rocky_core::net::NATIVE_SESSION_VERSION, 11);
+    assert_eq!(rocky_core::net::NATIVE_SESSION_VERSION, 12);
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
     let (accepted, dialed) = tokio::join!(
         NativeSession::accept(

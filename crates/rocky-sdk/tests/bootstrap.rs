@@ -590,6 +590,19 @@ async fn horizon_sdk_declares_finalizes_maintains_and_preserves_reopen_state() -
     let root = tempfile::tempdir()?;
     let device = Device::create(root.path(), None)?;
     device.add(101, "base").await;
+    let nodes: Vec<_> = (0..65)
+        .map(|_| rocky_sdk::credentials::PrivateKey::new().public_key())
+        .collect();
+    let error = device
+        .call(
+            json!({"type":"horizon","collection":"items","action":"declare","participants":nodes}),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("horizon_participants_full"));
+    let unknown = rocky_sdk::credentials::PrivateKey::new().public_key();
+    let error = device.call(json!({"type":"horizon","collection":"items","action":"declare","participants":[unknown]})).await.unwrap_err();
+    assert!(error.to_string().contains("no registry record"));
     assert!(device.call(json!({"type":"horizon","collection":"items","action":"maintain","max_operations":0})).await.is_err());
     let declared = device
         .ok(json!({"type":"horizon","collection":"items","action":"declare","participants":[]}))

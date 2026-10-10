@@ -231,7 +231,21 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
      * checkpoint, stays offline across the horizon and rebootstraps.
      */
     fun gate() {
-        val (a, b, c) = phones()
+        val a = device("a").open("create")
+        fun writer(name: String): Device {
+            val writer = device(name)
+            val keys = writer.call("prepare", "directory" to writer.directory.path)
+            writer.open("install", "supplied" to a.call("grantWriter", "device" to keys))
+            for (table in listOf("lists", "categories", "items")) {
+                val request = writer.call("authorRequest", "table" to table).jsonPrimitive.content
+                val credential = a.call("authorAssign", "request" to request)
+                writer.call("authorInstall", "credential" to credential)
+            }
+            return writer
+        }
+        val b = writer("b")
+        val c = writer("c")
+        c.call("addPeer", "contact" to a.contact())
         val custody = custody(a.call("pairing", "profile" to "custody").jsonPrimitive.content, a, b, c)
         for (phone in listOf(a, b, c)) phone.call("addPeer", "contact" to custody.contact)
         val weekly = a.call("createList", "title" to "Weekly").asLong
@@ -293,7 +307,8 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         expect(b.lists().sorted() == listOf("Weekend", "Weekly")) { "B lists: ${b.lists()}" }
         notes += "category delete nulled only items.category; deleting Party cascaded to its items"
 
-        // The horizon: custody neither admits statements nor forwards acknowledgments, so B meets A directly.
+        // Every horizon statement and acknowledgment travels through custody.
+        b.online(false)
         a.online(true)
         val order = listOf("items", "categories", "lists")
         for (list in lists) {
@@ -305,7 +320,8 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
             for (list in lists) {
                 var rounds = 0
                 while (true) {
-                    b.sync()
+                    relay(a, b)
+                    relay(b, a)
                     rounds++
                     val result = runCatching { a.call("horizon", "action" to "finalize", "table" to table, "list" to list) }
                     if (result.isSuccess) break
@@ -313,12 +329,12 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
                 }
             }
         }
-        b.sync()
+        relay(a, b)
         for (phone in listOf(a, b)) {
             expect(lists.all { list -> order.all { phone.finalized(it, list) } }) { "${phone.name} not finalized" }
             expect(lists.associateWith { phone.items(it) } == deleted) { "${phone.name} after horizon" }
         }
-        notes += "9 group-partition horizons finalized on A and B"
+        notes += "9 group-partition horizons finalized on A and B through custody alone"
 
         // C was offline across the horizon: it rebootstraps from A's finalized checkpoints.
         c.online(true)

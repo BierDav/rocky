@@ -221,6 +221,9 @@ impl NativeSession {
                 CheckpointMessage::CheckpointOffer { scope }
                 | CheckpointMessage::CheckpointPull { scope, .. },
             ) => vec![*scope],
+            Message::HorizonRelay(horizon_relay::HorizonRelayMessage::Exchange {
+                scope, ..
+            }) => vec![*scope],
             Message::Horizon(
                 HorizonMessage::MergeableCut { scope }
                 | HorizonMessage::HorizonRejoined { scope, .. }

@@ -30,6 +30,7 @@ naturally holds.
 | [0052](0052-holding-proofs.md) | Session-bound partition holding proofs |
 | [0053](0053-chains-by-reference.md) | Credential chains named by digest in frames, sessions, storage and checkpoint pages |
 | [0054](0054-envelope-delivery.md) | Envelope delivery to the recipient alone, directly or through a mailbox |
+| [0055](0055-relayed-horizon.md) | Relayed horizon statements and acknowledgments |
 | 0056 | [Contact exchange and discovery secrets](0056-contact-exchange-and-discovery-secrets.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |

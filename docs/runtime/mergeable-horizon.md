@@ -8,12 +8,13 @@ is for an author who schedules horizons, syncs across one, or changes the format
 
 ## Declare, acknowledge, finalize
 
-1. Sync the scope and its row/existence dependencies. `horizon_statement(scope,
-   peers)` captures a proposal from verified peer credential chains (at most 64
-   peers); the manifest publisher signs it outside the DB transaction and
-   distributes it through `receive_horizon`. Statements and acknowledgments
-   travel between a participant and the peer it syncs with. A keyless custody
-   peer relays neither, so each participant meets an issuer.
+1. Sync the scope and its row/existence dependencies. The SDK captures a cut
+   with participants from the issuer registry: unrevoked whole-scope readers
+   and custodians, with their latest recorded chain expiry. An explicit list
+   selects registry records; over 64 returns `horizon_participants_full`.
+   The publisher signs outside the transaction. Any scope-proved reader or
+   keyless custody peer stores and relays it and participant-signed
+   acknowledgments; participants need no session with the issuer.
 2. Participants sync missing cut evidence, then `acknowledge_horizon` and
    `receive_horizon_ack`. Exact row heads/digests and every existence cut must
    match. A holder already ahead of the cut refuses the proposal and imports the
@@ -21,7 +22,8 @@ is for an author who schedules horizons, syncs across one, or changes the format
 3. `horizon_progress` reports acknowledged, waiting and behind devices. A
    required device becomes behind at the minimum of its credential expiry and
    issue time plus 30 days (`HORIZON_WAIT_SECONDS`); restart preserves the
-   deadline. A first acknowledgment after it is refused; rebootstrap is the only
+   deadline. A participant revoked in the locally held set stops being required
+   immediately. A first acknowledgment after it is refused; rebootstrap is the only
    way back. The SDK's `horizon` status also reports the statement's `issued`
    time and `deadline`, the latest deadline of a waiting device: finalization
    waits no longer than that.
@@ -29,7 +31,7 @@ is for an author who schedules horizons, syncs across one, or changes the format
    in one transaction drops tombstones, hidden primary-key and unique losers and
    cascade orphans, stores substituted SET NULL values, preserves register
    stamps and identity high-water marks per author/partition, installs the
-   format-7 checkpoint and existence attachments, advances log floors and the
+   format-8 checkpoint and existence attachments, advances log floors and the
    revision. Notifications follow commit and flush. Retry is idempotent.
 5. `prune(scope)` then releases evidence only when the ordinary copy gates and
    `HorizonCustody` permit: `max(1, copies)` other holders must acknowledge the
@@ -93,27 +95,30 @@ reverse a parent's retirement at the same cut.
   winner rules. Reusing a released baseline key needs a signed causal dependency
   on the release and the same finalized basis.
 - Behind devices cannot sync rows or write until native `sync_scope` or SDK sync
-  imports a format-7 checkpoint. Learning the remote cut installs a durable
+  imports a format-8 checkpoint. Learning the remote cut installs a durable
   write/sync guard before pages download; only a covering finalized checkpoint
   clears it. Bootstrap fetches existence attachments, then row pages, then sends
   an authenticated finalized-bootstrap receipt.
 - A long-offline holder may skip intermediate declarations through a newer
   finalized checkpoint covering its held cut; proposal replacement otherwise
-  needs the immediate signed successor. A finalized horizon cannot be undone.
+  needs the immediate signed successor. Concurrent siblings choose the lower
+  statement ID and discard the loser's acknowledgments. A holder that already
+  finalized the higher ID uses the guarded rebootstrap path to the lower
+  finalized winner. See [decision 0055](../decisions/0055-relayed-horizon.md).
 
 ## Formats
 
 | Boundary | Current |
 | --- | --- |
-| Horizon statement | Format 3 with the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
-| Checkpoint | Format 7 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
-| Row frame | 6, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v9` |
-| Native session | `rocky.native-session.v11` |
+| Horizon statement | Format 4 with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
+| Checkpoint | Format 8 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
+| Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
+| File identity | `rocky.encrypted-replica.v12` |
+| Native session | `rocky.native-session.v12` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
-Horizon statements accept only format 3, with an explicit existence-base list.
-Checkpoint 7, frame 6 and replica identity v9 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Horizon statements accept only format 4, with an explicit existence-base list.
+Checkpoint 8, frame 8 and replica identity v12 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.
@@ -122,12 +127,18 @@ generations must satisfy the checkpoint's manifest/dependency bindings.
 
 The native JSON `horizon` operation and Kotlin `client.horizons` /
 `session.horizons` expose declare, admit, status, finalize and maintain. Sync
-first so verified participant credentials are cached; declaration defaults to the
-retention policy's required peers. Schedule issuer `maintain(table,
-maxOperations = 1024)`: it declares after that many operations since the last
+the cut first; declaration defaults to all eligible registry devices. A caller
+may name a subset explicitly; every device must have an eligible registry
+record, including authority over related parent row cuts. Schedule issuer
+`maintain(table, maxOperations = 1024)`: it declares after that many operations since the last
 finalization, then finalizes/prunes when ready. There is no automatic issuer
-timer. A non-issuer can admit, check status and finalize. Sync supplies
-acknowledgments and behind rebootstrap.
+timer. A non-issuer can admit, check status and finalize. Sync supplies relayed
+acknowledgments and behind rebootstrap. A custody peer verifies evidence without decrypting or checking the cut. Signed finalized
+checkpoints retire its pending statement and acknowledgments. One bounded
+completed certificate preserves the original signed acknowledgments for a
+holder that fetches them after another participant has already finalized.
+A reader whose rows or related parent cut differ from that evidence enters
+the existing rebootstrap guard and imports the finalized checkpoint.
 
 ## Evidence
 

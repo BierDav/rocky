@@ -220,7 +220,6 @@ async fn topology() -> Result<Topology, Failure> {
     )?;
     a.author(&a).await?;
     b.author(&a).await?;
-    b.sync().await?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
     Ok(Topology {
@@ -324,9 +323,8 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
         [[json!("Weekend")], [json!("Weekly")]]
     );
 
-    // The horizon. A keyless custody peer neither admits a statement nor
-    // forwards acknowledgments: B exchanges both with the issuer directly.
-    introduce(a, b).await?;
+    // Every horizon statement and acknowledgment travels through custody.
+    b.online(false).await?;
     a.online(true).await?;
     let participants = json!([b.node().await?]);
     let lists = [&weekly, &weekend, &party];
@@ -353,7 +351,8 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
         for list in lists {
             let mut rounds = 0;
             loop {
-                b.sync().await?;
+                relay(a, b).await?;
+                relay(b, a).await?;
                 rounds += 1;
                 match a.horizon(table, list, "finalize", json!({})).await {
                     Ok(_) => break,
@@ -363,7 +362,7 @@ async fn two_phones_never_online_together_pass_the_release_gate_through_custody(
             }
         }
     }
-    b.sync().await?;
+    relay(a, b).await?;
     for peer in [a, b] {
         for list in lists {
             for table in ORDER {
@@ -399,6 +398,14 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
         "from":values(&weekly),"to":values(&weekend)}),
     )
     .await?;
+    // Enrollment after finalization never adds C to the old participant set.
+    for table in ORDER {
+        for list in [&weekly, &weekend] {
+            a.horizon(table, list, "declare", json!({"participants":[]}))
+                .await?;
+            a.horizon(table, list, "finalize", json!({})).await?;
+        }
+    }
     // The weekly checkpoint holds the moved row's tombstone, which has no image.
     let c = Peer::new(
         Database::join(
@@ -413,6 +420,11 @@ async fn a_device_joining_after_a_move_starts_the_list_from_a_checkpoint() -> Re
     }
     c.sync().await?;
     assert_eq!(c.items().await?, a.items().await?);
+    for table in ORDER {
+        for list in [&weekly, &weekend] {
+            assert!(finalized(&c, table, list).await?);
+        }
+    }
     assert_eq!(
         c.items().await?,
         [[json!(weekend), json!("Milk"), json!("0"), Value::Null]]

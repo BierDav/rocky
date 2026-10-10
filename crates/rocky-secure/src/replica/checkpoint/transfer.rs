@@ -973,6 +973,20 @@ impl<A: RowApplication> Inner<A> {
         if base.sequence() > signed.statement.strong.base.map_or(0, |base| base.0) {
             return Err(denied("checkpoint behind strong horizon"));
         }
+        if let Some(needed) = self.horizon_bootstrap(signed.statement.scope).await?
+            && signed.statement.finalized.as_deref() == Some(&needed)
+            && let Some(held) = self
+                .checkpoint_record(id, true)
+                .await?
+                .and_then(|record| record.signed)
+                .and_then(|checkpoint| checkpoint.statement.finalized)
+            && held.statement.sequence == needed.statement.sequence
+            && held.statement.previous == needed.statement.previous
+            && needed.id().map_err(credential)? < held.id().map_err(credential)?
+        {
+            // The publisher's lower sibling replaces the invalidated replay base.
+            return Ok(());
+        }
         for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
             if !signed.statement.frontier.iter().any(|position| {
                 position.author == log.author && position.sequence as i64 >= horizon

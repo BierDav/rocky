@@ -71,6 +71,27 @@ private class DeviceProcess {
                 RockyDatabase.join(directory(), ShoppingSchema, request.text("invitation"), tcp(), automaticSync = false)
             }
 
+            "prepare" -> Credentials.prepare(directory().path)
+
+            "grantWriter" -> database.grant(
+                request.getValue("device").jsonObject,
+                GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()),
+                authors = ShoppingSchema.tables.size,
+            )
+
+            "install" -> opened(directory()) {
+                RockyDatabase.install(directory().path, ShoppingSchema, request.getValue("supplied").jsonObject, transport = tcp())
+            }
+
+            "authorRequest" -> JsonPrimitive(database.credentials.pseudonymRequest(request.text("table")))
+
+            "authorAssign" -> database.credentials.assignPseudonym(request.text("request"))
+
+            "authorInstall" -> {
+                database.credentials.installPseudonym(request.getValue("credential").jsonArray)
+                JsonNull
+            }
+
             "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, tcp(), automaticSync = false) }
 
             "pairing" -> JsonPrimitive(

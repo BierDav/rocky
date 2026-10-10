@@ -52,7 +52,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Persists the issuer cut learned from sync before downloading its replay base.
     pub async fn require_horizon_rebootstrap(&self, signed: SignedHorizon) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
-        inner.verify_horizon(&signed)?;
+        inner.verify_horizon(&signed).await?;
         if signed.statement.issued > now()? {
             return Err(denied("horizon issue time is in the future"));
         }
@@ -67,7 +67,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         .flatten()
         {
             if signed.statement.sequence < held.statement.sequence
-                || (signed.statement.sequence == held.statement.sequence && signed != held)
+                || (signed.statement.sequence == held.statement.sequence
+                    && signed != held
+                    && !(signed.statement.previous == held.statement.previous
+                        && signed.id().map_err(credential)? < held.id().map_err(credential)?))
             {
                 return Err(denied(
                     "bootstrap requirement moves the issuer cut backwards",

@@ -1,3 +1,4 @@
+mod relay;
 use super::*;
 
 async fn peer(replica: &EncryptedReplica<TypedRows>) -> (PublicKey, CredentialChain) {

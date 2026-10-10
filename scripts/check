@@ -2,12 +2,12 @@
 # Shared checks; see docs/development.md#shared-checks.
 #
 #   scripts/check                   formatting, clippy and every test
+#   scripts/check --doc             also the doc tests
 #   scripts/check --slow            only the ignored `soak_` tests
-#   scripts/check --build DIR       clippy, the doc tests, then archive the
-#                                   test binaries in DIR
+#   scripts/check --build DIR       clippy, then archive the test binaries in DIR
 #   scripts/check [--slow] --from DIR
 #                                   the same checks with DIR's test binaries,
-#                                   without clippy or doc tests, which --build ran
+#                                   without clippy, which --build ran
 #   scripts/check --no-clippy       every test, without clippy, when --build
 #                                   already ran clippy but its archives are gone
 #
@@ -22,12 +22,14 @@ usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 mode=all
 archives=
 clippy=true
+doc=false
 while [ $# -gt 0 ]; do
     case "$1" in
     --slow) mode=slow ;;
     --build) mode=build && archives=${2:-} && shift ;;
     --from) archives=${2:-} && shift ;;
     --no-clippy) clippy=false ;;
+    --doc) doc=true ;;
     *) usage ;;
     esac
     shift
@@ -78,9 +80,11 @@ slow)
     ;;
 build)
     cargo clippy --workspace --all-targets --locked -- -D warnings
-    # nextest cannot archive doc tests, so the one compiling job runs them here
-    # while the workspace is built; --from below then needs no compile.
-    cargo test --workspace --doc --locked
+    # nextest cannot archive doc tests; --doc runs them here, where the workspace
+    # is already compiled, so a later --from needs no compile.
+    if $doc; then
+        cargo test --workspace --doc --locked
+    fi
     mkdir -p "$archives"
     for name in workspace sdk-without-defaults; do
         # shellcheck disable=SC2046
@@ -94,8 +98,9 @@ esac
 cargo fmt --all -- --check
 [ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
 run_tests workspace
-# nextest does not run doc tests; the archives omit them, so --build ran them.
-if $nextest && [ -z "$archives" ]; then
+# nextest skips doc tests, which are opt-in so a check does not compile them;
+# plain `cargo test` still runs them.
+if $nextest && $doc; then
     cargo test --workspace --doc --locked
 fi
 # The database, sessions and other transports must not need iroh.

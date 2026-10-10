@@ -58,8 +58,8 @@ project dependencies.
 
 `scripts/check` resolves the repository from its own location. It runs formatting,
 workspace Clippy with `clippy::all` denied and warnings treated as errors, and
-workspace tests, including doc tests. Dependency resolution uses the committed
-lockfile.
+workspace tests. `--doc` adds the doc tests (without it, and with nextest, they
+do not run). Dependency resolution uses the committed lockfile.
 It uses [cargo-nextest](https://nexte.st) when installed, which runs every test
 binary in parallel, and falls back to `cargo test`. Settings are in
 `.config/nextest.toml`: tests that take over 60 seconds are reported as slow;
@@ -133,12 +133,12 @@ On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
 they exchange architecture-specific nextest archives and custody peer, while
 `lint` uses `ubuntu-latest-any-arch`.
 The `build` job is the only job that compiles the workspace. It downloads an
-archive of the exact event revision and runs `scripts/check --build`: strict
-workspace Clippy, the doc tests nextest cannot archive, and the test binaries as
-nextest archives; it then builds the custody peer binary. It uploads three
-independent artifacts -- `nextest-workspace`, `nextest-sdk` and `rocky-peer` --
-so a failure to finalize one cannot also lose the others, and each consumer
-fetches only what it runs.
+archive of the exact event revision and runs `scripts/check --build ... --doc`:
+strict workspace Clippy, the doc tests nextest cannot archive, and the test
+binaries as nextest archives; it then builds the custody peer binary. It uploads
+three independent artifacts -- `nextest-workspace`, `nextest-sdk` and
+`rocky-peer` -- so a failure to finalize one cannot also lose the others, and
+each consumer fetches only what it runs.
 Every job installs the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. Gitea installs the runner-architecture nextest

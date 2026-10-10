@@ -171,7 +171,9 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
-          ./scripts/check --build "$RUNNER_TEMP/build"
+          # --doc runs the doc tests once here, where the workspace is compiled;
+          # the test-only jobs skip them.
+          ./scripts/check --build "$RUNNER_TEMP/build" --doc
           # After the archives: the archive without default features replaces the binary.
           cargo build --locked -p rocky-sdk --bin rocky-peer
           cp target/debug/rocky-peer "$RUNNER_TEMP/build/"

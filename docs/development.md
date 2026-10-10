@@ -126,8 +126,10 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 
 ## CI
 
-The baseline workflow's `lint` job runs `scripts/tools` and `scripts/lint` on
-Linux; it needs no build and fails within minutes. The `build`, `check`, `slow`
+The baseline workflow runs for pushes to the default branch and for the release
+workflow's call, not for pull requests. Its `lint` job runs `scripts/tools` and
+`scripts/lint` on Linux; it needs no build and fails within minutes. The
+`build`, `check`, `slow`
 and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
 On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
 they exchange architecture-specific nextest archives and custody peer, while
@@ -161,8 +163,9 @@ of the same tree, such as a redescribed or rebased commit with unchanged content
 or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
 When `build` finds `check` already passed for the tree it builds nothing, and
-the jobs after it build what they still run themselves. The Rust dependency
-cache is saved from `main` and restored on other refs.
+the jobs after it build what they still run themselves. The Rust cache keeps
+both dependencies and workspace crates; it is saved from `main` and restored on
+other refs.
 
 The `slow` job runs `./scripts/check --slow` on pushes to `main`; releases do not
 wait for it.

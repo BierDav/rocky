@@ -5,8 +5,10 @@ name: Baseline checks
 # running again. See docs/development.md#ci.
 
 on:
+  # Only the default branch and the release call run baselines; there are no
+  # other long-lived branches or pull requests.
   push:
-  pull_request:
+    branches: [main]
   # The release workflow gates every release on these checks, without `slow`
   # and `shopping`. Its build and checks are skipped for a tree that passed.
   workflow_call:
@@ -22,7 +24,7 @@ permissions:
 # release's checks, which share the caller's workflow name and ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always

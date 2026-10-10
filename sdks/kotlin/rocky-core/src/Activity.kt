@@ -65,11 +65,11 @@ sealed interface RockyEvent {
     data class PeerAdded(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
     data class PeerRemoved(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
 
-    /** Credentials were renewed under policy [epoch], with [keys] new reader keys. */
+    /** Credentials were renewed; the device now holds [revocations], with [keys] new reader keys. */
     data class Renewed(
         override val sequence: Long,
         override val atEpochMillis: Long,
-        val epoch: Long,
+        val revocations: RevocationStatus,
         val expiresAtEpochSeconds: Long,
         val keys: Int,
     ) : RockyEvent
@@ -148,7 +148,7 @@ sealed interface RockyEvent {
 
                 "peer_removed" -> PeerRemoved(sequence, at, text("peer"))
 
-                "renewed" -> Renewed(sequence, at, event.long("epoch"), event.long("expires"), int("keys"))
+                "renewed" -> Renewed(sequence, at, RockySession.revocations(event.getValue("revocations").jsonObject), event.long("expires"), int("keys"))
 
                 "renewal_failed" -> RenewalFailed(sequence, at, text("error"))
 

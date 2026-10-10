@@ -29,7 +29,7 @@ is for an author who schedules horizons, syncs across one, or changes the format
    in one transaction drops tombstones, hidden primary-key and unique losers and
    cascade orphans, stores substituted SET NULL values, preserves register
    stamps and identity high-water marks per author/partition, installs the
-   format-6 checkpoint and existence attachments, advances log floors and the
+   format-7 checkpoint and existence attachments, advances log floors and the
    revision. Notifications follow commit and flush. Retry is idempotent.
 5. `prune(scope)` then releases evidence only when the ordinary copy gates and
    `HorizonCustody` permit: `max(1, copies)` other holders must acknowledge the
@@ -93,7 +93,7 @@ reverse a parent's retirement at the same cut.
   winner rules. Reusing a released baseline key needs a signed causal dependency
   on the release and the same finalized basis.
 - Behind devices cannot sync rows or write until native `sync_scope` or SDK sync
-  imports a format-6 checkpoint. Learning the remote cut installs a durable
+  imports a format-7 checkpoint. Learning the remote cut installs a durable
   write/sync guard before pages download; only a covering finalized checkpoint
   clears it. Bootstrap fetches existence attachments, then row pages, then sends
   an authenticated finalized-bootstrap receipt.
@@ -105,15 +105,15 @@ reverse a parent's retirement at the same cut.
 
 | Boundary | Current |
 | --- | --- |
-| Horizon statement | Format 2, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
-| Checkpoint | Format 6 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
+| Horizon statement | Format 3 with the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
+| Checkpoint | Format 7 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 6, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v8` |
-| Native session | `rocky.native-session.v7` |
+| File identity | `rocky.encrypted-replica.v9` |
+| Native session | `rocky.native-session.v8` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
-Horizon statements accept only format 2, with an explicit existence-base list.
-Checkpoint 6, frame 6 and replica identity v8 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Horizon statements accept only format 3, with an explicit existence-base list.
+Checkpoint 7, frame 6 and replica identity v9 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.

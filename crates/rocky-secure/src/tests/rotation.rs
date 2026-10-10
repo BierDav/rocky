@@ -16,22 +16,16 @@ fn key(scope: ResourceScope, generation: u64, key: [u8; 32]) -> KeyMaterial {
 fn reader(f: &Fixture) -> Vec<ResourceGrant> {
     vec![grant(f.public, &[Right::Read, Right::Custody], &[])]
 }
-/// A device's chain at `epoch`: publisher, user, node.
-fn chain(
-    f: &Fixture,
-    node: &PrivateKey,
-    grants: Vec<ResourceGrant>,
-    epoch: u64,
-) -> CredentialChain {
+/// A device's chain: publisher, user, node.
+fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
     let user = PrivateKey::new();
     let capability = |subject, kind, delegations| Capability {
         manifest: f.app().definition().hash(),
         subject,
         kind,
         grants: grants.clone(),
-        not_before: 0,
-        expires: u64::MAX,
-        epoch,
+        not_before: crate::tests::lifetime().0,
+        expires: crate::tests::lifetime().1,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
@@ -46,33 +40,22 @@ fn chain(
             .unwrap(),
     ])
 }
-fn policy(f: &Fixture, epoch: u64, revoked: &[PublicKey]) -> SignedPolicy {
-    SignedPolicy::sign(
-        PolicyStatement {
-            manifest: f.app().definition().hash(),
-            epoch,
-            revoked: revoked
-                .iter()
-                .map(rocky_credentials::revoked_subject)
-                .collect(),
-        },
-        &f.publisher,
-    )
-    .unwrap()
+/// A statement revoking `revoked` as nodes and users.
+fn revoking(f: &Fixture, revoked: &[PublicKey]) -> RevocationSet {
+    crate::tests::revoking(&f.publisher, f.app().definition().app, revoked, &[])
 }
 fn config(
     f: &Fixture,
     node: &PrivateKey,
     grants: Vec<ResourceGrant>,
-    epoch: u64,
     keys: Vec<KeyMaterial>,
 ) -> SecureConfig {
     SecureConfig {
         publisher: f.publisher.public_key(),
         manifest: f.manifest.clone(),
-        policy: policy(f, epoch, &[]),
+        revocations: RevocationSet::new(),
         node: node.clone(),
-        credentials: chain(f, node, grants, epoch),
+        credentials: chain(f, node, grants),
         keys,
     }
 }
@@ -102,7 +85,7 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
         EncryptedReplica::open(
             dir.path().join(name),
             f.app(),
-            config(&f, node, grants, 1, vec![key(f.public, 1, OLD)]),
+            config(&f, node, grants, vec![key(f.public, 1, OLD)]),
         )
     };
     let issuer = open("alice.db", &alice, f.full()).await.unwrap();
@@ -117,20 +100,17 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
         );
     }
 
-    // The issuer revokes carol: a new policy epoch, then a new key epoch.
-    // A session and a paged read opened before end with the change.
+    // The issuer revokes carol: a statement, then a new key epoch. A
+    // session and a paged read opened before end with the change; the
+    // issuer's own chain stays current.
     let session = issuer.session([f.public].into()).await.unwrap();
     let mut staged = session.transaction();
     staged
         .insert(f.public, [9; 32], f.app().name("Staged"))
         .await
         .unwrap();
-    let next = policy(&f, 2, &[carol.public_key()]);
-    issuer.learn_policy(next.clone()).await.unwrap();
-    issuer
-        .renew_credentials(chain(&f, &alice, f.full(), 2))
-        .await
-        .unwrap();
+    let next = revoking(&f, &[carol.public_key()]);
+    issuer.learn_revocations(&next).await.unwrap();
     let revision = *issuer.observe_revision().borrow();
     issuer
         .install_key_epoch(key(f.public, 2, NEW))
@@ -164,7 +144,7 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     let page = issuer
         .transfer_page(
             bob.public_key(),
-            &chain(&f, &bob, reader(&f), 2),
+            &chain(&f, &bob, reader(&f)),
             &[f.public],
             None,
             MAX_SECURE_FRAME,
@@ -179,10 +159,13 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
     );
 
     // Carol obtains the new ciphertext elsewhere. Whether or not she has
-    // learned the policy, she holds no key for it and reads no new row.
-    assert!(revoked.receive(second.clone()).await.is_err());
+    // learned the statement, she holds no key for it and reads no new row.
+    assert_eq!(
+        revoked.receive(second.clone()).await.unwrap(),
+        ReceiveStatus::MissingKey
+    );
     assert_eq!(rows(&revoked, &f).await, 1);
-    revoked.learn_policy(next.clone()).await.unwrap();
+    revoked.learn_revocations(&next).await.unwrap();
     assert!(revoked.receive(second.clone()).await.is_err());
     assert!(revoked.snapshot(f.public).await.is_err());
     assert!(revoked.session([f.public].into()).await.is_err());
@@ -193,12 +176,9 @@ async fn a_rotation_seals_later_writes_out_of_a_revoked_readers_reach() {
             .is_err()
     );
 
-    // Bob renews. Until the new key reaches him the write waits; then it applies.
-    member.learn_policy(next).await.unwrap();
-    member
-        .renew_credentials(chain(&f, &bob, reader(&f), 2))
-        .await
-        .unwrap();
+    // Bob learns the statement and keeps his chain. Until the new key
+    // reaches him the write waits; then it applies.
+    member.learn_revocations(&next).await.unwrap();
     assert_eq!(
         member.receive(second.clone()).await.unwrap(),
         ReceiveStatus::MissingKey
@@ -220,45 +200,44 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
     let dir = TempDir::new().unwrap();
     let alice = PrivateKey::new();
     let path = dir.path().join("alice.db");
-    let open = |epoch: u64, keys: Vec<KeyMaterial>| {
-        EncryptedReplica::open(&path, f.app(), config(&f, &alice, f.full(), epoch, keys))
+    let open = |keys: Vec<KeyMaterial>| {
+        EncryptedReplica::open(&path, f.app(), config(&f, &alice, f.full(), keys))
     };
-    let replica = open(1, vec![key(f.public, 1, OLD)]).await.unwrap();
+    let replica = open(vec![key(f.public, 1, OLD)]).await.unwrap();
     insert(&replica, &f, 1).await;
     drop(replica);
 
     // The key provider and the saved identity hold the new epoch; the
     // process stopped before the replica heard of either. Opening with
-    // what was saved finishes the rotation and the policy change.
+    // what was saved finishes the rotation.
     let both = || vec![key(f.public, 1, OLD), key(f.public, 2, NEW)];
-    let replica = open(2, both()).await.unwrap();
+    let replica = open(both()).await.unwrap();
     assert_eq!(replica.key_epochs(f.public).await, vec![1, 2]);
     assert_eq!(rows(&replica, &f).await, 1);
     assert_eq!(generation(&insert(&replica, &f, 2).await), 2);
     drop(replica);
     // Again, and after that with nothing left to complete.
-    let replica = open(2, both()).await.unwrap();
+    let replica = open(both()).await.unwrap();
     assert_eq!(rows(&replica, &f).await, 2);
     assert_eq!(replica.audit(f.public).await.unwrap().replayed, 2);
     drop(replica);
 
-    // Neither the key epoch nor the policy goes back, a lost earlier key is
-    // reported while its operations are retained, and other material for a
-    // recorded epoch is refused.
-    assert!(open(2, vec![key(f.public, 1, OLD)]).await.is_err());
-    assert!(open(2, vec![key(f.public, 2, NEW)]).await.is_err());
+    // The key epoch does not go back, a lost earlier key is reported while
+    // its operations are retained, and other material for a recorded epoch
+    // is refused.
+    assert!(open(vec![key(f.public, 1, OLD)]).await.is_err());
+    assert!(open(vec![key(f.public, 2, NEW)]).await.is_err());
     assert!(
-        open(2, vec![key(f.public, 1, [12; 32]), key(f.public, 2, NEW)])
+        open(vec![key(f.public, 1, [12; 32]), key(f.public, 2, NEW)])
             .await
             .is_err()
     );
     assert!(
-        open(2, vec![key(f.public, 1, OLD), key(f.public, 2, [78; 32])])
+        open(vec![key(f.public, 1, OLD), key(f.public, 2, [78; 32])])
             .await
             .is_err()
     );
-    assert!(open(1, both()).await.is_err());
-    assert_eq!(rows(&open(2, both()).await.unwrap(), &f).await, 2);
+    assert_eq!(rows(&open(both()).await.unwrap(), &f).await, 2);
 }
 
 #[tokio::test]
@@ -266,7 +245,7 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
-    let opened = config(&f, &alice, f.full(), 1, vec![key(f.public, 1, OLD)]);
+    let opened = config(&f, &alice, f.full(), vec![key(f.public, 1, OLD)]);
     let (coordinator, _) = recovery::coordination(&f, &[&opened]);
     let replica = EncryptedReplica::open(dir.path().join("alice.db"), f.app(), opened)
         .await
@@ -280,7 +259,7 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     // Recovery evidence spans both epochs: the original frames, with the
     // inventory naming the latest. A recipient holding both keys reads all.
     let both = vec![key(f.public, 1, OLD), key(f.public, 2, NEW)];
-    let recipient = config(&f, &bob, f.full(), 1, both);
+    let recipient = config(&f, &bob, f.full(), both);
     let package = replica
         .export_recovery(
             bob.public_key(),
@@ -336,24 +315,21 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
 }
 
 #[tokio::test]
-async fn policy_epoch_alone_refreshes_the_checkpoint_without_a_new_write() {
+async fn a_learned_revocation_alone_refreshes_the_checkpoint_without_a_new_write() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let node = PrivateKey::new();
     let replica = EncryptedReplica::open(
         dir.path().join("policy.db"),
         f.app(),
-        config(&f, &node, f.full(), 1, vec![key(f.public, 1, OLD)]),
+        config(&f, &node, f.full(), vec![key(f.public, 1, OLD)]),
     )
     .await
     .unwrap();
     insert(&replica, &f, 1).await;
     let before = replica.checkpoint(f.public).await.unwrap();
-    replica.learn_policy(policy(&f, 2, &[])).await.unwrap();
-    replica
-        .renew_credentials(chain(&f, &node, f.full(), 2))
-        .await
-        .unwrap();
+    let learned = revoking(&f, &[PrivateKey::new().public_key()]);
+    replica.learn_revocations(&learned).await.unwrap();
     // Drive bounded automatic maintenance directly, without a timer or a write.
     for _ in 0..8 {
         replica.maintain_checkpoint_for_test(f.public).await;
@@ -361,7 +337,11 @@ async fn policy_epoch_alone_refreshes_the_checkpoint_without_a_new_write() {
     let status = replica.checkpoint_status(f.public).await.unwrap();
     assert!(status.maintenance_error.is_none());
     let after = status.checkpoint.unwrap();
-    assert_eq!(after.statement.policy_epoch, 2);
+    assert_eq!(
+        after.statement.revocations,
+        learned.digest(now().unwrap()).unwrap()
+    );
+    assert_ne!(after.statement.revocations, before.statement.revocations);
     assert_eq!(after.statement.key_epoch, 1);
     assert_eq!(after.statement.operations, before.statement.operations);
     assert_eq!(after.statement.rows, before.statement.rows);
@@ -377,7 +357,7 @@ async fn reusing_another_scopes_key_names_the_collision_and_keeps_epochs() {
     let replica = EncryptedReplica::open(
         dir.path().join("keys.db"),
         f.app(),
-        config(&f, &node, f.full(), 1, vec![key(f.public, 1, OLD)]),
+        config(&f, &node, f.full(), vec![key(f.public, 1, OLD)]),
     )
     .await
     .unwrap();

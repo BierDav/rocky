@@ -12,7 +12,7 @@ impl<A: RowApplication> Inner<A> {
         chain: &CredentialChain,
         manifest: Commitment,
         key: PublicKey,
-        policy: &PolicyStatement,
+        policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let (mut grants, selectors) = chain
@@ -35,7 +35,7 @@ impl<A: RowApplication> Inner<A> {
         chain: &CredentialChain,
         manifest: Commitment,
         key: PublicKey,
-        policy: &PolicyStatement,
+        policy: &RevocationSet,
         time: u64,
         scopes: &[ResourceScope],
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
@@ -61,7 +61,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         chain: &CredentialChain,
         key: PublicKey,
-        policy: &PolicyStatement,
+        policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain_at(chain, self.manifest, key, policy, time)
@@ -227,7 +227,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 author.number,
                 scope,
                 &tuple,
-                &inner.config.policy.statement,
+                &inner.config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -256,7 +256,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.config.node.public_key(),
                 scope,
                 &tuple,
-                &inner.config.policy.statement,
+                &inner.config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -293,7 +293,7 @@ impl<A: RowApplication> Inner<A> {
                 self.config.publisher,
                 self.manifest,
                 self.config.node.public_key(),
-                &self.config.policy.statement,
+                &self.config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -545,7 +545,7 @@ impl<A: RowApplication> Inner<A> {
             .0
             .first()
             .map_or(self.manifest, |root| root.capability.manifest);
-        let policy = self.credential_policy(manifest, &self.config.policy.statement)?;
+        let revocations = self.revocations_for(manifest, &self.config.revocations)?;
         chain
             .verify_partition(
                 self.config.publisher,
@@ -553,7 +553,7 @@ impl<A: RowApplication> Inner<A> {
                 key,
                 scope,
                 tuple,
-                &policy,
+                revocations,
                 now()?,
             )
             .map_err(credential)
@@ -577,12 +577,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .map_or(inner.manifest, |root| root.capability.manifest);
         // One chain verification per batch. A peer without custody, or of a
         // generation this replica cannot verify, gets no offer.
-        let Ok(policy) = inner.credential_policy(manifest, &inner.config.policy.statement) else {
+        let Ok(revocations) = inner.revocations_for(manifest, &inner.config.revocations) else {
             return Ok(Vec::new());
         };
-        let Ok((_, selectors)) =
-            credentials.verify_selectors(inner.config.publisher, manifest, peer, &policy, now()?)
-        else {
+        let Ok((_, selectors)) = credentials.verify_selectors(
+            inner.config.publisher,
+            manifest,
+            peer,
+            revocations,
+            now()?,
+        ) else {
             return Ok(Vec::new());
         };
         if !selectors

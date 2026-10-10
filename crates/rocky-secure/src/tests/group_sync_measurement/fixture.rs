@@ -5,7 +5,7 @@ pub(super) struct Fixture {
     pub(super) schema: rocky_core::LogicalSchema,
     pub(super) domain: rocky_core::Scope,
     pub(super) manifest: SignedManifest,
-    pub(super) policy: SignedPolicy,
+    pub(super) revocations: RevocationSet,
 }
 impl Fixture {
     pub(super) fn new(tables: usize) -> Self {
@@ -44,21 +44,13 @@ impl Fixture {
             domain: DomainId([1; 16]),
         };
         let manifest = schema.manifest(&[domain.domain]);
-        let policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: manifest.hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            &publisher,
-        )
-        .unwrap();
+        let revocations = RevocationSet::new();
         Self {
             manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
             publisher,
             schema,
             domain,
-            policy,
+            revocations,
         }
     }
     pub(super) fn app(&self) -> TypedRows {
@@ -176,7 +168,6 @@ impl Fixture {
             raw.clone(),
             grants.clone(),
             (1, Some(AuthorRange::new(1, 1000).unwrap())),
-            1,
             (time, 3600, 5),
         )
         .unwrap();
@@ -188,7 +179,7 @@ impl Fixture {
             SecureConfig {
                 publisher: self.publisher.public_key(),
                 manifest: self.manifest.clone(),
-                policy: self.policy.clone(),
+                revocations: self.revocations.clone(),
                 node: node.clone(),
                 credentials,
                 keys,

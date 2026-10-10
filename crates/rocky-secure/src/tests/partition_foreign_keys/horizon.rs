@@ -261,7 +261,7 @@ async fn group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step() 
             SecureConfig {
                 publisher: inner.config.publisher,
                 manifest: inner.config.manifest.clone(),
-                policy: inner.config.policy.clone(),
+                revocations: inner.config.revocations.clone(),
                 node: inner.config.node.clone(),
                 credentials: inner.config.credentials.clone(),
                 keys: inner

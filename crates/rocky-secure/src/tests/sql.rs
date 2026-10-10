@@ -18,7 +18,7 @@ struct Typed {
     publisher: PrivateKey,
     schema: LogicalSchema,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    policy: RevocationSet,
     domain: Scope,
     items: ResourceScope,
     salaries: ResourceScope,
@@ -131,15 +131,7 @@ impl Typed {
         };
         Self {
             manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: BTreeSet::new(),
-                },
-                &publisher,
-            )
-            .unwrap(),
+            policy: RevocationSet::new(),
             items: scope("items"),
             salaries: scope("salaries"),
             domain,
@@ -184,19 +176,13 @@ impl Typed {
             self.writer(self.salaries, "salaries"),
         ]
     }
-    fn credentials(
-        &self,
-        node: &PrivateKey,
-        grants: Vec<ResourceGrant>,
-        epoch: u64,
-    ) -> CredentialChain {
-        self.credentials_until(node, grants, epoch, u64::MAX)
+    fn credentials(&self, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
+        self.credentials_until(node, grants, crate::tests::lifetime().1)
     }
     fn credentials_until(
         &self,
         node: &PrivateKey,
         grants: Vec<ResourceGrant>,
-        epoch: u64,
         expires: u64,
     ) -> CredentialChain {
         let user = PrivateKey::new();
@@ -209,9 +195,8 @@ impl Typed {
             subject,
             kind,
             grants: grants.clone(),
-            not_before: 0,
+            not_before: crate::tests::lifetime().0,
             expires,
-            epoch,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -251,9 +236,9 @@ impl Typed {
             SecureConfig {
                 publisher: self.publisher.public_key(),
                 manifest: self.manifest.clone(),
-                policy: self.policy.clone(),
+                revocations: self.policy.clone(),
                 node: node.clone(),
-                credentials: self.credentials(node, grants, 1),
+                credentials: self.credentials(node, grants),
                 keys: keys.iter().map(|scope| self.key(*scope)).collect(),
             },
         )
@@ -703,25 +688,20 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     let alice = t
         .open(&dir.path().join("a.db"), &node, t.full(), &both)
         .await;
+    let root = alice.inner.lock().await.config.credentials.0[0]
+        .id()
+        .unwrap();
     let session = sql(&alice, &both).await;
     session.run("BEGIN", vec![]).await.unwrap();
     insert(&session, "INSERT INTO items VALUES('a','apples',0)", vec![])
         .await
         .unwrap();
-    // A policy change is linearized by the replica: it waits for the open
+    // A revocation is linearized by the replica: it waits for the open
     // transaction, which commits under the authority it began with.
     let learning = {
         let alice = alice.clone();
-        let policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: t.app().manifest().hash(),
-                epoch: 2,
-                revoked: BTreeSet::new(),
-            },
-            &t.publisher,
-        )
-        .unwrap();
-        tokio::spawn(async move { alice.learn_policy(policy).await })
+        let policy = crate::tests::revoking(&t.publisher, t.app().manifest().app, &[], &[root]);
+        tokio::spawn(async move { alice.learn_revocations(&policy).await })
     };
     tokio::task::yield_now().await;
     assert!(!learning.is_finished());
@@ -732,9 +712,9 @@ async fn authority_changes_wait_for_the_lease_and_end_the_session() {
     assert!(session.run("SELECT * FROM items", vec![]).await.is_err());
     assert!(alice.session(both.into()).await.is_err());
 
-    // Renewed credentials of the new epoch open a new session.
+    // Credentials no statement ends open a new session.
     alice
-        .renew_credentials(t.credentials(&node, t.full(), 2))
+        .renew_credentials(t.credentials(&node, t.full()))
         .await
         .unwrap();
     let renewed = sql(&alice, &both).await;
@@ -767,7 +747,7 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
         .await;
     let expires = now().unwrap() + 3600;
     alice
-        .renew_credentials(t.credentials_until(&node, t.full(), 1, expires))
+        .renew_credentials(t.credentials_until(&node, t.full(), expires))
         .await
         .unwrap();
     assert_eq!(
@@ -834,7 +814,7 @@ async fn credentials_expiring_inside_an_open_transaction_refuse_it() {
     assert!(!alice.handle_committed([1; 32]).await.unwrap());
     assert!(!alice.handle_committed([2; 32]).await.unwrap());
     alice
-        .renew_credentials(t.credentials(&node, t.full(), 1))
+        .renew_credentials(t.credentials(&node, t.full()))
         .await
         .unwrap();
     assert_eq!(
@@ -1526,8 +1506,7 @@ fn row_author_with_grants(
         assigner.public_key(),
         grants.clone(),
         (1, Some(crate::credentials::AuthorRange::ALL)),
-        1,
-        (0, u64::MAX, 0),
+        crate::tests::validity(),
     )
     .unwrap();
     let credentials = CredentialChain(vec![issued])
@@ -1867,7 +1846,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 6);
+    assert_eq!(signed.statement.format, 7);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 
@@ -2002,7 +1981,7 @@ async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replace
     let signed = replicas[0].checkpoint(fixture.items).await.unwrap();
     let checkpoint_id = signed.id().unwrap();
     fresh.begin_rebootstrap(signed).await.unwrap();
-    let credentials = fixture.credentials(&fresh_node, fixture.full(), 1);
+    let credentials = fixture.credentials(&fresh_node, fixture.full());
     let mut after = None;
     loop {
         let page = replicas[0]

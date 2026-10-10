@@ -61,7 +61,7 @@ source links. Original-operation/field/destination markers commit with the
 follow frames and outbox. Repeated sync and reopening do not duplicate the
 follow. Source finalization ends following; the destination horizon also
 fences old carried stamps. Checkpoints authenticate the links, birth proofs
-and stamps with the row records, plus an additive `moves` summary in format 6.
+and stamps with the row records, plus an additive `moves` summary in the checkpoint format.
 
 A consumed birth behind a finalized horizon advances the operation log but
 has no materialized row. `RebootstrapReport.rejected` reports its hash and

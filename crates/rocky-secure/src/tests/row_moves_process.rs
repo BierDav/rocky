@@ -9,7 +9,7 @@ struct Peer {
     domain: rocky_core::Scope,
     publisher: PublicKey,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    policy: RevocationSet,
     node: [u8; 32],
     credentials: CredentialChain,
     keys: Vec<(ResourceScope, u64, [u8; 32])>,
@@ -38,7 +38,7 @@ impl Peer {
             domain: f.domain,
             publisher: inner.config.publisher,
             manifest: inner.config.manifest.clone(),
-            policy: inner.config.policy.clone(),
+            policy: inner.config.revocations.clone(),
             node: *inner.config.node.as_bytes(),
             credentials: inner.config.credentials.clone(),
             keys: inner
@@ -93,7 +93,7 @@ async fn peer_worker() {
     let config = SecureConfig {
         publisher: peer.publisher,
         manifest: peer.manifest.clone(),
-        policy: peer.policy.clone(),
+        revocations: peer.policy.clone(),
         node: PrivateKey::from_bytes(&peer.node),
         credentials: peer.credentials,
         keys: peer
@@ -111,7 +111,7 @@ async fn peer_worker() {
         schema: peer.schema,
         domain: peer.domain,
         manifest: peer.manifest,
-        policy: peer.policy,
+        revocations: peer.policy,
     };
     let replica = EncryptedReplica::open(&peer.path, f.app(), config)
         .await

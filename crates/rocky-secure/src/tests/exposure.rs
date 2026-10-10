@@ -12,7 +12,7 @@ fn again(config: &SecureConfig) -> SecureConfig {
     SecureConfig {
         publisher: config.publisher,
         manifest: config.manifest.clone(),
-        policy: config.policy.clone(),
+        revocations: config.revocations.clone(),
         node: config.node.clone(),
         credentials: config.credentials.clone(),
         keys: config

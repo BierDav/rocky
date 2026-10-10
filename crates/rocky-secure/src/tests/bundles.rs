@@ -379,7 +379,8 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     assert_ne!(status.principal, status.node);
     assert_eq!(status.readable, both.into());
     assert_eq!(status.writable, both.into());
-    assert_eq!(status.epoch, 1);
+    assert_eq!(status.revocations, crate::tests::unrevoked());
+    assert_eq!(status.revoked, 0);
 
     // A transaction reads its own writes and commits them as one bundle.
     let mut transaction = session.transaction();
@@ -469,7 +470,8 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
     );
     assert!(replica.companion(f.private, [1; 32]).await.is_err());
 
-    // A learned policy ends sessions; the old credentials are of the old epoch.
+    // A learned revocation ends sessions; one of the session's own links
+    // ends its credentials.
     let mut racing = renewed.transaction();
     racing
         .update(
@@ -480,18 +482,16 @@ async fn a_session_is_bound_to_its_authority_and_ends_when_it_changes() {
         )
         .await
         .unwrap();
+    let root = replica.inner.lock().await.config.credentials.0[0]
+        .id()
+        .unwrap();
     replica
-        .learn_policy(
-            SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: f.app().definition().hash(),
-                    epoch: 2,
-                    revoked: BTreeSet::new(),
-                },
-                &f.publisher,
-            )
-            .unwrap(),
-        )
+        .learn_revocations(&crate::tests::revoking(
+            &f.publisher,
+            f.app().definition().app,
+            &[],
+            &[root],
+        ))
         .await
         .unwrap();
     assert!(racing.commit([5; 32]).await.is_err());
@@ -767,6 +767,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
                 stream,
                 hub,
                 credentials,
+                crate::tests::unrevoked(),
                 |peer| known.contains(peer),
                 MAX_SECURE_BYTES,
             )
@@ -783,6 +784,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             near,
             carol.clone(),
             carol_credentials.clone(),
+            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -824,6 +826,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             near,
             bob.clone(),
             bob_credentials.clone(),
+            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -869,6 +872,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             near,
             carol.clone(),
             carol_credentials.clone(),
+            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -900,6 +904,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         near,
         stranger,
         carol_credentials,
+        crate::tests::unrevoked(),
         hub.public_key(),
         MAX_SECURE_BYTES,
     );

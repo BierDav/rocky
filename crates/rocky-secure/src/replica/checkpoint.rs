@@ -93,6 +93,8 @@ pub struct CustodySummary {
     /// Recovery archives held for other nodes; a checkpoint never releases them.
     pub archives: SetSummary,
 }
+/// The current checkpoint statement format; every other one is refused.
+pub(crate) const CHECKPOINT_FORMAT: u32 = 7;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -107,7 +109,8 @@ pub struct CheckpointStatement {
     pub definition: Commitment,
     pub schema: u32,
     pub handler: u32,
-    pub policy_epoch: u64,
+    /// The digest of the revocations the signer held.
+    pub revocations: Commitment,
     pub scope: ResourceScope,
     pub key_epoch: u64,
     /// Length of the checkpoint chain of this scope, starting at 1.
@@ -180,7 +183,7 @@ impl SignedCheckpoint {
         }
         let version: Version =
             p2panda_core::cbor::decode_cbor(bytes).map_err(|_| denied("invalid checkpoint"))?;
-        if version.statement.format != 6 {
+        if version.statement.format != CHECKPOINT_FORMAT {
             return Err(denied("unsupported checkpoint format"));
         }
         decode(bytes)
@@ -194,7 +197,7 @@ impl SignedCheckpoint {
     /// The signature and the frontier's canonical order.
     pub(crate) fn verify_signature(&self) -> Result<(), Error> {
         let statement = &self.statement;
-        if statement.format != 6 {
+        if statement.format != CHECKPOINT_FORMAT {
             return Err(denied("unsupported checkpoint format"));
         }
         if statement.partition.as_ref().is_some_and(|tuple| {
@@ -230,11 +233,8 @@ impl SignedCheckpoint {
         self.verify_signature()?;
         inner.verify_checkpoint_horizon(self)?;
         inner.admits(self.statement.definition)?;
-        let policy = PolicyStatement {
-            manifest: self.statement.definition,
-            epoch: self.statement.policy_epoch,
-            revoked: BTreeSet::new(),
-        };
+        // History verifies with no revocation, at the time it was signed.
+        let revocations = RevocationSet::new();
         let time = self
             .credentials
             .0
@@ -255,7 +255,7 @@ impl SignedCheckpoint {
                     self.node,
                     self.statement.scope,
                     tuple,
-                    &policy,
+                    &revocations,
                     time,
                 )
                 .map_err(credential)?,
@@ -265,7 +265,7 @@ impl SignedCheckpoint {
                     inner.config.publisher,
                     self.statement.definition,
                     self.node,
-                    &policy,
+                    &revocations,
                     time,
                 )
                 .map_err(credential)?,
@@ -285,7 +285,7 @@ impl SignedCheckpoint {
         Ok(())
     }
     /// Bootstrap state needs a current whole-scope reader with a write grant,
-    /// at the named generation's policy epoch.
+    /// under the held revocations.
     pub(super) fn verify_authority<A: RowApplication>(
         &self,
         inner: &Inner<A>,
@@ -301,10 +301,7 @@ impl SignedCheckpoint {
         {
             return Err(denied("checkpoint horizon issue time is in the future"));
         }
-        let epoch = match inner.admits(self.statement.definition)? {
-            None => inner.config.policy.statement.epoch,
-            Some(previous) => previous.epoch(),
-        };
+        inner.admits(self.statement.definition)?;
         if self
             .credentials
             .0
@@ -328,25 +325,20 @@ impl SignedCheckpoint {
                     self.node,
                     self.statement.scope,
                     tuple,
-                    &inner.credential_policy(
-                        self.statement.definition,
-                        &inner.config.policy.statement,
-                    )?,
+                    inner.revocations_for(self.statement.definition, &inner.config.revocations)?,
                     time,
                 )
                 .map_err(credential)?,
             None => inner.verify_chain(&self.credentials, self.node, time)?,
         };
-        if self.statement.policy_epoch != epoch
-            || !grants.iter().any(|grant| {
-                grant.scope == self.statement.scope
-                    && grant.rows == RowSelection::All
-                    && grant.rights.contains(&Right::Read)
-                    && [Right::Insert, Right::Update, Right::Delete]
-                        .iter()
-                        .any(|right| grant.rights.contains(right))
-            })
-        {
+        if !grants.iter().any(|grant| {
+            grant.scope == self.statement.scope
+                && grant.rows == RowSelection::All
+                && grant.rights.contains(&Right::Read)
+                && [Right::Insert, Right::Update, Right::Delete]
+                    .iter()
+                    .any(|right| grant.rights.contains(right))
+        }) {
             return Err(denied(
                 "checkpoint signer lacks whole-scope read and write authority",
             ));
@@ -1019,7 +1011,6 @@ impl<A: RowApplication> Inner<A> {
         if statement.schema != generation.schema
             || statement.handler != generation.handler
             || statement.scope != scope
-            || statement.policy_epoch > self.config.policy.statement.epoch
             || statement.rows != record.sets.rows_summary()
             || statement.tombstones != record.sets.tombstones
             || statement.creations != record.sets.creations_summary()

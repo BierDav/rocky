@@ -108,7 +108,7 @@ impl<A: RowApplication> Inner<A> {
                     partition
                         .as_ref()
                         .ok_or_else(|| denied("missing partition tuple"))?,
-                    &self.config.policy.statement,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,
@@ -119,7 +119,7 @@ impl<A: RowApplication> Inner<A> {
                     signing_key.public_key(),
                     author.number,
                     scope.table,
-                    &self.config.policy.statement,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(credential)?,

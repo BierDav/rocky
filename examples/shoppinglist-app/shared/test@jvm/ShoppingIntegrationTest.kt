@@ -527,7 +527,7 @@ class ShoppingIntegrationTest {
             a.author()
             a.add("After revocation")
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(session.policyEpoch + 1, b.session().policyEpoch)
+            assertEquals(session.revocations.statements + 1, b.session().revocations.statements)
             assertEquals(1, Row.decode(b.read(ItemsSchema.table("items").query())).size)
             assertEquals(ConnectionState.Revoked, c.syncOnce().state)
             assertFailsWith<RockyException> { c.renew() }

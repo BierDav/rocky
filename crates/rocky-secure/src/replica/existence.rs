@@ -276,7 +276,7 @@ impl<A: RowApplication> Inner<A> {
         if !record.signed()? {
             return Err(denied("invalid existence record signature"));
         }
-        let policy = self.credential_policy(statement.manifest, &self.config.policy.statement)?;
+        let revocations = self.revocations_for(statement.manifest, &self.config.revocations)?;
         self.check_authenticated_partition(scope, statement.partition.as_ref())?;
         let grants = if let Some(tuple) = &statement.partition {
             statement
@@ -288,7 +288,7 @@ impl<A: RowApplication> Inner<A> {
                     statement.author,
                     scope,
                     tuple,
-                    &policy,
+                    revocations,
                     time,
                 )
                 .map_err(credential)?
@@ -301,7 +301,7 @@ impl<A: RowApplication> Inner<A> {
                     record.signer,
                     statement.author,
                     scope.table,
-                    &policy,
+                    revocations,
                     time,
                 )
                 .map_err(credential)?

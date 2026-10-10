@@ -172,17 +172,6 @@ impl Lineage {
     fn manifest(&self, generation: u32) -> SignedManifest {
         SignedManifest::sign(&self.definition(generation), &self.publisher).unwrap()
     }
-    fn policy(&self, generation: u32) -> SignedPolicy {
-        SignedPolicy::sign(
-            PolicyStatement {
-                manifest: self.definition(generation).hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            &self.publisher,
-        )
-        .unwrap()
-    }
     fn transition(&self, from: u32, horizon: u32) -> SignedTransition {
         let at = |generation| Generation {
             schema: generation,
@@ -254,9 +243,8 @@ impl Lineage {
             subject,
             kind,
             grants: self.grants(generation),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: crate::tests::lifetime().0,
+            expires: crate::tests::lifetime().1,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -285,7 +273,7 @@ impl Lineage {
         SecureConfig {
             publisher: self.publisher.public_key(),
             manifest: self.manifest(generation),
-            policy: self.policy(generation),
+            revocations: RevocationSet::new(),
             node: node.clone(),
             credentials: self.credentials(generation, node),
             keys,
@@ -297,7 +285,6 @@ impl Lineage {
             steps: (from..to)
                 .map(|generation| GenerationStep {
                     manifest: self.manifest(generation),
-                    policy: self.policy(generation),
                     transition: self.transition(generation, horizon.min(generation)),
                 })
                 .collect(),
@@ -353,8 +340,7 @@ impl Lineage {
                 assigner.public_key(),
                 grants.clone(),
                 (1, Some(crate::credentials::AuthorRange::ALL)),
-                1,
-                (0, u64::MAX, 0),
+                crate::tests::validity(),
             )
             .unwrap();
             let chain = CredentialChain(vec![root])

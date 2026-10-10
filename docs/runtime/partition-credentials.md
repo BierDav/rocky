@@ -35,7 +35,7 @@ Deserialization refuses duplicate column commitments. This is the portable JSON 
 `rocky-credentials::PartitionGrant` pairs a selector with its domain, table,
 row selection, rights and field set. `Authority::issue_partition_terms` issues
 selector grants beside optional concrete `ResourceGrant`s and an author range.
-It shares the existing policy epoch, validity and delegation-depth contract.
+It shares the existing revocation, validity and delegation-depth contract.
 `CredentialChain::delegate_partitions` narrows selectors, rows, rights, fields,
 validity, depth and author ranges. One parent's grant must cover each child
 grant: combining the rights of one parent grant with the fields of another is

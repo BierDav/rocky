@@ -27,7 +27,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.config.publisher,
                 inner.manifest,
                 key.public_key(),
-                &inner.config.policy.statement,
+                &inner.config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -52,7 +52,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.config.publisher,
                 inner.manifest,
                 inner.config.node.public_key(),
-                &inner.config.policy.statement,
+                &inner.config.revocations,
                 now()?,
             )
             .map_err(credential)?;

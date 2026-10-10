@@ -4,7 +4,9 @@
 use common::{Device, Failure};
 use rocky_sdk::{
     Database, Network, Open, Supplied,
-    credentials::{Authority, CredentialChain, Credentials, PrivateKey, SignedManifest},
+    credentials::{
+        Authority, CredentialChain, Credentials, PrivateKey, Revocation, SignedManifest,
+    },
     transport::memory::Hub,
 };
 use serde_json::{Value, json};
@@ -289,7 +291,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     let revoked = a
         .ok(json!({"type": "revoke", "node": c.node().await}))
         .await;
-    assert_eq!(revoked["epoch"], "2");
+    assert_eq!(revoked["revocations"]["statements"], 1);
     // Only the collections the revoked reader could read get a new epoch.
     assert_eq!(
         identity(root, "a")?["keys"],
@@ -299,7 +301,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     item(&a, 2, "After").await?;
 
     synced(&b).await?;
-    assert_eq!(session(&b).await["epoch"], "2");
+    assert_eq!(session(&b).await["revocations"]["statements"], 1);
     assert_eq!(identity(root, "b")?["keys"], json!({"items": [1, 2]}));
     assert_eq!(
         secret(root, "b", "reader.items.2")?,
@@ -311,7 +313,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert_eq!(items(&a).await?, ["After", "Before", "Rotated"]);
     // A writer of another collection learns the policy, not the new key.
     synced(&w).await?;
-    assert_eq!(session(&w).await["epoch"], "2");
+    assert_eq!(session(&w).await["revocations"]["statements"], 1);
     assert_eq!(identity(root, "w")?["keys"], json!({"notes": [1]}));
 
     // The revoked reader gets neither the new key nor new rows.
@@ -341,7 +343,8 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     let notice = root.join("c/revoked.json");
     let original = std::fs::read(&notice)?;
     let mut tampered: Value = serde_json::from_slice(&original)?;
-    tampered["policy"]["statement"]["epoch"] = json!(999);
+    assert_eq!(tampered["version"], 2);
+    tampered["statement"]["statement"]["time"] = json!(999);
     std::fs::write(&notice, serde_json::to_vec(&tampered)?)?;
     let reopened = reopen(root, &hub, "c")?;
     assert!(reopened.call(json!({"type": "status"})).await.is_err());
@@ -369,10 +372,9 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let b = join(root, &hub, "b", &a.invite().await)?;
     let c = join(root, &hub, "c", &a.invite().await)?;
     item(&a, 1, "Before").await?;
-    // Frames signed under an earlier policy epoch are refused once a
-    // receiver learned a later one; see docs/runtime/credentials.md.
     synced(&b).await?;
     let c_node = c.node().await;
+    let a_node = a.node().await;
     let devices = a.ok(json!({"type": "devices"})).await;
     let record = devices["devices"]
         .as_array()
@@ -388,10 +390,39 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     // made; then the device stopped.
     let path = root.join("a/identity.json");
     let mut saved = identity(root, "a")?;
-    saved["authority"]["rotation"] = json!({"epoch": 2, "node": c_node, "record": {
-        "user": record["user"], "capability": null, "profile": record["profile"],
-        "partitions": [], "pseudonyms": [],
-    }});
+    let manifest = SignedManifest::from_bytes(
+        &data_encoding::HEXLOWER
+            .decode(saved["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
+    )?;
+    let statement = Revocation {
+        app: manifest
+            .verify(serde_json::from_value(saved["publisher"].clone())?)?
+            .app,
+        issuer: serde_json::from_value(json!(a_node))?,
+        time: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        nodes: [serde_json::from_value(json!(c_node))?].into(),
+        users: [serde_json::from_value(record["user"].clone())?].into(),
+        capabilities: [rocky_core::Commitment::try_from(
+            data_encoding::HEXLOWER
+                .decode(
+                    record["capability"]
+                        .as_str()
+                        .ok_or("capability")?
+                        .as_bytes(),
+                )?
+                .as_slice(),
+        )?]
+        .into(),
+        pseudonyms: Default::default(),
+    };
+    saved["authority"]["rotation"] = json!({
+        "node": c_node,
+        "statement": statement,
+        "keys": {"items": 2},
+        "groups": {},
+    });
     std::fs::write(&path, saved.to_string())?;
     let installation = saved["installation"].as_str().ok_or("installation")?;
     let made = [7; 32];
@@ -403,7 +434,11 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
 
     for round in 0..2 {
         let a = reopen(root, &hub, "a")?;
-        assert_eq!(session(&a).await["epoch"], "2", "round {round}");
+        assert_eq!(
+            session(&a).await["revocations"]["statements"],
+            1,
+            "round {round}"
+        );
         let saved = identity(root, "a")?;
         assert!(saved["authority"]["rotation"].is_null());
         assert_eq!(
@@ -419,6 +454,8 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
                 .any(|device| device["node"] == c_node && device["revoked"] == true),
             "{listed}"
         );
+        // The statement signed at completion is the one the intent named.
+        assert_eq!(saved["revocations"][0]["statement"], json!(statement));
         assert_eq!(secret(root, "a", "reader.items.2")?, Some(made));
         if round == 0 {
             item(&a, 2, "After").await?;
@@ -428,7 +465,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     let a = reopen(root, &hub, "a")?;
     let b = reopen(root, &hub, "b")?;
     synced(&b).await?;
-    assert_eq!(session(&b).await["epoch"], "2");
+    assert_eq!(session(&b).await["revocations"]["statements"], 1);
     assert_eq!(secret(root, "b", "reader.items.2")?, Some(made));
     assert_eq!(items(&b).await?, ["After", "Before"]);
     let c = reopen(root, &hub, "c")?;
@@ -454,8 +491,8 @@ fn issued(
         &data_encoding::HEXLOWER
             .decode(creator["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
     )?;
-    let policy: rocky_sdk::credentials::SignedPolicy =
-        serde_json::from_value(creator["policy"].clone())?;
+    let revocations: rocky_sdk::credentials::RevocationSet =
+        serde_json::from_value(creator["revocations"].clone())?;
     // The grants of an enrolled device's profile, without its keys.
     let model: CredentialChain =
         serde_json::from_value(identity(root, grants_of)?["credentials"].clone())?;
@@ -467,11 +504,11 @@ fn issued(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    let capability = authority.issue(user, grants, policy.statement.epoch, (now, 3600, 300))?;
+    let capability = authority.issue(user, grants, (now, 3600, 300))?;
     Ok(Credentials {
         publisher: publisher_key.public_key(),
         manifest,
-        policy,
+        revocations,
         chain: CredentialChain(vec![capability]),
     })
 }

@@ -17,13 +17,13 @@ use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
 use rand::RngCore;
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
-    Admission, AuthorRange, Authority, Credentials, Invitation, PairRequest, Profile,
-    PseudonymRequest, RenewRequest, Renewal, device_chain, open_enrollment, revoked_subject,
-    seal_enrollment,
+    Admission, AuthorRange, Authority, Credentials, Invitation, MAX_LIVE_REVOCATIONS, PairRequest,
+    Profile, PseudonymRequest, REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
+    device_chain, open_enrollment, seal_enrollment,
 };
 use rocky_secure::{
-    CredentialChain, KeyMaterial, PolicyStatement, PrivateKey, PublicKey, SecureConfig,
-    SignedCapability, SignedManifest, SignedPolicy,
+    CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
+    SignedCapability, SignedManifest, SignedRevocation,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -33,8 +33,9 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Current `identity.json` format: issuer records live in the registry.
-pub const VERSION: u32 = 10;
+/// Current `identity.json` format: issuer records live in the registry,
+/// revocations are a set of statements.
+pub const VERSION: u32 = 11;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -48,7 +49,8 @@ pub const DEFAULT_TTL: u64 = 30 * 24 * 60 * 60;
 const INVITATION_TTL: u64 = 600;
 /// Key epochs kept per collection: one per revocation that rotated it.
 const MAX_EPOCHS: usize = 256;
-const MAX_MESSAGE: usize = 256 * 1024;
+/// A renewal answer carries the whole revocation set, hexadecimal in JSON.
+const MAX_MESSAGE: usize = 3 * rocky_credentials::MAX_REVOCATION_SET_BYTES;
 /// Accepted clock difference between devices.
 const SKEW: u64 = 300;
 /// Prefixes a pseudonym request a member sends an issuer over the renewal
@@ -57,8 +59,9 @@ pub(crate) const AUTHOR: &[u8] = b"rocky.sdk.author.v1\n";
 pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
 const TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The statement that revokes this device.
 #[derive(Debug)]
-pub(crate) struct Revoked(pub SignedPolicy);
+pub(crate) struct Revoked(pub SignedRevocation);
 impl std::fmt::Display for Revoked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("this device has been revoked")
@@ -66,12 +69,24 @@ impl std::fmt::Display for Revoked {
 }
 impl std::error::Error for Revoked {}
 
+/// A revocation refused because 1,024 live statements are held.
+#[derive(Debug)]
+pub(crate) struct RevocationSetFull;
+impl std::fmt::Display for RevocationSetFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REVOCATION_SET_FULL)
+    }
+}
+impl std::error::Error for RevocationSetFull {}
+
+/// `revoked.json`: the statement that revoked this device.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Revocation {
+struct Notice {
     version: u32,
-    policy: SignedPolicy,
+    statement: SignedRevocation,
 }
+const NOTICE_VERSION: u32 = 2;
 
 /// The persisted identity of one installation. It holds no secret; keys
 /// are in the `SecretStore` under `installation`.
@@ -86,7 +101,8 @@ pub struct Settings {
     /// The pinned trust anchor: the domain's publisher key.
     pub publisher: PublicKey,
     pub manifest: String,
-    pub policy: SignedPolicy,
+    /// Every revocation statement this device verified.
+    pub revocations: RevocationSet,
     pub credentials: CredentialChain,
     pub ttl: u64,
     /// What this device was enrolled as.
@@ -163,7 +179,7 @@ impl Minting {
     }
 }
 /// What an issuer keeps besides the registry: its invitation, the device
-/// that claimed it and a revocation it has begun.
+/// that claimed it, a revocation it has begun and the keys revoked for good.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Issuing {
@@ -174,6 +190,9 @@ pub struct Issuing {
     /// Saved before the rotation's keys are made, so an interrupted
     /// revocation completes at the next open.
     pub rotation: Option<Rotation>,
+    /// Every node and user key a statement this issuer learned revoked.
+    /// Kept after the statement leaves the set: no renewal for them.
+    pub tombstones: BTreeSet<PublicKey>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,26 +202,25 @@ pub struct Claim {
     /// The author numbers handed to an issuer profile.
     pub authors: Option<AuthorRange>,
 }
+/// A begun revocation: its statement and the key epoch each collection and
+/// group partition rotates to. Signing is deterministic: the statement keeps
+/// its ID however often an interrupted rotation signs it again.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rotation {
-    /// The policy and key epoch the revocation creates.
-    pub epoch: u64,
     pub node: PublicKey,
-    /// What the registry recorded of the device when the revocation began.
-    pub record: Option<Revoking>,
+    pub statement: Revocation,
+    pub keys: BTreeMap<String, u64>,
+    pub groups: BTreeMap<String, u64>,
 }
-/// The registry record a revocation acts on, kept with its intent so it
-/// completes before the replica opens.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Revoking {
-    pub user: Option<PublicKey>,
-    pub capability: Option<Commitment>,
+/// What the registry recorded of a device a revocation acts on.
+struct Revoking {
+    user: Option<PublicKey>,
+    capability: Option<Commitment>,
     /// Absent when the device may have read anything.
-    pub profile: Option<Profile>,
-    pub partitions: Vec<rocky_credentials::PartitionGrant>,
-    pub pseudonyms: Vec<PublicKey>,
+    profile: Option<Profile>,
+    partitions: Vec<rocky_credentials::PartitionGrant>,
+    pseudonyms: Vec<PublicKey>,
 }
 impl Revoking {
     fn of(record: &registry::Record) -> Self {
@@ -331,7 +349,7 @@ struct Enrollment {
     mesh: MeshId,
     domain: DomainId,
     manifest: String,
-    policy: SignedPolicy,
+    revocations: RevocationSet,
     capability: SignedCapability,
     profile: Profile,
     keys: Keys,
@@ -473,10 +491,10 @@ impl Terms {
         Ok(ttl)
     }
 }
-/// What a renewal brought: the policy, this device's chain and reader
-/// keys it did not hold.
+/// What a renewal brought: the issuer's revocations, this device's chain
+/// and reader keys it did not hold.
 pub struct Renewed {
-    pub policy: SignedPolicy,
+    pub revocations: RevocationSet,
     pub chain: CredentialChain,
     pub keys: Vec<(String, u64, [u8; 32])>,
     /// What the grants amount to when they changed, as supplied ones may.
@@ -568,50 +586,99 @@ pub(crate) fn command_identity(node: PublicKey) -> String {
 }
 
 impl Settings {
-    pub(crate) fn verify_revocation(&self, policy: &SignedPolicy) -> Result<bool, Failure> {
-        policy.verify(self.publisher, self.domain()?.manifest().hash())?;
-        if policy.statement.epoch < self.policy.statement.epoch {
-            return Err("revocation carries an older policy".into());
-        }
-        for capability in &self.credentials.0 {
-            if policy.statement.revoked.contains(&capability.id()?)
-                || policy
-                    .statement
-                    .revoked
-                    .contains(&revoked_subject(&capability.capability.subject))
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    /// The statement of `set` that revokes this device, once the whole set
+    /// verifies.
+    pub(crate) fn revoking(
+        &self,
+        set: &RevocationSet,
+    ) -> Result<Option<SignedRevocation>, Failure> {
+        set.verify(self.publisher, self.domain()?.manifest().app)?;
+        Ok(set.revoking(&self.credentials)?.cloned())
     }
 
-    pub(crate) fn revocation(&self, path: &Path) -> Result<Option<SignedPolicy>, Failure> {
+    pub(crate) fn revocation(&self, path: &Path) -> Result<Option<SignedRevocation>, Failure> {
         let bytes = match std::fs::read(path.with_file_name("revoked.json")) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let notice: Revocation = serde_json::from_slice(&bytes)?;
-        if notice.version != 1 || !self.verify_revocation(&notice.policy)? {
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if value["version"].as_u64() != Some(u64::from(NOTICE_VERSION)) {
+            return Err("unsupported device revocation notice".into());
+        }
+        let notice: Notice = serde_json::from_value(value)?;
+        let set = RevocationSet::try_from(vec![notice.statement.clone()])?;
+        if self.revoking(&set)?.is_none() {
             return Err("invalid device revocation notice".into());
         }
-        Ok(Some(notice.policy))
+        Ok(Some(notice.statement))
     }
 
     pub(crate) fn record_revocation(
         &self,
         path: &Path,
-        policy: SignedPolicy,
+        statement: SignedRevocation,
     ) -> Result<(), Failure> {
-        if !self.verify_revocation(&policy)? {
-            return Err("policy does not revoke this device".into());
+        let set = RevocationSet::try_from(vec![statement.clone()])?;
+        if self.revoking(&set)?.is_none() {
+            return Err("the statement does not revoke this device".into());
         }
         write_private(
             &path.with_file_name("revoked.json"),
-            &serde_json::to_vec(&Revocation { version: 1, policy })?,
+            &serde_json::to_vec(&Notice {
+                version: NOTICE_VERSION,
+                statement,
+            })?,
         )?;
         Ok(())
+    }
+
+    /// Merges `set` into this identity's revocations. An issuer also
+    /// tombstones every node and user key they revoke, for good; its next
+    /// registry commit writes the records' tombstones. Returns the
+    /// statements added.
+    pub(crate) fn learn_revocations(
+        &mut self,
+        set: &RevocationSet,
+    ) -> Result<Vec<SignedRevocation>, Failure> {
+        let app = self.domain()?.manifest().app;
+        let added = self.revocations.merge(set, self.publisher, app, now()?)?;
+        if let Some(authority) = &mut self.authority {
+            for signed in self.revocations.statements() {
+                let statement = &signed.statement;
+                authority
+                    .tombstones
+                    .extend(statement.nodes.iter().chain(&statement.users));
+            }
+        }
+        Ok(added)
+    }
+    /// The digest and live count of the held revocations, as status shows them.
+    pub(crate) fn revocation_status(&self) -> Result<serde_json::Value, Failure> {
+        let time = now()?;
+        Ok(serde_json::json!({
+            "digest": HEXLOWER.encode(&self.revocations.digest(time)?),
+            "statements": self.revocations.live(time),
+        }))
+    }
+    /// Whether `set` holds a live statement this identity lacks.
+    pub(crate) fn lacks(&self, set: &RevocationSet) -> Result<bool, Failure> {
+        let time = now()?;
+        for signed in set.statements() {
+            if signed.statement.live(time) && self.revocations.get(&signed.id()?).is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Whether a pseudonym chain of this device is still usable: of this
+    /// definition, unexpired and ended by no held statement.
+    fn current_pseudonym(&self, chain: &CredentialChain, manifest: Commitment, time: u64) -> bool {
+        chain.0.iter().all(|credential| {
+            credential.capability.manifest == manifest
+                && credential.capability.expires > time
+                && self.revocations.ends(credential).is_ok_and(|ended| !ended)
+        })
     }
 
     /// Loads only the current identity format, without changing the file or keys.
@@ -871,7 +938,7 @@ impl Settings {
         Ok(SecureConfig {
             publisher: self.publisher,
             manifest: self.manifest()?,
-            policy: self.policy.clone(),
+            revocations: self.revocations.clone(),
             node: PrivateKey::from_bytes(&vault.get("node")?),
             credentials: self.credentials.clone(),
             keys,
@@ -905,15 +972,18 @@ impl Settings {
             );
         }
         // A rotation may have made keys the identity does not list yet.
-        if let Some(Rotation { epoch, .. }) =
-            self.authority.as_ref().and_then(|a| a.rotation.as_ref())
-        {
-            roles.extend(self.keys.keys().map(|name| key_role(name, *epoch)));
+        if let Some(rotation) = self.authority.as_ref().and_then(|a| a.rotation.as_ref()) {
             roles.extend(
-                self.groups
-                    .values()
-                    .map(|record| secret_role(&record.address, *epoch)),
+                rotation
+                    .keys
+                    .iter()
+                    .map(|(name, epoch)| key_role(name, *epoch)),
             );
+            roles.extend(rotation.groups.iter().filter_map(|(address, epoch)| {
+                self.groups
+                    .get(address)
+                    .map(|record| secret_role(&record.address, *epoch))
+            }));
         }
         roles
     }
@@ -961,14 +1031,6 @@ impl Settings {
             keys.insert(name.to_owned(), vec![1]);
         }
         let manifest = SignedManifest::sign(&bound.manifest(), &publisher)?;
-        let policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: bound.manifest().hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            &publisher,
-        )?;
         let mut settings = Self {
             version: VERSION,
             installation,
@@ -977,7 +1039,7 @@ impl Settings {
             domain,
             publisher: publisher.public_key(),
             manifest: HEXLOWER.encode(&manifest.to_bytes()?),
-            policy,
+            revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl,
             profile: Profile::Issuer,
@@ -1029,7 +1091,6 @@ impl Settings {
             grants,
             partitions,
             (1, authors),
-            self.policy.statement.epoch,
             self.validity()?,
         )?)
     }
@@ -1046,7 +1107,7 @@ impl Settings {
             self.publisher,
             domain.manifest().hash(),
             node.public_key(),
-            &self.policy.statement,
+            &self.revocations,
             now()?,
         )?;
         Ok(chain)
@@ -1206,7 +1267,7 @@ impl Settings {
             mesh: self.mesh,
             domain: self.domain,
             manifest: self.manifest.clone(),
-            policy: self.policy.clone(),
+            revocations: self.revocations.clone(),
             capability: issued,
             keys: self.keys_for(vault, &domain, &grants)?,
             issuer,
@@ -1274,7 +1335,6 @@ impl Settings {
             grants.clone(),
             whole_partitions(&domain, &grants),
             (terms.delegations.unwrap_or(1), authors),
-            self.policy.statement.epoch,
             (time, ttl, SKEW),
         )?;
         let mut keys = Vec::new();
@@ -1315,7 +1375,7 @@ impl Settings {
             credentials: Credentials {
                 publisher: self.publisher,
                 manifest: self.manifest()?,
-                policy: self.policy.clone(),
+                revocations: self.revocations.clone(),
                 chain: CredentialChain(vec![capability]),
             },
             keys,
@@ -1409,7 +1469,7 @@ impl Settings {
             credentials: Credentials {
                 publisher: self.publisher,
                 manifest: self.manifest()?,
-                policy: self.policy.clone(),
+                revocations: self.revocations.clone(),
                 chain,
             },
             keys,
@@ -1434,9 +1494,6 @@ impl Settings {
         {
             return Err("the credentials belong to another domain or definition".into());
         }
-        if credentials.policy.statement.epoch < self.policy.statement.epoch {
-            return Err("the credentials carry an older policy".into());
-        }
         let user = PrivateKey::from_bytes(&vault.get("user")?);
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let mut chain = credentials.chain.clone();
@@ -1447,14 +1504,18 @@ impl Settings {
         {
             chain = chain.complete(&user, node.public_key())?;
         }
-        credentials
-            .policy
-            .verify(self.publisher, domain.manifest().hash())?;
+        let mut revocations = self.revocations.clone();
+        revocations.merge(
+            &credentials.revocations,
+            self.publisher,
+            domain.manifest().app,
+            now()?,
+        )?;
         let (grants, _) = chain.verify_selectors(
             self.publisher,
             domain.manifest().hash(),
             node.public_key(),
-            &credentials.policy.statement,
+            &revocations,
             now()?,
         )?;
         let mut keys = Vec::new();
@@ -1479,7 +1540,7 @@ impl Settings {
             return Err("missing reader key".into());
         }
         Ok(Renewed {
-            policy: credentials.policy.clone(),
+            revocations: credentials.revocations.clone(),
             chain,
             keys,
             profile: Some(profile_of(&grants, &domain)),
@@ -1546,13 +1607,9 @@ impl Settings {
         let manifest = domain.manifest().hash();
         let time = now()?;
         let current = |collection: &str| {
-            self.pseudonyms.get(collection).is_some_and(|chain| {
-                chain.0.iter().all(|credential| {
-                    credential.capability.manifest == manifest
-                        && credential.capability.epoch == self.policy.statement.epoch
-                        && credential.capability.expires > time
-                })
-            })
+            self.pseudonyms
+                .get(collection)
+                .is_some_and(|chain| self.current_pseudonym(chain, manifest, time))
         };
         // The registry's author is installed when an issuer first writes it.
         Ok(domain
@@ -1581,13 +1638,10 @@ impl Settings {
     pub(crate) fn holds_author(&self, domain: &Domain, collection: &str) -> Result<bool, Failure> {
         let manifest = domain.manifest().hash();
         let time = now()?;
-        Ok(self.pseudonyms.get(collection).is_some_and(|chain| {
-            chain.0.iter().all(|credential| {
-                credential.capability.manifest == manifest
-                    && credential.capability.epoch == self.policy.statement.epoch
-                    && credential.capability.expires > time
-            })
-        }))
+        Ok(self
+            .pseudonyms
+            .get(collection)
+            .is_some_and(|chain| self.current_pseudonym(chain, manifest, time)))
     }
     /// The rows of this issuer's own record: its device entry, current
     /// capability and pseudonyms. Rows that exist are kept.
@@ -1646,9 +1700,10 @@ impl Settings {
                 },
             )?;
         }
-        // A revocation interrupted before its tombstone was written.
+        // A revocation interrupted before its tombstone was written, or one
+        // learned from a statement.
         for (other, record) in &registry.records {
-            if !record.revoked && record.device.is_some() && self.revoked(other) {
+            if !record.revoked && record.device.is_some() && self.revoked_device(other, registry) {
                 changes.revoked(other)?;
             }
         }
@@ -1701,7 +1756,7 @@ impl Settings {
         let (grants, partitions) = request.verify_selectors(
             self.publisher,
             manifest,
-            &self.policy.statement,
+            &self.revocations,
             (now()?, SKEW),
         )?;
         let range = self.minting()?.range;
@@ -1856,7 +1911,7 @@ impl Settings {
             self.publisher,
             self.domain()?.manifest().hash(),
             key,
-            &self.policy.statement,
+            &self.revocations,
             now()?,
         )?;
         self.pseudonyms.insert(collection.clone(), chain);
@@ -1871,13 +1926,7 @@ impl Settings {
         self.pseudonyms
             .iter()
             // Retain stale chains for renewal, without admitting their writers.
-            .filter(|(_, chain)| {
-                chain.0.iter().all(|credential| {
-                    credential.capability.manifest == manifest
-                        && credential.capability.epoch == self.policy.statement.epoch
-                        && credential.capability.expires > time
-                })
-            })
+            .filter(|(_, chain)| self.current_pseudonym(chain, manifest, time))
             .map(|(collection, chain)| {
                 Ok((
                     PrivateKey::from_bytes(&vault.get(&pseudonym_role(collection))?),
@@ -2018,12 +2067,9 @@ impl Settings {
         self.peers.entry(node).or_default().learn(contact.routes);
     }
     fn revoked(&self, node: &PublicKey) -> bool {
-        self.policy
-            .statement
-            .revoked
-            .contains(&revoked_subject(node))
+        self.revocations.revokes(node)
     }
-    /// Forgets the peers and issuers the current policy revoked, such as a
+    /// Forgets the peers and issuers a held statement revokes, such as a
     /// lost issuer another one revoked.
     fn forget_revoked(&mut self) {
         let gone: Vec<PublicKey> = self
@@ -2094,7 +2140,7 @@ impl Settings {
             domain: supplied.domain,
             publisher: credentials.publisher,
             manifest: HEXLOWER.encode(&credentials.manifest.to_bytes()?),
-            policy: credentials.policy.clone(),
+            revocations: RevocationSet::new(),
             credentials: credentials.chain.clone(),
             ttl: DEFAULT_TTL,
             profile: Profile::Issuer,
@@ -2125,14 +2171,12 @@ impl Settings {
                 settings.credentials.0.push(last);
             }
         }
-        credentials
-            .policy
-            .verify(credentials.publisher, domain.manifest().hash())?;
+        settings.learn_revocations(&credentials.revocations)?;
         let (grants, _) = settings.credentials.verify_selectors(
             settings.publisher,
             domain.manifest().hash(),
             node.public_key(),
-            &settings.policy.statement,
+            &settings.revocations,
             now()?,
         )?;
         settings.ttl = settings
@@ -2256,7 +2300,7 @@ impl Joining {
             domain: enrollment.domain,
             publisher: invite.publisher,
             manifest: enrollment.manifest,
-            policy: enrollment.policy,
+            revocations: RevocationSet::new(),
             credentials: CredentialChain(Vec::new()),
             ttl: enrollment.ttl,
             profile: enrollment.profile,
@@ -2289,9 +2333,7 @@ impl Joining {
         if settings.manifest()?.verify(settings.publisher)?.hash() != domain.manifest().hash() {
             return Err("the domain's manifest differs from this application schema".into());
         }
-        settings
-            .policy
-            .verify(settings.publisher, domain.manifest().hash())?;
+        settings.learn_revocations(&enrollment.revocations)?;
         // The device receives what the invitation said, no more and no less.
         let grants = grants_of(&invite.profile, &domain)?;
         if enrollment.capability.issuer != settings.publisher
@@ -2326,6 +2368,8 @@ impl Joining {
             }
             vault.put("publisher", &key)?;
             settings.authority = Some(Issuing::default());
+            // Tombstones start with every statement already held.
+            settings.learn_revocations(&RevocationSet::new())?;
             if settings.credentials.0[0].capability.authors()? != enrollment.authors {
                 return Err("the enrollment's author range differs from its capability".into());
             }
@@ -2358,7 +2402,7 @@ impl Settings {
                 }
             }
             return Ok(Renewed {
-                policy: self.policy.clone(),
+                revocations: self.revocations.clone(),
                 chain: self.renew_locally(vault)?,
                 keys: Vec::new(),
                 profile: None,
@@ -2416,9 +2460,9 @@ impl Settings {
             Ok(reply) => reply,
             Err(error) => {
                 if let Ok(reply) = exchange(transport, addresses, Protocol::Renew, POLICY).await {
-                    let policy: SignedPolicy = serde_json::from_slice(&reply)?;
-                    if self.verify_revocation(&policy)? {
-                        return Err(Box::new(Revoked(policy)));
+                    let set: RevocationSet = serde_json::from_slice(&reply)?;
+                    if let Some(statement) = self.revoking(&set)? {
+                        return Err(Box::new(Revoked(statement)));
                     }
                 }
                 return Err(error);
@@ -2427,19 +2471,13 @@ impl Settings {
         let renewal = Renewal::from_bytes(&reply)?;
         let sealed = renewal.open(self.publisher, &request, &secret)?;
         let domain = self.domain()?;
-        renewal
-            .policy
-            .verify(self.publisher, domain.manifest().hash())?;
-        if renewal.policy.statement.epoch < self.policy.statement.epoch {
-            return Err("renewal carries an older policy".into());
-        }
         if renewal.capability.capability.subject != user.public_key()
             || renewal.capability.capability.grants != self.grants()
         {
             return Err("renewal names another user or other grants".into());
         }
         let mut next = self.clone();
-        next.policy = renewal.policy.clone();
+        next.learn_revocations(&renewal.revocations)?;
         let chain = next.chain(renewal.capability, &user, &node, &domain)?;
         let Sealed {
             keys: received,
@@ -2458,7 +2496,7 @@ impl Settings {
             }
         }
         Ok(Renewed {
-            policy: renewal.policy,
+            revocations: renewal.revocations,
             chain,
             keys,
             profile: None,
@@ -2502,9 +2540,6 @@ impl Settings {
         let renewal = Renewal::from_bytes(&reply)?;
         let sealed = renewal.open(self.publisher, &request, &secret)?;
         let domain = self.domain()?;
-        renewal
-            .policy
-            .verify(self.publisher, domain.manifest().hash())?;
         let grants = grants_of(&self.profile, &domain)?;
         if renewal.capability.capability.subject != user.public_key()
             || renewal.capability.capability.grants != grants
@@ -2512,7 +2547,7 @@ impl Settings {
             return Err("the renewal names another user or other grants".into());
         }
         let mut next = self.clone();
-        next.policy = renewal.policy.clone();
+        next.learn_revocations(&renewal.revocations)?;
         let chain = next.chain(renewal.capability, &user, &node, &domain)?;
         let Sealed {
             keys: received,
@@ -2531,7 +2566,7 @@ impl Settings {
             }
         }
         Ok(Renewed {
-            policy: renewal.policy,
+            revocations: renewal.revocations,
             chain,
             keys,
             profile: None,
@@ -2553,7 +2588,7 @@ impl Settings {
                 held.push((name.clone(), *epoch, *key));
             }
         }
-        draft.policy = renewed.policy.clone();
+        draft.learn_revocations(&renewed.revocations)?;
         draft.credentials = renewed.chain.clone();
         draft.forget_revoked();
         draft.learn_issuers(vault, &renewed.issuers);
@@ -2574,10 +2609,11 @@ impl Settings {
     }
     /// Answers a renewal with the registry rows to commit before it
     /// leaves. The request proves a device the publisher once issued a
-    /// chain; it receives the same grants under the current policy and
-    /// the reader keys those grants read. The record's tombstone and
-    /// profile count wherever the device enrolled; without a record the
-    /// presented chain is renewed and recorded.
+    /// chain; it receives the same grants, the revocations this issuer
+    /// holds and the reader keys those grants read. The record's tombstone
+    /// and profile count wherever the device enrolled; without a record the
+    /// presented chain is renewed and recorded. A node or user a statement
+    /// revoked is refused, also after the statement left the set.
     pub fn renew(
         &self,
         vault: &Vault,
@@ -2627,6 +2663,9 @@ impl Settings {
             }
         };
         let prior = &prior;
+        if self.tombstoned(&prior.subject) {
+            return Err("device was revoked".into());
+        }
         if known.and_then(|known| known.device.as_ref()).is_none()
             && registry.devices() >= registry::MAX_DEVICES
         {
@@ -2645,7 +2684,7 @@ impl Settings {
             &authority,
             &request,
             prior,
-            self.policy.clone(),
+            self.revocations.clone(),
             (time, self.ttl, SKEW),
             &serde_json::to_vec(&sealed)?,
         )?;
@@ -2674,16 +2713,25 @@ impl Settings {
         )?;
         Ok((renewal.to_bytes()?, changes))
     }
-    /// Whether the policy or the registry revoked a device, or the policy
-    /// its recorded user.
+    /// Whether a key is revoked for good here: by a held statement or, on
+    /// an issuer, a tombstone.
+    fn tombstoned(&self, key: &PublicKey) -> bool {
+        self.revocations.revokes(key)
+            || self
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.tombstones.contains(key))
+    }
+    /// Whether a statement, a tombstone or the registry revoked a device,
+    /// or a statement or tombstone its recorded user.
     pub(crate) fn revoked_device(&self, node: &PublicKey, registry: &Registry) -> bool {
-        self.revoked(node)
+        self.tombstoned(node)
             || registry.get(node).is_some_and(|record| {
                 record.revoked
                     || record
                         .device
                         .as_ref()
-                        .is_some_and(|device| self.revoked(&device.user))
+                        .is_some_and(|device| self.tombstoned(&device.user))
             })
     }
     /// The registry rows recording partitions granted or delegated to a
@@ -2698,7 +2746,7 @@ impl Settings {
         delegations: u8,
         registry: &Registry,
     ) -> Result<Changes, Failure> {
-        if self.revoked_device(&device.node, registry) || self.revoked(&device.user) {
+        if self.revoked_device(&device.node, registry) || self.tombstoned(&device.user) {
             return Err("the device or its user was revoked".into());
         }
         let known = registry.get(&device.node);
@@ -2736,101 +2784,78 @@ impl Settings {
         }
         Ok(changes)
     }
-    /// Begins revoking a device: the intent and what the registry recorded
-    /// of it are all that changes. `rotate` completes it, now or at the
-    /// next open.
+    /// Begins revoking a device: fixes its statement, from what the registry
+    /// recorded of it, and the key epoch each collection and group partition
+    /// it could read rotates to, the held maximum plus one. The intent is all
+    /// that changes; `rotate` signs and completes it, now or at the next open.
     pub fn begin_revocation(
         &mut self,
         node: PublicKey,
         registry: &Registry,
     ) -> Result<(), Failure> {
-        let epoch = self.policy.statement.epoch + 1;
         // Another issuer is revoked like any device; the publisher key it
         // holds is not taken away (`docs/runtime/sdk-enrollment.md`).
         let own = self
             .credentials
             .0
             .last()
-            .map(|leaf| leaf.capability.subject);
-        if own == Some(node) {
+            .map(|leaf| leaf.capability.subject)
+            .ok_or("empty device credential chain")?;
+        if own == node {
             return Err("an issuer cannot revoke itself".into());
         }
         if self.revoked_device(&node, registry) {
             return Err("device is already revoked".into());
         }
-        let record = registry.get(&node).map(Revoking::of);
-        let authority = self.issuing("revokes devices")?;
-        if authority.rotation.is_some() {
+        if self.issuing("revokes devices")?.rotation.is_some() {
             return Err("another revocation is unfinished".into());
         }
-        authority.rotation = Some(Rotation {
-            epoch,
-            node,
-            record,
-        });
-        Ok(())
-    }
-    /// Completes a begun revocation: a new policy epoch that ends every
-    /// earlier chain and names the device, and a fresh key epoch for every
-    /// collection it could read. Earlier keys stay; history is not sealed
-    /// again. Repeating it after an interruption gives the same result.
-    /// Returns the new keys.
-    pub fn rotate(&mut self, vault: &Vault) -> Result<Vec<(String, u64, [u8; 32])>, Failure> {
-        let Some(Rotation {
-            epoch,
-            node,
-            record,
-        }) = self
-            .authority
-            .as_ref()
-            .and_then(|authority| authority.rotation.clone())
-        else {
-            return Ok(Vec::new());
-        };
-        let domain = self.domain()?;
-        let mut revoked = vec![revoked_subject(&node)];
-        // A recorded device loses its user subject too, so a fresh node key
-        // under it cannot renew, and its capability and pseudonyms.
-        if let Some(record) = &record {
-            revoked.extend(record.user.as_ref().map(revoked_subject));
-            revoked.extend(record.capability);
-            revoked.extend(record.pseudonyms.iter().map(revoked_subject));
+        let time = now()?;
+        if self.revocations.live(time) >= MAX_LIVE_REVOCATIONS {
+            return Err(Box::new(RevocationSetFull));
         }
-        let readable: Option<Profile> = record.as_ref().and_then(|record| record.profile.clone());
-        // A device this issuer never saw may have read anything.
-        let mut keys = Vec::new();
-        let names: Vec<String> = self.keys.keys().cloned().collect();
-        for name in names {
+        let domain = self.domain()?;
+        // A recorded device loses its user too, so a fresh node key under it
+        // cannot renew, and its capability and pseudonyms.
+        let record = registry.get(&node).map(Revoking::of);
+        let statement = Revocation {
+            app: domain.manifest().app,
+            issuer: own,
+            time,
+            nodes: [node].into(),
+            users: record.iter().filter_map(|record| record.user).collect(),
+            capabilities: record
+                .iter()
+                .filter_map(|record| record.capability)
+                .collect(),
+            pseudonyms: record
+                .iter()
+                .flat_map(|record| record.pseudonyms.iter().copied())
+                .collect(),
+        };
+        // A device without a recorded profile may have read anything.
+        let readable = record.as_ref().and_then(|record| record.profile.clone());
+        let mut keys = BTreeMap::new();
+        for (name, epochs) in &self.keys {
             if readable
                 .as_ref()
-                .is_some_and(|profile| !profile.reads(&name))
+                .is_some_and(|profile| !profile.reads(name))
             {
                 continue;
             }
-            // The intent was saved first: a key missing here was never
-            // used, so making it is not replacing one.
-            let role = key_role(&name, epoch);
-            let key = match vault.find(&role)? {
-                Some(key) => key,
-                None => vault.create(&role)?,
-            };
-            let epochs = self.keys.entry(name.clone()).or_default();
-            if !epochs.contains(&epoch) {
-                if epochs.len() >= MAX_EPOCHS {
-                    return Err("key epoch capacity reached".into());
-                }
-                epochs.push(epoch);
-                epochs.sort_unstable();
+            if epochs.len() >= MAX_EPOCHS {
+                return Err("key epoch capacity reached".into());
             }
-            keys.push((name, epoch, key));
+            let held = epochs.iter().max().copied().unwrap_or(0);
+            keys.insert(name.clone(), held + 1);
         }
         // The group secret is the unit: one new secret per group partition
         // the device could read, so every member table advances together.
         // Its profile's tables and its recorded partition grants count; a
-        // device enrolled elsewhere may have read any known partition.
-        // Even an address held here without a key rotates: the new secret
-        // does not depend on the old one.
-        let mut rotated = Vec::new();
+        // device enrolled elsewhere may have read any known partition. A
+        // partition whose secret this issuer never held has no epoch to
+        // follow, and is left to an issuer that holds it.
+        let mut groups = BTreeMap::new();
         for partition in self.partitions(&domain)? {
             let read = match &readable {
                 None => true,
@@ -2844,43 +2869,135 @@ impl Settings {
                             .is_some_and(|record| record.selects(&partition))
                 }
             };
-            if read {
-                partition.record.admit(epoch)?;
-                rotated.push(partition.record);
+            if let (true, Some(held)) = (read, partition.record.current()) {
+                partition.record.admit(held + 1)?;
+                groups.insert(
+                    crate::groups::record_key(&partition.record.address),
+                    held + 1,
+                );
             }
         }
-        // Capacity was checked for all before any secret is made; a secret
-        // found here was made by an interrupted attempt of this intent.
-        for mut record in rotated {
+        // Refused here, before anything is saved, when it is too large.
+        if rocky_credentials::encode(&statement)?.len() + rocky_credentials::SIGNATURE_OVERHEAD
+            > rocky_credentials::MAX_REVOCATION_BYTES
+        {
+            return Err("the revocation names too many keys".into());
+        }
+        self.issuing("revokes devices")?.rotation = Some(Rotation {
+            node,
+            statement,
+            keys,
+            groups,
+        });
+        Ok(())
+    }
+    /// Completes a begun revocation: a fresh key epoch for every collection
+    /// and group partition it names, the signed statement joins the set and
+    /// the issuer renews its own chain. Earlier keys stay; history is not sealed
+    /// again. Repeating it after an interruption makes the same keys and
+    /// statement. Returns the new keys, or nothing when no revocation was
+    /// begun.
+    pub fn rotate(&mut self, vault: &Vault) -> Result<Option<Vec<NewKey>>, Failure> {
+        let Some(Rotation {
+            node,
+            statement,
+            keys: targets,
+            groups,
+        }) = self
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.rotation.clone())
+        else {
+            return Ok(None);
+        };
+        fault::check(fault::Stage::Begun)?;
+        let mut keys = Vec::new();
+        for (name, epoch) in targets {
+            // The intent was saved first: a key missing here was never
+            // used, so making it is not replacing one.
+            let role = key_role(&name, epoch);
+            let key = match vault.find(&role)? {
+                Some(key) => key,
+                None => vault.create(&role)?,
+            };
+            let epochs = self.keys.entry(name.clone()).or_default();
+            if !epochs.contains(&epoch) {
+                epochs.push(epoch);
+                epochs.sort_unstable();
+            }
+            keys.push((name, epoch, key));
+            fault::check(fault::Stage::Key)?;
+        }
+        for (address, epoch) in groups {
+            let mut record = self
+                .groups
+                .get(&address)
+                .cloned()
+                .ok_or("a rotated group partition is unknown")?;
             let role = secret_role(&record.address, epoch);
             if vault.find(&role)?.is_none() {
                 vault.create(&role)?;
             }
             record.hold(epoch)?;
-            self.groups
-                .insert(crate::groups::record_key(&record.address), record);
+            self.groups.insert(address, record);
+            fault::check(fault::Stage::Key)?;
         }
+        let domain = self.domain()?;
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-        let authority = Authority {
+        let signed = Authority {
             publisher: &publisher,
             manifest: domain.manifest().hash(),
-        };
-        if self.policy.statement.epoch < epoch {
-            self.policy = authority.revoke(&self.policy.statement, revoked)?;
         }
+        .revoke(statement, &PrivateKey::from_bytes(&vault.get("node")?))?;
+        self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
+        fault::check(fault::Stage::Signed)?;
         self.credentials = self.renew_locally(vault)?;
-        // Own pseudonyms keep their numbers: each request carries its chain.
-        let own_authors = self.pseudonyms.keys().cloned().collect::<Vec<_>>();
-        for collection in own_authors {
-            let request = self.pseudonym_request(vault, &collection)?;
-            let (chain, _) = self.assign_pseudonym(vault, &request, None)?;
-            self.hold_pseudonym(vault, chain)?;
-        }
+        fault::check(fault::Stage::Renewed)?;
         self.peers.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
         self.enrollment_routes.remove(&node);
+        fault::check(fault::Stage::Clearing)?;
         self.issuing("revokes devices")?.rotation = None;
-        Ok(keys)
+        Ok(Some(keys))
+    }
+}
+
+/// A key `rotate` made: collection, key epoch and key.
+pub type NewKey = (String, u64, [u8; 32]);
+
+/// Deterministic interruptions of `rotate`, for its fault sweep.
+pub(crate) mod fault {
+    use crate::Failure;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Stage {
+        Begun,
+        Key,
+        Signed,
+        Renewed,
+        Clearing,
+    }
+    #[cfg(test)]
+    thread_local! {
+        /// The stage, and how many of it pass first, at which `rotate` stops.
+        pub static STOP: std::cell::Cell<Option<(Stage, usize)>> = const { std::cell::Cell::new(None) };
+    }
+    #[cfg(test)]
+    pub fn check(stage: Stage) -> Result<(), Failure> {
+        STOP.with(|stop| match stop.get() {
+            Some((at, 0)) if at == stage => {
+                stop.set(None);
+                Err(format!("injected stop at {stage:?}").into())
+            }
+            Some((at, passes)) if at == stage => {
+                stop.set(Some((at, passes - 1)));
+                Ok(())
+            }
+            _ => Ok(()),
+        })
+    }
+    #[cfg(not(test))]
+    pub fn check(_: Stage) -> Result<(), Failure> {
+        Ok(())
     }
 }
 

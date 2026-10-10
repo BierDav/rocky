@@ -147,8 +147,11 @@ interface SecretStore {
     fun delete(name: String)
 }
 
+/** The revocations a device holds: the lowercase hex [digest] of the live set, which two devices share when they hold the same statements, and how many [statements] are live. */
+data class RevocationStatus(val digest: String, val statements: Int)
+
 /** The authority this device holds. Keys are lowercase hex; `expiresAtEpochSeconds` ends its credentials. `transport` is the attached network's kind. */
-data class SessionStatus(val principal: String, val node: String, val policyEpoch: Long, val expiresAtEpochSeconds: Long, val isIssuer: Boolean, val profile: GrantProfile, val transport: String)
+data class SessionStatus(val principal: String, val node: String, val revocations: RevocationStatus, val expiresAtEpochSeconds: Long, val isIssuer: Boolean, val profile: GrantProfile, val transport: String)
 
 /**
  * Another device's record in the replicated issuer registry, which every issuer reads: the profile its grants amount
@@ -175,7 +178,7 @@ enum class ReadinessState { Ready, Syncing, Bootstrapping, Unavailable, Revoked 
 data class Readiness(
     val state: ReadinessState,
     val revision: Long,
-    val policyEpoch: Long,
+    val revocations: RevocationStatus,
     val expiresAtEpochSeconds: Long,
     val profile: GrantProfile,
     val networkAttached: Boolean,

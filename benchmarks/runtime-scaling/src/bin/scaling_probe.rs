@@ -37,6 +37,18 @@ mod wide_schema;
 
 type Failure = Box<dyn std::error::Error>;
 
+/// A fixture credential's validity: from a day ago for 300 days, inside the
+/// longest a chain may live.
+fn lifetime() -> (u64, u64) {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_secs());
+    (
+        time - rocky_secure::credentials::DAY,
+        time + 300 * rocky_secure::credentials::DAY,
+    )
+}
+
 /// Inventory semantics with a manifest that declares more than two domains.
 #[derive(Clone, Copy)]
 struct Wide(u8, Option<&'static [&'static str]>, u16);

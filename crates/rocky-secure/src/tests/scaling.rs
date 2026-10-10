@@ -488,9 +488,8 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
             subject,
             kind,
             grants: f.full(),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: crate::tests::lifetime().0,
+            expires: crate::tests::lifetime().1,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -498,15 +497,7 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
         SecureConfig {
             publisher: f.publisher.public_key(),
             manifest: signed.clone(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: Default::default(),
-                },
-                &f.publisher,
-            )
-            .unwrap(),
+            revocations: RevocationSet::new(),
             node: node.clone(),
             credentials: CredentialChain(vec![
                 SignedCapability::sign(

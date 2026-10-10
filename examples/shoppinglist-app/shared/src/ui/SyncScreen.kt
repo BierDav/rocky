@@ -75,7 +75,7 @@ private fun IdentityCard(state: SyncState) {
             }
             Fact("Node", self?.node?.take(24)?.plus("…") ?: "…", mono = true)
             Fact("Grants", self?.profile?.let(::profile) ?: "…")
-            Fact("Policy epoch", state.readiness?.policyEpoch?.toString() ?: "…")
+            Fact("Revocations", state.readiness?.revocations?.statements?.toString() ?: "…")
             Fact("Credentials expire", state.readiness?.expiresAtEpochSeconds?.let { "in ${(it * 1000 - currentMillis()) / 86_400_000} days" } ?: "…")
             Fact("Transport", self?.transport ?: "…")
             Fact("Domain", state.domain.take(48) + if (state.domain.length > 48) "…" else "", mono = true)

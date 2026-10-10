@@ -95,7 +95,7 @@ impl LocalOperationStore<ResourceScope, Extensions> for TransactionStore {
 }
 
 pub(crate) const SCHEMA: &[&str] = &[
-    "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,policy BLOB NOT NULL,revision INTEGER NOT NULL)",
+    "CREATE TABLE secure_metadata(id INTEGER PRIMARY KEY CHECK(id=1),identity BLOB NOT NULL,revocations BLOB NOT NULL,revision INTEGER NOT NULL)",
     "CREATE TABLE secure_operations(hash BLOB PRIMARY KEY,author BLOB NOT NULL,scope BLOB NOT NULL,sequence INTEGER NOT NULL,header BLOB NOT NULL,body BLOB NOT NULL,status TEXT NOT NULL,UNIQUE(author,scope,sequence))",
     "CREATE TABLE secure_rows(scope BLOB NOT NULL,row BLOB NOT NULL,fields BLOB,stamp BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE secure_outbox(hash BLOB PRIMARY KEY)",

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 #[tokio::test]
 async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     let f = Fixture::new();
-    for version in [0, 1, 2, 3, 4, 5, 7] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 8] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();
@@ -49,7 +49,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 9] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         let node = PrivateKey::new();

@@ -80,7 +80,7 @@ native request may name `table` instead of `group` to mean that table's group.
 
 | Operation | Effect |
 | --- | --- |
-| `create(group, values)` | Issuer: prepares the secret at the partition's current epoch, else the policy epoch |
+| `create(group, values)` | Issuer: prepares the secret at the partition's current epoch, else epoch 1 |
 | `share(group, values, recipients)` | Issuer: one envelope of the current epoch per recipient node key |
 | `install(group, values, envelope)` | Opens the envelope, then requires whole-partition read on every member before anything is stored |
 | `grant` / `delegate` | Selector grants; an issuer records the device and user first |
@@ -198,7 +198,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 1, one secret per recipient, bound to manifest, group address and epoch ([0040](../decisions/0040-group-secrets.md)) |
 | Frame | Row format 6 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
-| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 6 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
+| Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 7 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |
 
 Readers recompute the tuple from both row images and refuse a mismatch before

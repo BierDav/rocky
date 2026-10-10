@@ -14,9 +14,7 @@ use crate::{
 use data_encoding::HEXLOWER;
 use rocky_core::{Generation, GenerationTransition, SchemaChange};
 use rocky_credentials::{Profile, SignedTransition};
-use rocky_secure::{
-    GenerationStep, PolicyStatement, PrivateKey, SignedManifest, SignedPolicy, Upgrade,
-};
+use rocky_secure::{GenerationStep, PrivateKey, RevocationSet, SignedManifest, Upgrade};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
@@ -25,21 +23,19 @@ pub(crate) const OFFER: &[u8] = b"rocky.sdk.generations.v1\n";
 /// Earlier generations a domain keeps.
 const MAX_LINEAGE: usize = 32;
 
-/// A generation a domain left: its schema, signed manifest, last policy,
-/// and the signed transition to the next. All of it is public.
+/// A generation a domain left: its schema, signed manifest and the signed
+/// transition to the next. All of it is public.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub schema: Schema,
     pub manifest: String,
-    pub policy: SignedPolicy,
     pub transition: String,
 }
 impl Step {
     fn signed(&self) -> Result<GenerationStep, Failure> {
         Ok(GenerationStep {
             manifest: SignedManifest::from_bytes(&HEXLOWER.decode(self.manifest.as_bytes())?)?,
-            policy: self.policy.clone(),
             transition: SignedTransition::from_bytes(
                 &HEXLOWER.decode(self.transition.as_bytes())?,
             )?,
@@ -53,7 +49,7 @@ struct Offer {
     lineage: Vec<Step>,
     schema: Schema,
     manifest: String,
-    policy: SignedPolicy,
+    revocations: RevocationSet,
 }
 
 /// The schema generation of a lineage ending at `schema`, and the nullable
@@ -108,7 +104,7 @@ impl Settings {
             lineage: self.lineage.clone(),
             schema: self.schema.clone(),
             manifest: self.manifest.clone(),
-            policy: self.policy.clone(),
+            revocations: self.revocations.clone(),
         })?)
     }
     /// Moves the identity to `schema`. A local change only records it; the
@@ -168,7 +164,6 @@ impl Settings {
         draft.lineage.push(Step {
             schema: self.schema.clone(),
             manifest: self.manifest.clone(),
-            policy: self.policy.clone(),
             transition: String::new(),
         });
         draft.schema = schema.clone();
@@ -194,14 +189,6 @@ impl Settings {
             step.transition = HEXLOWER.encode(&signed.to_bytes()?);
         }
         draft.manifest = HEXLOWER.encode(&SignedManifest::sign(&after, &publisher)?.to_bytes()?);
-        // The same epoch and revocations, for the new definition.
-        draft.policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: after.hash(),
-                ..self.policy.statement.clone()
-            },
-            &publisher,
-        )?;
         for (name, _) in domain.scopes() {
             if !draft.keys.contains_key(name) {
                 let role = key_role(name, 1);
@@ -282,15 +269,11 @@ impl Settings {
         draft.lineage = offer.lineage;
         draft.schema = offer.schema;
         draft.manifest = offer.manifest;
-        draft.policy = offer.policy;
         let manifest = draft.manifest()?.verify(self.publisher)?;
         if manifest.hash() != draft.domain()?.manifest().hash() {
             return Err("the issuer's manifest differs from this application schema".into());
         }
-        draft.policy.verify(self.publisher, manifest.hash())?;
-        if draft.policy.statement.epoch < self.policy.statement.epoch {
-            return Err("the issuer's policy is older than this device's".into());
-        }
+        draft.learn_revocations(&offer.revocations)?;
         for step in &draft.lineage {
             step.signed()?.transition.verify(self.publisher)?;
         }

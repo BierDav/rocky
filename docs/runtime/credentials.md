@@ -13,15 +13,16 @@ has had a cryptographic audit.
 endpoint: everything it does is keys and bytes.
 
 - Signed types: `SignedManifest`, `SignedCapability`, `CredentialChain`,
-  `SignedPolicy`. [Author pseudonyms](credential-primitives.md#author-pseudonyms)
+  `SignedRevocation` and the `RevocationSet` of them a device holds
+  ([revocations](revocations.md)). [Author pseudonyms](credential-primitives.md#author-pseudonyms)
   and partition selectors use a versioned capability extension.
   `rocky-secure` re-exports these types.
-- `Credentials { publisher, manifest, policy, chain }::verify(device, time)`
-  checks a whole supplied set and returns the principal, grants, epoch and
-  expiry. Nothing needs to be contacted.
+- `Credentials { publisher, manifest, revocations, chain }::verify(device, time)`
+  checks a whole supplied set and returns the principal, grants, revocation
+  digest and expiry. Nothing needs to be contacted.
 - `Authority { publisher, manifest }` issues user capabilities, delegable
   ones with `issue_delegable`, renews one with the same grants and depth and
-  signs the next policy with revocations. `device_chain` and
+  signs revocation statements co-signed by an issuer's node key. `device_chain` and
   `CredentialChain::complete` delegate to a node key, `CredentialChain::delegate`
   to another user or deployment.
 - `Grant` is a [raw grant](credential-primitives.md#raw-grants); `Profile`
@@ -32,7 +33,7 @@ endpoint: everything it does is keys and bytes.
   `Renewal`.
 
 Verification is necessary, never sufficient. A secure runtime verifies every
-frame, session, sync request and transfer against the policy it learned,
+frame, session, sync request and transfer against the revocations it learned,
 whichever issuer, transport or enrollment produced the credentials. Errors are
 `Denied` (final for the same input), `Protocol` or `Provider`.
 
@@ -43,7 +44,7 @@ in the publisher grants anything.
 
 | Type | Key | Grants |
 | --- | --- | --- |
-| `Publisher` | Domain trust anchor | Signs manifest, policies and user capabilities |
+| `Publisher` | Domain trust anchor | Signs manifest, revocations and user capabilities |
 | `LoginPrincipal` | Subject of a chain's root | What its capability names |
 | `SigningDevice` | Node key, the chain's leaf | Signs operations, session frames and renewal requests; owns author logs |
 | `Pseudonym` | Separate signing key per device and table | Author number and table grants; issuer alone opens the sealed device binding |
@@ -140,43 +141,55 @@ device or one that missed intervening epochs.
 
 ### Revocation in the SDK
 
-An issuer's `revoke(node)` saves the intent in `identity.json` first, then:
+An issuer's `revoke(node)` saves the intent in `identity.json` first: the
+[revocation statement](revocations.md) naming the device's node and user keys,
+its capability and its pseudonym keys, and the key epoch each collection and
+group partition the device could read rotates to, the scope's held maximum
+plus one. Both come from the device's [registry](issuer-registry.md) record;
+without a recorded profile every collection rotates. Then it:
 
-1. creates the next key epoch of every collection the device could read
-   according to its [registry](issuer-registry.md) record (every collection
-   if the record has no profile);
-2. signs policy epoch + 1, revoking the device's node and user keys, its
-   capability and pseudonyms, which ends every chain issued earlier;
-3. renews its own chain, saves the identity and teaches the replica.
+1. creates each of those key epochs;
+2. signs the statement under the publisher key, co-signed by its own node key,
+   and adds it to its set, which ends the device's chains and no other;
+3. renews its own chain, clears the intent, saves the identity and teaches the
+   replica;
+4. writes the tombstone into the device's [registry](issuer-registry.md)
+   record.
 
-An interruption anywhere completes at the next open with the same keys. Other
-devices receive the new epochs, for the collections their grants read, with
-their next renewal from an issuer that holds them. The revoked device is
-refused renewal by every issuer and never receives the new key, so ciphertext
-written after the rotation stays sealed from it even when obtained elsewhere.
+An interruption anywhere completes at the next open with the same statement
+ID and the same keys. Other devices learn the statement and receive the new
+epochs, for the collections their grants read, with their next renewal from
+an issuer that holds them; a sync refused for a differing revocation set
+renews at once. The revoked device is refused renewal by every issuer, for
+good, and never receives the new key, so ciphertext written after the
+rotation stays sealed from it even when obtained elsewhere. `revoke` refuses
+with `revocation_set_full` once 1,024 live statements are held, and "another
+revocation is unfinished" while this issuer's previous one is; other issuers
+revoke at the same time.
 
 ## Limits
 
-- **Latest learned policy.** A device enforces the newest policy it learned. An
+- **Learned revocations.** A device enforces the statements it learned. An
   offline device that has not learned a revocation keeps accepting the revoked
   peer and keeps writing under the old key epoch, which the revoked device can
   read. Expiry bounds this window.
-- **Frames from an earlier policy epoch.** Receivers verify a frame's credentials
-  against their current policy. Once a device learned epoch *n*, frames signed
-  under an earlier chain are rejected, including honest history it had not
-  received yet; a device enrolled after a revocation cannot sync earlier rows.
-  The same check refuses frames whose author's chain has expired. Confirmed command
-  results are the exception: a verified coordinator receipt anchors them, so they
-  verify at the epoch they were issued under
+- **Frames of a revoked author.** Receivers verify a frame's credentials
+  against the revocations they hold. Every frame of a revoked author is
+  refused, earlier ones included; its rows a device did not yet hold arrive
+  through [checkpoint bootstrap](strong-history.md). Frames of every other
+  author are admitted whenever they were signed. The same check refuses
+  frames whose author's chain has expired. Confirmed command results are the
+  exception: a verified coordinator receipt anchors them, so they verify with
+  no revocation at the time they were issued
   ([portable result evidence](encrypted-commands.md#portable-result-evidence)).
-  New devices receive earlier rows and a strong base through current-policy
-  [checkpoint bootstrap](strong-history.md), rather than replaying old frames.
 - **No retraction.** Data a device decrypted, and keys it held, stay with it.
-- **Issuers.** Another issuer revokes a lost issuer by policy epoch, but the
+- **Issuers.** Another issuer revokes a lost issuer by a statement, but the
   revoked one keeps the publisher key: excluding a stolen issuer needs a new
   domain ([issuer recovery](sdk-enrollment.md#issuer-recovery)). Two issuers
-  revoking at once sign two policies of one epoch, which receivers refuse as
-  equivocation. Revoke from one issuer at a time.
+  revoking at once both count; two that revoke each other are both revoked.
+- **Concurrent revocations** merge, within the [limits](revocations.md#limits)
+  of one scope rotated twice at once and of issuers partitioned for longer
+  than a chain's lifetime.
 - **Whole-row scopes.** A key reveals every row of its scope. Partition
   selectors and recipient key envelopes define independent keys for declared
   partitions. A key still reveals its entire partition; subscriptions select
@@ -191,13 +204,14 @@ written after the rotation stays sealed from it even when obtained elsewhere.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` (`rocky_sdk` `VERSION`) | 10 | Profile, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation and its claim, pending `rotation` with the revoked record), `issuers` by node key, author range and pseudonyms; device records are in the [registry](issuer-registry.md); 9 is refused |
+| `identity.json` (`rocky_sdk` `VERSION`) | 11 | Profile, `revocations`, held key epochs per collection, group partitions with held secret epochs, issuer `authority` (invitation and its claim, pending `rotation` with its statement and target epochs, `tombstones`), `issuers` by node key, author range and pseudonyms; device records are in the [registry](issuer-registry.md); 10 is refused |
 | Issuer registry rows | | One row per entry of a device's record ([decision 0048](../decisions/0048-replicated-issuer-registry.md)) |
 | Invitation URI `rocky://join/` | 4 | Carries the grant profile and an explicit `via_custody` flag |
 | Pair request | 2 | Labels `rocky.credentials.pair-*.v2`; the enrollment carries profile, key epochs and, for an issuer, the publisher key and an author range; optional `routes` are bound by the proof when present |
-| Renewal | 2 | Request signed by the node, bound to an issuer audience and a one-time X25519 key; publisher-signed answer sealing `{keys, issuers}` to that key |
+| Renewal | 3 | Request signed by the node (`rocky.credentials.renew.v2`), bound to an issuer audience and a one-time X25519 key; publisher-signed answer (`rocky.credentials.renewal.v3`) carrying the issuer's revocation set and sealing `{keys, issuers}` to that key |
 | Contact URI | 2 | `issuer` and `enrollment_only` flags; `issuer` written only by issuers |
-| Revoked subject | | `revoked_subject(key)` under `rocky.credentials.revoked-subject.v1`, in the policy's `revoked` set beside capability IDs |
+| Revocation statement and set | 1 | See [revocations](revocations.md#formats) |
+| `revoked.json` | 2 | The statement that revoked this device |
 
 `secure_keys` holds the current key fingerprint per scope and
 `secure_key_epochs` every earlier one; the recovery inventory's `key_epochs`
@@ -212,7 +226,8 @@ with an explicit duplicate-material error, separately from missing read rights.
 and `cargo test -p rocky-sdk --test credentials` cover supplied sets, attenuation,
 profile grants, renewal refusing the revoked, a revoked reader failing on
 post-rotation ciphertext, interrupted rotation and revocation completing once,
-and epochs retiring only when unused.
+and epochs retiring only when unused. [Revocations](revocations.md#qualification)
+lists the tests of the set, the frame rule and concurrent revocations.
 
 ## Design rationale
 
@@ -225,7 +240,7 @@ and epochs retiring only when unused.
   not retract what a revoked reader already holds. Ciphertext names its epoch.
 - Revoking a subject key, not only a capability ID, ends capabilities another
   issuer signs later for that key.
-- `authority.rotation` is saved before any key is made, so an interrupted
-  revocation completes with the same keys and policy.
+- `authority.rotation` is saved before any key is made or anything is signed,
+  so an interrupted revocation completes with the same keys and statement.
 - An issuer never revokes itself, and revocation recovers from a lost issuer,
   not a stolen one: the publisher key cannot be taken back.

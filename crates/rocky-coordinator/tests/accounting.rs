@@ -131,32 +131,26 @@ async fn registration_does_not_authorize_accounting_and_learned_deletion_revokes
             fields: BTreeSet::from([field]),
         },
     ];
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let capability = |subject, kind, delegations| Capability {
         manifest: hash,
         subject,
         kind,
         grants: grants.clone(),
-        not_before: 0,
-        expires: u64::MAX,
-        epoch: 1,
+        not_before: time - rocky_credentials::DAY,
+        expires: time + 300 * rocky_credentials::DAY,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
     };
     let signed = SignedManifest::sign(&manifest, &accounting).unwrap();
-    let policy = SignedPolicy::sign(
-        PolicyStatement {
-            manifest: hash,
-            epoch: 1,
-            revoked: BTreeSet::new(),
-        },
-        &accounting,
-    )
-    .unwrap();
     let config = |credentials| SecureConfig {
         publisher: accounting.public_key(),
         manifest: signed.clone(),
-        policy: policy.clone(),
+        revocations: RevocationSet::new(),
         node: node.clone(),
         credentials,
         keys: vec![KeyMaterial {
@@ -235,20 +229,25 @@ async fn registration_does_not_authorize_accounting_and_learned_deletion_revokes
         .unwrap();
     assert!(!registry.registered_node(*phone.public_key().as_bytes()));
     assert_eq!(registry.deletions[0].rotate_keys, vec![resource]);
+    let issuer = PrivateKey::new();
+    let statement = Revocation {
+        app: manifest.app,
+        issuer: issuer.public_key(),
+        time,
+        nodes: BTreeSet::new(),
+        users: BTreeSet::new(),
+        capabilities: registry.deletions[0]
+            .revoked_grants
+            .iter()
+            .copied()
+            .collect(),
+        pseudonyms: BTreeSet::new(),
+    };
     replica
-        .learn_policy(
-            SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: hash,
-                    epoch: 2,
-                    revoked: registry.deletions[0]
-                        .revoked_grants
-                        .iter()
-                        .copied()
-                        .collect(),
-                },
-                &accounting,
-            )
+        .learn_revocations(
+            &RevocationSet::try_from(vec![
+                SignedRevocation::sign(statement, &accounting, &issuer).unwrap(),
+            ])
             .unwrap(),
         )
         .await

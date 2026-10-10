@@ -13,10 +13,10 @@ compiled manifest body signed by its trusted publisher. Publisher-bound app,
 entity and field IDs use the existing manifest format. Installation does not
 load executable code from a manifest.
 
-`SignedManifest`, `SignedCapability` and `SignedPolicy` live in
+`SignedManifest`, `SignedCapability` and `SignedRevocation` live in
 [`rocky-credentials`](credentials.md) and use domain-separated Ed25519 signatures. CBOR must round-trip to the pinned canonical encoder;
 noncanonical/trailing input is rejected. Capabilities bind the manifest hash,
-node public key, principal kind, validity interval, policy epoch and bounded
+node public key, principal kind, validity interval and bounded
 resource grants. Delegation is publisher → user → optional deployment → node.
 Users may delegate to users; deployments cannot turn back into users; nodes
 cannot delegate. Every child narrows its parent's rows, fields, actions, validity
@@ -24,13 +24,12 @@ and delegation budget. Each child grant must fit one complete parent grant.
 
 Publisher and issuer availability is unnecessary once signed evidence is
 retained. Admission evaluates expiry with the receiver's local wall clock and
-its latest learned signed policy. `learn_policy` persists increasing epochs and
-cumulative revocations, prevents rollback/equivocation, and invalidates pending
-operations and current reads under obsolete credentials. It cannot learn a
-revocation while offline. An epoch change requires newly issued credentials.
-A policy may also revoke a subject key, which ends every capability naming it.
+the [revocation statements](revocations.md) it holds. `learn_revocations`
+merges a set by union, persists it and ends sessions and reads under credentials
+it now ends. It cannot learn a revocation while offline. A statement ends every
+chain through a key or capability it names; other chains stay current.
 Previously applied history is retained, rather than retroactively erased, but
-frames signed under an earlier epoch are rejected once a later one is learned
+every frame of a revoked author is refused once its statement is learned
 ([limits](credentials.md#limits)).
 
 `SecureConfig` supplies node and encryption keys from a

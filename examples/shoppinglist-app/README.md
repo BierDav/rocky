@@ -109,7 +109,7 @@ children, and deleting a category clears its items' category. Moving an item
 keeps an offline tick attached to it.
 
 The **Sync** tab shows readiness, connection state, domain and node identity,
-grants, policy epoch, credential expiry, per-table holdings and key epochs.
+grants, revocation digest and count, credential expiry, per-table holdings and key epochs.
 Its activity feed shows transfers, checkpoint imports, bootstrap, horizon
 finalization, author installation, enrollment and key delivery. The feed is
 bounded and lasts for the open database's lifetime; see

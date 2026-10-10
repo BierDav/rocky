@@ -245,13 +245,12 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 }
             }
             let inventory = RecoveryInventory {
-                format: 2,
+                format: 3,
                 definition: inner.manifest,
                 recipient,
                 scopes: scopes.clone(),
                 schema: inner.definition.schema,
                 handler: inner.definition.handler,
-                policy: inner.config.policy.clone(),
                 key_epochs,
                 frontier: ids.into_iter().collect(),
                 heads: heads.clone(),
@@ -285,17 +284,14 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         let payload = package.open(recovery_key)?;
         {
             let inner = self.inner.lock().await;
-            package.inspect(inner.config.publisher, &inner.config.policy.statement)?;
+            package.inspect(inner.config.publisher, &inner.config.revocations)?;
             if package.inventory.definition != inner.manifest
                 || package.inventory.recipient != inner.config.node.public_key()
                 || package.exporter == inner.config.node.public_key()
                 || package.inventory.schema != inner.definition.schema
                 || package.inventory.handler != inner.definition.handler
-                || package.inventory.policy.statement.epoch > inner.config.policy.statement.epoch
             {
-                return Err(denied(
-                    "recovery recipient/definition/policy/generation mismatch",
-                ));
+                return Err(denied("recovery recipient/definition/generation mismatch"));
             }
             authorize(&inner.local_grants(now()?)?, &package.inventory.scopes)?;
             for scope in &package.inventory.scopes {

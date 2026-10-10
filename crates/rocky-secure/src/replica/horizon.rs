@@ -217,9 +217,9 @@ impl<A: RowApplication> Inner<A> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
         if statement.manifest != self.manifest
-            || statement.policy_epoch != self.config.policy.statement.epoch
+            || statement.revocations != self.revocation_digest()?
         {
-            return Err(denied("horizon manifest or policy is not current"));
+            return Err(denied("horizon manifest or revocation set is not current"));
         }
         let (related, existence) = self.horizon_dependencies(statement.scope)?;
         if existence
@@ -397,7 +397,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(HorizonStatement {
             format: rocky_credentials::HORIZON_FORMAT,
             manifest: inner.manifest,
-            policy_epoch: inner.config.policy.statement.epoch,
+            revocations: inner.revocation_digest()?,
             scope,
             sequence: match &previous {
                 Some(signed) => signed
@@ -560,7 +560,7 @@ impl<A: RowApplication> Inner<A> {
         checkpoint: &SignedCheckpoint,
     ) -> Result<(), Error> {
         if let Some(finalized) = &checkpoint.statement.finalized
-            && (finalized.statement.format != 2
+            && (finalized.statement.format != rocky_credentials::HORIZON_FORMAT
                 || checkpoint.statement.horizon.as_ref().is_none_or(|current| {
                     current.statement.sequence < finalized.statement.sequence
                 }))
@@ -580,7 +580,6 @@ impl<A: RowApplication> Inner<A> {
             let statement = &checkpoint.statement;
             if horizon.scope != statement.scope
                 || horizon.manifest != statement.definition
-                || horizon.policy_epoch > statement.policy_epoch
                 || horizon.logs.iter().any(|log| {
                     !statement.frontier.iter().any(|position| {
                         position.author == log.signer
@@ -1308,7 +1307,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             #[cfg(test)]
             inner.horizon_fault(4)?;
             let mut statement = previous_signed.statement.clone();
-            statement.format = 6;
+            statement.format = checkpoint::CHECKPOINT_FORMAT;
             statement.finalized = Some(signed.clone());
             statement.sequence = statement
                 .sequence

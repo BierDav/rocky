@@ -111,13 +111,13 @@ impl<A: RowApplication> Inner<A> {
                 _ => return Err(Error::Corrupt("applied positions".into())),
             };
             // Nothing new: the current checkpoint stands, unless it was signed
-            // under an older policy/key epoch or imported from another signer.
+            // under other revocations or key epoch, or imported from another signer.
             if let Some(record) = &verified
                 && target <= record.position
             {
                 let signed = inner.verify_record(scope, record)?;
                 if signed.signer() == inner.config.node.public_key()
-                    && signed.statement.policy_epoch == inner.config.policy.statement.epoch
+                    && signed.statement.revocations == inner.revocation_digest()?
                     && signed.statement.key_epoch == inner.scope_key(scope)?.0
                     && signed.statement.strong.head == inner.capture_strong(scope).await?.head
                     && signed.statement.horizon == inner.mergeable_horizon(scope).await?
@@ -282,7 +282,7 @@ impl<A: RowApplication> Inner<A> {
             let horizon = capture.horizon;
             let finalized = capture.finalized;
             let statement = CheckpointStatement {
-                format: 6,
+                format: CHECKPOINT_FORMAT,
                 finalized,
                 horizon,
                 partition: inner.partitions.get(&scope).cloned(),
@@ -291,7 +291,7 @@ impl<A: RowApplication> Inner<A> {
                 definition: inner.manifest,
                 schema: manifest.schema,
                 handler: manifest.handler,
-                policy_epoch: inner.config.policy.statement.epoch,
+                revocations: inner.revocation_digest()?,
                 scope,
                 key_epoch: generation,
                 sequence: previous
@@ -593,9 +593,10 @@ impl<A: RowApplication> Inner<A> {
             .checkpoint_record(id, true)
             .await?
             .and_then(|record| record.signed);
-        // Policy and key epochs both fence transfer of an older checkpoint.
+        // Revocations and key epochs both fence transfer of an older checkpoint.
+        let digest = self.revocation_digest()?;
         let rotated = verified.as_ref().is_some_and(|signed| {
-            signed.statement.policy_epoch != self.config.policy.statement.epoch
+            signed.statement.revocations != digest
                 || self
                     .scope_key(scope)
                     .is_ok_and(|(generation, _)| generation != signed.statement.key_epoch)

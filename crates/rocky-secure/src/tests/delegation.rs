@@ -3,7 +3,6 @@
 use super::*;
 use crate::wire::{Extensions, author};
 
-const ROOT_EXPIRES: u64 = 1 << 40;
 /// Changes one dimension of a link.
 type Widen = dyn Fn(&mut Capability, &Fixture);
 
@@ -22,9 +21,8 @@ fn delegated(
         subject: user.public_key(),
         kind: PrincipalKind::User,
         grants: held.to_vec(),
-        not_before: 1,
-        expires: ROOT_EXPIRES,
-        epoch: 1,
+        not_before: crate::tests::lifetime().0,
+        expires: crate::tests::lifetime().1,
         delegations: 2,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
             partitions: Vec::new(),
@@ -76,8 +74,8 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             link.grants[0].fields.insert(f.app().field("salary"));
         },
         &|link, f| link.grants[0].scope = f.private,
-        &|link, _| link.expires = ROOT_EXPIRES + 1,
-        &|link, _| link.not_before = 0,
+        &|link, _| link.expires += 1,
+        &|link, _| link.not_before -= 1,
         &|link, _| link.delegations = 2,
         &|link, _| {
             link.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {

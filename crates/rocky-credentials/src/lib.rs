@@ -1,5 +1,5 @@
 //! Credentials independent of a database or a network: signed manifests,
-//! capabilities and policies, the identities they bind, key providers,
+//! capabilities and revocations, the identities they bind, key providers,
 //! issuance and the enrollment and renewal messages. A runtime enforces
 //! what these verify. See `docs/runtime/credentials.md`.
 mod author_binding;
@@ -12,6 +12,7 @@ mod issue;
 mod keys;
 mod partition;
 mod pseudonym;
+mod revocation;
 mod signed;
 
 pub use author_binding::AuthorBinding;
@@ -39,9 +40,14 @@ pub use partition::PartitionGrant;
 pub use pseudonym::{
     AuthorRange, Extended, Extension, MAX_AUTHOR, Pseudonym, PseudonymRequest, SealedDevice,
 };
+pub use revocation::{
+    DAY, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES,
+    MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL, Revocation, RevocationSet, SIGNATURE_OVERHEAD,
+    SignedRevocation,
+};
 pub use signed::{
-    Capability, CredentialChain, Credentials, PolicyStatement, SignedCapability, SignedManifest,
-    SignedPolicy, SignedTransition, Verified, revoked_subject,
+    Capability, CredentialChain, Credentials, SignedCapability, SignedManifest, SignedTransition,
+    Verified,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

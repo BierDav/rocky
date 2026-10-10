@@ -119,23 +119,23 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
         .ok_or("revoked itself")?;
     assert_eq!(error["code"], "rejected", "{error}");
     let revoked = b.ok(json!({"type": "revoke", "node": a_node})).await;
-    assert_eq!(revoked["epoch"], "2");
+    assert_eq!(revoked["revocations"]["statements"], 1);
     assert!(issuers(root, "b")?.is_empty());
     assert!(identity(root, "b")?["peers"].get(&a_node).is_none());
 
     // The second issuer invites a third device, which syncs with it.
     let c = join(root, &hub, "c", &b.invite().await)?;
-    assert_eq!(session(&c).await["epoch"], "2");
+    assert_eq!(session(&c).await["revocations"]["statements"], 1);
     synced(&c).await?;
     assert_eq!(c.titles().await, ["Milk"]);
 
     // A device the creator enrolled renews through the second issuer and
     // forgets the revoked creator.
     let before = session(&early).await;
-    assert_eq!(before["epoch"], "1");
+    assert_eq!(before["revocations"]["statements"], 0);
     early.ok(json!({"type": "renew"})).await;
     let after = session(&early).await;
-    assert_eq!(after["epoch"], "2");
+    assert_eq!(after["revocations"]["statements"], 1);
     assert!(after["expires"].as_str() >= before["expires"].as_str());
     assert_eq!(issuers(root, "early")?, [b_node.as_str()]);
     assert!(identity(root, "early")?["peers"].get(&a_node).is_none());
@@ -144,11 +144,10 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     synced(&c).await?;
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
 
-    // A refused sync renews from the second issuer. The device writes after
-    // learning the revocation: frames signed under the ended epoch are
-    // refused (credentials.md#limits).
+    // A refused sync renews from the second issuer, learning the
+    // revocation; its earlier chain stays current.
     synced(&late).await?;
-    assert_eq!(session(&late).await["epoch"], "2");
+    assert_eq!(session(&late).await["revocations"]["statements"], 1);
     assert_eq!(issuers(root, "late")?, [b_node.as_str()]);
     late.add(3, "Bread").await;
     synced(&late).await?;

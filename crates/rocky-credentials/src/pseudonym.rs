@@ -2,7 +2,7 @@
 //! the device sealed to the publisher and the request a device sends for a
 //! pseudonym. See `docs/runtime/credential-primitives.md`.
 use crate::{
-    CredentialChain, Error, MAX_CREDENTIAL_BYTES, PolicyStatement, PrivateKey, PublicKey,
+    CredentialChain, Error, MAX_CREDENTIAL_BYTES, PrivateKey, PublicKey, RevocationSet,
     decode_bounded, denied, encode, signing_bytes,
 };
 use curve25519_dalek::{edwards::CompressedEdwardsY, montgomery::MontgomeryPoint};
@@ -282,12 +282,12 @@ impl PseudonymRequest {
         Ok(request)
     }
     /// The grants the pseudonym receives: the device's write grants on the
-    /// table, from its node chain under `policy` at `time`.
+    /// table, from its node chain under `revocations` at `time`.
     pub fn verify_selectors(
         &self,
         publisher: PublicKey,
         manifest: Commitment,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         (time, skew): (u64, u64),
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
         if self.version != Self::VERSION {
@@ -304,9 +304,9 @@ impl PseudonymRequest {
         {
             return Err(denied("invalid pseudonym request"));
         }
-        let (grants, partitions) = self
-            .chain
-            .verify_selectors(publisher, manifest, self.node, policy, time)?;
+        let (grants, partitions) =
+            self.chain
+                .verify_selectors(publisher, manifest, self.node, revocations, time)?;
         let writes = |rights: &std::collections::BTreeSet<Right>| {
             [Right::Insert, Right::Update, Right::Delete]
                 .iter()
@@ -329,10 +329,11 @@ impl PseudonymRequest {
         &self,
         publisher: PublicKey,
         manifest: Commitment,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         validity: (u64, u64),
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let (grants, partitions) = self.verify_selectors(publisher, manifest, policy, validity)?;
+        let (grants, partitions) =
+            self.verify_selectors(publisher, manifest, revocations, validity)?;
         if !partitions.is_empty() {
             return Err(denied(
                 "partition pseudonym request requires selector verification",

@@ -60,7 +60,8 @@ Start at `crates/rocky-core/src/lib.rs`.
 ## rocky-credentials
 
 Verifies and issues credentials without a database or endpoint: the signed
-manifest, capability chain and policy types with subject revocation, the
+manifest, capability chain and the mergeable set of signed revocation
+statements ([revocations](runtime/revocations.md)), the
 distinct identities, raw grants and chain delegation, author pseudonyms and range verification,
 grant profiles built on
 raw grants with the invoke and execute rights of declared commands,
@@ -155,7 +156,8 @@ Start at `crates/rocky-runtime/src/lib.rs`.
 ## rocky-secure
 
 Owns the secure profile around `EncryptedReplica`: admission of the signed
-capabilities `rocky-credentials` verifies, reader key epochs and rotation,
+capabilities `rocky-credentials` verifies under the revocation set it holds,
+reader key epochs and rotation,
 encrypted row operations, a framework-transaction p2panda store adapter and bounded
 authenticated native TCP synchronization, encrypted command scheduling and
 scoped strong projections with [bounded strong history](runtime/strong-history.md),
@@ -294,7 +296,7 @@ launcher and its container; see [always-on peer](runtime/always-on-peer.md).
 `crates/rocky-sdk` owns the native reactor over `EncryptedReplica`: a schema's
 typed secure tables, enrollment with grant profiles, the replicated
 [issuer registry](runtime/issuer-registry.md), renewal,
-revocation with key rotation, supplied credentials, durable pseudonym assignment
+revocation statements with key rotation and issuer tombstones, supplied credentials, durable pseudonym assignment
 and per-table signing keys, the `SecretStore` key
 provider, contact records and sync with configured peers
 ([SDK enrollment](runtime/sdk-enrollment.md)). Its transports are TCP, the

@@ -5,7 +5,7 @@ use rocky_core::{
     Commitment, Coordinator, ResourceScope, Right, RowCommandApplication, StrongHead,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub struct EffectJob {
@@ -121,20 +121,11 @@ impl EffectObservation {
                         .and_then(|set| set.commitments.get(self.index).copied())
             })
             .ok_or_else(|| denied("job output missing"))?;
-        let policy = if historical {
-            PolicyStatement {
-                manifest: inner.manifest,
-                epoch: self
-                    .credentials
-                    .0
-                    .last()
-                    .ok_or_else(|| denied("missing effect credential"))?
-                    .capability
-                    .epoch,
-                revoked: BTreeSet::new(),
-            }
+        let none = RevocationSet::new();
+        let revocations = if historical {
+            &none
         } else {
-            inner.config.policy.statement.clone()
+            &inner.config.revocations
         };
         let time = if historical {
             self.credentials
@@ -146,7 +137,7 @@ impl EffectObservation {
         } else {
             now()?
         };
-        let grants = inner.verify_chain_with(&self.credentials, self.node, &policy, time)?;
+        let grants = inner.verify_chain_with(&self.credentials, self.node, revocations, time)?;
         if self.job != job_id(&package.request, self.index)?
             || part.kind != PackageKind::Job
             || part.scope != self.event.scope

@@ -61,7 +61,7 @@ impl ExistenceBaseAttachment {
             "rocky.existence-base.id.v1",
             &encode(&(
                 self.horizon.statement.manifest,
-                self.horizon.statement.policy_epoch,
+                self.horizon.statement.revocations,
                 self.cut()?,
                 self.descriptor()?,
             ))?,
@@ -116,9 +116,7 @@ impl<A: RowApplication> Inner<A> {
             .verify(self.config.publisher)
             .map_err(credential)?;
         self.admits(base.horizon.statement.manifest)?;
-        if !self.existence_table(base.scope)
-            || base.horizon.statement.policy_epoch > self.config.policy.statement.epoch
-        {
+        if !self.existence_table(base.scope) {
             return Err(denied("existence base context is not admitted"));
         }
         base.descriptor()?;

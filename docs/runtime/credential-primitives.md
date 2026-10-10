@@ -72,8 +72,7 @@ A delegate never holds more than its delegator:
 
 - Every grant must be included in one of the delegator's: the same scope, a
   subset of its rights, columns and rows.
-- Its validity is clamped inside the delegator's, its policy epoch is the
-  same, and its depth is lower.
+- Its validity is clamped inside the delegator's and its depth is lower.
 - The delegator's reader keys travel with it only for collections the
   delegated grants read.
 
@@ -84,8 +83,8 @@ remote read, a command or a recovery transfer all run the same chain check.
 
 An issuer renews only chains it issued directly, so a delegated chain is
 renewed by its delegator delegating again; the delegate calls `install`. A
-revocation's new policy epoch ends delegated chains with the rest. The
-delegate's sync peers are configured with contacts, as for any member.
+[revocation](revocations.md) naming the delegator's key or capability ends
+the chains delegated from it. The delegate's sync peers are configured with contacts, as for any member.
 
 ## Executor registration
 
@@ -149,13 +148,14 @@ rewinds the allocation counter, even across removal of a range. Delegating
 again with `authors` carves a fresh range; omit it when the recipient no
 longer needs to assign authors.
 
-A learned policy epoch ends pseudonym chains like device chains. Renew the
-device credentials, then request, assign and install the pseudonym again;
-the key and author number stay the same. Rotation of pseudonym keys is out
+A [revocation](revocations.md) naming the pseudonym key, or a key or
+capability its chain passes through, ends the pseudonym chain like a device
+chain. After renewing the device credentials, request, assign and install the
+pseudonym again; the key and author number stay the same. Rotation of pseudonym keys is out
 of scope.
 
 `CredentialChain::verify_author` is the receiver primitive: it verifies the
-signing key, exact author number, table, grants and current policy. A pseudonym
+signing key, exact author number, table, grants and the held revocations. A pseudonym
 chain is refused wherever a node chain is required, including existing frames
 and sessions.
 

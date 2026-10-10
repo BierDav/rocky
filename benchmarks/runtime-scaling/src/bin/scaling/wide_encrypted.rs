@@ -42,23 +42,15 @@ fn config(
         subject,
         kind,
         grants: vec![grant.clone()],
-        not_before: 0,
-        expires: u64::MAX,
-        epoch: 1,
+        not_before: super::lifetime().0,
+        expires: super::lifetime().1,
         delegations,
         extension: extension.clone(),
     };
     Ok(SecureConfig {
         publisher: publisher.public_key(),
         manifest: SignedManifest::sign(manifest, publisher)?,
-        policy: SignedPolicy::sign(
-            PolicyStatement {
-                manifest: hash,
-                epoch: 1,
-                revoked: Default::default(),
-            },
-            publisher,
-        )?,
+        revocations: RevocationSet::new(),
         node: node.clone(),
         credentials: CredentialChain(vec![
             SignedCapability::sign(
@@ -110,7 +102,8 @@ pub async fn run() -> Result<(), Failure> {
         let source_config = config(&publisher, &author, &manifest, scope, field)?;
         let target_config = config(&publisher, &receiver, &manifest, scope, field)?;
         let credentials = source_config.credentials.clone();
-        let policy = source_config.policy.statement.clone();
+        let policy = source_config.revocations.clone();
+        let time = super::lifetime().0 + rocky_secure::credentials::DAY;
         let start = Instant::now();
         let encoded = source_config.manifest.to_bytes()?;
         assert_eq!(
@@ -156,7 +149,7 @@ pub async fn run() -> Result<(), Failure> {
                 manifest.hash(),
                 author.public_key(),
                 &policy,
-                1,
+                time,
             )?);
         }
         // Report pure verification separately from manifest hashing.
@@ -168,7 +161,7 @@ pub async fn run() -> Result<(), Failure> {
                 hash,
                 author.public_key(),
                 &policy,
-                1,
+                time,
             )?);
         }
         println!(

@@ -435,25 +435,12 @@ impl World {
             })
             .collect();
         let root = authority
-            .issue(
-                device.user.public_key(),
-                grants,
-                1,
-                (now().unwrap(), 3600, 60),
-            )
+            .issue(device.user.public_key(), grants, (now().unwrap(), 3600, 60))
             .unwrap();
         SecureConfig {
             publisher: self.publisher.public_key(),
             manifest: SignedManifest::sign(&manifest, &self.publisher).unwrap(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: BTreeSet::new(),
-                },
-                &self.publisher,
-            )
-            .unwrap(),
+            revocations: RevocationSet::new(),
             node: device.node.clone(),
             credentials: device_chain(root, &device.user, device.node.public_key()).unwrap(),
             keys,

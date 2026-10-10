@@ -63,7 +63,7 @@ struct Erp {
     publisher: PrivateKey,
     schema: LogicalSchema,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    policy: RevocationSet,
     domain: Scope,
 }
 /// One device and the tables it holds.
@@ -88,15 +88,7 @@ impl Erp {
         let manifest = schema.manifest(&[DomainId([1; 16])]);
         Self {
             manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: BTreeSet::new(),
-                },
-                &publisher,
-            )
-            .unwrap(),
+            policy: RevocationSet::new(),
             domain: Scope {
                 mesh: MeshId([1; 16]),
                 app: schema.app_id(),
@@ -152,9 +144,8 @@ impl Erp {
             subject,
             kind,
             grants: grants.clone(),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: crate::tests::lifetime().0,
+            expires: crate::tests::lifetime().1,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -181,8 +172,7 @@ impl Erp {
             assigner.public_key(),
             grants.clone(),
             (1, Some(crate::credentials::AuthorRange::ALL)),
-            1,
-            (0, u64::MAX, 0),
+            crate::tests::validity(),
         )
         .unwrap();
         let chain = CredentialChain(vec![issued])
@@ -212,7 +202,7 @@ impl Erp {
             SecureConfig {
                 publisher: self.publisher.public_key(),
                 manifest: self.manifest.clone(),
-                policy: self.policy.clone(),
+                revocations: self.policy.clone(),
                 node: node.clone(),
                 credentials: credentials.clone(),
                 keys: tables
@@ -250,8 +240,7 @@ impl Erp {
                 assigner.public_key(),
                 grants.clone(),
                 (1, Some(crate::credentials::AuthorRange::ALL)),
-                1,
-                (0, u64::MAX, 0),
+                crate::tests::validity(),
             )
             .unwrap();
             let chain = CredentialChain(vec![issued])
@@ -899,16 +888,23 @@ async fn native_sessions_exchange_existence_logs() {
     );
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session =
-            NativeSession::authenticate(stream, key, credentials, peer, MAX_SECURE_BYTES)
-                .await
-                .unwrap();
+        let mut session = NativeSession::authenticate(
+            stream,
+            key,
+            credentials,
+            crate::tests::unrevoked(),
+            peer,
+            MAX_SECURE_BYTES,
+        )
+        .await
+        .unwrap();
         while session.serve_once(&replica).await.is_ok() {}
     });
     let mut session = NativeSession::authenticate(
         TcpStream::connect(address).await.unwrap(),
         b.node.clone(),
         b.credentials.clone(),
+        crate::tests::unrevoked(),
         a.node.public_key(),
         MAX_SECURE_BYTES,
     )
@@ -1226,7 +1222,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 6);
+    assert_eq!(before_horizon.statement.format, 7);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1250,7 +1246,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 6);
+    assert_eq!(checkpoint.statement.format, 7);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1357,7 +1353,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v8");
+    assert_eq!(identity, "rocky.encrypted-replica.v9");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1383,7 +1379,7 @@ async fn horizon_recovery_refuses_packages_that_cannot_preserve_the_declaration(
     let configs = [&source_node, &target_node].map(|node| SecureConfig {
         publisher: erp.publisher.public_key(),
         manifest: erp.manifest.clone(),
-        policy: erp.policy.clone(),
+        revocations: erp.policy.clone(),
         node: node.clone(),
         credentials: erp.credentials(node, erp.grants(&TABLES)),
         keys: TABLES
@@ -1601,7 +1597,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 6);
+    assert_eq!(a.statement.format, 7);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(
@@ -2383,16 +2379,23 @@ async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_ke
         let peer = child.node.public_key();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut session =
-                NativeSession::authenticate(stream, key, credentials, peer, MAX_SECURE_BYTES)
-                    .await
-                    .unwrap();
+            let mut session = NativeSession::authenticate(
+                stream,
+                key,
+                credentials,
+                crate::tests::unrevoked(),
+                peer,
+                MAX_SECURE_BYTES,
+            )
+            .await
+            .unwrap();
             while session.serve_once(&source).await.is_ok() {}
         });
         let mut session = NativeSession::authenticate(
             TcpStream::connect(addr).await.unwrap(),
             child.node.clone(),
             child.credentials.clone(),
+            crate::tests::unrevoked(),
             full.node.public_key(),
             MAX_SECURE_BYTES,
         )

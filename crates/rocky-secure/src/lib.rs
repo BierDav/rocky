@@ -39,8 +39,8 @@ pub use replica::{
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;
 pub use rocky_credentials::{
-    Capability, CredentialChain, Hash, MAX_CREDENTIAL_DEPTH, PolicyStatement, PrivateKey,
-    PublicKey, SignedCapability, SignedManifest, SignedPolicy, SignedTransition,
+    Capability, CredentialChain, Hash, MAX_CREDENTIAL_DEPTH, PrivateKey, PublicKey, Revocation,
+    RevocationSet, SignedCapability, SignedManifest, SignedRevocation, SignedTransition,
 };
 pub use rocky_storage::sql::{
     AbortReason, Certainty, MAX_SAVEPOINTS, MAX_TRANSACTION_TIMEOUT, SqlError, SqlOptions,

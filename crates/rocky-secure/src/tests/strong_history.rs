@@ -13,7 +13,7 @@ fn clone_config(c: &SecureConfig) -> SecureConfig {
     SecureConfig {
         publisher: c.publisher,
         manifest: c.manifest.clone(),
-        policy: c.policy.clone(),
+        revocations: c.revocations.clone(),
         node: c.node.clone(),
         credentials: c.credentials.clone(),
         keys: c
@@ -62,7 +62,7 @@ async fn command(f: &Fixture, replica: &Replica, c: &dyn Coordinator, n: u32) ->
 async fn bootstrap(f: &Fixture, source: &Replica, target: &Replica, config: &SecureConfig) {
     for scope in [f.public, f.private] {
         let signed = source.checkpoint(scope).await.unwrap();
-        assert_eq!(signed.statement.format, 6);
+        assert_eq!(signed.statement.format, 7);
         assert_eq!(signed.statement.strong.base, signed.statement.strong.head);
         target.begin_rebootstrap(signed.clone()).await.unwrap();
         let mut cursor = None;
@@ -433,9 +433,8 @@ fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey
         subject,
         kind,
         grants: command_grants(f),
-        not_before: 0,
-        expires: u64::MAX,
-        epoch,
+        not_before: crate::tests::lifetime().0,
+        expires: crate::tests::lifetime().1,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
@@ -444,18 +443,11 @@ fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey
         publisher: f.publisher.public_key(),
         manifest: f.manifest.clone(),
         node: node.clone(),
-        policy: SignedPolicy::sign(
-            PolicyStatement {
-                manifest: f.app().definition().hash(),
-                epoch,
-                revoked: revoked
-                    .iter()
-                    .map(rocky_credentials::revoked_subject)
-                    .collect(),
-            },
-            &f.publisher,
-        )
-        .unwrap(),
+        revocations: if revoked.is_empty() {
+            RevocationSet::new()
+        } else {
+            crate::tests::revoking(&f.publisher, f.app().definition().app, revoked, &[])
+        },
         credentials: CredentialChain(vec![
             SignedCapability::sign(
                 capability(user.public_key(), PrincipalKind::User, 1),
@@ -512,7 +504,7 @@ async fn writer_enrolled_after_revocation_bootstraps_old_mergeable_and_confirmed
         .await
         .unwrap();
     command(&f, &a, &c, 1).await;
-    a.learn_policy(next.policy.clone()).await.unwrap();
+    a.learn_revocations(&next.revocations).await.unwrap();
     a.renew_credentials(next.credentials.clone()).await.unwrap();
     for key in next.keys {
         a.install_key_epoch(key).await.unwrap();
@@ -520,7 +512,9 @@ async fn writer_enrolled_after_revocation_bootstraps_old_mergeable_and_confirmed
     let b = EncryptedReplica::open(dir.path().join("b.db"), f.app(), clone_config(&bc))
         .await
         .unwrap();
-    assert!(b.receive(frame).await.is_err());
+    // An earlier author's frame is admitted; only its key epoch is missing,
+    // so its row arrives with the checkpoint.
+    assert_eq!(b.receive(frame).await.unwrap(), ReceiveStatus::MissingKey);
     bootstrap(&f, &a, &b, &bc).await;
     assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 1);
     assert!(b.command_snapshot(f.public).await.unwrap().complete);

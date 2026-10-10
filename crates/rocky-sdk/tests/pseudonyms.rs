@@ -105,7 +105,8 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
         w.ok(json!({"type": "session"})).await["pseudonyms"]["items"],
         2
     );
-    // Policy rotation ends the old chain; renewal retains the pseudonym key/number.
+    // Revoking another device leaves the chain current; a new assignment
+    // after renewal retains the pseudonym key and number.
     let r = Device::join(
         &root.join("r"),
         &a.invite_as(json!({"kind": "reader", "scopes": ["items"]}))
@@ -115,11 +116,8 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
     a.ok(json!({"type": "revoke", "node": r.node().await}))
         .await;
     w.ok(json!({"type": "renew"})).await;
-    assert!(
-        w.call(json!({"type": "pseudonym_install", "pseudonym": chain}))
-            .await
-            .is_err()
-    );
+    w.ok(json!({"type": "pseudonym_install", "pseudonym": chain}))
+        .await;
     let renewed = assign(&a, &request(&w).await).await;
     assert_eq!(author(&renewed)?, 2);
     install(&w, &renewed).await;

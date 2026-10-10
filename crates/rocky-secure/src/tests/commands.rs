@@ -38,7 +38,7 @@ async fn encrypted_commands_recover_lost_reply_and_atomic_multiscope_rollback() 
     let reopen = SecureConfig {
         publisher: config.publisher,
         manifest: config.manifest.clone(),
-        policy: config.policy.clone(),
+        revocations: config.revocations.clone(),
         node: config.node.clone(),
         credentials: config.credentials.clone(),
         keys: vec![
@@ -667,6 +667,7 @@ async fn native_encrypted_invocation_and_result_application() {
             stream,
             executor_key.clone(),
             executor_credentials,
+            crate::tests::unrevoked(),
             caller_key.public_key(),
             1024 * 1024,
         )
@@ -683,6 +684,7 @@ async fn native_encrypted_invocation_and_result_application() {
             stream,
             caller_key.clone(),
             caller_credentials,
+            crate::tests::unrevoked(),
             executor_key.public_key(),
             1024 * 1024,
         )
@@ -984,16 +986,13 @@ async fn renewed_policy_preserves_applied_command_history_and_denies_old_invocat
         .execute_encrypted(old.clone(), &coordinator)
         .await
         .unwrap();
-    let policy = SignedPolicy::sign(
-        PolicyStatement {
-            manifest: fixture.app().definition().hash(),
-            epoch: 2,
-            revoked: [revoked].into(),
-        },
+    let policy = crate::tests::revoking(
         &fixture.publisher,
-    )
-    .unwrap();
-    replica.learn_policy(policy.clone()).await.unwrap();
+        fixture.app().definition().app,
+        &[],
+        &[revoked],
+    );
+    replica.learn_revocations(&policy).await.unwrap();
     assert!(
         replica
             .execute_encrypted(old.clone(), &coordinator)
@@ -1008,9 +1007,8 @@ async fn renewed_policy_preserves_applied_command_history_and_denies_old_invocat
         subject,
         kind,
         grants: command_grants(&fixture),
-        not_before: 0,
-        expires: u64::MAX,
-        epoch: 2,
+        not_before: crate::tests::lifetime().0,
+        expires: crate::tests::lifetime().1,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
@@ -1039,7 +1037,7 @@ async fn renewed_policy_preserves_applied_command_history_and_denies_old_invocat
         command_grants(&fixture),
         &[fixture.public, fixture.private],
     );
-    config.policy = policy;
+    config.revocations = policy;
     config.credentials = credentials;
     let replica = EncryptedReplica::open(&path, fixture.app(), config)
         .await
@@ -1094,7 +1092,7 @@ async fn confirmed_history_is_audited_once_per_open_and_then_incrementally() {
     let reopen = SecureConfig {
         publisher: config.publisher,
         manifest: config.manifest.clone(),
-        policy: config.policy.clone(),
+        revocations: config.revocations.clone(),
         node: config.node.clone(),
         credentials: config.credentials.clone(),
         keys: vec![

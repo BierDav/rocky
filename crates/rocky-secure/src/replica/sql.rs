@@ -296,7 +296,7 @@ impl<A: RowApplication> SecureSql<A> {
                     author.number,
                     scope,
                     tuple,
-                    &inner.config.policy.statement,
+                    &inner.config.revocations,
                     now()?,
                 )
                 .map_err(credential)?,
@@ -308,7 +308,7 @@ impl<A: RowApplication> SecureSql<A> {
                     author.key.public_key(),
                     author.number,
                     table.scope.table,
-                    &inner.config.policy.statement,
+                    &inner.config.revocations,
                     now()?,
                 )
                 .map_err(credential)?,

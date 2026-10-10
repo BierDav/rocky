@@ -72,10 +72,10 @@ impl crate::CredentialChain {
         publisher: PublicKey,
         manifest: Commitment,
         subject: PublicKey,
-        policy: &crate::PolicyStatement,
+        revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<PartitionGrant>), Error> {
-        let leaf = self.links(publisher, manifest, Some((policy, time)))?;
+        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
         if leaf.subject != subject
             || leaf.delegations != 0
             || !matches!(
@@ -97,10 +97,10 @@ impl crate::CredentialChain {
         subject: PublicKey,
         scope: ResourceScope,
         tuple: &PartitionTuple,
-        policy: &crate::PolicyStatement,
+        revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, manifest, Some((policy, time)))?;
+        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
         if leaf.subject != subject
             || leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.delegations != 0
@@ -119,10 +119,10 @@ impl crate::CredentialChain {
         author: u32,
         scope: ResourceScope,
         tuple: &PartitionTuple,
-        policy: &crate::PolicyStatement,
+        revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, manifest, Some((policy, time)))?;
+        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
         if leaf.kind != rocky_core::PrincipalKind::Pseudonym
             || leaf.subject != signer
             || leaf.authors()?.and_then(|range| range.single()) != Some(author)
@@ -269,14 +269,13 @@ impl crate::Authority<'_> {
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
         terms: (u8, Option<crate::AuthorRange>),
-        epoch: u64,
         validity: (u64, u64, u64),
     ) -> Result<crate::SignedCapability, Error> {
         if partitions.is_empty() {
-            return self.issue_terms(subject, grants, terms, epoch, validity);
+            return self.issue_terms(subject, grants, terms, validity);
         }
         let mut capability = self
-            .issue_terms(subject, grants, terms, epoch, validity)?
+            .issue_terms(subject, grants, terms, validity)?
             .capability;
         capability.extension = crate::Extension::new(crate::Extended {
             authors: terms.1,

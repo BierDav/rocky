@@ -56,9 +56,8 @@ pub(super) fn config<A: RowCommandApplication>(
         subject: user.public_key(),
         kind: PrincipalKind::User,
         grants: grants.clone(),
-        not_before: 0,
-        expires: u64::MAX,
-        epoch: 1,
+        not_before: crate::tests::lifetime().0,
+        expires: crate::tests::lifetime().1,
         delegations: 1,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
@@ -77,15 +76,7 @@ pub(super) fn config<A: RowCommandApplication>(
     SecureConfig {
         publisher: publisher.public_key(),
         manifest: SignedManifest::sign(&app.manifest(), publisher).unwrap(),
-        policy: SignedPolicy::sign(
-            PolicyStatement {
-                manifest: app.manifest().hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            publisher,
-        )
-        .unwrap(),
+        revocations: RevocationSet::new(),
         node: node.clone(),
         credentials: CredentialChain(vec![root, leaf]),
         keys: scopes
@@ -373,19 +364,14 @@ async fn alice_receipt_does_not_authorize_accounting_and_current_conditions_are_
         .id()
         .unwrap();
     alice
-        .learn_policy(
-            SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: Alice::new(*publisher.public_key().as_bytes())
-                        .manifest()
-                        .hash(),
-                    epoch: 2,
-                    revoked: [root].into(),
-                },
-                &publisher,
-            )
-            .unwrap(),
-        )
+        .learn_revocations(&crate::tests::revoking(
+            &publisher,
+            Alice::new(*publisher.public_key().as_bytes())
+                .manifest()
+                .app,
+            &[],
+            &[root],
+        ))
         .await
         .unwrap();
     assert!(alice.begin_effect(job, vec![], true, &c).await.is_err());

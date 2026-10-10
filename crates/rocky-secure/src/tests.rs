@@ -10,9 +10,52 @@ use tempfile::TempDir;
 struct Fixture {
     publisher: PrivateKey,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    policy: RevocationSet,
     public: ResourceScope,
     private: ResourceScope,
+}
+/// From a day ago for 300 days: a fixture chain's validity, within the
+/// longest a chain may live.
+pub(crate) fn lifetime() -> (u64, u64) {
+    let time = now().unwrap();
+    (
+        time - rocky_credentials::DAY,
+        time + 300 * rocky_credentials::DAY,
+    )
+}
+/// Issuance terms for a fixture: from now for 300 days.
+pub(crate) fn validity() -> (u64, u64, u64) {
+    (
+        now().unwrap(),
+        300 * rocky_credentials::DAY,
+        rocky_credentials::DAY,
+    )
+}
+/// The digest of an empty revocation set, which a fixture's hello carries.
+pub(crate) fn unrevoked() -> Commitment {
+    RevocationSet::new().digest(0).unwrap()
+}
+/// A one-statement set that revokes `users` and `capabilities`.
+pub(crate) fn revoking(
+    publisher: &PrivateKey,
+    app: rocky_core::AppId,
+    users: &[PublicKey],
+    capabilities: &[Commitment],
+) -> RevocationSet {
+    let issuer = PrivateKey::new();
+    let statement = Revocation {
+        app,
+        issuer: issuer.public_key(),
+        time: now().unwrap(),
+        nodes: BTreeSet::new(),
+        users: users.iter().copied().collect(),
+        capabilities: capabilities.iter().copied().collect(),
+        pseudonyms: BTreeSet::new(),
+    };
+    RevocationSet::try_from(vec![
+        SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
+    ])
+    .unwrap()
 }
 fn grant(scope: ResourceScope, rights: &[Right], fields: &[Commitment]) -> ResourceGrant {
     ResourceGrant {
@@ -31,15 +74,7 @@ impl Fixture {
         let body = app.definition();
         Self {
             manifest: SignedManifest::sign(&body, &publisher).unwrap(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: body.hash(),
-                    epoch: 1,
-                    revoked: BTreeSet::new(),
-                },
-                &publisher,
-            )
-            .unwrap(),
+            policy: RevocationSet::new(),
             public: app.scope(MeshId([1; 16]), false),
             private: app.scope(MeshId([1; 16]), true),
             publisher,
@@ -56,9 +91,8 @@ impl Fixture {
             subject,
             kind,
             grants: grants.clone(),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: crate::tests::lifetime().0,
+            expires: crate::tests::lifetime().1,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -90,7 +124,7 @@ impl Fixture {
         SecureConfig {
             publisher: self.publisher.public_key(),
             manifest: self.manifest.clone(),
-            policy: self.policy.clone(),
+            revocations: self.policy.clone(),
             node: node.clone(),
             credentials: self.credentials(node, grants),
             keys: scopes
@@ -521,51 +555,50 @@ async fn rollback_retry_restart_and_missing_encrypted_dependencies() {
 }
 
 #[test]
-fn signatures_attenuation_expiry_epoch_and_cross_app_replay() {
+fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     let fixture = Fixture::new();
     let key = PrivateKey::new();
     let chain = fixture.credentials(&key, fixture.full());
-    let verify = |chain: &CredentialChain, policy: &PolicyStatement, manifest| {
+    let time = now().unwrap();
+    let verify = |chain: &CredentialChain, revocations: &RevocationSet, manifest| {
         chain.verify(
             fixture.publisher.public_key(),
             manifest,
             key.public_key(),
-            policy,
-            1,
+            revocations,
+            time,
         )
     };
-    assert!(
-        verify(
-            &chain,
-            &fixture.policy.statement,
-            fixture.app().definition().hash()
-        )
-        .is_ok()
-    );
-    assert!(verify(&chain, &fixture.policy.statement, [0; 32]).is_err());
+    assert!(verify(&chain, &fixture.policy, fixture.app().definition().hash()).is_ok());
+    assert!(verify(&chain, &fixture.policy, [0; 32]).is_err());
     let mut tampered = chain.clone();
     tampered.0[2].capability.grants[0].fields.insert([99; 32]);
     assert!(
         verify(
             &tampered,
-            &fixture.policy.statement,
+            &fixture.policy,
             fixture.app().definition().hash()
         )
         .is_err()
     );
-    let mut policy = fixture.policy.statement.clone();
-    policy.revoked.insert(chain.0[0].id().unwrap());
-    assert!(verify(&chain, &policy, fixture.app().definition().hash()).is_err());
-    policy.revoked.clear();
-    policy.epoch = 2;
-    assert!(verify(&chain, &policy, fixture.app().definition().hash()).is_err());
+    let app = fixture.app().definition().app;
+    let ended = revoking(&fixture.publisher, app, &[], &[chain.0[0].id().unwrap()]);
+    assert!(verify(&chain, &ended, fixture.app().definition().hash()).is_err());
+    // A statement naming someone else leaves the chain current.
+    let other = revoking(
+        &fixture.publisher,
+        app,
+        &[PrivateKey::new().public_key()],
+        &[],
+    );
+    assert!(verify(&chain, &other, fixture.app().definition().hash()).is_ok());
     assert!(
         chain
             .verify(
                 fixture.publisher.public_key(),
                 fixture.app().definition().hash(),
                 key.public_key(),
-                &fixture.policy.statement,
+                &fixture.policy,
                 u64::MAX
             )
             .is_err()
@@ -638,6 +671,7 @@ async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgmen
             stream,
             a.clone(),
             acred,
+            crate::tests::unrevoked(),
             b.public_key(),
             MAX_SECURE_FRAME * 4,
         )
@@ -652,6 +686,7 @@ async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgmen
             stream,
             b.clone(),
             bcred,
+            crate::tests::unrevoked(),
             a.public_key(),
             MAX_SECURE_FRAME * 4,
         )
@@ -807,27 +842,64 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
         );
         assert!(public_reader.open_package(&private, &set).await.is_err());
     }
-    let policy = SignedPolicy::sign(
-        PolicyStatement {
-            manifest: fixture.app().definition().hash(),
-            epoch: 2,
-            revoked: [root_grant].into(),
-        },
+    let revoked = revoking(
         &fixture.publisher,
-    )
-    .unwrap();
-    target.learn_policy(policy.clone()).await.unwrap();
-    assert!(target.snapshot(fixture.private).await.is_err());
-    assert!(target.receive(frame).await.is_err());
-    assert!(target.learn_policy(fixture.policy.clone()).await.is_err());
-    drop(target);
-    let mut config = fixture.config(&target_key, fixture.full(), &[]);
-    config.policy = policy;
-    config.credentials = target_credentials;
+        fixture.app().definition().app,
+        &[],
+        &[root_grant],
+    );
+    target.learn_revocations(&revoked).await.unwrap();
+    // The revoked author's new frames are refused; the target's own chain,
+    // which no statement names, stays current.
+    let later = source
+        .author(
+            [2; 32],
+            vec![change(
+                fixture.public,
+                2,
+                None,
+                Some(fixture.app().name("Later")),
+            )],
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert!(target.receive(later).await.is_err());
+    assert!(target.snapshot(fixture.private).await.is_ok());
+    // Learning less removes nothing.
     assert!(
+        target
+            .learn_revocations(&RevocationSet::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(target);
+    // Reopened with an empty supplied set, the file keeps what it learned.
+    let mut config = fixture.config(&target_key, fixture.full(), &[]);
+    config.credentials = target_credentials;
+    assert_eq!(
         EncryptedReplica::open(&target_path, fixture.app(), config)
             .await
-            .is_err()
+            .unwrap()
+            .revocations()
+            .await,
+        revoked
+    );
+    assert!(
+        EncryptedReplica::open(&target_path, fixture.app(), {
+            let mut config = fixture.config(&target_key, fixture.full(), &[]);
+            config.credentials = fixture.credentials(&target_key, fixture.full());
+            config.revocations = revoking(
+                &fixture.publisher,
+                fixture.app().definition().app,
+                &[config.credentials.0[0].capability.subject],
+                &[],
+            );
+            config
+        })
+        .await
+        .is_err()
     );
 }
 
@@ -848,7 +920,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         grants: vec![narrow.clone()],
         not_before: 0,
         expires: 100,
-        epoch: 1,
         delegations: 1,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
             .unwrap(),
@@ -883,7 +954,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
                     fixture.publisher.public_key(),
                     root.manifest,
                     node.public_key(),
-                    &fixture.policy.statement,
+                    &fixture.policy,
                     1
                 )
                 .is_err()
@@ -899,7 +970,7 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
                 fixture.publisher.public_key(),
                 fixture.app().definition().hash(),
                 node.public_key(),
-                &fixture.policy.statement,
+                &fixture.policy,
                 1
             )
             .is_ok()
@@ -1084,6 +1155,7 @@ async fn native_pull(
             stream,
             source_identity.0.clone(),
             source_identity.1,
+            crate::tests::unrevoked(),
             target_identity.0.public_key(),
             MAX_SECURE_FRAME * 8,
         )
@@ -1099,6 +1171,7 @@ async fn native_pull(
             stream,
             target_identity.0.clone(),
             target_identity.1,
+            crate::tests::unrevoked(),
             source_identity.0.public_key(),
             MAX_SECURE_FRAME * 8,
         )
@@ -1416,6 +1489,7 @@ mod exposure;
 mod generations;
 mod group;
 mod partitions;
+mod revocations;
 #[cfg(unix)]
 mod roles;
 mod rotation;

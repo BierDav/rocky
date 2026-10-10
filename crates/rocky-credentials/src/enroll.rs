@@ -2,8 +2,9 @@
 //! bytes in, bytes out. Enrollment is optional plumbing over issuance; a
 //! device may equally install credentials supplied another way.
 use crate::{
-    Authority, Capability, CredentialChain, Error, MAX_CREDENTIAL_BYTES, PrivateKey, Profile,
-    PublicKey, SignedCapability, SignedPolicy, decode_bounded, denied, encode, signing_bytes,
+    Authority, Capability, CredentialChain, Error, MAX_CREDENTIAL_BYTES, MAX_REVOCATION_SET_BYTES,
+    PrivateKey, Profile, PublicKey, RevocationSet, SignedCapability, decode_bounded, denied,
+    encode, signing_bytes,
 };
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit,
@@ -329,13 +330,13 @@ impl RenewRequest {
     }
 }
 
-/// An issuer's answer: a renewed capability, the current policy and a
-/// payload sealed to the requesting device, such as its reader keys. The
-/// publisher key signs the whole answer.
+/// An issuer's answer: a renewed capability, the revocations the issuer
+/// holds and a payload sealed to the requesting device, such as its reader
+/// keys. The publisher key signs the whole answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Renewal {
     pub capability: SignedCapability,
-    pub policy: SignedPolicy,
+    pub revocations: RevocationSet,
     exchange: [u8; 32],
     sealed: Vec<u8>,
     signature: Signature,
@@ -347,7 +348,7 @@ impl Renewal {
         shared: &[u8; 32],
     ) -> Result<Commitment, Error> {
         Ok(commitment(
-            "rocky.credentials.renew-key.v2",
+            "rocky.credentials.renew-key.v3",
             &[
                 shared.as_slice(),
                 &request.exchange,
@@ -359,47 +360,43 @@ impl Renewal {
     }
     fn body(&self, request: &RenewRequest) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.renewal.v2",
+            "rocky.credentials.renewal.v3",
             &(
                 request.id()?,
                 self.capability.id()?,
                 commitment(
-                    "rocky.credentials.renewal-policy.v2",
-                    &encode(&self.policy)?,
+                    "rocky.credentials.renewal-revocations.v3",
+                    &encode(&self.revocations)?,
                 ),
                 self.exchange,
-                commitment("rocky.credentials.renewal-payload.v2", &self.sealed),
+                commitment("rocky.credentials.renewal-payload.v3", &self.sealed),
             ),
         )
     }
-    /// Renews the verified `request` under `policy` and seals `payload` to
-    /// its device. A revoked subject is refused.
+    /// Renews the verified `request` and seals `payload` to its device. A
+    /// node or user `revocations` revokes is refused.
     pub fn seal(
         authority: &Authority<'_>,
         request: &RenewRequest,
         prior: &Capability,
-        policy: SignedPolicy,
+        revocations: RevocationSet,
         validity: (u64, u64, u64),
         payload: &[u8],
     ) -> Result<Self, Error> {
-        if policy
-            .statement
-            .revoked
-            .contains(&crate::revoked_subject(&request.node))
-        {
+        if revocations.revokes(&request.node) {
             return Err(denied("invalid or revoked credential"));
         }
-        let capability = authority.renew(prior, &policy.statement, validity)?;
+        let capability = authority.renew(prior, &revocations, validity)?;
         let (secret, exchange) = Exchange::new();
         let shared = secret.shared(&request.exchange)?;
         let sealed = seal(
             Self::key(request, &exchange, &shared)?,
-            b"rocky.credentials.renewal.v2",
+            b"rocky.credentials.renewal.v3",
             payload,
         )?;
         let mut renewal = Self {
             capability,
-            policy,
+            revocations,
             exchange,
             sealed,
             signature: authority.publisher.sign(&[]),
@@ -423,7 +420,7 @@ impl Renewal {
         let shared = secret.shared(&self.exchange)?;
         open(
             Self::key(request, &self.exchange, &shared)?,
-            b"rocky.credentials.renewal.v2",
+            b"rocky.credentials.renewal.v3",
             &self.sealed,
         )
     }
@@ -431,6 +428,6 @@ impl Renewal {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, MAX_CREDENTIAL_BYTES)
+        decode_bounded(bytes, MAX_CREDENTIAL_BYTES + MAX_REVOCATION_SET_BYTES)
     }
 }

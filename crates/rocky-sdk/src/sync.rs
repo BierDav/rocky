@@ -29,6 +29,8 @@ pub struct Upstream<'a> {
     pub peer: PublicKey,
     pub node: PrivateKey,
     pub credentials: CredentialChain,
+    /// The digest of the local live revocations, which the hello carries.
+    pub revocations: rocky_core::Commitment,
 }
 
 /// What one scope exchanged with a peer during a sync.
@@ -194,6 +196,7 @@ async fn session(upstream: &Upstream<'_>) -> Result<NativeSession, Failure> {
         stream,
         upstream.node.clone(),
         upstream.credentials.clone(),
+        upstream.revocations,
         upstream.peer,
         MAX_SECURE_BYTES,
     )
@@ -386,6 +389,7 @@ pub async fn serve(
         stream,
         node,
         credentials,
+        replica.revocation_digest().await?,
         |peer| admitted.contains(peer),
         MAX_SECURE_BYTES,
     )

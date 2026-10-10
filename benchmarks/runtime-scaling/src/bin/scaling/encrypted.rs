@@ -1,7 +1,7 @@
 //! Baseline for the `EncryptedReplica` path. It has its own storage code, one
 //! mutex around all work and its own retained-history bounds, which
 //! checkpoints and pruning keep a scope inside.
-use super::{Failure, futures, line, resident_mib};
+use super::{Failure, futures, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::{
     MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowChange, RowSelection,
@@ -9,8 +9,8 @@ use rocky_core::{
 use rocky_runtime::Error;
 use rocky_secure::{
     Capability, CredentialChain, EncryptedFrame, EncryptedReplica, KeyMaterial, MAX_SECURE_FRAME,
-    MAX_SNAPSHOT_ROWS, PolicyStatement, PrivateKey, RetentionLimits, RetentionPolicy, SecureConfig,
-    SignedCapability, SignedManifest, SignedPolicy,
+    MAX_SNAPSHOT_ROWS, PrivateKey, RetentionLimits, RetentionPolicy, RevocationSet, SecureConfig,
+    SignedCapability, SignedManifest,
 };
 use std::time::Instant;
 
@@ -47,24 +47,15 @@ impl Fixture {
                 .into(),
                 fields: [self.app().field("display_name")].into(),
             }],
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: lifetime().0,
+            expires: lifetime().1,
             delegations,
             extension: extension.clone(),
         };
         Ok(SecureConfig {
             publisher: self.publisher.public_key(),
             manifest: SignedManifest::sign(&manifest, &self.publisher).map_err(signing)?,
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: Default::default(),
-                },
-                &self.publisher,
-            )
-            .map_err(signing)?,
+            revocations: RevocationSet::new(),
             node: node.clone(),
             credentials: CredentialChain(vec![
                 SignedCapability::sign(

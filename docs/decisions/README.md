@@ -24,6 +24,7 @@ naturally holds.
 | [0046](0046-per-scope-frontier-refusal.md) | Per-scope frontier refusal in native session v7 |
 | [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
 | [0048](0048-replicated-issuer-registry.md) | Replicated issuer registry |
+| [0049](0049-mergeable-revocation-set.md) | A mergeable revocation set replaces the policy epoch |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
@@ -51,6 +52,7 @@ unreserved record is 0060.
 | Database bindings, placement groups | [database-bindings](../runtime/database-bindings.md#design-rationale) |
 | Signed capabilities, encrypted row protocol | [permissions-and-sync](../runtime/permissions-and-sync.md#design-rationale) |
 | Credentials, grant profiles, issuer devices, key epochs | [credentials](../runtime/credentials.md#design-rationale) |
+| Revocation statements, mergeable sets, the frame rule | [0049](0049-mergeable-revocation-set.md), [revocations](../runtime/revocations.md) |
 | Author pseudonyms and author ranges | [credential-primitives](../runtime/credential-primitives.md#design-rationale) |
 | Partitioned reader scopes, key envelopes | [partitioned-scopes](../runtime/partitioned-scopes.md#design-rationale) |
 | Typed command descriptors, tickets, handler hosts | [typed-commands](../runtime/typed-commands.md#design-rationale) |

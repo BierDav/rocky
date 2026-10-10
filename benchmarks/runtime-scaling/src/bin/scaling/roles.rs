@@ -1,6 +1,6 @@
 //! Phase 7 gate: one full replica node and two partial replicas over the
 //! native transport. See docs/runtime/scaling-limits.md.
-use super::{Failure, line, resident_mib};
+use super::{Failure, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::*;
 use rocky_secure::network::NativeSession;
@@ -18,7 +18,6 @@ const ROWS_PER_OPERATION: usize = 32;
 struct World {
     publisher: PrivateKey,
     manifest: SignedManifest,
-    policy: SignedPolicy,
     app: Employees,
     scopes: Vec<ResourceScope>,
 }
@@ -36,14 +35,6 @@ impl World {
         let public = app.scope(MeshId([1; 16]), false);
         Ok(Self {
             manifest: SignedManifest::sign(&body, &publisher)?,
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: body.hash(),
-                    epoch: 1,
-                    revoked: Default::default(),
-                },
-                &publisher,
-            )?,
             scopes: (0..SCOPES)
                 .map(|index| ResourceScope {
                     encryption: commitment("roles.department.v1", &[index]),
@@ -87,9 +78,8 @@ impl World {
             subject,
             kind,
             grants: grants.clone(),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: lifetime().0,
+            expires: lifetime().1,
             delegations,
             extension: extension.clone(),
         };
@@ -126,7 +116,7 @@ impl World {
         let config = SecureConfig {
             publisher: self.publisher.public_key(),
             manifest: self.manifest.clone(),
-            policy: self.policy.clone(),
+            revocations: RevocationSet::new(),
             node: key.clone(),
             credentials: credentials.clone(),
             keys: scopes
@@ -190,10 +180,14 @@ async fn serve(
         let Ok((stream, _)) = listener.accept().await else {
             return;
         };
+        let Ok(digest) = node.replica.revocation_digest().await else {
+            return;
+        };
         let Ok(mut session) = NativeSession::authenticate(
             stream,
             node.key.clone(),
             node.credentials.clone(),
+            digest,
             peer,
             MAX_SECURE_BYTES,
         )
@@ -224,6 +218,7 @@ async fn connect(
         TcpStream::connect(address).await?,
         client.key.clone(),
         client.credentials.clone(),
+        client.replica.revocation_digest().await?,
         server.key.public_key(),
         MAX_SECURE_BYTES,
     )

@@ -62,7 +62,7 @@ class IssuerRecoveryTest {
             opened -= a
             assertTrue(File(root, "a").deleteRecursively())
             b.revoke(creator)
-            assertEquals(expiring.policyEpoch + 1, b.session().policyEpoch)
+            assertEquals(expiring.revocations.statements + 1, b.session().revocations.statements)
             assertTrue(b.peers().none { it.node == creator })
 
             val c = join(File(root, "c"), b.pairing(writer)).withRoom(File(root, "c")).also { opened += it }.joined()
@@ -73,7 +73,7 @@ class IssuerRecoveryTest {
             assertEquals(listOf("Milk"), c.titles())
 
             val renewed = d.renew()
-            assertEquals(b.session().policyEpoch, renewed.policyEpoch)
+            assertEquals(b.session().revocations, renewed.revocations)
             assertTrue(renewed.expiresAtEpochSeconds > expiring.expiresAtEpochSeconds + 24 * 60 * 60)
             assertTrue(d.peers().none { it.node == creator })
             // The held list gains the rotated epoch; renewal's bootstrap then restarts it from a checkpoint.

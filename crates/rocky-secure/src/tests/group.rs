@@ -426,7 +426,7 @@ fn public_futures_are_send(
     send(replica.author([1; 32], insert(&f, 1), vec![]));
     send(replica.receive(frame.clone()));
     send(replica.receive_all(vec![frame]));
-    send(replica.learn_policy(f.policy.clone()));
+    send(replica.learn_revocations(&f.policy.clone()));
 }
 
 #[tokio::test]

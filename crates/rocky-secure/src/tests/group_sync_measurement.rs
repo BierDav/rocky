@@ -58,6 +58,7 @@ async fn sync(
                 stream,
                 writer_node.clone(),
                 writer_credentials.clone(),
+                crate::tests::unrevoked(),
                 |peer| *peer == reader_peer,
                 MAX_SECURE_BYTES,
             )
@@ -72,6 +73,7 @@ async fn sync(
                 stream,
                 reader_node.clone(),
                 reader_credentials.clone(),
+                crate::tests::unrevoked(),
                 writer_peer,
                 MAX_SECURE_BYTES,
             )

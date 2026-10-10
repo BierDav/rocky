@@ -12,8 +12,10 @@ pub struct SessionStatus {
     /// The device signing identity that authors every operation.
     pub node: PublicKey,
     pub manifest: Commitment,
-    /// The policy epoch the credentials were verified under.
-    pub epoch: u64,
+    /// The digest of the live revocations the credentials were verified under.
+    pub revocations: Commitment,
+    /// How many live revocation statements the replica holds.
+    pub revoked: usize,
     /// The earliest expiry in the credential chain, in seconds.
     pub expires: u64,
     /// The resource set the session was opened with.
@@ -36,7 +38,7 @@ pub enum UpdateMode {
 /// A principal's handle on an `EncryptedReplica`. Every call checks that
 /// the replica's authority has not changed since the session opened, that
 /// the credentials are still valid now and that the scope is in the
-/// session's set. A policy, credential, key or logout change ends it.
+/// session's set. A revocation, credential, key or logout change ends it.
 pub struct SecureSession<A> {
     pub(super) replica: EncryptedReplica<A>,
     pub(super) authority: u64,
@@ -120,7 +122,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let grants = inner.resolve_chain(
             &credentials,
             inner.config.node.public_key(),
-            &inner.config.policy.statement,
+            &inner.config.revocations,
             now()?,
         )?;
         inner.config.credentials = credentials;
@@ -166,7 +168,8 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| denied("missing user credential"))?,
             node: self.config.node.public_key(),
             manifest: self.manifest,
-            epoch: self.config.policy.statement.epoch,
+            revocations: self.revocation_digest()?,
+            revoked: self.config.revocations.live(time),
             expires: self
                 .config
                 .credentials

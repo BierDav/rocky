@@ -5,9 +5,9 @@ use rocky_core::{
     Commitment, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowChange, RowSelection,
 };
 use rocky_secure::{
-    Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PolicyStatement, PrivateKey,
-    SecureConfig, SignedCapability, SignedManifest, SignedPolicy, network::NativeSession,
-    secure_node_id, secure_principal_id,
+    Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet,
+    SecureConfig, SignedCapability, SignedManifest, network::NativeSession, secure_node_id,
+    secure_principal_id,
 };
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use tokio::net::{TcpListener, TcpStream};
@@ -73,24 +73,21 @@ impl SecureDemo {
             })
             .collect();
         let manifest = SignedManifest::sign(&app.definition(), &publisher).map_err(signing)?;
-        let policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: app.definition().hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            &publisher,
-        )
-        .map_err(signing)?;
+        // Credentials live at most a year; each start issues them afresh.
+        const DAY: u64 = 24 * 60 * 60;
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Rejected("clock before the epoch".into()))?
+            .as_secs();
+        let (not_before, expires) = (time.saturating_sub(DAY), time + 300 * DAY);
         let root = SignedCapability::sign(
             Capability {
                 manifest: app.definition().hash(),
                 subject: user.public_key(),
                 kind: PrincipalKind::User,
                 grants: full.clone(),
-                not_before: 0,
-                expires: u64::MAX,
-                epoch: 1,
+                not_before,
+                expires,
                 delegations: 1,
                 extension: rocky_secure::credentials::Extension::new(
                     rocky_secure::credentials::Extended::default(),
@@ -111,9 +108,8 @@ impl SecureDemo {
                     subject: node.public_key(),
                     kind: PrincipalKind::Node,
                     grants,
-                    not_before: 0,
-                    expires: u64::MAX,
-                    epoch: 1,
+                    not_before,
+                    expires,
                     delegations: 0,
                     extension: rocky_secure::credentials::Extension::new(
                         rocky_secure::credentials::Extended::default(),
@@ -126,7 +122,7 @@ impl SecureDemo {
             Ok(SecureConfig {
                 publisher: publisher.public_key(),
                 manifest: manifest.clone(),
-                policy: policy.clone(),
+                revocations: RevocationSet::new(),
                 node,
                 credentials: CredentialChain(vec![root.clone(), leaf]),
                 keys,
@@ -307,12 +303,17 @@ impl SecureDemo {
     ) -> Result<(NativeSession, NativeSession), Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(Error::Io)?;
         let address = listener.local_addr().map_err(Error::Io)?;
+        let (source_digest, target_digest) = (
+            self.replica(source).revocation_digest().await?,
+            self.replica(target).revocation_digest().await?,
+        );
         let server = async {
             let (stream, _) = listener.accept().await.map_err(Error::Io)?;
             NativeSession::authenticate(
                 stream,
                 self.identities[source].0.clone(),
                 self.identities[source].1.clone(),
+                source_digest,
                 self.identities[target].0.public_key(),
                 4 * 1024 * 1024,
             )
@@ -324,6 +325,7 @@ impl SecureDemo {
                 stream,
                 self.identities[target].0.clone(),
                 self.identities[target].1.clone(),
+                target_digest,
                 self.identities[source].0.public_key(),
                 4 * 1024 * 1024,
             )

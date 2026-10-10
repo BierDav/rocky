@@ -185,7 +185,7 @@ private class DeviceProcess {
                 JsonNull
             }
 
-            "renew" -> JsonPrimitive(database.renew().policyEpoch)
+            "renew" -> JsonPrimitive(database.renew().revocations.statements)
 
             "horizon" -> {
                 val values = database.list(list()).values

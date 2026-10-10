@@ -10,7 +10,7 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         result.to_bytes()?;
         // The verified receipt anchors a result confirmed before a later
-        // policy epoch; its credentials verify at the epoch it was issued under.
+        // revocation; its credentials verify with none at the time of issue.
         let package = match result.verify(&inner) {
             Ok(package) => package,
             Err(_) => result.verify_history(&inner)?,
@@ -329,7 +329,7 @@ impl<A: RowCommandApplication> Inner<A> {
                     self.verify_chain(&result.credentials, result.executor, now()?)?,
                 ))
             });
-        // A result confirmed under an earlier policy epoch keeps the grants it had.
+        // A result confirmed before a later revocation keeps the grants it had.
         let (caller, executor) = match current {
             Ok(grants) => grants,
             Err(_) => result.historical_grants(self)?,

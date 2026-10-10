@@ -722,8 +722,8 @@ async fn run(
     let vault = settings.vault(&setup.secrets);
     let opened = async {
         // A revocation interrupted after its intent was saved completes
-        // here; the replica adopts its policy and keys as it opens.
-        if !settings.rotate(&vault)?.is_empty() {
+        // here; the replica adopts its revocations and keys as it opens.
+        if settings.rotate(&vault)?.is_some() {
             settings.save(&path)?;
         }
         // Expired credentials cannot open the replica: renew them first.
@@ -736,15 +736,13 @@ async fn run(
                 .request_renewal(&vault, transport, false, None)
                 .await?;
             if path.exists() {
-                if renewed.policy.statement.epoch > settings.policy.statement.epoch {
-                    rocky_credentials::write_private(
-                        &directory.join("bootstrap.json"),
-                        &serde_json::to_vec(&renewed.policy.statement.epoch)?,
-                    )?;
+                // Rows of a newly revoked author arrive by checkpoint.
+                if settings.lacks(&renewed.revocations)? {
+                    rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
                 }
                 settings.adopt(&path, &vault, &renewed)?;
             } else {
-                settings.policy = renewed.policy;
+                settings.learn_revocations(&renewed.revocations)?;
                 settings.credentials = renewed.chain;
             }
         }

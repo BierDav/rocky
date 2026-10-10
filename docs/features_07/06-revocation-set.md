@@ -1,6 +1,17 @@
 # 6. Mergeable revocation set
 
-Status: not started.
+Status: implemented on 2026-10-10, rebased on [phase 5](05-issuer-registry.md);
+completion gate met with [decision 0049](../decisions/0049-mergeable-revocation-set.md)
+and the [revocations guide](../runtime/revocations.md#qualification).
+Acceptance 1 runs in both orders on the in-process hub
+(`cargo test -p rocky-sdk --test revocations`, 20 to 24 s each under the full check in the
+debug profile); the merge property test covers every interleaving of five
+statements (`rocky-credentials` `revocation::tests`); the frame rule and the
+named hello refusal are `rocky-secure` `tests::revocations`; the fault sweep
+stops at all seven points, the 1,025th statement and tombstones at two issuers
+are `rocky-sdk` `enrollment::tests`. `./scripts/check` (708 workspace and 159
+`--no-default-features` tests), `./scripts/lint`, `./kotlin build -m rocky-core`
+and `examples/shoppinglist-app/check` (27 tests) pass.
 Owner: `rocky-credentials` policy, capabilities and renewal; `rocky-secure`
 admission, hello, checkpoints, horizon and generations; `rocky-sdk`
 revocation and renewal; native and Kotlin status. No dependency; shares

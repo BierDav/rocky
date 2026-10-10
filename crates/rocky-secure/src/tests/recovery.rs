@@ -632,6 +632,7 @@ async fn native_phone_publication_recovers_after_executor_exit() {
             stream,
             a.clone(),
             acred,
+            crate::tests::unrevoked(),
             phone_key.public_key(),
             MAX_SECURE_FRAME * 8,
         )
@@ -645,6 +646,7 @@ async fn native_phone_publication_recovers_after_executor_exit() {
             stream,
             phone_key.clone(),
             pcred,
+            crate::tests::unrevoked(),
             a.public_key(),
             MAX_SECURE_FRAME * 8,
         )

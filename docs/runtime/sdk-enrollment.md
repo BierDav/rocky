@@ -19,7 +19,7 @@ collection is its own reader scope with its own key epochs.
 
 | Key | Held by | Purpose |
 | --- | --- | --- |
-| Publisher | Issuers | Trust anchor: signs manifest, policy and user capabilities |
+| Publisher | Issuers | Trust anchor: signs manifest, revocation statements and user capabilities |
 | User | Each device | Subject of the capability the publisher issues |
 | Node | Each device | Signs operations, session frames and renewal requests |
 | Pseudonym, per table | Writing devices that request one | Signs as a table author; number and sealed device binding are in its credential |
@@ -85,7 +85,7 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 10 | Pinned publisher key, signed manifest/policy/lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, and a pending revocation with the record it acts on |
+| `identity.json` | 11 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
@@ -106,7 +106,7 @@ secret until used.
 - The joiner generates its own user and node keys and proves the token. The
   issuer answers with a capability, the current reader keys the profile reads
   and, for an issuer profile, the publisher key, sealed under a token-derived key.
-- The joiner verifies manifest, policy and capability against the invitation's
+- The joiner verifies manifest, revocations and capability against the invitation's
   publisher key, and that grants equal the profile. It pins the issuer's node key.
 - A join persists its nonce and keys before contacting the issuer, so a lost
   answer retries as the same device; nobody else can reuse the invitation.
@@ -134,30 +134,35 @@ key installs nothing. No network is needed.
 
 Credentials last 30 days by default (`credential_ttl`, a minute to a year). A
 sync renews them past half their lifetime: the device signs a timestamped
-request for one issuer, which answers with the same grants under its current
-policy and the current reader key epochs, sealed to a one-time key. Any issuer
-renews any unrevoked device: it takes the tombstone and profile from the
-device's registry record, or renews the presented chain and records it when the
-record has not reached it yet. An issuer renews itself after asking known issuers
-for a newer policy. Expired credentials cannot open a member until an issuer
-is reachable. Clock skew up to five minutes is accepted.
+request for one issuer, which answers with the same grants, the
+[revocations](revocations.md) it holds and the current reader key epochs,
+sealed to a one-time key. Any issuer renews any unrevoked device: it takes the
+tombstone and profile from the device's registry record, or renews the
+presented chain and records it when the record has not reached it yet. An
+issuer renews itself after asking known issuers, which is how it learns their
+revocations. Expired credentials cannot open a member until an issuer is
+reachable. Clock skew up to five minutes is accepted.
 
 `revoke(node)` on an issuer starts a new key epoch for every collection the
 device could read, and a new secret for every group partition it could read or
-was granted, and signs the next policy epoch ending its chains and its user's
-([group secrets](partitioned-scopes.md#group-secrets)). The
-intent is saved first; an interruption completes at the next open. Others
-renew on their next sync; the revoked device is refused sync and renewal and
-keeps only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk)
-and [limits](credentials.md#limits).
+was granted ([group secrets](partitioned-scopes.md#group-secrets)), and signs a
+statement revoking its node, its user, its capability and its pseudonyms. The
+intent is saved first; an interruption completes at the next open with the
+same statement and keys. Any issuer revokes while others do: their statements
+merge. Others learn it on their next sync, which a differing revocation set
+turns into a renewal; the revoked device is refused sync and renewal and keeps
+only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk),
+[revocations](revocations.md) and [limits](credentials.md#limits).
 
-After a refused renewal, a device requests the issuer's public signed policy
-with `rocky.sdk.policy.v1`. It verifies the pinned publisher, manifest, epoch
-and revocation of its credential chain before reporting `revoked`. A verified
-notice is kept in `revoked.json` (version 1), so readiness remains revoked
-after reopening; sync returns the non-retryable `revoked` error. Earlier
-decrypted data stays readable locally. Offline devices learn this only when
-an issuer becomes reachable. A fresh invitation enrolls a new identity.
+After a refused renewal, a device requests the issuer's public revocation set
+with `rocky.sdk.policy.v1`. It verifies the pinned publisher and application
+and finds the statement that revokes its credential chain before reporting
+`revoked`. That statement is kept in `revoked.json` (version 2), so readiness
+remains revoked after reopening; sync returns the non-retryable `revoked`
+error. Earlier decrypted data stays readable locally. Offline devices learn
+this only when an issuer becomes reachable. A fresh invitation enrolls a new
+identity; the revoked user key never renews again at an issuer that learned
+the statement.
 
 `logout()` ends sessions and deletes keys; `logout(purge = true)` also removes
 local data on close. Rejoining needs a new invitation. An issuer that knows no
@@ -180,8 +185,8 @@ refuses a sync from a device whose record has not reached it first answers the
 renewal that sync starts, then serves it.
 
 When the creator is lost, a remaining issuer calls `revoke(node)` with its
-node key: next policy epoch, ended chains, rotated reader keys. Others renew
-from remaining issuers. An issuer cannot revoke itself; one issuer revokes at a time.
+node key: a statement ending its chains, rotated reader keys. Others renew
+from remaining issuers. An issuer cannot revoke itself.
 
 Unrecoverable:
 
@@ -191,8 +196,8 @@ Unrecoverable:
   good. A member that removed every issuer reports `issuer_contact: false`.
 - **A device that knew only the lost issuer** and did not renew since: add a
   remaining issuer's contact with `addPeer`.
-- **Writes under the ended epoch.** Peers that learned the revocation refuse
-  them; renew, then write.
+- **The revoked issuer's own writes**, earlier ones included. Peers that
+  learned the revocation refuse them; its rows they lacked arrive by checkpoint.
 
 ## Peers and contacts
 
@@ -225,7 +230,7 @@ pushes what the peer lacks and pulls what this device lacks for the granted
 collections, in bounded frames. It succeeds when one peer was reached; `peers`
 shows each. Members keep syncing while every issuer is offline, until their
 credentials expire. Sync needs an [attached network](sdk-composition.md#attach-a-network);
-reads and writes do not. Requests are authorized under the latest policy this
+reads and writes do not. Requests are authorized under the revocations this
 device learned. When a peer refuses, the device renews once and retries, which
 is how it learns a revocation. Checkpoints and catch-up are in
 [SDK bootstrapping](sdk-bootstrapping.md).
@@ -246,7 +251,7 @@ enables the native [change-driven worker](always-on-peer.md#change-driven-sync);
 | Request | Result |
 | --- | --- |
 | `domain` | `scope`, `issuer`, `profile`, `collections`, `transport` (attached kind or empty) |
-| `session` | `principal`, `node`, policy `epoch`, `expires`, `issuer`, `profile`, readable/writable counts |
+| `session` | `principal`, `node`, `revocations` (`digest`, live `statements`), `expires`, `issuer`, `profile`, readable/writable counts |
 | `pairing` with `profile` | `uri`, `expires`, `profile` (issuer) |
 | `grant` / `delegate` with `device` and `grants` or `profile` | `supplied` for `install`; `delegate` narrows this device's grants |
 | `install` with `supplied` | Replaces credentials; the new `session` |

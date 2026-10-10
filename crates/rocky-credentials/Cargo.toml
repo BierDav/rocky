@@ -1,6 +1,6 @@
 [package]
 name = "rocky-credentials"
-description = "Signed manifests, capabilities and policies, identities, key providers, issuance and enrollment messages"
+description = "Signed manifests, capabilities and revocations, identities, key providers, issuance and enrollment messages"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

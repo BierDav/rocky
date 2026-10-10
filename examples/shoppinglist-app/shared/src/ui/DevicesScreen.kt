@@ -191,7 +191,7 @@ private fun SelfCard(me: HouseholdDevice, self: SessionStatus?) {
             }
             self?.let { session ->
                 Text(
-                    "${session.transport} · policy epoch ${session.policyEpoch} · credentials until ${date(session.expiresAtEpochSeconds)}",
+                    "${session.transport} · ${session.revocations.statements} revocations · credentials until ${date(session.expiresAtEpochSeconds)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

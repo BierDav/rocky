@@ -60,12 +60,12 @@ impl EncryptedCommand {
         &self,
         inner: &Inner<A>,
     ) -> Result<StrongRequest, Error> {
-        self.verify_at(inner, &inner.config.policy.statement, now()?)
+        self.verify_at(inner, &inner.config.revocations, now()?)
     }
     fn verify_at<A: RowCommandApplication>(
         &self,
         inner: &Inner<A>,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<StrongRequest, Error> {
         let request = self.request()?;
@@ -89,7 +89,8 @@ impl EncryptedCommand {
         }
         // A command submitted under an earlier generation inside the
         // horizon keeps its signed identity and runs under this one.
-        let live = *policy == inner.config.policy.statement;
+        // Admitting under the held set, not verifying history.
+        let live = std::ptr::eq(revocations, &inner.config.revocations);
         let submitted = inner.generation_of(request.policy, live)?;
         if request.schema != submitted.schema
             || request.handler != submitted.handler
@@ -116,7 +117,7 @@ impl EncryptedCommand {
                 request.method, request.version
             )));
         }
-        let grants = inner.verify_chain_with(&self.credentials, self.node, policy, time)?;
+        let grants = inner.verify_chain_with(&self.credentials, self.node, revocations, time)?;
         let invocation: EncryptedPackage = decode(&request.arguments)?;
         let resources = resources(inner, &request)?;
         if invocation.generation == 0
@@ -178,7 +179,7 @@ impl ConfirmedCommand {
         &self,
         inner: &Inner<A>,
     ) -> Result<StrongPackage, Error> {
-        self.verify_at(inner, &inner.config.policy.statement, now()?)
+        self.verify_at(inner, &inner.config.revocations, now()?)
     }
     pub(super) fn verify_preparation<A: RowCommandApplication>(
         &self,
@@ -207,11 +208,11 @@ impl ConfirmedCommand {
         &self,
         inner: &Inner<A>,
     ) -> Result<StrongPackage, Error> {
-        let (policy, time) = self.historical(inner)?;
-        self.verify_at(inner, &policy, time)
+        let time = self.historical(inner)?;
+        self.verify_at(inner, &RevocationSet::new(), time)
     }
-    /// The caller's and executor's grants under the policy epoch and time
-    /// `verify_history` checks a result at.
+    /// The caller's and executor's grants at the time `verify_history`
+    /// checks a result at.
     pub(super) fn historical_grants<A: RowCommandApplication>(
         &self,
         inner: &Inner<A>,
@@ -222,16 +223,16 @@ impl ConfirmedCommand {
         ),
         Error,
     > {
-        let (policy, time) = self.historical(inner)?;
+        let time = self.historical(inner)?;
+        let none = RevocationSet::new();
         Ok((
-            inner.verify_chain_with(&self.command.credentials, self.command.node, &policy, time)?,
-            inner.verify_chain_with(&self.credentials, self.executor, &policy, time)?,
+            inner.verify_chain_with(&self.command.credentials, self.command.node, &none, time)?,
+            inner.verify_chain_with(&self.credentials, self.executor, &none, time)?,
         ))
     }
-    fn historical<A: RowCommandApplication>(
-        &self,
-        inner: &Inner<A>,
-    ) -> Result<(PolicyStatement, u64), Error> {
+    /// A confirmed result verifies with no revocation, at the time both
+    /// chains were issued: its receipt anchors it.
+    fn historical<A: RowCommandApplication>(&self, _inner: &Inner<A>) -> Result<u64, Error> {
         let leaf = &self
             .command
             .credentials
@@ -239,11 +240,6 @@ impl ConfirmedCommand {
             .last()
             .ok_or_else(|| denied("missing historical credential"))?
             .capability;
-        let policy = PolicyStatement {
-            manifest: inner.manifest,
-            epoch: leaf.epoch,
-            revoked: BTreeSet::new(),
-        };
         let executor_time = self
             .credentials
             .0
@@ -251,18 +247,19 @@ impl ConfirmedCommand {
             .ok_or_else(|| denied("missing historical executor credential"))?
             .capability
             .not_before;
-        Ok((policy, leaf.not_before.max(executor_time)))
+        Ok(leaf.not_before.max(executor_time))
     }
     fn verify_at<A: RowCommandApplication>(
         &self,
         inner: &Inner<A>,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<StrongPackage, Error> {
-        let request = self.command.verify_at(inner, policy, time)?;
+        let request = self.command.verify_at(inner, revocations, time)?;
         let package = self.strong_package()?;
         let receipt = self.receipt()?;
-        let grants = inner.verify_chain_with(&self.credentials, self.executor, policy, time)?;
+        let grants =
+            inner.verify_chain_with(&self.credentials, self.executor, revocations, time)?;
         if request != package.request
             || package.base.executor != secure_node_id(self.executor)
             || !self

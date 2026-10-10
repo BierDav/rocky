@@ -176,9 +176,12 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     // Revoking forgets the device's contact and refuses it again.
     assert_eq!(a.peer(&c.node().await).await, Value::Null);
     assert!(a.add_peer(&c.contact().await).await.is_err());
-    // The other member learns the new policy epoch from the creator.
+    // The other member learns the revocation from the creator.
     b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(b.ok(json!({"type": "session"})).await["epoch"], "2");
+    assert_eq!(
+        b.ok(json!({"type": "session"})).await["revocations"]["statements"],
+        1
+    );
     a.close().await;
 
     b.add(1, "Fresh").await;
@@ -314,7 +317,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, u32::MAX] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, u32::MAX] {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

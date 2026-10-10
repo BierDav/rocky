@@ -58,8 +58,7 @@ impl World {
             assigner.public_key(),
             grants.clone(),
             (1, Some(crate::credentials::AuthorRange::ALL)),
-            1,
-            (0, u64::MAX, 0),
+            crate::tests::validity(),
         )
         .unwrap();
         let chain = CredentialChain(vec![issued])

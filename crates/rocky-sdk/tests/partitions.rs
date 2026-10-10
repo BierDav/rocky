@@ -197,7 +197,7 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         json!({"type":"revoke","node":device.node.to_string()}),
     )
     .await;
-    assert_eq!(revoked["epoch"], "2");
+    assert_eq!(revoked["revocations"]["statements"], 1);
     call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
     let id = call(
         &session,

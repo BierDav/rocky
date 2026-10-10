@@ -8,24 +8,23 @@ use rocky_core::{ApplicationManifest, Generation, LogicalSchema, Scope};
 use rocky_credentials::SignedTransition;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,handler INTEGER NOT NULL,signed BLOB NOT NULL,policy BLOB NOT NULL,transition BLOB NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,handler INTEGER NOT NULL,signed BLOB NOT NULL,transition BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_horizon(id INTEGER PRIMARY KEY CHECK(id=1),horizon INTEGER NOT NULL)",
 ];
 /// Earlier generations a replica keeps admitting.
 pub const MAX_GENERATIONS: usize = 64;
 
-/// One generation a transition leaves: its signed manifest, the last
-/// policy of that generation and the transition to the next.
+/// One generation a transition leaves: its signed manifest and the
+/// transition to the next.
 #[derive(Clone, Debug)]
 pub struct GenerationStep {
     pub manifest: SignedManifest,
-    pub policy: SignedPolicy,
     pub transition: SignedTransition,
 }
 /// What activates `SecureConfig::manifest` on a file installed with an
 /// earlier generation: the steps from the installed manifest, oldest
 /// first, and the typed tables of the new definition when typed tables are
-/// installed. The configured policy and credentials are the new ones.
+/// installed. The configured revocations and credentials are the new ones.
 #[derive(Clone, Debug)]
 pub struct Upgrade {
     pub steps: Vec<GenerationStep>,
@@ -42,19 +41,11 @@ pub struct GenerationStatus {
     pub previous: Vec<(Generation, Commitment)>,
     pub plan: Option<super::migrate::ProjectionPlan>,
 }
-/// An earlier generation and the last policy it had.
+/// An earlier generation.
 #[derive(Clone)]
 pub(crate) struct Previous {
     pub(super) manifest: Commitment,
     pub(super) generation: Generation,
-    policy: SignedPolicy,
-}
-
-impl Previous {
-    /// The policy epoch the generation ended at.
-    pub(crate) fn epoch(&self) -> u64 {
-        self.policy.statement.epoch
-    }
 }
 fn generation(manifest: &ApplicationManifest) -> Generation {
     Generation {
@@ -67,7 +58,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
 }
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v8", manifest, node))
+    encode(&("rocky.encrypted-replica.v9", manifest, node))
 }
 /// A newer definition keeps everything replicas of the older one agree
 /// on: its tables, fields, methods, operations and domains.
@@ -143,17 +134,15 @@ impl<A: RowApplication> Inner<A> {
             Some(previous) => previous.generation,
         })
     }
-    /// Verifies a chain under the generation its root capability names.
-    /// An earlier generation verifies under its last policy with every
-    /// current revocation added: nothing revoked since is readmitted.
+    /// Verifies a chain under the generation its root capability names and
+    /// the held revocations. Every generation shares the one set.
     pub(crate) fn verify_chain(
         &self,
         chain: &CredentialChain,
         key: PublicKey,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let statement = self.config.policy.statement.clone();
-        self.verify_chain_with(chain, key, &statement, time)
+        self.verify_chain_with(chain, key, &self.config.revocations, time)
     }
     /// Verifies current authority, resolving selectors only for requested scopes.
     pub(crate) fn verify_chain_scopes(
@@ -167,52 +156,43 @@ impl<A: RowApplication> Inner<A> {
             .0
             .first()
             .map_or(self.manifest, |root| root.capability.manifest);
-        let policy = self.credential_policy(manifest, &self.config.policy.statement)?;
-        self.resolve_chain_scopes_at(chain, manifest, key, &policy, time, scopes)
+        let revocations = self.revocations_for(manifest, &self.config.revocations)?;
+        self.resolve_chain_scopes_at(chain, manifest, key, revocations, time, scopes)
     }
-    /// `verify_chain` with a statement of the current generation: the
-    /// live policy, or a historical statement of the epoch a credential was
-    /// issued at. An earlier generation's chain verifies under its last
-    /// policy plus current revocations, or under the historical statement
-    /// moved to its manifest.
+    /// `verify_chain` under `revocations`: the held set, or none for a
+    /// confirmed result verified at the time it was issued.
     pub(crate) fn verify_chain_with(
         &self,
         chain: &CredentialChain,
         key: PublicKey,
-        statement: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let manifest = chain
             .0
             .first()
             .map_or(self.manifest, |root| root.capability.manifest);
-        let policy = self.credential_policy(manifest, statement)?;
-        self.resolve_chain_at(chain, manifest, key, &policy, time)
+        let revocations = self.revocations_for(manifest, revocations)?;
+        self.resolve_chain_at(chain, manifest, key, revocations, time)
     }
-    pub(super) fn credential_policy(
+    /// `revocations` once `manifest` names an admitted generation, or with
+    /// a set other than the held one, any recorded generation.
+    pub(super) fn revocations_for<'a>(
         &self,
         manifest: Commitment,
-        statement: &PolicyStatement,
-    ) -> Result<PolicyStatement, Error> {
-        let live = *statement == self.config.policy.statement;
-        Ok(match self.lookup(manifest, live)? {
-            None => statement.clone(),
-            Some(previous) if live => {
-                let mut earlier = previous.policy.statement.clone();
-                earlier.revoked.extend(statement.revoked.iter().copied());
-                earlier
-            }
-            Some(previous) => PolicyStatement {
-                manifest: previous.manifest,
-                ..statement.clone()
-            },
-        })
+        revocations: &'a RevocationSet,
+    ) -> Result<&'a RevocationSet, Error> {
+        self.lookup(
+            manifest,
+            std::ptr::eq(revocations, &self.config.revocations),
+        )?;
+        Ok(revocations)
     }
     /// Loads the earlier generations and the horizon at open.
     pub(super) async fn load_generations(&mut self) -> Result<(), Error> {
         let stored = rows(
             &self.conn,
-            "SELECT manifest,schema,handler,policy FROM secure_generations ORDER BY schema,handler",
+            "SELECT manifest,schema,handler FROM secure_generations ORDER BY schema,handler",
         )
         .await?;
         let mut previous = Vec::new();
@@ -221,7 +201,6 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(manifest),
                 SqlValue::Integer(schema),
                 SqlValue::Integer(handler),
-                SqlValue::Blob(policy),
             ] = row.as_slice()
             else {
                 return Err(Error::Corrupt("generation record".into()));
@@ -233,7 +212,6 @@ impl<A: RowApplication> Inner<A> {
                     schema: u32::try_from(*schema).map_err(|_| corrupt())?,
                     handler: u32::try_from(*handler).map_err(|_| corrupt())?,
                 },
-                policy: decode(policy)?,
             });
         }
         self.horizon = match rows(&self.conn, "SELECT horizon FROM secure_horizon WHERE id=1")
@@ -277,7 +255,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(false);
         };
         let steps = &upgrade.steps[start..];
-        let installed = steps[0].manifest.verify(publisher).map_err(credential)?;
         if steps.len() + self.previous.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
@@ -301,32 +278,8 @@ impl<A: RowApplication> Inner<A> {
                 return Err(incompatible("the upgrade's transitions do not chain"));
             }
             extends(&manifest, &next)?;
-            step.policy
-                .verify(publisher, manifest.hash())
-                .map_err(credential)?;
             horizon = transition.horizon;
             records.push((manifest, step));
-        }
-        // The installed generation ends with the newer of its stored and
-        // supplied policies; the new policy revokes at least as much.
-        let kept: SignedPolicy = {
-            let stored = rows(&self.conn, "SELECT policy FROM secure_metadata WHERE id=1").await?;
-            let Some([SqlValue::Blob(bytes)]) = stored.first().map(Vec::as_slice) else {
-                return Err(denied("missing secure metadata"));
-            };
-            decode(bytes)?
-        };
-        kept.verify(publisher, installed.hash())
-            .map_err(credential)?;
-        let new = &self.config.policy.statement;
-        for (_, step) in &records {
-            let old = &step.policy.statement;
-            if new.epoch < old.epoch || !old.revoked.is_subset(&new.revoked) {
-                return Err(denied("policy rollback/revocation removal"));
-            }
-        }
-        if new.epoch < kept.statement.epoch || !kept.statement.revoked.is_subset(&new.revoked) {
-            return Err(denied("policy rollback/revocation removal"));
         }
         // Typed tables move to the new schema through a projection plan;
         // the plan classifies the change before anything is written.
@@ -351,22 +304,16 @@ impl<A: RowApplication> Inner<A> {
             }
             self.record_plan(schema, *domain, readers).await?;
         }
-        for (index, (manifest, step)) in records.iter().enumerate() {
-            let policy = if index == 0 && kept.statement.epoch > step.policy.statement.epoch {
-                &kept
-            } else {
-                &step.policy
-            };
+        for (manifest, step) in &records {
             let generation = generation(manifest);
             self.conn
                 .execute(
-                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?)",
                     bindings(vec![
                         SqlValue::Blob(manifest.hash().to_vec()),
                         SqlValue::Integer(i64::from(generation.schema)),
                         SqlValue::Integer(i64::from(generation.handler)),
                         SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
-                        SqlValue::Blob(encode(policy)?),
                         SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
                     ]),
                 )
@@ -376,12 +323,6 @@ impl<A: RowApplication> Inner<A> {
             .execute(
                 "INSERT OR REPLACE INTO secure_horizon VALUES(1,?)",
                 [i64::from(horizon)],
-            )
-            .await?;
-        self.conn
-            .execute(
-                "UPDATE secure_metadata SET policy=?,revision=revision+1 WHERE id=1",
-                [encode(&self.config.policy)?],
             )
             .await?;
         self.load_generations().await?;
@@ -420,19 +361,15 @@ impl<A: RowApplication> Inner<A> {
                 return Err(incompatible("the lineage's transitions do not chain"));
             }
             extends(&manifest, &next)?;
-            step.policy
-                .verify(publisher, manifest.hash())
-                .map_err(credential)?;
             horizon = transition.horizon;
             self.conn
                 .execute(
-                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?)",
                     bindings(vec![
                         SqlValue::Blob(manifest.hash().to_vec()),
                         SqlValue::Integer(i64::from(manifest.schema)),
                         SqlValue::Integer(i64::from(manifest.handler)),
                         SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
-                        SqlValue::Blob(encode(&step.policy)?),
                         SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
                     ]),
                 )

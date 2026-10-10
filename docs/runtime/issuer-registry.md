@@ -44,10 +44,10 @@ grant and pseudonym lists merge by union.
 | `grant`, `delegate` on an issuer | Carved author range | `device`, capability | `supplied` |
 | `partition_grant`, `partition_delegate` on an issuer | Nothing | `device` when absent, partition grants | `supplied` |
 | Pseudonym assignment by an issuer | Author counter | Pseudonym | Chain |
-| `revoke` | Intent with the record, then policy and keys | Tombstone | New epoch |
+| `revoke` | Intent with the statement and target epochs, then keys, the signed statement and tombstones | Tombstone | Statement ID and revocations |
 
 Each commit also brings the issuer's own record up to date and writes a missing
-tombstone for any device its policy revoked. An issuer writes under its own
+tombstone for any device a held statement or tombstone revoked. An issuer writes under its own
 `issuer_registry` pseudonym, assigned from its author range on its first
 write. Its own pseudonyms for application tables join its record with that
 commit. A lost answer leaves a record without a usable chain; the retry is the
@@ -60,12 +60,14 @@ any issuer, and a renewal or grant records the new capability.
 - `admitted()`: an issuer serves sync to its configured peers and every
   recorded device without a tombstone.
 - `peer_add` on an issuer refuses a tombstoned contact; any device refuses a
-  contact its policy revoked.
-- Renewal refuses a node or user its policy or the record revoked and renews
+  contact a held [revocation](revocations.md) names.
+- Renewal refuses a node or user a held statement, a tombstone or the record
+  revoked and renews
   an earlier generation into the record's profile. Without a record it renews
   the presented chain and writes one.
 - `logout` counts recorded issuers besides `issuers`.
-- `revoke(node)` snapshots the record into its intent. It rotates the
+- `revoke(node)` builds its [statement](revocations.md) and target key epochs
+  from the record and saves them as its intent. It rotates the
   collections the record's profile reads and the group partitions it reads or
   holds grants for, revokes its user, capability and pseudonyms, and rotates
   everything when the registry holds no profile. A device recorded only by

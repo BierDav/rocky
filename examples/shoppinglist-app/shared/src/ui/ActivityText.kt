@@ -88,7 +88,7 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             key,
             event.atEpochMillis,
             EntryKind.Credentials,
-            "Credentials renewed under policy epoch ${event.epoch}",
+            "Credentials renewed holding ${event.revocations.statements} revocations",
             "${event.keys} new reader keys",
         )
 

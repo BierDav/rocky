@@ -381,24 +381,27 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     assert!(Db::join(&root.path().join("d"), &invitation, tcp()).is_err());
 
     let status = alice.ok(json!({"type": "session"})).await;
-    assert_eq!(status["epoch"], "1");
+    assert_eq!(status["revocations"]["statements"], 0);
     assert_ne!(status["principal"], status["node"]);
     let renewed = alice.ok(json!({"type": "renew"})).await;
     assert!(renewed["expires"].as_str() >= status["expires"].as_str());
 
-    // Revoking Bob raises the epoch; Alice renews on her next sync.
+    // Revoking Bob adds a statement; Alice learns it on her next sync.
     let devices = creator.ok(json!({"type": "devices"})).await;
     assert_eq!(devices["devices"].as_array().map(Vec::len), Some(2));
     let bob_node = bob.ok(json!({"type": "session"})).await["node"].clone();
     assert_eq!(
         creator
             .ok(json!({"type": "revoke", "node": bob_node}))
-            .await["epoch"],
-        "2"
+            .await["revocations"]["statements"],
+        1
     );
     creator.add(1, "After revocation").await;
     alice.sync().await;
-    assert_eq!(alice.ok(json!({"type": "session"})).await["epoch"], "2");
+    assert_eq!(
+        alice.ok(json!({"type": "session"})).await["revocations"]["statements"],
+        1
+    );
     assert_eq!(titles(&alice.items().await), ["After revocation"]);
     assert!(bob.call(json!({"type": "sync"})).await.is_err());
     assert!(bob.call(json!({"type": "renew"})).await.is_err());

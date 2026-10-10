@@ -52,7 +52,7 @@ admission and limits, [decision 0046](../decisions/0046-per-scope-frontier-refus
 refusal and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v7`) pulls by frontier:
+`NativeSession` (label `rocky.native-session.v8`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |

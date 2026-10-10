@@ -158,13 +158,15 @@ partitions unchanged. See [decision 0043](../decisions/0043-partition-horizon-st
 
 Partition, admitted horizon and finalized horizon are independent optional
 fields; an admitted cut is never treated as finalized. The required additive
-`moves` field retains format 6 after [decision 0038](../decisions/0038-row-moves.md). Other formats are
+`moves` field ([decision 0038](../decisions/0038-row-moves.md)) and the signer's
+revocation digest ([decision 0049](../decisions/0049-mergeable-revocation-set.md))
+make format 7. Other formats are
 refused before writes.
 
 | Field | Binds |
 | --- | --- |
 | `definition`, `schema`, `handler` | Manifest hash and generations |
-| `policy_epoch`, `key_epoch`, `scope`, `partition` | Policy epoch at signing, the scope and its key generation |
+| `revocations`, `key_epoch`, `scope`, `partition` | The signer's [revocation](revocations.md) digest, the scope and its key generation |
 | `sequence`, `previous` | Position in the scope's checkpoint chain and the prior identity |
 | `frontier`, `clock`, `operations` | Per author applied sequence, tip hash and clock, ordered by author; highest clock; applied count |
 | `identities` | Per-author identity high-water marks |

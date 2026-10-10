@@ -5,7 +5,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope};
 use serde::{Deserialize, Serialize};
 
-pub const HORIZON_FORMAT: u32 = 2;
+pub const HORIZON_FORMAT: u32 = 3;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,8 @@ impl HorizonPeer {
 pub struct HorizonStatement {
     pub format: u32,
     pub manifest: Commitment,
-    pub policy_epoch: u64,
+    /// The digest of the revocations the declaring issuer held.
+    pub revocations: Commitment,
     pub scope: ResourceScope,
     pub sequence: u64,
     pub previous: Option<Commitment>,
@@ -220,7 +221,7 @@ mod tests {
         let statement = HorizonStatement {
             format: HORIZON_FORMAT,
             manifest: [6; 32],
-            policy_epoch: 1,
+            revocations: [0; 32],
             scope,
             sequence: 1,
             previous: None,
@@ -236,7 +237,7 @@ mod tests {
         let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
         current.verify(issuer.public_key()).unwrap();
         assert_eq!(current.statement, statement);
-        for format in [0, 1, 3, u32::MAX] {
+        for format in [0, 2, 4, u32::MAX] {
             let mut other = signed.clone();
             other.statement.format = format;
             assert_eq!(

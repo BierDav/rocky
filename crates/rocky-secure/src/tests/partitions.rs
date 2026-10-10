@@ -12,7 +12,7 @@ struct Fixture {
     schema: rocky_core::LogicalSchema,
     domain: rocky_core::Scope,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    revocations: RevocationSet,
 }
 impl Fixture {
     fn new() -> Self {
@@ -46,21 +46,13 @@ impl Fixture {
             app: schema.app_id(),
             domain: DomainId([1; 16]),
         };
-        let policy = SignedPolicy::sign(
-            PolicyStatement {
-                manifest: manifest.hash(),
-                epoch: 1,
-                revoked: BTreeSet::new(),
-            },
-            &publisher,
-        )
-        .unwrap();
+        let revocations = RevocationSet::new();
         Self {
             manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
             publisher,
             schema,
             domain,
-            policy,
+            revocations,
         }
     }
     fn app(&self) -> TypedRows {
@@ -136,7 +128,6 @@ impl Fixture {
             vec![],
             vec![grant.clone()],
             (1, Some(AuthorRange::new(1, 1000).unwrap())),
-            1,
             (time, 3600, 5),
         )
         .unwrap();
@@ -148,7 +139,7 @@ impl Fixture {
             SecureConfig {
                 publisher: self.publisher.public_key(),
                 manifest: self.manifest.clone(),
-                policy: self.policy.clone(),
+                revocations: self.revocations.clone(),
                 node: node.clone(),
                 credentials,
                 keys: vec![],
@@ -553,7 +544,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 6);
+    assert_eq!(cp.statement.format, 7);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);
@@ -1023,7 +1014,7 @@ async fn partitioned_open_refuses_dropped_or_changed_constraint_indexes() {
             SecureConfig {
                 publisher: inner.config.publisher,
                 manifest: inner.config.manifest.clone(),
-                policy: inner.config.policy.clone(),
+                revocations: inner.config.revocations.clone(),
                 node: inner.config.node.clone(),
                 credentials: inner.config.credentials.clone(),
                 keys: vec![],

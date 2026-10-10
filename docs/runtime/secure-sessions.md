@@ -68,18 +68,19 @@ supplied at open. No call argument names a principal or a grant.
 | --- | --- |
 | `principal` | The user the credential chain delegates from: the login identity |
 | `node` | The device key that signs every operation |
-| `manifest`, `epoch` | The definition and the policy epoch of the credentials |
+| `manifest` | The definition the credentials bind |
+| `revocations`, `revoked` | The digest and count of the live [revocations](revocations.md) the credentials were verified under |
 | `expires` | Earliest expiry in the chain |
 | `scopes` | The resource set asked for; each must be granted |
 | `readable`, `writable` | Scopes read with an installed key, scopes with a write right |
 
 Every session call checks that the replica's authority has not changed since
 the session opened and verifies the credentials at the current time. These
-end every session: `learn_policy`, `renew_credentials`, `evict_key`,
+end every session: `learn_revocations` when the set changed, `renew_credentials`, `evict_key`,
 `install_key_epoch`, `retire_key_epoch` and `logout`. `renew_credentials` evicts keys the new grants cannot read whole.
 `logout` drops every key from memory; stored plaintext projections remain at
-rest. An offline node enforces only the newest policy it has learned;
-`SessionStatus::epoch` shows which.
+rest. An offline node enforces only the revocations it has learned;
+`SessionStatus::revocations` shows which.
 
 `SecureSession::transaction()` stages inserts, updates and deletes in memory
 and reads its own writes. Each staged write is admitted at once and again at
@@ -98,7 +99,7 @@ republished; changing one needs a strong command. A row another writer
 changed since the transaction read it fails the commit with `Conflict`.
 
 The commit is admitted under the replica lock inside the write transaction.
-A policy learned before that point refuses it; one learned after it applies
+A revocation learned before that point refuses it; one learned after it applies
 to later calls. Bytes already returned cannot be taken back.
 
 ## Qualification

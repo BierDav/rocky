@@ -81,7 +81,9 @@ pub struct KeyMaterial {
 pub struct SecureConfig {
     pub publisher: PublicKey,
     pub manifest: SignedManifest,
-    pub policy: SignedPolicy,
+    /// The revocations this device verified; the replica keeps the union of
+    /// these and every set it learned.
+    pub revocations: RevocationSet,
     pub node: PrivateKey,
     pub credentials: CredentialChain,
     pub keys: Vec<KeyMaterial>,
@@ -374,7 +376,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v8" {
+    if label != "rocky.encrypted-replica.v9" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -405,7 +407,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
             if let [SqlValue::Blob(bytes)] = record.as_slice() {
                 let version: Version = p2panda_core::cbor::decode_cbor(bytes.as_slice())
                     .map_err(|_| denied("invalid checkpoint"))?;
-                if version.statement.format != 6 {
+                if version.statement.format != checkpoint::CHECKPOINT_FORMAT {
                     return Err(denied("unsupported checkpoint format"));
                 }
             }
@@ -444,8 +446,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("compiled application differs from signed manifest"));
         }
         config
-            .policy
-            .verify(config.publisher, manifest.hash())
+            .revocations
+            .verify(config.publisher, manifest.app)
             .map_err(credential)?;
         let (grants, selectors) = config
             .credentials
@@ -453,7 +455,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 config.publisher,
                 manifest.hash(),
                 config.node.public_key(),
-                &config.policy.statement,
+                &config.revocations,
                 now()?,
             )
             .map_err(credential)?;
@@ -575,7 +577,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .conn
                     .execute(
                         "INSERT INTO secure_metadata VALUES(1,?,?,0)",
-                        [identity.clone(), encode(&inner.config.policy)?],
+                        [
+                            identity.clone(),
+                            inner.config.revocations.to_bytes().map_err(credential)?,
+                        ],
                     )
                     .await?;
             }
@@ -596,9 +601,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             } else {
                 inner.load_generations().await?;
                 let stored = inner.stored_identity().await?;
-                if !inner.activate(&stored, upgrade.as_ref()).await? {
-                    inner.load_policy(&identity).await?;
-                }
+                let activated = inner.activate(&stored, upgrade.as_ref()).await?;
+                inner
+                    .load_revocations((!activated).then_some(identity.as_slice()))
+                    .await?;
             }
             inner
                 .conn
@@ -832,34 +838,51 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.flush()?;
         inner.status(id).await
     }
-    pub async fn learn_policy(&self, policy: SignedPolicy) -> Result<(), Error> {
+    /// Merges `revocations` into the set this replica holds: the union of
+    /// the statements that verify, never a refusal for order or overlap. A
+    /// statement that fails verification refuses the whole set and changes
+    /// nothing. Returns the statements it added.
+    pub async fn learn_revocations(
+        &self,
+        revocations: &RevocationSet,
+    ) -> Result<Vec<SignedRevocation>, Error> {
         let mut inner = self.inner.lock().await;
-        policy
-            .verify(inner.config.publisher, inner.manifest)
+        let mut merged = inner.config.revocations.clone();
+        let added = merged
+            .merge(
+                revocations,
+                inner.config.publisher,
+                inner.definition.app,
+                now()?,
+            )
             .map_err(credential)?;
-        let old = &inner.config.policy.statement;
-        if policy.statement.epoch < old.epoch || !old.revoked.is_subset(&policy.statement.revoked) {
-            return Err(denied("policy rollback/revocation removal"));
+        if merged == inner.config.revocations {
+            return Ok(added);
         }
-        if policy.statement.epoch == old.epoch && encode(&policy)? != encode(&inner.config.policy)?
-        {
-            return Err(denied("policy epoch equivocation"));
-        }
-        let bytes = encode(&policy)?;
+        let bytes = merged.to_bytes().map_err(credential)?;
         transaction!(inner, |inner| {
             inner
                 .conn
                 .execute(
-                    "UPDATE secure_metadata SET policy=?,revision=revision+1 WHERE id=1",
+                    "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1",
                     [bytes.clone()],
                 )
                 .await?;
             Ok(())
         })?;
-        inner.config.policy = policy;
+        inner.config.revocations = merged;
         inner.bump_authority();
         inner.publish_revision().await?;
-        inner.process_pending(now()?).await
+        inner.process_pending(now()?).await?;
+        Ok(added)
+    }
+    /// The revocations this replica holds.
+    pub async fn revocations(&self) -> RevocationSet {
+        self.inner.lock().await.config.revocations.clone()
+    }
+    /// The digest of the live revocations, which a session hello carries.
+    pub async fn revocation_digest(&self) -> Result<Commitment, Error> {
+        self.inner.lock().await.revocation_digest()
     }
     #[cfg(test)]
     pub(crate) async fn applied_ack_count(&self) -> usize {
@@ -924,11 +947,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
+    /// The digest of the live revocations this replica holds.
+    pub(crate) fn revocation_digest(&self) -> Result<Commitment, Error> {
+        self.config.revocations.digest(now()?).map_err(credential)
+    }
     pub(super) fn local_grants(&self, time: u64) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.resolve_chain(
             &self.config.credentials,
             self.config.node.public_key(),
-            &self.config.policy.statement,
+            &self.config.revocations,
             time,
         )
     }
@@ -1008,7 +1035,7 @@ impl<A: RowApplication> Inner<A> {
                         .ok_or_else(|| denied("partition author missing"))?,
                     extension.scope,
                     tuple,
-                    &self.credential_policy(extension.manifest, &self.config.policy.statement)?,
+                    self.revocations_for(extension.manifest, &self.config.revocations)?,
                     time,
                 )
                 .map_err(credential)?,
@@ -1185,41 +1212,38 @@ impl<A: RowApplication> Inner<A> {
             _ => Err(denied("missing secure metadata")),
         }
     }
-    /// Checks an existing file's identity and adopts a newer retained policy.
-    async fn load_policy(&mut self, identity: &[u8]) -> Result<(), Error> {
+    /// Checks an existing file's identity, when given, and holds the union
+    /// of the retained and the supplied revocations.
+    async fn load_revocations(&mut self, identity: Option<&[u8]>) -> Result<(), Error> {
         let mut metadata = self
             .conn
-            .query("SELECT identity,policy FROM secure_metadata WHERE id=1", ())
+            .query(
+                "SELECT identity,revocations FROM secure_metadata WHERE id=1",
+                (),
+            )
             .await?;
         let row = metadata
             .next()
             .await?
             .ok_or_else(|| denied("missing secure metadata"))?;
-        let stored = row.get::<Vec<u8>>(0)?;
-        if stored != identity {
+        if identity.is_some_and(|identity| row.get::<Vec<u8>>(0).ok().as_deref() != Some(identity))
+        {
             return Err(denied("secure file identity mismatch"));
         }
-        let stored: SignedPolicy = decode(&row.get::<Vec<u8>>(1)?)?;
-        stored
-            .verify(self.config.publisher, self.manifest)
+        let stored = RevocationSet::from_bytes(&row.get::<Vec<u8>>(1)?).map_err(credential)?;
+        let mut merged = self.config.revocations.clone();
+        merged
+            .merge(&stored, self.config.publisher, self.definition.app, now()?)
             .map_err(credential)?;
-        let supplied = &self.config.policy.statement;
-        if supplied.epoch < stored.statement.epoch {
-            self.config.policy = stored;
-        } else if supplied.epoch > stored.statement.epoch {
-            // A policy learned before the replica recorded it: record it now.
-            if !stored.statement.revoked.is_subset(&supplied.revoked) {
-                return Err(denied("policy rollback/revocation removal"));
-            }
+        if merged != stored {
             self.conn
                 .execute(
-                    "UPDATE secure_metadata SET policy=?,revision=revision+1 WHERE id=1",
-                    [encode(&self.config.policy)?],
+                    "UPDATE secure_metadata SET revocations=?,revision=revision+1 WHERE id=1",
+                    [merged.to_bytes().map_err(credential)?],
                 )
                 .await?;
-        } else if encode(&self.config.policy)? != encode(&stored)? {
-            return Err(denied("policy epoch equivocation"));
         }
+        self.config.revocations = merged;
         Ok(())
     }
 }

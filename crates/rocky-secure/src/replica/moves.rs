@@ -650,7 +650,7 @@ impl<A: RowApplication> Inner<A> {
                     author.number,
                     scope,
                     tuple,
-                    &self.config.policy.statement,
+                    &self.config.revocations,
                     time,
                 )
                 .map_err(|error| denied(&format!("{table_name}: {error}")))?;
@@ -910,7 +910,7 @@ impl<A: RowApplication> Inner<A> {
                 author.number,
                 destination,
                 tuple,
-                &self.config.policy.statement,
+                &self.config.revocations,
                 time,
             );
             let Ok(grants) = grants else {

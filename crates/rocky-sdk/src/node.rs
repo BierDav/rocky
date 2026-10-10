@@ -17,7 +17,7 @@ use rocky_core::{Coordinator, ResourceScope, SqlValue, TypedCommands, commitment
 use rocky_credentials::Profile;
 use rocky_secure::{
     CredentialChain, Delivery, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey,
-    SecureSession, SecureSql, SignedPolicy, SqlError, SqlOptions, TicketState, secure_node_id,
+    RevocationSet, SecureSession, SecureSql, SqlError, SqlOptions, TicketState, secure_node_id,
     secure_principal_id,
 };
 use serde::{Deserialize, Serialize};
@@ -918,16 +918,14 @@ impl Node {
             .supplied_renewal(&self.vault, &supplied)
             .map_err(refused)?;
         let mut settings = self.settings.lock().await;
-        if renewed.policy.statement.epoch < settings.policy.statement.epoch {
-            return Err("a newer policy was learned meanwhile; install again".into());
-        }
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
         let fresh = keys.len();
-        self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        self.apply(&settings.revocations, &renewed.chain, keys)
+            .await?;
         self.activity.record(
             "renewed",
             json!({
-                "epoch": renewed.policy.statement.epoch.to_string(),
+                "revocations": settings.revocation_status()?,
                 "expires": settings.expires().to_string(),
                 "keys": fresh,
             }),
@@ -1153,7 +1151,7 @@ impl Node {
         Ok(json!({
             "principal": status.principal.to_hex(),
             "node": status.node.to_hex(),
-            "epoch": status.epoch.to_string(),
+            "revocations": {"digest": HEXLOWER.encode(&status.revocations), "statements": status.revoked},
             "expires": status.expires.to_string(),
             "issuer": settings.issuer(),
             "profile": settings.profile,
@@ -1212,7 +1210,7 @@ impl Node {
             "revision": revision.to_string(),
             "generation": generation,
             "authority": {
-                "epoch": settings.policy.statement.epoch.to_string(),
+                "revocations": settings.revocation_status()?,
                 "expires": settings.expires().to_string(),
                 "expired": expired,
                 "logged_out": logged_out,
@@ -1338,38 +1336,56 @@ impl Node {
         let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
-        draft.begin_revocation(node, &registry).map_err(refused)?;
+        draft
+            .begin_revocation(node, &registry)
+            .map_err(|error| -> Failure {
+                if error.is::<crate::enrollment::RevocationSetFull>() {
+                    error
+                } else {
+                    refused(error)
+                }
+            })?;
         draft.save(&self.path)?;
         *settings = draft.clone();
-        let keys = draft.rotate(&self.vault)?;
+        let rotation = draft
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.rotation.clone())
+            .ok_or("the revocation was not begun")?;
+        let keys = draft.rotate(&self.vault)?.unwrap_or_default();
         draft.save(&self.path)?;
         *settings = draft;
-        self.apply(&settings.policy, &settings.credentials, keys)
+        self.apply(&settings.revocations, &settings.credentials, keys)
             .await?;
-        let epoch = settings.policy.statement.epoch;
         for (key, credentials) in settings.row_authors(&self.vault)? {
             self.replica.register_row_author(key, credentials).await?;
         }
         for partition in settings.partitions(&self.domain)? {
-            if partition.record.epochs.contains(&epoch) {
+            let address = crate::groups::record_key(&partition.record.address);
+            if rotation.groups.contains_key(&address) {
                 self.hold_keys(&settings, &partition).await?;
             }
         }
+        let status = settings.revocation_status()?;
         drop(settings);
         self.forget_readers().await;
-        // Rotated first: the policy refuses the device even if this fails.
+        // Rotated first: the statement refuses the device even if this fails.
         Box::pin(self.record_revocation(node)).await?;
-        Ok(json!({"epoch": epoch.to_string()}))
+        Ok(json!({
+            "statement": HEXLOWER.encode(&rotation.statement.id()?),
+            "revocations": status,
+        }))
     }
-    /// Teaches the replica what the identity already records: the policy,
-    /// this device's chain and new key epochs, earlier ones first.
+    /// Teaches the replica what the identity already records: the
+    /// revocations, this device's chain and new key epochs, earlier ones
+    /// first.
     async fn apply(
         &self,
-        policy: &SignedPolicy,
+        revocations: &RevocationSet,
         chain: &CredentialChain,
         mut keys: Vec<(String, u64, [u8; 32])>,
     ) -> Result<(), Failure> {
-        self.replica.learn_policy(policy.clone()).await?;
+        self.replica.learn_revocations(revocations).await?;
         self.replica.renew_credentials(chain.clone()).await?;
         keys.sort_by_key(|(_, epoch, _)| *epoch);
         for (name, generation, key) in keys {
@@ -1422,17 +1438,13 @@ impl Node {
             }
         };
         let mut settings = self.settings.lock().await;
-        if renewed.policy.statement.epoch < settings.policy.statement.epoch {
-            return Err("a newer policy was learned meanwhile; renew again".into());
-        }
-        if renewed.policy.statement.epoch > settings.policy.statement.epoch {
-            rocky_credentials::write_private(
-                &self.path.with_file_name("bootstrap.json"),
-                &serde_json::to_vec(&renewed.policy.statement.epoch)?,
-            )?;
+        // Rows of a newly revoked author arrive by checkpoint.
+        if settings.lacks(&renewed.revocations)? {
+            rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
         }
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
-        self.apply(&renewed.policy, &renewed.chain, keys).await?;
+        self.apply(&settings.revocations, &renewed.chain, keys)
+            .await?;
         // New grants may make more members of a held group readable.
         for partition in settings.partitions(&self.domain)? {
             self.hold_keys(&settings, &partition).await?;
@@ -1698,8 +1710,8 @@ impl Node {
     /// Syncs with every configured peer. One reachable peer is enough;
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
-        if let Some(policy) = self.settings.lock().await.revocation(&self.path)? {
-            return Err(Box::new(crate::enrollment::Revoked(policy)));
+        if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+            return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         if !self.online.load(Ordering::SeqCst) {
             return Ok((json!({"state": "offline"}), false));
@@ -1735,9 +1747,9 @@ impl Node {
         let registry = Box::pin(self.admission()).await;
         let targets = self.settings.lock().await.targets(&registry);
         let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
-        // A revocation elsewhere raised the policy epoch, or an issuer does
-        // not know this device yet: renew once, from that peer if it is an
-        // issuer. An issuer hears of revocations from the other issuers.
+        // The peer holds other revocations, or an issuer does not know this
+        // device yet: renew once, from that peer if it is an issuer. An
+        // issuer hears of revocations from the other issuers.
         let mut renewable = member || !settings.issuers.is_empty();
         for (peer, contact) in &targets {
             let mut result = self.reconcile(transport, *peer, contact).await;
@@ -1749,8 +1761,8 @@ impl Node {
                 if self.renew(Some(transport), true, Some(*peer)).await.is_ok() {
                     result = self.reconcile(transport, *peer, contact).await;
                 }
-                if let Some(policy) = self.settings.lock().await.revocation(&self.path)? {
-                    return Err(Box::new(crate::enrollment::Revoked(policy)));
+                if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+                    return Err(Box::new(crate::enrollment::Revoked(statement)));
                 }
             }
             let error = result.as_ref().err().map(ToString::to_string);
@@ -1810,6 +1822,7 @@ impl Node {
             peer,
             node: PrivateKey::from_bytes(&self.vault.get("node")?),
             credentials: self.settings.lock().await.credentials.clone(),
+            revocations: self.replica.revocation_digest().await?,
         };
         let coordinator = self
             .coordinator
@@ -1822,16 +1835,12 @@ impl Node {
             let expected = std::fs::read(&marker)?;
             let intent: Value = serde_json::from_slice(&expected)?;
             let token = intent.get("intent").unwrap_or(&intent);
-            if token != &json!(true) && !token.as_u64().is_some_and(|epoch| epoch > 0) {
+            if token != &json!(true) {
                 return Err(refused("invalid bootstrap authority intent"));
-            }
-            let epoch = self.settings.lock().await.policy.statement.epoch;
-            if token.as_u64().is_some_and(|required| required > epoch) {
-                return Err("bootstrap intent requires policy renewal".into());
             }
             let pending: Vec<ResourceScope> = match intent.get("pending") {
                 Some(pending) => serde_json::from_value(pending.clone())?,
-                None if intent == true || intent.is_u64() => self.scopes(),
+                None if intent == true => self.scopes(),
                 None => return Err(refused("invalid bootstrap intent")),
             };
             if pending.iter().any(|scope| !self.scopes().contains(scope)) {
@@ -1937,7 +1946,7 @@ impl Node {
                         return Err(refused("only an issuer renews devices"));
                     }
                     if request == crate::enrollment::POLICY {
-                        return Ok(serde_json::to_vec(&settings.policy)?);
+                        return Ok(serde_json::to_vec(&settings.revocations)?);
                     }
                     if request == crate::generation::OFFER {
                         return settings.offer();
@@ -2206,7 +2215,7 @@ impl Node {
                             settings.publisher,
                             self.domain.manifest().hash(),
                             node,
-                            &settings.policy.statement,
+                            &settings.revocations,
                             now()?,
                         )?
                         .iter()
@@ -2618,7 +2627,7 @@ impl Node {
             return Err(refused("query quota"));
         }
         let settings = self.settings.lock().await;
-        let authority = (settings.policy.statement.epoch, settings.expires());
+        let authority = (settings.revocations.digest(now()?)?, settings.expires());
         drop(settings);
         let mut descriptor = query.clone();
         descriptor.cursor = None;
@@ -2776,6 +2785,13 @@ pub fn error(error: &Failure) -> Value {
         ("revoked", false)
     } else if error.is::<crate::registry::RegistryFull>() {
         ("registry_full", false)
+    } else if error.is::<crate::enrollment::RevocationSetFull>() {
+        ("revocation_set_full", false)
+    } else if matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::Rejected(message)) if message == rocky_secure::network::REVOCATIONS_DIFFER
+    ) {
+        ("revocations_differ", true)
     } else if error.is::<Refused>() {
         ("rejected", false)
     } else if error.is::<Deferred>() {

@@ -31,11 +31,16 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Existence records per exchanged page and signers per frontier.
 const EXISTENCE_PAGE: usize = 128;
 const MAX_EXISTENCE_SIGNERS: usize = 4096;
+/// The refusal of a peer whose live revocation set differs. The side that
+/// lacks statements renews to learn them.
+pub const REVOCATIONS_DIFFER: &str = "revocation set differs";
 #[derive(Serialize, Deserialize)]
 struct Hello {
     node: PublicKey,
     challenge: [u8; 32],
     credentials: CredentialChain,
+    /// The digest of the sender's live revocations.
+    revocations: Commitment,
 }
 #[derive(Serialize, Deserialize)]
 struct SignedMessage {
@@ -265,11 +270,14 @@ pub struct NativeSession {
     remaining: usize,
 }
 impl NativeSession {
-    /// Authenticates `expected_peer` over `stream`.
+    /// Authenticates `expected_peer` over `stream`. `revocations` is the
+    /// digest of the local live revocation set; a peer with another one is
+    /// refused with `REVOCATIONS_DIFFER`.
     pub async fn authenticate(
         stream: impl SessionStream + 'static,
         local: PrivateKey,
         credentials: CredentialChain,
+        revocations: Commitment,
         expected_peer: PublicKey,
         byte_budget: usize,
     ) -> Result<Self, Error> {
@@ -279,7 +287,7 @@ impl NativeSession {
         Self::handshake(
             Box::new(stream),
             local,
-            credentials,
+            (credentials, revocations),
             |peer| *peer == expected_peer,
             byte_budget,
         )
@@ -292,6 +300,7 @@ impl NativeSession {
         stream: impl SessionStream + 'static,
         local: PrivateKey,
         credentials: CredentialChain,
+        revocations: Commitment,
         admit: impl FnOnce(&PublicKey) -> bool,
         byte_budget: usize,
     ) -> Result<Self, Error> {
@@ -299,7 +308,7 @@ impl NativeSession {
         Self::handshake(
             Box::new(stream),
             local,
-            credentials,
+            (credentials, revocations),
             |peer| *peer != own && admit(peer),
             byte_budget,
         )
@@ -308,7 +317,7 @@ impl NativeSession {
     async fn handshake(
         mut stream: Box<dyn SessionStream>,
         local: PrivateKey,
-        credentials: CredentialChain,
+        (credentials, revocations): (CredentialChain, Commitment),
         admit: impl FnOnce(&PublicKey) -> bool,
         byte_budget: usize,
     ) -> Result<Self, Error> {
@@ -321,6 +330,7 @@ impl NativeSession {
             node: local.public_key(),
             challenge,
             credentials,
+            revocations,
         };
         let local_bytes = encode(&hello)?;
         write_frame(&mut stream, &local_bytes).await?;
@@ -332,11 +342,15 @@ impl NativeSession {
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
         parts.sort_by_key(|(key, _)| *key);
         // The current wire label refuses every other session format.
-        let binding = signing_bytes("rocky.native-session.v7", &parts)?;
+        let binding = signing_bytes("rocky.native-session.v8", &parts)?;
         write_frame(&mut stream, &encode(&local.sign(&binding))?).await?;
         let signature: Signature = decode(&read_frame(&mut stream).await?)?;
         if !peer.node.verify(&binding, &signature) {
             return Err(denied("native session authentication failed"));
+        }
+        // Both sides compare once authenticated; neither serves the other.
+        if peer.revocations != revocations {
+            return Err(denied(REVOCATIONS_DIFFER));
         }
         Ok(Self {
             stream,

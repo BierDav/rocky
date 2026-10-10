@@ -56,13 +56,15 @@ joining device exchanges rows with it and keeps its intent for a peer that does.
 
 Enrollment and renewal send only the current reader key for each granted
 collection. Existing devices retain the epochs they already hold. Renewal that
-advances the policy epoch persists fresh bootstrap intent before adopting its keys, so
-a device that missed intervening key epochs does not claim complete catch-up
-from ciphertext it cannot open. A device enrolled after revocation reads earlier rows through a checkpoint verified under
-the current policy, without receiving keys for rotated-out ciphertext.
+brings revocation statements the device lacked persists fresh bootstrap intent
+before adopting its keys, so a device that missed intervening key epochs, or
+rows of a revoked author, does not claim complete catch-up from what it cannot
+open or admit. A device enrolled after revocation reads earlier rows through a
+checkpoint verified under the held [revocations](revocations.md), without
+receiving keys for rotated-out ciphertext.
 
-Checkpoint creation and offers refresh a stale policy epoch as well as a stale
-key epoch. Automatic bounded maintenance also detects both changes, even if
+Checkpoint creation and offers refresh a checkpoint signed under another
+revocation digest as well as a stale key epoch. Automatic bounded maintenance also detects both changes, even if
 there are no uncovered operations; a previous verified base remains until the
 new one installs successfully.
 

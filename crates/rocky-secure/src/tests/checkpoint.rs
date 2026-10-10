@@ -165,7 +165,8 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     assert_eq!(signed.signer(), node.public_key());
     assert_eq!(statement.definition, f.app().definition().hash());
     assert_eq!((statement.schema, statement.handler), (1, 1));
-    assert_eq!((statement.policy_epoch, statement.key_epoch), (1, 1));
+    assert_eq!(statement.revocations, crate::tests::unrevoked());
+    assert_eq!(statement.key_epoch, 1);
     assert_eq!((statement.sequence, statement.previous), (1, None));
     assert_eq!(statement.frontier.len(), 1);
     assert_eq!(statement.frontier[0].author, node.public_key());
@@ -552,10 +553,16 @@ async fn serve(
     peer: PublicKey,
 ) {
     let (stream, _) = listener.accept().await.unwrap();
-    let mut session =
-        NativeSession::authenticate(stream, identity.0, identity.1, peer, MAX_SECURE_BYTES)
-            .await
-            .unwrap();
+    let mut session = NativeSession::authenticate(
+        stream,
+        identity.0,
+        identity.1,
+        crate::tests::unrevoked(),
+        peer,
+        MAX_SECURE_BYTES,
+    )
+    .await
+    .unwrap();
     while session.serve_once(source).await.is_ok() {}
 }
 
@@ -646,6 +653,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
                 stream,
                 keys[2].clone(),
                 c_credentials.clone(),
+                crate::tests::unrevoked(),
                 keys[0].public_key(),
                 MAX_SECURE_BYTES,
             )
@@ -1285,13 +1293,14 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
     let (writer, _) = open(&f, &dir.path().join("writer.db"), &writer_key).await;
     let (target, _) = open(&f, &dir.path().join("target.db"), &target_key).await;
     let signed = writer.checkpoint(f.public).await.unwrap();
+    let expires = writer.inner.lock().await.config.credentials.expires();
     target
-        .verify_checkpoint_at_for_test(&signed, u64::MAX - 1)
+        .verify_checkpoint_at_for_test(&signed, expires - 1)
         .await
         .unwrap();
     assert!(
         target
-            .verify_checkpoint_at_for_test(&signed, u64::MAX)
+            .verify_checkpoint_at_for_test(&signed, expires)
             .await
             .is_err()
     );

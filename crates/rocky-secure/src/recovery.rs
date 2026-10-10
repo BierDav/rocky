@@ -21,7 +21,6 @@ pub struct RecoveryInventory {
     pub scopes: Vec<ResourceScope>,
     pub schema: u32,
     pub handler: u32,
-    pub policy: SignedPolicy,
     pub key_epochs: BTreeMap<ResourceScope, u64>,
     pub frontier: Vec<Hash>,
     pub heads: Vec<StrongHead>,
@@ -127,13 +126,9 @@ impl RecoveryPackage {
             &self.to_bytes()?,
         ))
     }
-    fn inspect(&self, publisher: PublicKey, policy: &PolicyStatement) -> Result<(), Error> {
+    fn inspect(&self, publisher: PublicKey, revocations: &RevocationSet) -> Result<(), Error> {
         self.to_bytes()?;
-        self.inventory
-            .policy
-            .verify(publisher, self.inventory.definition)
-            .map_err(credential)?;
-        if self.inventory.format != 2
+        if self.inventory.format != 3
             || self.inventory.scopes.is_empty()
             || self.inventory.scopes.len() > 32
             || self
@@ -153,7 +148,7 @@ impl RecoveryPackage {
                 publisher,
                 self.inventory.definition,
                 self.exporter,
-                policy,
+                revocations,
                 now()?,
             )
             .map_err(credential)?;

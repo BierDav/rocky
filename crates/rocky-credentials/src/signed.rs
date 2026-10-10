@@ -1,13 +1,12 @@
-//! Signed manifests, capabilities and policies. Encodings and signature
-//! labels are those `rocky-secure` has always used.
+//! Signed manifests, capabilities and credential chains.
 use crate::{
-    AuthorRange, Error, Extended, Extension, MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH,
-    PrivateKey, Pseudonym, PublicKey, decode_bounded, denied, encode, signing_bytes,
+    AuthorRange, Error, Extended, Extension, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
+    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, Pseudonym,
+    PublicKey, RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
 use rocky_core::{ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedManifest {
@@ -87,7 +86,6 @@ pub struct Capability {
     pub grants: Vec<ResourceGrant>,
     pub not_before: u64,
     pub expires: u64,
-    pub epoch: u64,
     pub delegations: u8,
     /// Author ranges, pseudonym binding and partition selectors.
     pub extension: Extension,
@@ -128,29 +126,23 @@ impl SignedCapability {
     }
 }
 
-/// The policy entry that revokes every capability naming `subject`, at any
-/// epoch. It shares the revocation set with capability ids.
-pub fn revoked_subject(subject: &PublicKey) -> Commitment {
-    rocky_core::commitment("rocky.credentials.revoked-subject.v1", subject.as_bytes())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialChain(pub Vec<SignedCapability>);
 impl CredentialChain {
-    /// Concrete grants of a node under the current policy and time.
+    /// Concrete grants of a node under `revocations` at `time`.
     /// Partition leaves require `verify_partition` with a concrete tuple.
     pub fn verify(
         &self,
         publisher: PublicKey,
         manifest: Commitment,
         subject: PublicKey,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        self.check(publisher, manifest, subject, Some((policy, time)))
+        self.check(publisher, manifest, subject, Some((revocations, time)))
     }
     /// Whether the publisher once delegated to the node `subject` through
-    /// this chain, whatever the epoch, the time and later revocations. It
+    /// this chain, whatever the time and later revocations. It
     /// proves who a renewal is for; it authorizes nothing. Returns the
     /// root capability.
     pub fn provenance(
@@ -170,7 +162,7 @@ impl CredentialChain {
         publisher: PublicKey,
         manifest: Commitment,
         subject: PublicKey,
-        current: Option<(&PolicyStatement, u64)>,
+        current: Option<(&RevocationSet, u64)>,
     ) -> Result<Vec<ResourceGrant>, Error> {
         let leaf = self.links(publisher, manifest, current)?;
         if leaf.subject != subject || leaf.kind != PrincipalKind::Node || leaf.delegations != 0 {
@@ -185,12 +177,13 @@ impl CredentialChain {
     }
     /// Checks every link and returns the leaf: each is signed by its
     /// parent's subject, narrows it in grants, validity, depth and author
-    /// range, and, with `current`, is current under that policy.
+    /// range, lives at most `MAX_CHAIN_LIFETIME` and, with `current`, is
+    /// valid at its time and ended by no statement of its set.
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
         manifest: Commitment,
-        current: Option<(&PolicyStatement, u64)>,
+        current: Option<(&RevocationSet, u64)>,
     ) -> Result<&Capability, Error> {
         if self.0.is_empty() || self.0.len() > MAX_CREDENTIAL_DEPTH {
             return Err(denied("credential depth"));
@@ -201,15 +194,10 @@ impl CredentialChain {
             let capability = &signed.capability;
             let extended = capability.extended()?;
             let stale = match current {
-                Some((policy, time)) => {
-                    policy.manifest != manifest
-                        || capability.epoch != policy.epoch
-                        || capability.not_before > time
+                Some((revocations, time)) => {
+                    capability.not_before > time
                         || capability.expires <= time
-                        || policy.revoked.contains(&signed.id()?)
-                        || policy
-                            .revoked
-                            .contains(&revoked_subject(&capability.subject))
+                        || revocations.ends(signed)?
                 }
                 None => false,
             };
@@ -217,6 +205,7 @@ impl CredentialChain {
                 || capability.manifest != manifest
                 || stale
                 || capability.not_before >= capability.expires
+                || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
                 || capability.grants.len() + extended.partitions.len() == 0
                 || capability.grants.len() + extended.partitions.len() > 64
@@ -307,17 +296,17 @@ impl CredentialChain {
             Err(denied("invalid credential extension for its principal"))
         }
     }
-    /// The pseudonym `key` under `policy` at `time`: the chain ends at it
-    /// as a pseudonym leaf. A node chain is refused.
+    /// The pseudonym `key` under `revocations` at `time`: the chain ends
+    /// at it as a pseudonym leaf. A node chain is refused.
     pub fn verify_pseudonym(
         &self,
         publisher: PublicKey,
         manifest: Commitment,
         key: PublicKey,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<Pseudonym, Error> {
-        let leaf = self.links(publisher, manifest, Some((policy, time)))?;
+        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
         if !leaf.extended()?.partitions.is_empty() {
             return Err(denied(
                 "partition pseudonyms require a concrete partition tuple",
@@ -334,14 +323,14 @@ impl CredentialChain {
         publisher: PublicKey,
         manifest: Commitment,
         key: PublicKey,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<(Pseudonym, Vec<crate::PartitionGrant>), Error> {
-        let (_, partitions) = self.verify_selectors(publisher, manifest, key, policy, time)?;
+        let (_, partitions) = self.verify_selectors(publisher, manifest, key, revocations, time)?;
         Ok((self.pseudonym_leaf(publisher, manifest)?, partitions))
     }
     /// The receiver's check of an authored frame: `signer` holds exactly
-    /// `author` in `table` under `policy` at `time`. Returns its grants.
+    /// `author` in `table` under `revocations` at `time`. Returns its grants.
     #[allow(clippy::too_many_arguments)]
     pub fn verify_author(
         &self,
@@ -350,10 +339,10 @@ impl CredentialChain {
         signer: PublicKey,
         author: u32,
         table: Commitment,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let pseudonym = self.verify_pseudonym(publisher, manifest, signer, policy, time)?;
+        let pseudonym = self.verify_pseudonym(publisher, manifest, signer, revocations, time)?;
         if pseudonym.author != author || pseudonym.table != table {
             return Err(denied(
                 "the author number does not belong to the signing key",
@@ -361,8 +350,8 @@ impl CredentialChain {
         }
         Ok(pseudonym.grants)
     }
-    /// The pseudonym leaf of an authentic chain, whatever its epoch and
-    /// time: what the publisher once let it hold.
+    /// The pseudonym leaf of an authentic chain, whatever its time and
+    /// revocations: what the publisher once let it hold.
     pub(crate) fn pseudonym_leaf(
         &self,
         publisher: PublicKey,
@@ -430,50 +419,14 @@ impl CredentialChain {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyStatement {
-    pub manifest: Commitment,
-    pub epoch: u64,
-    /// Capability ids and `revoked_subject` entries.
-    pub revoked: BTreeSet<Commitment>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SignedPolicy {
-    pub statement: PolicyStatement,
-    signature: Signature,
-}
-impl SignedPolicy {
-    pub fn sign(statement: PolicyStatement, publisher: &PrivateKey) -> Result<Self, Error> {
-        if statement.epoch == 0 || statement.revoked.len() > 4096 {
-            return Err(denied("invalid policy"));
-        }
-        Ok(Self {
-            signature: publisher.sign(&signing_bytes("rocky.policy.v1", &statement)?),
-            statement,
-        })
-    }
-    pub fn verify(&self, publisher: PublicKey, manifest: Commitment) -> Result<(), Error> {
-        if self.statement.manifest != manifest
-            || self.statement.epoch == 0
-            || self.statement.revoked.len() > 4096
-            || !publisher.verify(
-                &signing_bytes("rocky.policy.v1", &self.statement)?,
-                &self.signature,
-            )
-        {
-            return Err(denied("invalid policy signature"));
-        }
-        Ok(())
-    }
-}
-
 /// Everything a device presents to use a domain, from any issuer: the
-/// pinned publisher, its signed manifest and policy and the device's chain.
+/// pinned publisher, its signed manifest, the revocations it knows and the
+/// device's chain.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Credentials {
     pub publisher: PublicKey,
     pub manifest: SignedManifest,
-    pub policy: SignedPolicy,
+    pub revocations: RevocationSet,
     pub chain: CredentialChain,
 }
 /// What verified credentials establish.
@@ -482,7 +435,8 @@ pub struct Verified {
     pub manifest: ApplicationManifest,
     pub principal: PublicKey,
     pub device: PublicKey,
-    pub epoch: u64,
+    /// The digest of the live revocations verified against.
+    pub revocations: Commitment,
     pub expires: u64,
     pub grants: Vec<ResourceGrant>,
 }
@@ -491,12 +445,12 @@ impl Credentials {
     /// endpoint or issuer.
     pub fn verify(&self, device: PublicKey, time: u64) -> Result<Verified, Error> {
         let manifest = self.manifest.verify(self.publisher)?;
-        self.policy.verify(self.publisher, manifest.hash())?;
+        self.revocations.verify(self.publisher, manifest.app)?;
         let grants = self.chain.verify(
             self.publisher,
             manifest.hash(),
             device,
-            &self.policy.statement,
+            &self.revocations,
             time,
         )?;
         Ok(Verified {
@@ -506,7 +460,7 @@ impl Credentials {
                 .principal()
                 .ok_or_else(|| denied("credential depth"))?,
             device,
-            epoch: self.policy.statement.epoch,
+            revocations: self.revocations.digest(time)?,
             expires: self.chain.expires(),
             grants,
         })
@@ -515,6 +469,6 @@ impl Credentials {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, MAX_CREDENTIAL_BYTES)
+        decode_bounded(bytes, MAX_CREDENTIAL_BYTES + MAX_REVOCATION_SET_BYTES)
     }
 }

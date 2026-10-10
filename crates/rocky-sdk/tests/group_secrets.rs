@@ -348,18 +348,19 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
     let revoked = issuer
         .ok(json!({"type":"revoke","node":removed_device.node.to_string()}))
         .await;
-    assert_eq!(revoked["epoch"], "2");
+    assert_eq!(revoked["revocations"]["statements"], 1);
     for list in ["A", "B"] {
         let (secrets, tables) = issuer.epochs(list).await;
         assert_eq!(secrets, json!([1, 2]), "{list}");
         assert!(uniform(&tables, json!([1, 2])), "{list}: {tables:?}");
     }
     assert_eq!(issuer.store.group_secrets(), 4);
-    // A partition created after the rotation starts at the current epoch.
+    // A partition created after the rotation starts at the first epoch:
+    // key epochs follow each scope, not the revocations.
     let created = issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("C")}))
         .await;
-    assert_eq!(created["epoch"], 2);
+    assert_eq!(created["epoch"], 1);
 
     // Sharing refuses the revoked device and any epoch but the current.
     let refused = issuer.share("A", &[&removed_device]).await.unwrap_err();

@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    AuthorRange, Authority, CredentialChain, Extended, Extension, PolicyStatement, SignedCapability,
+    AuthorRange, Authority, CredentialChain, Extended, Extension, Revocation, RevocationSet,
+    SignedCapability, SignedRevocation,
 };
 use crate::{decode_bounded, encode};
 use rocky_core::{
@@ -51,12 +52,25 @@ fn grant(
         fields: fields.iter().map(|field| [*field; 32]).collect(),
     }
 }
-fn policy() -> PolicyStatement {
-    PolicyStatement {
-        manifest: [9; 32],
-        epoch: 1,
-        revoked: BTreeSet::new(),
-    }
+fn policy() -> RevocationSet {
+    RevocationSet::new()
+}
+/// A set whose one statement revokes `key`.
+fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
+    let issuer = PrivateKey::new();
+    let statement = Revocation {
+        app: AppId([2; 16]),
+        issuer: issuer.public_key(),
+        time: NOW,
+        nodes: BTreeSet::new(),
+        users: [key].into(),
+        capabilities: BTreeSet::new(),
+        pseudonyms: BTreeSet::new(),
+    };
+    RevocationSet::try_from(vec![
+        SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
+    ])
+    .unwrap()
 }
 fn authority(key: &PrivateKey) -> Authority<'_> {
     Authority {
@@ -78,7 +92,6 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
             vec![],
             vec![held.clone()],
             (2, None),
-            1,
             VALIDITY,
         )
         .unwrap();
@@ -221,20 +234,7 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     }
     for (p, time) in [
         (policy(), 1100),
-        (
-            PolicyStatement {
-                epoch: 2,
-                ..policy()
-            },
-            NOW,
-        ),
-        (
-            PolicyStatement {
-                revoked: [crate::revoked_subject(&delegate.public_key())].into(),
-                ..policy()
-            },
-            NOW,
-        ),
+        (revoking(&publisher, delegate.public_key()), NOW),
     ] {
         assert!(
             chain
@@ -253,10 +253,7 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     let renewed = authority(&publisher)
         .renew(
             &prefix.0[0].capability,
-            &PolicyStatement {
-                epoch: 2,
-                ..policy()
-            },
+            &revoking(&publisher, delegate.public_key()),
             VALIDITY,
         )
         .unwrap();
@@ -280,7 +277,6 @@ fn paired_grants_and_partition_pseudonyms_never_expand_authority() {
             vec![],
             vec![a.clone(), b.clone()],
             (2, Some(AuthorRange::new(10, 20).unwrap())),
-            1,
             VALIDITY,
         )
         .unwrap();
@@ -431,14 +427,7 @@ fn partition_selectors_cannot_be_dropped() {
     let node = PrivateKey::new();
     let partitions = vec![grant(Some("x"), None, &[Right::Read], &[1])];
     let root = authority(&publisher)
-        .issue_partition_terms(
-            user.public_key(),
-            vec![],
-            partitions,
-            (1, None),
-            1,
-            VALIDITY,
-        )
+        .issue_partition_terms(user.public_key(), vec![], partitions, (1, None), VALIDITY)
         .unwrap();
     let chain = CredentialChain(vec![root])
         .complete(&user, node.public_key())

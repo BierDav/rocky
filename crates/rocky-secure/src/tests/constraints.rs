@@ -32,7 +32,7 @@ struct Shop {
     publisher: PrivateKey,
     schema: LogicalSchema,
     manifest: SignedManifest,
-    policy: SignedPolicy,
+    policy: RevocationSet,
     domain: Scope,
     lists: ResourceScope,
     items: ResourceScope,
@@ -96,15 +96,7 @@ impl Shop {
         };
         Self {
             manifest: SignedManifest::sign(&manifest, &publisher).unwrap(),
-            policy: SignedPolicy::sign(
-                PolicyStatement {
-                    manifest: manifest.hash(),
-                    epoch: 1,
-                    revoked: BTreeSet::new(),
-                },
-                &publisher,
-            )
-            .unwrap(),
+            policy: RevocationSet::new(),
             lists: scope("lists"),
             items: scope("items"),
             domain,
@@ -148,9 +140,8 @@ impl Shop {
             subject,
             kind,
             grants: self.grants(),
-            not_before: 0,
-            expires: u64::MAX,
-            epoch: 1,
+            not_before: crate::tests::lifetime().0,
+            expires: crate::tests::lifetime().1,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
                 .unwrap(),
@@ -177,7 +168,7 @@ impl Shop {
             SecureConfig {
                 publisher: self.publisher.public_key(),
                 manifest: self.manifest.clone(),
-                policy: self.policy.clone(),
+                revocations: self.policy.clone(),
                 node: node.clone(),
                 credentials: self.credentials(node),
                 // Keys are per table; both tables share one reader scope.
@@ -225,8 +216,7 @@ impl Shop {
                 assigner.public_key(),
                 grants.clone(),
                 (1, Some(crate::credentials::AuthorRange::ALL)),
-                1,
-                (0, u64::MAX, 0),
+                crate::tests::validity(),
             )
             .unwrap();
             let chain = CredentialChain(vec![issued])

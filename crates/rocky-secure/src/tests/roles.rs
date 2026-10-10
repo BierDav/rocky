@@ -55,7 +55,7 @@ async fn open_node(
     let config = SecureConfig {
         publisher: f.publisher.public_key(),
         manifest: f.manifest.clone(),
-        policy: f.policy.clone(),
+        revocations: f.policy.clone(),
         node: key.clone(),
         credentials: credentials.clone(),
         keys: keyed
@@ -168,8 +168,15 @@ async fn serve(node: &Node, peer: PublicKey) -> (SocketAddr, tokio::task::JoinHa
     );
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let Ok(mut session) =
-            NativeSession::authenticate(stream, key, credentials, peer, MAX_SECURE_BYTES).await
+        let Ok(mut session) = NativeSession::authenticate(
+            stream,
+            key,
+            credentials,
+            crate::tests::unrevoked(),
+            peer,
+            MAX_SECURE_BYTES,
+        )
+        .await
         else {
             return;
         };
@@ -200,6 +207,7 @@ async fn connect_with(
         stream,
         node.key.clone(),
         node.credentials.clone(),
+        crate::tests::unrevoked(),
         server.key.public_key(),
         budget,
     )

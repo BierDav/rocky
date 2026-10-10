@@ -33,7 +33,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
         Readiness(
             ReadinessState.valueOf(status.text("state").replaceFirstChar(Char::uppercase)),
             status.text("revision").toLong(),
-            authority.text("epoch").toLong(),
+            revocations(authority.getValue("revocations").jsonObject),
             authority.text("expires").toLong(),
             profile(authority.getValue("profile").jsonObject),
             status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean,
@@ -122,7 +122,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     private fun status(result: JsonObject) = SessionStatus(
         result.text("principal"),
         result.text("node"),
-        result.text("epoch").toLong(),
+        revocations(result.getValue("revocations").jsonObject),
         result.text("expires").toLong(),
         result.getValue("issuer").jsonPrimitive.boolean,
         profile(result.getValue("profile").jsonObject),
@@ -219,8 +219,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     }
 
     /**
-     * Ends a device's authority at the next policy epoch and starts a new key epoch for the tables it read;
-     * remaining devices receive it when they renew. Data it already decrypted stays with it. Another issuer, such as a
+     * Signs a revocation statement ending a device's authority and starts a new key epoch for the tables it read;
+     * remaining devices receive both when they renew. Data it already decrypted stays with it. Another issuer, such as a
      * lost creator, is revoked the same way, but keeps the publisher key it holds: revocation recovers from loss, not theft.
      */
     suspend fun revoke(node: String) {
@@ -375,6 +375,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                 }
             },
         )
+        internal fun revocations(value: JsonObject) = RevocationStatus(value.text("digest"), value.getValue("statements").jsonPrimitive.int)
         internal fun profile(value: JsonObject): GrantProfile {
             fun tables() = value.getValue("scopes").jsonArray.map { it.jsonPrimitive.content }.toSet()
             return when (val kind = value.text("kind")) {

@@ -42,7 +42,7 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
             if package.commitment()? != id {
                 return Err(denied("custody archive binding mismatch"));
             }
-            package.inspect(inner.config.publisher, &inner.config.policy.statement)?;
+            package.inspect(inner.config.publisher, &inner.config.revocations)?;
             authorize(&inner.local_grants(now()?)?, &package.inventory.scopes)?;
             if package.inventory.recipient != inner.config.node.public_key()
                 || package.inventory.definition != inner.manifest

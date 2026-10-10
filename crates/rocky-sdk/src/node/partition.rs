@@ -49,7 +49,7 @@ impl Node {
                     node,
                     member.scope,
                     &member.tuple,
-                    &settings.policy.statement,
+                    &settings.revocations,
                     time,
                 )
                 .unwrap_or_default();
@@ -136,7 +136,6 @@ impl Node {
                     vec![],
                     grants.clone(),
                     terms,
-                    settings.policy.statement.epoch,
                     validity,
                 )?,
             ])
@@ -151,7 +150,7 @@ impl Node {
             credentials: rocky_credentials::Credentials {
                 publisher: settings.publisher,
                 manifest: settings.manifest()?,
-                policy: settings.policy.clone(),
+                revocations: settings.revocations.clone(),
                 chain,
             },
             keys: vec![],
@@ -160,7 +159,7 @@ impl Node {
         Ok(json!({"supplied":supplied}))
     }
     /// Prepares the group secret on an issuer: the current epoch of a known
-    /// partition, otherwise the current policy epoch.
+    /// partition, otherwise the first.
     async fn create_group(&self, partition: GroupPartition) -> Result<Value, Failure> {
         let mut settings = self.settings.lock().await;
         if !settings.issuer() {
@@ -175,7 +174,7 @@ impl Node {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| partition.record.clone());
-        let epoch = record.current().unwrap_or(settings.policy.statement.epoch);
+        let epoch = record.current().unwrap_or(1);
         record.admit(epoch)?;
         let role = secret_role(&record.address, epoch);
         if self.vault.find(&role)?.is_none() {

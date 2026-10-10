@@ -79,7 +79,7 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
     ) -> Result<CustodyAck, Error> {
         let payload = package.open(key)?;
         let mut inner = self.inner.lock().await;
-        package.inspect(inner.config.publisher, &inner.config.policy.statement)?;
+        package.inspect(inner.config.publisher, &inner.config.revocations)?;
         if package.inventory.recipient != inner.config.node.public_key()
             || package.inventory.definition != inner.manifest
         {

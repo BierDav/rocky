@@ -1,8 +1,9 @@
 //! Issuance: raw grants, the grant profiles built on them and what a
 //! holder of the publisher key signs.
 use crate::{
-    AuthorRange, Capability, CredentialChain, Error, Extended, Extension, PolicyStatement,
-    PrivateKey, PublicKey, SealedDevice, SignedCapability, SignedPolicy, denied,
+    AuthorRange, Capability, CredentialChain, Error, Extended, Extension, MAX_CHAIN_LIFETIME,
+    PrivateKey, PublicKey, Revocation, RevocationSet, SealedDevice, SignedCapability,
+    SignedRevocation, denied,
 };
 use rocky_core::{Commitment, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection};
 use serde::{Deserialize, Serialize};
@@ -320,17 +321,16 @@ pub struct Authority<'a> {
     pub manifest: Commitment,
 }
 impl Authority<'_> {
-    /// A user capability for `subject` under policy `epoch`, valid from
-    /// `skew` seconds before `time` for `ttl` seconds. Its subject
-    /// delegates only to its own node key.
+    /// A user capability for `subject`, valid from `skew` seconds before
+    /// `time` for `ttl` seconds. Its subject delegates only to its own
+    /// node key.
     pub fn issue(
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
-        epoch: u64,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        self.issue_delegable(subject, grants, 1, epoch, validity)
+        self.issue_delegable(subject, grants, 1, validity)
     }
     /// As `issue`, with `delegations` links allowed below it: 1 reaches
     /// the subject's own node key, 2 one further delegate and its node.
@@ -339,10 +339,9 @@ impl Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         delegations: u8,
-        epoch: u64,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        self.issue_terms(subject, grants, (delegations, None), epoch, validity)
+        self.issue_terms(subject, grants, (delegations, None), validity)
     }
     /// As `issue_delegable`, letting the subject assign the author numbers
     /// `authors` to pseudonyms.
@@ -351,11 +350,13 @@ impl Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         (delegations, authors): (u8, Option<AuthorRange>),
-        epoch: u64,
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
         if delegations == 0 || usize::from(delegations) >= crate::MAX_CREDENTIAL_DEPTH {
             return Err(denied("a user capability allows 1 to 7 delegations"));
+        }
+        if ttl > MAX_CHAIN_LIFETIME || skew > crate::LIFETIME_SKEW {
+            return Err(denied("a credential lives at most 366 days"));
         }
         SignedCapability::sign(
             Capability {
@@ -365,7 +366,6 @@ impl Authority<'_> {
                 grants,
                 not_before: time.saturating_sub(skew),
                 expires: time.saturating_add(ttl),
-                epoch,
                 delegations,
                 extension: ranged(authors)?,
             },
@@ -373,20 +373,17 @@ impl Authority<'_> {
         )
     }
     /// The capability `prior` renewed: the same subject, grants,
-    /// delegations and author range, never more, under `policy`. A revoked
-    /// subject is refused.
+    /// delegations and author range, never more. A subject `revocations`
+    /// revokes is refused.
     pub fn renew(
         &self,
         prior: &Capability,
-        policy: &PolicyStatement,
+        revocations: &RevocationSet,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
         if prior.manifest != self.manifest
             || prior.kind != PrincipalKind::User
-            || policy.manifest != self.manifest
-            || policy
-                .revoked
-                .contains(&crate::revoked_subject(&prior.subject))
+            || revocations.revokes(&prior.subject)
         {
             return Err(denied("invalid or revoked credential"));
         }
@@ -396,7 +393,6 @@ impl Authority<'_> {
                 prior.grants.clone(),
                 prior.extended()?.partitions,
                 (prior.delegations, prior.authors()?),
-                policy.epoch,
                 validity,
             );
         }
@@ -404,30 +400,17 @@ impl Authority<'_> {
             prior.subject,
             prior.grants.clone(),
             (prior.delegations, prior.authors()?),
-            policy.epoch,
             validity,
         )
     }
-    /// The next policy: one epoch later, with `revoked` added. Every chain
-    /// issued before it ends.
+    /// Signs `statement` under the publisher key, co-signed by `issuer`,
+    /// the node key it names.
     pub fn revoke(
         &self,
-        current: &PolicyStatement,
-        revoked: impl IntoIterator<Item = Commitment>,
-    ) -> Result<SignedPolicy, Error> {
-        let mut all = current.revoked.clone();
-        all.extend(revoked);
-        SignedPolicy::sign(
-            PolicyStatement {
-                manifest: self.manifest,
-                epoch: current
-                    .epoch
-                    .checked_add(1)
-                    .ok_or_else(|| denied("invalid policy"))?,
-                revoked: all,
-            },
-            self.publisher,
-        )
+        statement: Revocation,
+        issuer: &PrivateKey,
+    ) -> Result<SignedRevocation, Error> {
+        SignedRevocation::sign(statement, self.publisher, issuer)
     }
 }
 
@@ -507,7 +490,6 @@ impl CredentialChain {
             grants,
             not_before: time.saturating_sub(skew).max(parent.not_before),
             expires: time.saturating_add(ttl).min(parent.expires),
-            epoch: parent.epoch,
             delegations,
             extension: ranged(authors)?,
         };
@@ -560,7 +542,6 @@ impl CredentialChain {
             grants,
             not_before: time.saturating_sub(skew).max(parent.not_before),
             expires: time.saturating_add(ttl).min(parent.expires).min(until),
-            epoch: parent.epoch,
             delegations: 0,
             extension: Extension::new(Extended {
                 partitions: Vec::new(),

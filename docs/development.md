@@ -62,10 +62,12 @@ workspace tests. The doc tests are opt-in with `--doc` and no CI job passes it.
 Dependency resolution uses the committed lockfile.
 It uses [cargo-nextest](https://nexte.st) when installed, which runs every test
 binary in parallel, and falls back to `cargo test`. Settings are in
-`.config/nextest.toml`: tests that take over 60 seconds are reported as slow;
-the coordinator Raft store probe gets all test threads because parallel tests
-would distort its fsync latency measurement. CI disables fail-fast and
-terminates an individual test after ten 60-second timeout periods.
+`.config/nextest.toml`: a test is reported slow after 30 seconds and terminated
+after 60, the [per-test budget](#test-budgets); CI allows twice that. The
+named long tests start first and may take 10 minutes. The coordinator Raft
+store probe gets all test threads because parallel tests would distort its
+fsync latency measurement. CI disables fail-fast and retries a failing test
+once.
 
 Soak tests are `#[ignore]`d and named `soak_*`; `./scripts/check --slow` runs
 only those. Keep a short variant of each soak test in the baseline.
@@ -85,6 +87,35 @@ checks for supported feature combinations when platform features are added.
 Do not assume `--all-features` represents a valid platform configuration.
 `./scripts/check` also tests `rocky-sdk` without its default `iroh` feature,
 and `./sdks/native/check` builds the ABI without it.
+
+### Test budgets
+
+Measured on an 18-core Apple M5 Pro shared with other builds; the baseline,
+the result and the host are in the
+[phase 1 evidence](features_07/01-test-speed-evidence.md). A change that
+misses a budget names the cause and its largest test, or makes it faster.
+
+| Budget | Checked by | Result |
+| --- | --- | --- |
+| A single test: 60 s; 120 s in CI | `./scripts/check`, which terminates it | named long tests may take 10 min |
+| One package's tests after an incremental build: 60 s | `cargo nextest run -p <package>` | `rocky-sdk` 56 s, `rocky-secure` 58 s; `rocky-coordinator` 72 s |
+| `./scripts/check` with a warm build: 6 min | `./scripts/check` | 241 to 300 s |
+| `./kotlin check` with a warm build: 4 min | `./kotlin check` | 110 to 127 s |
+| `./examples/shoppinglist-app/check` with a warm build: 3 min | that command | 82 to 97 s |
+| `./sdks/native/check` with a warm build: 30 s | that command | 2 to 3 s |
+| `./scripts/lint`: 30 s | `./scripts/lint` | 5 to 9 s |
+| CI from push to a green `check` with a restored cache: 30 min; `lint`: 5 min | the hosted run | not yet measured |
+
+`rocky-coordinator` misses its budget by the fsync probe, which runs alone for
+about 20 s, and `outages_and_restarts_keep_state_and_restore_is_fenced`, which
+waits about 50 s on the client's 12 s request deadline and voter restarts.
+
+The tests that legitimately need longer are named in `.config/nextest.toml`,
+each with a run of 30 s or more in the measured baseline. They start first, at
+most eight at a time, so they neither end a run alone nor all contend at its
+start; the fsync probe runs alone before them. Add a test there only with its
+measured time; a test that only waits belongs on Tokio's paused clock or the
+in-process hub's faults instead.
 
 ## Kotlin desktop integration
 
@@ -151,7 +182,8 @@ only `nextest-workspace` for its soak tests; `shopping` downloads only
 native caches. The downloads are best-effort: Gitea's artifact service sometimes
 fails to finalize an artifact, and a job that finds one missing rebuilds the
 test binaries from the dependency cache (`check` runs `scripts/check --no-clippy`
-so it does not repeat the Clippy the `build` job already ran).
+so it does not repeat the Clippy the `build` job already ran). `check` and `slow`
+compile nothing otherwise, so they restore the Rust cache only then.
 It needs no version-control CLI or repository history, and never invokes Git.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
 lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,
@@ -201,6 +233,28 @@ The commit-message workflow checks every pushed and pull-request commit
 ([commit messages](commits.md)). The release workflow publishes nightly and on
 demand to the hosting forge's packages; it is the one workflow that clones
 history, which git-cliff needs to compute the version ([releasing](releasing.md)).
+
+### Adding a CI job
+
+A job that reuses the build is written like `check` in
+[the baseline workflow](../.github/workflows/check.yml); later phases add their
+jobs there. It needs `build`, pins the same runner, keeps the source step and
+then uses two actions in `.github/actions`:
+
+- `reuse-build`, given the job's marker name and the source tree, looks up the
+  job's passing marker. When there is none it installs the system libraries,
+  the pinned toolchain and cargo-nextest (`nextest: false` skips it), downloads
+  the artifacts the job asks for (`workspace-archive`, `sdk-archive`, `peer`)
+  to `$RUNNER_TEMP/build` and restores the Rust cache; `dependencies: fallback`
+  restores it only when a requested artifact is missing.
+- The job's own steps run only when `steps.<id>.outputs.passed` is not `true`.
+  They run the artifacts that arrived, such as
+  `scripts/check --from "$RUNNER_TEMP/build"`, and build the rest.
+- `record-pass` with the same marker name, last, under the same condition.
+
+A job that cannot run the Linux artifacts, such as one on a macOS runner, asks
+for none and builds what it runs from the restored cache; the system library
+step does nothing outside Linux.
 
 ### Gitea
 

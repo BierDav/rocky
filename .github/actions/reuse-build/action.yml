@@ -1,0 +1,113 @@
+name: Reuse the build
+description: >-
+  Prepares a Linux job that runs after `build` from the source in `source`:
+  looks up the job's passing marker for the tree and, when there is none,
+  installs the system libraries, the pinned toolchain and cargo-nextest,
+  downloads the build artifacts the job runs to `$RUNNER_TEMP/build` and
+  restores the Rust cache. See docs/development.md#adding-a-ci-job.
+
+inputs:
+  job:
+    description: The job's marker name, recorded by the record-pass action.
+    required: true
+  tree:
+    description: The source tree of the event revision.
+    required: true
+  workspace-archive:
+    description: "`true` to download `nextest-workspace`, the workspace test archive."
+    default: "false"
+  sdk-archive:
+    description: "`true` to download `nextest-sdk`, the SDK test archive without default features."
+    default: "false"
+  peer:
+    description: "`true` to download `rocky-peer`, the custody peer binary."
+    default: "false"
+  nextest:
+    description: "`false` for a job that runs no nextest archives."
+    default: "true"
+  dependencies:
+    description: >-
+      When to restore the Rust cache: `always`, or `fallback` for a job that
+      compiles only when an artifact it downloads is missing.
+    default: always
+
+outputs:
+  passed:
+    description: "`true` when the job passed for this tree; every later step skips."
+    value: ${{ steps.passed.outputs.cache-hit == 'true' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Look for a passing run of this tree
+      id: passed
+      uses: actions/cache/restore@v4
+      with:
+        path: passed
+        key: baseline-${{ inputs.job }}-${{ runner.os }}-${{ inputs.tree }}
+        lookup-only: true
+
+    - name: Install the system build dependencies
+      if: steps.passed.outputs.cache-hit != 'true'
+      shell: sh
+      working-directory: source
+      run: ./scripts/ci/install-system-deps
+
+    - uses: dtolnay/rust-toolchain@1.99.0
+      if: steps.passed.outputs.cache-hit != 'true'
+      with:
+        components: rustfmt, clippy
+
+    - uses: taiki-e/install-action@v2
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true' && github.server_url == 'https://github.com'
+      with:
+        tool: cargo-nextest
+
+    # install-action's checksum check fails with the Gitea runner's sha256sum,
+    # so Gitea installs the matching nextest for the runner architecture.
+    - name: Install cargo-nextest on Gitea
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true' && github.server_url != 'https://github.com'
+      shell: sh
+      working-directory: source
+      run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
+
+    # Each is missing when `build` found the tree's checks passed or failed to
+    # upload it; the job then builds what it runs.
+    - name: Download the workspace test archive
+      id: workspace
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.workspace-archive == 'true'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: nextest-workspace
+        path: ${{ runner.temp }}/build
+
+    - name: Download the SDK test archive
+      id: sdk
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.sdk-archive == 'true'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: nextest-sdk
+        path: ${{ runner.temp }}/build
+
+    - name: Download the custody peer
+      id: peer
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.peer == 'true'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: rocky-peer
+        path: ${{ runner.temp }}/build
+
+    - uses: Swatinem/rust-cache@v2
+      if: >-
+        steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
+        || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
+        || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
+        || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
+      with:
+        workspaces: source -> target
+        shared-key: check
+        cache-workspace-crates: true
+        save-if: false

@@ -47,3 +47,14 @@ receipts would exceed it again, and the scope could not bootstrap.
 Fix: send the latest command beside the page, or reference it by hash and let
 the peer fetch it with its result, and encode byte strings as CBOR byte strings
 so the budget no longer reserves two bytes per stored byte.
+
+## Kotlin tests choose TCP ports that another process can take
+
+`sdks/kotlin/room-qualification` and `examples/shoppinglist-app/shared` tests
+pick a listen address with `ServerSocket(0)`, close it and pass the port to
+`PeerTransport.Tcp`, which binds it later. On a host running other tests, a
+process can take the port in between; `RoomGateTest` failed once on
+2026-10-10 with `Address already in use (os error 48)` during `./kotlin check`.
+
+Fix: let `PeerTransport.Tcp` listen on port 0 and advertise the bound port,
+and use that in the tests.

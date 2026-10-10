@@ -1,6 +1,15 @@
 # 1. Test speed
 
-Status: not started.
+Status: implemented on 2026-10-10; completion gate met on the developer host,
+with the [baseline and result](01-test-speed-evidence.md) and the
+[budgets](../development.md#test-budgets). The warm `./scripts/check` went from
+535 to 241–300 s, `./kotlin check` from 311 to 110–127 s and the shopping check
+from 344 to 82–97 s, with every test still passing. The `rocky-coordinator` package
+loop misses 60 s at 72 s; the cause and its largest test are named. Integration
+binaries were not merged: link time does not dominate. No hosted CI run was
+observed (GitHub starts no job for billing; the Gitea API needs a token), so the
+CI budgets and the CI side of the per-test limit were checked only with the
+`ci` profile locally.
 Owner: `scripts/check`, `.config/nextest.toml`, `.github/workflows`,
 `sdks/native/check`, the root `./kotlin check` and
 `examples/shoppinglist-app/check`. No dependency. Wave 0.

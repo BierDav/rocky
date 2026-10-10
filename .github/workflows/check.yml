@@ -218,6 +218,8 @@ jobs:
           compression-level: 0
 
   check:
+    # A job after `build`: the source step, reuse-build, its own steps and
+    # record-pass. Add a job the same way; see docs/development.md#adding-a-ci-job.
     needs: build
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 45
@@ -243,66 +245,17 @@ jobs:
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
           echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
-      - name: Look for a passing run of this tree
-        id: passed
-        uses: actions/cache/restore@v4
+      - id: reuse
+        uses: ./source/.github/actions/reuse-build
         with:
-          path: passed
-          key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
-          lookup-only: true
-
-      - name: Install the system build dependencies
-        if: steps.passed.outputs.cache-hit != 'true'
-        working-directory: source
-        run: ./scripts/ci/install-system-deps
-
-      - uses: dtolnay/rust-toolchain@1.99.0
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          components: rustfmt, clippy
-
-      # The build job compiles; only a fallback rebuild (a missing archive) does
-      # here.
-      - uses: Swatinem/rust-cache@v2
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          workspaces: source -> target
-          shared-key: check
-          cache-workspace-crates: true
-          save-if: false
-
-      - uses: taiki-e/install-action@v2
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
-        with:
-          tool: cargo-nextest
-
-      # install-action's checksum check fails with the Gitea runner's sha256sum,
-      # so Gitea installs the matching nextest for the runner architecture.
-      - name: Install cargo-nextest on Gitea
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        working-directory: source
-        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
-
-      # Both are missing when `build` found this tree's checks passed or failed
-      # to upload one; the job then builds what it runs.
-      - name: Download the workspace test archive
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-workspace
-          path: ${{ runner.temp }}/build
-
-      - name: Download the SDK test archive
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-sdk
-          path: ${{ runner.temp }}/build
+          job: check
+          tree: ${{ steps.source.outputs.tree }}
+          workspace-archive: true
+          sdk-archive: true
+          dependencies: fallback
 
       - name: Run shared checks
-        if: steps.passed.outputs.cache-hit != 'true'
+        if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
           if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ] \
@@ -314,15 +267,11 @@ jobs:
             ./scripts/check --no-clippy
           fi
 
-      - name: Record the passing tree
-        if: steps.passed.outputs.cache-hit != 'true'
-        run: touch passed
-
-      - uses: actions/cache/save@v4
-        if: steps.passed.outputs.cache-hit != 'true'
+      - uses: ./source/.github/actions/record-pass
+        if: steps.reuse.outputs.passed != 'true'
         with:
-          path: passed
-          key: baseline-check-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          job: check
+          tree: ${{ steps.source.outputs.tree }}
 
   slow:
     # Soak tests: on pushes to the default branch only; releases do not wait for them.
@@ -352,56 +301,16 @@ jobs:
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
           echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
-      - name: Look for a passing run of this tree
-        id: passed
-        uses: actions/cache/restore@v4
+      - id: reuse
+        uses: ./source/.github/actions/reuse-build
         with:
-          path: passed
-          key: baseline-slow-${{ runner.os }}-${{ steps.source.outputs.tree }}
-          lookup-only: true
-
-      - name: Install the system build dependencies
-        if: steps.passed.outputs.cache-hit != 'true'
-        working-directory: source
-        run: ./scripts/ci/install-system-deps
-
-      - uses: dtolnay/rust-toolchain@1.99.0
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          workspaces: source -> target
-          shared-key: check
-          cache-workspace-crates: true
-          save-if: false
-
-      - uses: taiki-e/install-action@v2
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
-        with:
-          tool: cargo-nextest
-
-      # install-action's checksum check fails with the Gitea runner's sha256sum,
-      # so Gitea installs the matching nextest for the runner architecture.
-      - name: Install cargo-nextest on Gitea
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url != 'https://github.com'
-        working-directory: source
-        run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
-
-      # Missing when `build` found this tree's checks passed or failed to upload
-      # it; the job then builds what it runs.
-      - name: Download the workspace test archive
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: nextest-workspace
-          path: ${{ runner.temp }}/build
+          job: slow
+          tree: ${{ steps.source.outputs.tree }}
+          workspace-archive: true
+          dependencies: fallback
 
       - name: Run soak tests
-        if: steps.passed.outputs.cache-hit != 'true'
+        if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
           if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ]; then
@@ -410,15 +319,11 @@ jobs:
             ./scripts/check --slow
           fi
 
-      - name: Record the passing tree
-        if: steps.passed.outputs.cache-hit != 'true'
-        run: touch passed
-
-      - uses: actions/cache/save@v4
-        if: steps.passed.outputs.cache-hit != 'true'
+      - uses: ./source/.github/actions/record-pass
+        if: steps.reuse.outputs.passed != 'true'
         with:
-          path: passed
-          key: baseline-slow-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          job: slow
+          tree: ${{ steps.source.outputs.tree }}
 
   shopping:
     # Multi-process shopping qualification: device JVMs and the packaged custody peer.
@@ -449,44 +354,18 @@ jobs:
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
           echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
 
-      - name: Look for a passing run of this tree
-        id: passed
-        uses: actions/cache/restore@v4
+      # The Kotlin build compiles the native library, which needs the
+      # restored registry even with the custody peer.
+      - id: reuse
+        uses: ./source/.github/actions/reuse-build
         with:
-          path: passed
-          key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
-          lookup-only: true
-
-      - name: Install the system build dependencies
-        if: steps.passed.outputs.cache-hit != 'true'
-        working-directory: source
-        run: ./scripts/ci/install-system-deps
-
-      - uses: dtolnay/rust-toolchain@1.99.0
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        if: steps.passed.outputs.cache-hit != 'true'
-        with:
-          workspaces: source -> target
-          shared-key: check
-          cache-workspace-crates: true
-          save-if: false
-
-      # Missing when `build` found this tree's checks passed or failed to upload
-      # it; the qualification then builds the peer itself.
-      - name: Download the custody peer
-        if: steps.passed.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: rocky-peer
-          path: ${{ runner.temp }}/build
+          job: shopping
+          tree: ${{ steps.source.outputs.tree }}
+          peer: true
+          nextest: false
 
       - name: Run the shopping qualification
-        if: steps.passed.outputs.cache-hit != 'true'
+        if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
           set -euo pipefail
@@ -497,15 +376,11 @@ jobs:
           fi
           ./examples/shoppinglist-app/qualify
 
-      - name: Record the passing tree
-        if: steps.passed.outputs.cache-hit != 'true'
-        run: touch passed
-
-      - uses: actions/cache/save@v4
-        if: steps.passed.outputs.cache-hit != 'true'
+      - uses: ./source/.github/actions/record-pass
+        if: steps.reuse.outputs.passed != 'true'
         with:
-          path: passed
-          key: baseline-shopping-${{ runner.os }}-${{ steps.source.outputs.tree }}
+          job: shopping
+          tree: ${{ steps.source.outputs.tree }}
 
   android:
     # Runs the release workflow's Android build steps to keep its caches warm:

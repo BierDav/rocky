@@ -15,13 +15,17 @@ struct Fixture {
     private: ResourceScope,
 }
 /// From a day ago for 300 days: a fixture chain's validity, within the
-/// longest a chain may live.
+/// longest a chain may live. Read once per process, so a link issued after a
+/// second boundary never outlives its parent.
 pub(crate) fn lifetime() -> (u64, u64) {
-    let time = now().unwrap();
-    (
-        time - rocky_credentials::DAY,
-        time + 300 * rocky_credentials::DAY,
-    )
+    static LIFETIME: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    *LIFETIME.get_or_init(|| {
+        let time = now().unwrap();
+        (
+            time - rocky_credentials::DAY,
+            time + 300 * rocky_credentials::DAY,
+        )
+    })
 }
 /// Issuance terms for a fixture: from now for 300 days.
 pub(crate) fn validity() -> (u64, u64, u64) {

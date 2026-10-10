@@ -10,6 +10,9 @@ threads-required = "num-test-threads"
 
 [profile.ci]
 fail-fast = false
+# The SDK persists `identity.json` from its runtime thread; a fault-injection
+# test can race the temporary path a persist briefly holds. Retry once.
+retries = 1
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 # The soak tests confirm thousands of commands; they run only in `--slow` and

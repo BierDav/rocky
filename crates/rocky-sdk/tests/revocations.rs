@@ -148,12 +148,14 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         json!({"issuer_registry": [1], "items": [1], "notes": [1, 2]})
     );
 
-    // They meet. The first to sync is refused by the other's digest,
-    // renews from it once and learns its statement; the second then learns
-    // the first's the same way, and the first's next sync succeeds.
+    // They meet. The handshake gives each the other's statement; each
+    // then renews once for the other's rotated key, the first while it
+    // syncs, the second on its next sync. The first's checkpoint import
+    // fails until the second holds its key too.
     let (first, second) = if a_first { (&a, &b) } else { (&b, &a) };
     let _ = first.sync().await;
     assert_eq!(revocations(first).await["statements"], 2);
+    assert_eq!(revocations(second).await["statements"], 2);
     second.sync().await.map_err(|error| error.to_string())?;
     first.sync().await.map_err(|error| error.to_string())?;
     let both = revocations(&a).await;
@@ -167,22 +169,15 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
         );
     }
 
-    // A member whose issuer holds both is refused by its issuer's digest,
-    // renews once and then holds both. Its peer, not yet renewed, is
-    // refused by the named error.
+    // A member learns both from its issuer's handshake and renews once for
+    // the keys. Its peer learns both from the member's handshake, before
+    // it ever met an issuer again, and renews on its next sync.
     m.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(revocations(&m).await, both);
-    let refused = m.peer(&n.node().await).await;
-    assert!(
-        refused["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("revocation set differs")),
-        "{refused}"
-    );
-    n.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(revocations(&n).await, both);
-    m.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(m.peer(&n.node().await).await["error"], Value::Null);
+    n.sync().await.map_err(|error| error.to_string())?;
+    m.sync().await.map_err(|error| error.to_string())?;
     for (name, device) in [("m", &m), ("n", &n)] {
         assert_eq!(
             identity(root, name)?["keys"],

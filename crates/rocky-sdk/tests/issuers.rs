@@ -94,11 +94,9 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     assert_eq!(issuers(root, "early")?, [a_node.as_str()]);
     early.ok(json!({"type": "renew"})).await;
     assert_eq!(issuers(root, "early")?, [a_node.clone(), b_node.clone()]);
-    // The second issuer refuses a device it never saw; that device renews
-    // from it rather than from the creator, and is served from then on.
+    // The second issuer serves a device it never saw: its chain admits it.
     synced(&late).await?;
-    let known = b.ok(json!({"type": "devices"})).await.to_string();
-    assert!(known.contains(&late.node().await), "{known}");
+    assert_eq!(b.peer(&late.node().await).await["state"], "connected");
     assert_eq!(
         identity(root, "late")?["peers"]
             .as_object()

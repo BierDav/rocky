@@ -748,22 +748,14 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     let public_only = EncryptedReplica::open(dir.path().join("b.db"), f.app(), bob_config)
         .await
         .unwrap();
-    let known = [carol.public_key(), bob.public_key()];
 
     // The hub learns its peer from the handshake; the stream is an
     // in-memory pipe, as any reliable ordered transport would be.
     let serve = |stream| {
         let (source, hub, credentials) = (source.clone(), hub.clone(), hub_credentials.clone());
         async move {
-            let mut session = NativeSession::accept(
-                stream,
-                hub,
-                credentials,
-                crate::tests::unrevoked(),
-                |peer| known.contains(peer),
-                MAX_SECURE_BYTES,
-            )
-            .await?;
+            let mut session =
+                NativeSession::accept(stream, &source, hub, credentials, MAX_SECURE_BYTES).await?;
             session.serve(&source).await
         }
     };
@@ -774,9 +766,9 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     let client = async {
         let mut session = NativeSession::authenticate(
             near,
+            &full,
             carol.clone(),
             carol_credentials.clone(),
-            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -816,9 +808,9 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     let client = async {
         let mut session = NativeSession::authenticate(
             near,
+            &public_only,
             bob.clone(),
             bob_credentials.clone(),
-            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -862,9 +854,9 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     let client = async {
         let mut session = NativeSession::authenticate(
             near,
+            &full,
             carol.clone(),
             carol_credentials.clone(),
-            crate::tests::unrevoked(),
             hub.public_key(),
             MAX_SECURE_BYTES,
         )
@@ -894,9 +886,9 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     let stranger = PrivateKey::new();
     let client = NativeSession::authenticate(
         near,
+        &full,
         stranger,
         carol_credentials,
-        crate::tests::unrevoked(),
         hub.public_key(),
         MAX_SECURE_BYTES,
     );

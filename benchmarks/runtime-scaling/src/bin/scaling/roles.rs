@@ -166,10 +166,9 @@ fn handle(node: &Node, label: &str, index: usize) -> Commitment {
     bytes.extend((index as u64).to_le_bytes());
     commitment("roles.handle.v1", &bytes)
 }
-/// Serves `node` to `peer` until it disconnects or the task is aborted.
+/// Serves `node` to one peer until it disconnects or the task is aborted.
 async fn serve(
     node: &Node,
-    peer: PublicKey,
 ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), Failure> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -178,15 +177,11 @@ async fn serve(
         let Ok((stream, _)) = listener.accept().await else {
             return;
         };
-        let Ok(digest) = node.replica.revocation_digest().await else {
-            return;
-        };
-        let Ok(mut session) = NativeSession::authenticate(
+        let Ok(mut session) = NativeSession::accept(
             stream,
+            &node.replica,
             node.key.clone(),
             node.credentials.clone(),
-            digest,
-            peer,
             MAX_SECURE_BYTES,
         )
         .await
@@ -211,12 +206,12 @@ async fn connect(
     client: &Node,
     server: &Node,
 ) -> Result<(NativeSession, tokio::task::JoinHandle<()>), Failure> {
-    let (address, task) = serve(server, client.key.public_key()).await?;
+    let (address, task) = serve(server).await?;
     let session = NativeSession::authenticate(
         TcpStream::connect(address).await?,
+        &client.replica,
         client.key.clone(),
         client.credentials.clone(),
-        client.replica.revocation_digest().await?,
         server.key.public_key(),
         MAX_SECURE_BYTES,
     )

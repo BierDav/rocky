@@ -57,8 +57,9 @@ any issuer, and a renewal or grant records the new capability.
 
 ## Reading it
 
-- `admitted()`: an issuer serves sync to its configured peers and every
-  recorded device without a tombstone.
+- Sync admission reads no registry: any device whose chain and the
+  revocation set admit it is served
+  ([roster-free admission](../decisions/0051-roster-free-admission.md)).
 - `peer_add` on an issuer refuses a tombstoned contact; any device refuses a
   contact a held [revocation](revocations.md) names.
 - Renewal refuses a node or user a held statement, a tombstone or the record

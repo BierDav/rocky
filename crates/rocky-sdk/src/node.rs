@@ -40,6 +40,8 @@ const MAX_SUBSCRIPTIONS: usize = 64;
 const MAX_SESSIONS: usize = 64;
 /// Concurrent inbound streams a node serves; more are dropped.
 const INBOUND: usize = 32;
+/// Peers met without a contact that `peers` lists.
+const MET: usize = 64;
 /// How long a closing network service lets its work finish before it
 /// cancels what remains.
 const DRAIN: Duration = Duration::from_secs(5);
@@ -236,6 +238,12 @@ pub(crate) struct Node {
     pub(crate) activity: crate::activity::Activity,
     backups: Mutex<()>,
     reached: std::sync::Mutex<BTreeMap<PublicKey, Reached>>,
+    /// Peers whose sessions this device served, with the last time; at
+    /// most `MET` are kept.
+    met: std::sync::Mutex<BTreeMap<PublicKey, u64>>,
+    /// A session brought statements since the last renewal. Rotated keys
+    /// still arrive by renewal, so the next sync pass renews once.
+    learned: AtomicBool,
     /// The application's coordinator, when it composed strong commands.
     coordinator: Option<Arc<dyn Coordinator>>,
     /// Takes an unassigned domain of a coordination service for this
@@ -285,6 +293,8 @@ impl Node {
             activity: crate::activity::Activity::new(),
             backups: Mutex::new(()),
             reached: std::sync::Mutex::new(BTreeMap::new()),
+            met: std::sync::Mutex::new(BTreeMap::new()),
+            learned: AtomicBool::new(false),
             coordinator,
             acquire,
             service: None,
@@ -988,27 +998,38 @@ impl Node {
         self.forget_readers().await;
         self.status(client).await
     }
-    /// The configured peers, their routes and the last attempt to sync.
+    /// Every peer met or kept as a contact: its routes, whether it is a
+    /// configured contact, and the last attempt to sync with it. A peer met
+    /// only through its own session has no routes.
     async fn peers(&self) -> Vec<Value> {
         let settings = self.settings.lock().await;
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
-        settings
+        let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+        let nodes: std::collections::BTreeSet<PublicKey> = settings
             .peers
-            .iter()
-            .map(|(node, contact)| {
-                let last = reached.get(node);
-                let state = match last {
-                    None => "unknown",
-                    Some(Reached { error: None, .. }) => "connected",
-                    Some(_) => "unreachable",
+            .keys()
+            .chain(met.keys())
+            .filter(|node| !settings.revocations.revokes(node))
+            .copied()
+            .collect();
+        nodes
+            .into_iter()
+            .map(|node| {
+                let contact = settings.peers.get(&node);
+                let last = reached.get(&node);
+                let state = match (last, met.get(&node)) {
+                    (Some(Reached { error: None, .. }), _) | (None, Some(_)) => "connected",
+                    (Some(_), _) => "unreachable",
+                    (None, None) => "unknown",
                 };
-                let issuer = settings.issuers.contains(node);
+                let checked = last.map(|last| last.at).or_else(|| met.get(&node).copied());
                 json!({
                     "node": node.to_hex(),
-                    "issuer": issuer,
-                    "routes": contact.routes,
+                    "issuer": settings.issuers.contains(&node),
+                    "configured": contact.is_some(),
+                    "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
                     "state": state,
-                    "checked": last.map(|last| last.at.to_string()),
+                    "checked": checked.map(|at| at.to_string()),
                     "error": last.and_then(|last| last.error.clone()),
                 })
             })
@@ -1495,6 +1516,7 @@ impl Node {
                 return Err(error);
             }
         };
+        self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
         if !epochs_only && settings.lacks(&renewed.revocations)? {
             rocky_credentials::write_private(&self.path.with_file_name("bootstrap.json"), b"true")?;
@@ -1736,6 +1758,15 @@ impl Node {
         }
     }
     fn inbound_sync(&self, peer: PublicKey) {
+        if let Ok(at) = now() {
+            let mut met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+            met.insert(peer, at);
+            if met.len() > MET
+                && let Some(oldest) = met.iter().min_by_key(|(_, at)| **at).map(|(node, _)| *node)
+            {
+                met.remove(&oldest);
+            }
+        }
         let backed_off = self
             .retries
             .lock()
@@ -1882,8 +1913,17 @@ impl Node {
         {
             let _ = self.authors(Some(transport)).await;
         }
-        let registry = Box::pin(self.admission()).await;
-        let targets = self.settings.lock().await.targets(&registry);
+        let renewable = member || !settings.issuers.is_empty();
+        // A served session brought statements: renew for the rotated keys
+        // before moving rows.
+        if renewable && self.learned.load(Ordering::SeqCst) {
+            let _ = self.renew(Some(transport), true, None, true).await;
+            if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+                return Err(Box::new(crate::enrollment::Revoked(statement)));
+            }
+        }
+        let targets = self.dialed(&*self.settings.lock().await);
+        self.replica.configure_peers(settings.kept()).await;
         let needs_initial = {
             let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
             targets.iter().any(|(peer, _)| !retries.contains_key(peer))
@@ -1927,7 +1967,6 @@ impl Node {
                 self.retry_deadline().is_some(),
             ));
         }
-        let renewable = member || !settings.issuers.is_empty();
         let mut targets = targets;
         let mut results = Vec::new();
         for round in 0..2 {
@@ -1981,6 +2020,10 @@ impl Node {
                 self.record_reach(peer, before, &result);
                 results.push((peer, contact, generation, result));
             }
+            // A peer told this device of its own revocation.
+            if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
+                return Err(Box::new(crate::enrollment::Revoked(statement)));
+            }
             let failed = |result: &Result<(bool, bool, sync::Transfer), Failure>| {
                 result
                     .as_ref()
@@ -2004,17 +2047,24 @@ impl Node {
                 if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                     return Err(Box::new(crate::enrollment::Revoked(statement)));
                 }
-                if renewed {
+                // Without a renewal, a sync that stopped for learned
+                // statements still moves its rows; new keys wait.
+                let learned = |result: &Result<(bool, bool, sync::Transfer), Failure>| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.is::<sync::Learned>())
+                };
+                if renewed || results.iter().any(|(_, _, _, result)| learned(result)) {
+                    let again = |result: &Result<_, Failure>| match renewed {
+                        true => result.is_ok() || failed(result),
+                        false => learned(result),
+                    };
                     targets = results
                         .iter()
-                        .filter(|(_, _, _, result)| result.is_ok() || failed(result))
+                        .filter(|(_, _, _, result)| again(result))
                         .map(|(peer, contact, generation, _)| (*peer, contact.clone(), *generation))
                         .collect();
-                    results.retain(|(_, _, _, result)| {
-                        result
-                            .as_ref()
-                            .is_err_and(|error| error.is::<ServiceError>())
-                    });
+                    results.retain(|(_, _, _, result)| !again(result));
                     continue;
                 }
             }
@@ -2062,7 +2112,70 @@ impl Node {
             _ => Ok((json!({"state": "connected", "peers": connected}), retry)),
         }
     }
+    /// The contacts one pass dials: issuers first, then the least recently
+    /// attempted, at most `MAX_DIALED`.
+    fn dialed(&self, settings: &Settings) -> Vec<(PublicKey, Contact)> {
+        let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut targets = settings.targets();
+        targets.sort_by_key(|(node, _)| {
+            (
+                !settings.issuers.contains(node),
+                reached.get(node).map(|reached| reached.at),
+            )
+        });
+        targets.truncate(crate::enrollment::MAX_DIALED);
+        targets
+    }
+    /// Keeps the statements the replica learned in sessions in this
+    /// identity. One that revokes this device, which the replica does not
+    /// keep, is recorded as after a refused renewal; rows of a newly revoked
+    /// author arrive by checkpoint.
+    async fn absorb_revocations(&self, outcome: Option<&Failure>) -> Result<(), Failure> {
+        let held = self.replica.revocations().await;
+        let revoking = outcome.and_then(revoked_by);
+        let mut settings = self.settings.lock().await;
+        if !settings.lacks(&held)? && revoking.is_none() {
+            return Ok(());
+        }
+        let mut draft = settings.clone();
+        if draft.lacks(&held)? {
+            draft.learn_revocations(&held)?;
+            draft.forget_revoked();
+            self.learned.store(true, Ordering::SeqCst);
+            // Issuers retain sibling epochs; members restore newly revoked authors by checkpoint.
+            if !draft.issuer() {
+                rocky_credentials::write_private(
+                    &self.path.with_file_name("bootstrap.json"),
+                    b"true",
+                )?;
+            }
+            draft.save(&self.path)?;
+        }
+        if let Some(statement) = revoking
+            && draft.revocation(&self.path)?.is_none()
+        {
+            draft.record_revocation(&self.path, statement)?;
+            let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
+            self.activity
+                .record("device_revoked", json!({"node": node.to_hex()}));
+        }
+        *settings = draft;
+        Ok(())
+    }
+    /// Syncs with one peer, then keeps the revocations its sessions brought.
     async fn reconcile(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+        let result = self.exchange(transport, peer, contact).await;
+        let absorbed = self.absorb_revocations(result.as_ref().err()).await;
+        let transfer = result?;
+        absorbed?;
+        Ok(transfer)
+    }
+    async fn exchange(
         &self,
         transport: &dyn Transport,
         peer: PublicKey,
@@ -2076,13 +2189,21 @@ impl Node {
             }
             .into());
         }
+        let (credentials, renewable) = {
+            let settings = self.settings.lock().await;
+            let renewable = !settings.issuer() || !settings.issuers.is_empty();
+            (settings.credentials.clone(), renewable)
+        };
         let upstream = Upstream {
             transport,
             addresses: &addresses,
             peer,
             node: PrivateKey::from_bytes(&self.vault.get("node")?),
-            credentials: self.settings.lock().await.credentials.clone(),
-            revocations: self.replica.revocation_digest().await?,
+            credentials,
+            renew_from: match renewable {
+                true => Some(self.replica.revocation_digest().await?),
+                false => None,
+            },
         };
         let coordinator = self
             .coordinator
@@ -2092,7 +2213,7 @@ impl Node {
         let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
             // A stalled dial must not hold the shared checkpoint import slot.
-            let first = sync::session(&upstream).await?;
+            let first = sync::session(&self.replica, &upstream).await?;
             let _bootstrap = self.bootstrap.lock().await;
             if !marker.exists() {
                 first.close().await?;
@@ -2173,30 +2294,29 @@ impl Node {
         bootstrapped.extend(transfer);
         Ok((newer, retry, bootstrapped))
     }
-    /// Serves one inbound stream: sync for the peers this device admits,
-    /// pairing and renewal on an issuer.
+    /// Serves one inbound stream: sync for any peer its chain and the
+    /// revocation set admit, pairing and renewal on an issuer.
     pub async fn serve(&self, protocol: Protocol, stream: Stream) -> Result<(), Failure> {
         if !self.online.load(Ordering::SeqCst) || self.ended.lock().await.is_some() {
             return Err("this node is offline".into());
         }
         match protocol {
             Protocol::Sync => {
-                let registry = Box::pin(self.admission()).await;
                 let settings = self.settings.lock().await.clone();
+                self.replica.configure_peers(settings.kept()).await;
                 let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-                let admitted = settings.admitted(&registry);
-                let (credentials, coordinator) =
-                    (settings.credentials, self.coordinator.as_deref());
-                sync::serve(
+                let served = sync::serve(
                     stream,
                     &self.replica,
                     node,
-                    credentials,
-                    admitted,
-                    coordinator,
+                    settings.credentials,
+                    self.coordinator.as_deref(),
                     |peer| self.inbound_sync(peer),
                 )
-                .await
+                .await;
+                let absorbed = self.absorb_revocations(served.as_ref().err()).await;
+                served?;
+                absorbed
             }
             Protocol::Pair => {
                 answer(stream, async |request| {
@@ -2228,7 +2348,7 @@ impl Node {
                             self.domain.manifest().hash(),
                             (now()?, 300),
                         )?;
-                        let registry = self.admission().await;
+                        let registry = self.registry().await?;
                         let mut current = self.settings.lock().await;
                         let mut draft = current.clone();
                         let added = draft.learn_revocations(&request.revocations)?;
@@ -3072,6 +3192,15 @@ fn subscription(request: &Value) -> Result<u64, Failure> {
         .ok_or("subscription must be a string")?
         .parse()?)
 }
+/// The statement that revokes this device, when a session ended on it.
+fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
+    match error.downcast_ref::<Error>()? {
+        Error::Application(error) => error
+            .downcast_ref::<rocky_secure::network::Revoked>()
+            .map(|revoked| (*revoked.0).clone()),
+        _ => None,
+    }
+}
 fn is_authority(error: &Failure) -> bool {
     error.to_string().contains("session authority changed")
 }
@@ -3085,11 +3214,6 @@ pub fn error(error: &Failure) -> Value {
         ("registry_full", false)
     } else if error.is::<crate::enrollment::RevocationSetFull>() {
         ("revocation_set_full", false)
-    } else if matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::Rejected(message)) if message == rocky_secure::network::REVOCATIONS_DIFFER
-    ) {
-        ("revocations_differ", true)
     } else if error.is::<Refused>() {
         ("rejected", false)
     } else if error.is::<Deferred>() {

@@ -1,3 +1,4 @@
+mod admission;
 mod apply;
 mod author;
 mod backup;
@@ -34,6 +35,7 @@ use crate::{
     scoped_connection::ScopedConnection,
     storage::{bindings, collect_rows, retryable, rows},
 };
+pub use admission::MAX_UNCONFIGURED_PEERS;
 pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_FRAME};
 pub use checkpoint::{
     AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
@@ -64,7 +66,7 @@ pub use session::{SecureSession, SecureTransaction, SessionStatus, UpdateMode};
 pub use sql::{SecureCommit, SecureRows, SecureSql};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -238,6 +240,11 @@ pub(super) struct Inner<A> {
     /// The submission sequence through which every ticket is settled, and
     /// each domain's last request sequence within it.
     pub(super) acknowledged: (i64, BTreeMap<rocky_core::Scope, u64>),
+    /// Peers whose credentials and frontiers are kept whatever the bound.
+    configured: BTreeSet<PublicKey>,
+    /// When each peer was last served since open, by a growing count; a
+    /// peer not served since open counts as the least recent.
+    served: (u64, HashMap<PublicKey, u64>),
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
     #[cfg(test)]
@@ -573,6 +580,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             audited: BTreeMap::new(),
             reconciled: None,
             acknowledged: (0, BTreeMap::new()),
+            configured: BTreeSet::new(),
+            served: (0, HashMap::new()),
             #[cfg(test)]
             stage_fault: None,
             #[cfg(test)]
@@ -910,6 +919,36 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(inner);
         self.settle().await?;
         Ok(added)
+    }
+    /// Merges the statements a session peer sent, except one that revokes
+    /// `own`, this device's chain: a replica never holds the statement that
+    /// revokes itself, which its owner records instead. Returns that
+    /// statement, verified, if one came.
+    pub(crate) async fn learn_session_revocations(
+        &self,
+        statements: Vec<SignedRevocation>,
+        own: &CredentialChain,
+    ) -> Result<Option<SignedRevocation>, Error> {
+        let (publisher, app) = {
+            let inner = self.inner.lock().await;
+            (inner.config.publisher, inner.definition.app)
+        };
+        let mut revoking = None;
+        let mut others = Vec::new();
+        for signed in statements {
+            signed.verify(publisher, app).map_err(credential)?;
+            let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
+            if single.revoking(own).map_err(credential)?.is_some() {
+                revoking.get_or_insert(signed);
+            } else {
+                others.push(signed);
+            }
+        }
+        if !others.is_empty() {
+            let set = RevocationSet::try_from(others).map_err(credential)?;
+            self.learn_revocations(&set).await?;
+        }
+        Ok(revoking)
     }
     /// The revocations this replica holds.
     pub async fn revocations(&self) -> RevocationSet {

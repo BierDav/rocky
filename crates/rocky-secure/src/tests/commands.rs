@@ -651,12 +651,11 @@ async fn native_encrypted_invocation_and_result_application() {
     let address = listener.local_addr().unwrap();
     let serve = async {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(
+        let mut session = NativeSession::accept(
             stream,
+            &executor,
             executor_key.clone(),
             executor_credentials,
-            crate::tests::unrevoked(),
-            caller_key.public_key(),
             1024 * 1024,
         )
         .await
@@ -670,9 +669,9 @@ async fn native_encrypted_invocation_and_result_application() {
         let stream = TcpStream::connect(address).await.unwrap();
         let mut session = NativeSession::authenticate(
             stream,
+            &caller,
             caller_key.clone(),
             caller_credentials,
-            crate::tests::unrevoked(),
             executor_key.public_key(),
             1024 * 1024,
         )

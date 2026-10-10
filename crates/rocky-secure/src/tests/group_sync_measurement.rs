@@ -46,7 +46,6 @@ async fn sync(
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
     let writer_peer = writer_node.public_key();
-    let reader_peer = reader_node.public_key();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut visited = BTreeSet::new();
@@ -56,10 +55,9 @@ async fn sync(
             stream.set_nodelay(true).unwrap();
             let mut session = NativeSession::accept(
                 stream,
+                writer,
                 writer_node.clone(),
                 writer_credentials.clone(),
-                crate::tests::unrevoked(),
-                |peer| *peer == reader_peer,
                 MAX_SECURE_BYTES,
             )
             .await
@@ -71,9 +69,9 @@ async fn sync(
             stream.set_nodelay(true).unwrap();
             let mut session = NativeSession::authenticate(
                 stream,
+                reader,
                 reader_node.clone(),
                 reader_credentials.clone(),
-                crate::tests::unrevoked(),
                 writer_peer,
                 MAX_SECURE_BYTES,
             )

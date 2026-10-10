@@ -52,7 +52,7 @@ admission and limits, [decision 0046](../decisions/0046-per-scope-frontier-refus
 refusal and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v8`) pulls by frontier:
+`NativeSession` (label `rocky.native-session.v9`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |
@@ -72,6 +72,13 @@ A frontier names, per author log, the next sequence not held and the next not
 applied. Pages are built from it, so a pass costs the frames that are missing,
 not the history. A requester whose prefix ends at or before a pruned part of a
 log gets `behind` and no frames.
+
+Any admitted peer may report frontiers, so the replica bounds what peers it
+was not told to keep leave behind: at most 256 unconfigured peers hold
+frontiers or horizon credentials, and the least recently served lose theirs
+first. Full nodes and the peers named with `configure_peers` are never
+dropped; a dropped frontier only delays pruning
+([decision 0051](../decisions/0051-roster-free-admission.md)).
 
 ### Custody and pruning
 

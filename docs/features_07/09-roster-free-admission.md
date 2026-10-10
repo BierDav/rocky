@@ -1,10 +1,29 @@
 # 9. Roster-free admission
 
-Status: not started.
+Status: implemented on 2026-10-10 with
+[decision 0051](../decisions/0051-roster-free-admission.md). Acceptance 5 and
+the device revoked while offline are `cargo test -p rocky-sdk --test admission`
+(about 1 s alone); foreign, expired and self-signed chains, the revoked peer,
+another session version, the 1,024-statement exchange and the 300-stranger
+bound are `rocky-secure` `tests::admission`; the 64 strangers against the
+inbound limit are `rocky-sdk` `node::sync_tests::admission` (about 0.5 s
+alone). Equal sets of 1,024 statements exchange 440 bytes after the hellos;
+1,024 against none move 719,214 bytes, every page within a frame. The phase 6
+interim refusal is gone; its acceptance test now passes without it.
 Owner: `rocky-secure` native session; `rocky-core` protocol names; `rocky-sdk`
 serving, peers and sync; the Kotlin `peers()` shape. Depends on
 [phase 6](06-revocation-set.md). Wave 1.
 Follow the [execution contract](README.md#agent-execution-contract).
+
+## Rebase verification
+
+The phase 8 rebase boxes checkpoint pages without changing their Serde encoding.
+Issuers retain the epoch-delivery path rather than starting a member rebootstrap
+when a handshake brings revocations. The three sibling-rotation tests keep their
+assertions and pass. `rocky-secure` builds at development `opt-level = 3`; the
+unchanged frame-encoding test measured 8.627 ms alone, and the two catch-up tests
+with existing exceptions measured 1.463 s and 1.820 s. These meet the ordinary
+10 ms/2 s budgets without relying on those exceptions.
 
 ## Inputs and objective
 

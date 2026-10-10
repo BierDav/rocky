@@ -272,10 +272,8 @@ async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_t
     assert_ne!(by_a["statement"], by_b["statement"]);
     assert_eq!(identity(root, "a")?["keys"], before_a);
     assert_eq!(identity(root, "b")?["keys"], before_b);
-    // Phase 6's renew-once exchange can learn B's statement before B has A's.
-    if let Err(error) = a.sync().await {
-        assert_eq!(error["code"], "revocations_differ", "{error}");
-    }
+    // The handshake gives each issuer the other's statement.
+    sync(&a).await?;
     assert_eq!(
         a.ok(json!({"type":"session"})).await["revocations"]["statements"],
         2

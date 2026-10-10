@@ -16,7 +16,7 @@ token, renewals are signed, and sync runs
 encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/8`,
+Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/9`,
 `rocky/sdk-renew/2`, `rocky/command/1`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream.
@@ -179,7 +179,7 @@ peer. Disable both options or name your own relay to depend on no public service
 
 | Resource | Bound |
 | --- | --- |
-| Inbound streams served at once per network service | 32; further ones are dropped |
+| Inbound streams served at once per network service | 32; further ones are dropped and counted (`network.inbound.refused`) |
 | Inbound streams queued, only while a service is attached | iroh 32, TCP 32, hub 8 |
 | Inbound iroh connections with Rocky ALPNs; streams in flight each | 64; 4 |
 | Cached outbound iroh connections | 64 |
@@ -188,6 +188,9 @@ peer. Disable both options or name your own relay to depend on no public service
 | Session frame read or write | 10 s |
 | Pairing/renewal exchange | 30 s after dialing; each route has its own dial deadline |
 | Sessions per sync and peer | 16 |
+| Contacts kept; contacts dialed per sync pass | 64; 16, issuers first, then the least recently attempted |
+| Peers met without a contact that `peers` lists | 64, the least recent dropped |
+| Unconfigured peers with horizon credentials or frontiers per replica | 256, the least recently served since open losing theirs; contacts, issuers and full nodes are kept |
 | Closing a network service | 5 s drain, then cancellation |
 
 A peer attempt tries routes in order until one connects, each with its own

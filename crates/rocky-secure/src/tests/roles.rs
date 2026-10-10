@@ -154,7 +154,7 @@ async fn stored_rows(replica: &Replica, scope: ResourceScope) -> i64 {
     result.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 /// Serves `node` to one peer until the peer disconnects.
-async fn serve(node: &Node, peer: PublicKey) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn serve(node: &Node) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (key, credentials, replica) = (
@@ -164,15 +164,8 @@ async fn serve(node: &Node, peer: PublicKey) -> (SocketAddr, tokio::task::JoinHa
     );
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let Ok(mut session) = NativeSession::authenticate(
-            stream,
-            key,
-            credentials,
-            crate::tests::unrevoked(),
-            peer,
-            MAX_SECURE_BYTES,
-        )
-        .await
+        let Ok(mut session) =
+            NativeSession::accept(stream, &replica, key, credentials, MAX_SECURE_BYTES).await
         else {
             return;
         };
@@ -197,13 +190,13 @@ async fn connect_with(
     server: &Node,
     budget: usize,
 ) -> (NativeSession, tokio::task::JoinHandle<()>) {
-    let (address, task) = serve(server, node.key.public_key()).await;
+    let (address, task) = serve(server).await;
     let stream = TcpStream::connect(address).await.unwrap();
     let session = NativeSession::authenticate(
         stream,
+        &node.replica,
         node.key.clone(),
         node.credentials.clone(),
-        crate::tests::unrevoked(),
         server.key.public_key(),
         budget,
     )

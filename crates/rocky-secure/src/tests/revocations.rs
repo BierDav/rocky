@@ -1,9 +1,10 @@
-//! The frame rule under a learned revocation set, and the hello's digest
-//! (`docs/decisions/0049-mergeable-revocation-set.md`).
+//! The frame rule under a learned revocation set
+//! (`docs/decisions/0049-mergeable-revocation-set.md`), and the statements
+//! a handshake exchanges (`docs/decisions/0051-roster-free-admission.md`).
 use super::*;
-use crate::network::{NativeSession, REVOCATIONS_DIFFER};
+use crate::network::NativeSession;
 
-async fn open(
+pub(super) async fn open(
     f: &Fixture,
     dir: &TempDir,
     name: &str,
@@ -17,7 +18,7 @@ async fn open(
     .await
     .unwrap()
 }
-async fn insert(
+pub(super) async fn insert(
     replica: &EncryptedReplica<Employees>,
     f: &Fixture,
     row: u8,
@@ -87,80 +88,56 @@ async fn a_learned_revocation_refuses_the_revoked_author_and_admits_every_other(
     assert_eq!(d.revocations().await, revoked);
 }
 
-/// Authenticates `left` to `right` over loopback TCP with each replica's
-/// own digest; returns both sides' results.
-async fn hello(
+/// `right` dials `left` over an in-memory pipe; returns both sides' results.
+pub(super) async fn hello(
     (left_key, left): (&PrivateKey, &EncryptedReplica<Employees>),
     (right_key, right): (&PrivateKey, &EncryptedReplica<Employees>),
     f: &Fixture,
 ) -> (Result<NativeSession, Error>, Result<NativeSession, Error>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (left_digest, right_digest) = (
-        left.revocation_digest().await.unwrap(),
-        right.revocation_digest().await.unwrap(),
-    );
-    let server = async {
-        let (stream, _) = listener.accept().await.unwrap();
+    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    tokio::join!(
         NativeSession::accept(
-            stream,
+            far,
+            left,
             left_key.clone(),
             f.credentials(left_key, f.full()),
-            left_digest,
-            |_| true,
             MAX_SECURE_BYTES,
-        )
-        .await
-    };
-    let client = async {
+        ),
         NativeSession::authenticate(
-            tokio::net::TcpStream::connect(address).await.unwrap(),
+            near,
+            right,
             right_key.clone(),
             f.credentials(right_key, f.full()),
-            right_digest,
             left_key.public_key(),
             MAX_SECURE_BYTES,
         )
-        .await
-    };
-    tokio::join!(server, client)
+    )
 }
 
 #[tokio::test]
-async fn a_hello_with_another_digest_is_refused_by_name_until_both_hold_the_set() {
+async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_union() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (xavier, yara) = (PrivateKey::new(), PrivateKey::new());
     let x = open(&f, &dir, "x.db", &xavier).await;
     let y = open(&f, &dir, "y.db", &yara).await;
-    let (left, right) = hello((&xavier, &x), (&yara, &y), &f).await;
-    assert!(left.is_ok() && right.is_ok());
-
-    let revoked = revoking(
-        &f.publisher,
-        f.app().definition().app,
-        &[PrivateKey::new().public_key()],
-        &[],
-    );
-    y.learn_revocations(&revoked).await.unwrap();
+    let app = f.app().definition().app;
+    let first = revoking(&f.publisher, app, &[PrivateKey::new().public_key()], &[]);
+    let second = revoking(&f.publisher, app, &[PrivateKey::new().public_key()], &[]);
+    x.learn_revocations(&first).await.unwrap();
+    y.learn_revocations(&second).await.unwrap();
     assert_ne!(
         x.revocation_digest().await.unwrap(),
         y.revocation_digest().await.unwrap()
     );
-    // Both sides refuse, each by the same name, after authenticating.
-    let (left, right) = hello((&xavier, &x), (&yara, &y), &f).await;
-    for side in [left, right] {
-        match side {
-            Err(Error::Rejected(message)) => assert_eq!(message, REVOCATIONS_DIFFER),
-            other => panic!("expected the named refusal, got {:?}", other.err()),
-        }
-    }
-    // Once the lagging side holds the statement, the hello succeeds and
-    // rows flow again.
-    x.learn_revocations(&y.revocations().await).await.unwrap();
+    // Each side sends the statement the other lacks; neither refuses.
     insert(&x, &f, 1, "after").await;
     let (left, right) = hello((&xavier, &x), (&yara, &y), &f).await;
     let (mut server, mut client) = (left.unwrap(), right.unwrap());
+    let union = x.revocations().await;
+    assert_eq!(union.len(), 2);
+    assert_eq!(y.revocations().await, union);
+    // Rows flow in the same session.
     let (served, pulled) = tokio::join!(
         async {
             server.serve_once(&x).await.unwrap();

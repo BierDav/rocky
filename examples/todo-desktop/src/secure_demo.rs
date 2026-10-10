@@ -305,18 +305,13 @@ impl SecureDemo {
     ) -> Result<(NativeSession, NativeSession), Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(Error::Io)?;
         let address = listener.local_addr().map_err(Error::Io)?;
-        let (source_digest, target_digest) = (
-            self.replica(source).revocation_digest().await?,
-            self.replica(target).revocation_digest().await?,
-        );
         let server = async {
             let (stream, _) = listener.accept().await.map_err(Error::Io)?;
-            NativeSession::authenticate(
+            NativeSession::accept(
                 stream,
+                self.replica(source),
                 self.identities[source].0.clone(),
                 self.identities[source].1.clone(),
-                source_digest,
-                self.identities[target].0.public_key(),
                 4 * 1024 * 1024,
             )
             .await
@@ -325,9 +320,9 @@ impl SecureDemo {
             let stream = TcpStream::connect(address).await.map_err(Error::Io)?;
             NativeSession::authenticate(
                 stream,
+                self.replica(target),
                 self.identities[target].0.clone(),
                 self.identities[target].1.clone(),
-                target_digest,
                 self.identities[source].0.public_key(),
                 4 * 1024 * 1024,
             )

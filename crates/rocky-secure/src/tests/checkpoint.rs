@@ -546,23 +546,12 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
 }
 
-async fn serve(
-    listener: TcpListener,
-    source: &Replica,
-    identity: (PrivateKey, CredentialChain),
-    peer: PublicKey,
-) {
+async fn serve(listener: TcpListener, source: &Replica, identity: (PrivateKey, CredentialChain)) {
     let (stream, _) = listener.accept().await.unwrap();
-    let mut session = NativeSession::authenticate(
-        stream,
-        identity.0,
-        identity.1,
-        crate::tests::unrevoked(),
-        peer,
-        MAX_SECURE_BYTES,
-    )
-    .await
-    .unwrap();
+    let mut session =
+        NativeSession::accept(stream, source, identity.0, identity.1, MAX_SECURE_BYTES)
+            .await
+            .unwrap();
     while session.serve_once(source).await.is_ok() {}
 }
 
@@ -651,9 +640,9 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
             let stream = TcpStream::connect(address).await.unwrap();
             let mut session = NativeSession::authenticate(
                 stream,
+                &c,
                 keys[2].clone(),
                 c_credentials.clone(),
-                crate::tests::unrevoked(),
                 keys[0].public_key(),
                 MAX_SECURE_BYTES,
             )
@@ -678,12 +667,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         };
         let (report, ()) = tokio::join!(
             client,
-            serve(
-                listener,
-                &a,
-                (keys[0].clone(), a_credentials.clone()),
-                keys[2].public_key()
-            )
+            serve(listener, &a, (keys[0].clone(), a_credentials.clone()),)
         );
         let Some(_) = fault else {
             let report = report.unwrap();

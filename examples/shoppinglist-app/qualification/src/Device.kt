@@ -111,6 +111,7 @@ private class DeviceProcess {
                                 buildJsonObject {
                                     put("node", peer.node)
                                     put("issuer", peer.isIssuer)
+                                    put("configured", peer.isConfigured)
                                     put("state", peer.state)
                                     put("error", peer.error)
                                 }

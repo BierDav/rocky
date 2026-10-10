@@ -64,11 +64,13 @@ the held set:
 - confirmed command results and historical checkpoints verify with no
   revocation at the time they were issued, since a receipt anchors them.
 
-A native session's hello carries the sender's digest. Once both sides
-authenticated, each refuses a peer whose digest differs with
-`network::REVOCATIONS_DIFFER` ("revocation set differs"); neither serves the
-other. [Phase 9](../features_07/09-roster-free-admission.md) carries the
-statements in the session instead.
+Every native session ends its handshake with the
+[revocation exchange](../decisions/0051-roster-free-admission.md): both sides
+compare digests and, when they differ, send each other the statements the
+other lacks, then check the merged set. A peer it revokes is refused as `the
+peer is revoked`; a side it revokes ends the session with `network::Revoked`,
+holding the statement. A replica never merges the statement that revokes its
+own chain: its owner records it instead.
 
 ## In the SDK
 
@@ -81,11 +83,14 @@ commits the record's tombstone and then discards the redo intent
 
 Renewal answers, enrollments, supplied credentials and the answer to
 `rocky.sdk.policy.v1` carry the issuer's whole set; the receiver merges it.
-A sync whose peer refuses its digest (`revocations_differ`) renews once from
-that peer, or from its issuers, and retries; a renewal that brought new
-statements starts a checkpoint bootstrap for the rows of revoked authors. A
-device refused renewal fetches the set with `rocky.sdk.policy.v1` and keeps
-the statement that revokes it in `revoked.json`. Status, readiness and the
+Sessions carry the set too: a device learns a statement from any admitted peer
+it meets. Rotated keys still arrive by renewal, so a sync whose session changed
+the set renews once from that peer, or from its issuers, and retries; a pass
+renews first when a served session brought statements. New statements start a
+checkpoint bootstrap for the rows of revoked authors. A device refused renewal
+fetches the set with `rocky.sdk.policy.v1`, and one a session revoked holds the
+statement from the handshake; either keeps it in `revoked.json` and reports
+`revoked`. Status, readiness and the
 `renewed` activity report `revocations`: the digest and the live statement
 count; Kotlin's `SessionStatus` and `Readiness` carry them as
 `RevocationStatus`.
@@ -101,8 +106,8 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
   rotate all collection keys and known partition secrets held here; only
   their node is named. Non-issuer delegation provenance remains unrecorded
   ([phase 7](../features_07/07-registry-revocation.md)).
-- Until phase 9 a member learns statements only from an issuer's renewal; two
-  members with different sets refuse each other until one renews.
+- A member learns statements from any peer, but the keys a revocation
+  rotated only from an issuer's renewal; without one its rows wait for them.
 - Devices whose clocks straddle a day boundary near an expiry hold different
   digests for up to a day.
 - Two partitioned issuers near the bound may together hold more than 1,024
@@ -115,7 +120,7 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
 | `Revocation` | `app`, `issuer`, `time`, `nodes`, `users`, `capabilities`, `pseudonyms`; ID `rocky.revocation.id.v1` |
 | `SignedRevocation` | Publisher signature `rocky.revocation.v1`, issuer signature `rocky.revocation-issuer.v1`; at most 2,048 bytes |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
-| Native session | `rocky.native-session.v8`, hello with `revocations` |
+| Native session | `rocky.native-session.v9`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
 | Checkpoint statement | Format 7, `revocations` digest of its signer |
 | Horizon statement | Format 3, `revocations` digest of its declaring issuer |
 | Encrypted replica | `rocky.encrypted-replica.v9`; `secure_metadata.revocations` |
@@ -125,9 +130,13 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
 - `cargo test -p rocky-credentials --lib revocation`: every interleaving of
   merges gives one digest, expired statements leave it, a bad statement
   changes nothing, mutual revocations both count.
-- `cargo test -p rocky-secure --lib tests::revocations`: a learned revocation
-  refuses the revoked author and admits other authors' earlier frames; a hello
-  with another digest is refused by name until both hold the set.
+- `cargo test -p rocky-secure --lib tests::revocations tests::admission`: a
+  learned revocation refuses the revoked author and admits other authors'
+  earlier frames; a handshake leaves both sides with the union; a revoked
+  peer learns its statement, which its replica does not keep, and both sides
+  end the session; a full set is paged within frames.
+- `cargo test -p rocky-sdk --test admission`: a member learns a revocation
+  from a peer that is no issuer and stops syncing.
 - `cargo test -p rocky-sdk --lib enrollment::tests`: the fault sweep over
   `revoke`, the 1,025th live statement and tombstones at every issuer.
 - `cargo test -p rocky-sdk --test revocations`: two partitioned issuers each

@@ -699,6 +699,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         inner.verify_chain_scopes(credentials, node, now()?, &[])?;
+        inner.touch_peer(node);
         let bytes = encode(credentials)?;
         let mut rows = inner
             .conn
@@ -712,8 +713,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Ok(());
         }
+        drop(rows);
+        let first = inner.unrecorded_peer(node).await?;
         transaction!(inner, |inner| {
             inner.conn.execute("INSERT INTO secure_horizon_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET credentials=excluded.credentials", [node.as_bytes().to_vec(),bytes.clone()]).await?;
+            if first {
+                inner.bound_peers().await?;
+            }
             Ok(())
         })
     }

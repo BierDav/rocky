@@ -1,6 +1,7 @@
 //! Synchronization with one authorized peer: a device pushes and pulls
-//! every collection over an authenticated native session, and serves the
-//! peers it admits. See `docs/runtime/sdk-enrollment.md`.
+//! every collection over an authenticated native session, and serves every
+//! peer whose chain and the revocation set admit it. See
+//! `docs/runtime/sdk-enrollment.md`.
 use crate::{
     Failure,
     enrollment::dial,
@@ -29,9 +30,21 @@ pub struct Upstream<'a> {
     pub peer: PublicKey,
     pub node: PrivateKey,
     pub credentials: CredentialChain,
-    /// The digest of the local live revocations, which the hello carries.
-    pub revocations: rocky_core::Commitment,
+    /// The revocation digest this sync started from, when it renews: a
+    /// session that changes the set ends the sync with `Learned`.
+    pub renew_from: Option<rocky_core::Commitment>,
 }
+
+/// A session brought revocation statements. Rotated keys still arrive by
+/// renewal, so the sync renews before it moves rows.
+#[derive(Debug)]
+pub(crate) struct Learned;
+impl std::fmt::Display for Learned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the peer sent revocation statements; renewing before sync")
+    }
+}
+impl std::error::Error for Learned {}
 
 /// What one scope exchanged with a peer during a sync.
 #[derive(Clone, Debug, Default)]
@@ -146,7 +159,7 @@ pub(crate) async fn bootstrap(
     for _ in 0..SESSIONS {
         let mut session = match first.take() {
             Some(session) => session,
-            None => session(upstream).await?,
+            None => session(replica, upstream).await?,
         };
         let scope = scopes.get(next).ok_or("missing bootstrap scope")?;
         let (catch_up, checkpoint) = if imported {
@@ -194,17 +207,29 @@ pub(crate) async fn bootstrap(
     }
     Err("bootstrap exceeded its session budget; it continues on the next sync".into())
 }
-pub(crate) async fn session(upstream: &Upstream<'_>) -> Result<NativeSession, Failure> {
+/// A session with the upstream peer. The handshake leaves `replica`
+/// holding every revocation statement the peer sent; see `Learned`.
+pub(crate) async fn session(
+    replica: &EncryptedReplica<TypedCommands>,
+    upstream: &Upstream<'_>,
+) -> Result<NativeSession, Failure> {
     let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
-    Ok(NativeSession::authenticate(
+    let session = NativeSession::authenticate(
         stream,
+        replica,
         upstream.node.clone(),
         upstream.credentials.clone(),
-        upstream.revocations,
         upstream.peer,
         MAX_SECURE_BYTES,
     )
-    .await?)
+    .await?;
+    if let Some(digest) = upstream.renew_from
+        && replica.revocation_digest().await? != digest
+    {
+        session.close().await?;
+        return Err(Box::new(Learned));
+    }
+    Ok(session)
 }
 async fn rows(
     replica: &EncryptedReplica<TypedCommands>,
@@ -215,7 +240,7 @@ async fn rows(
 ) -> Result<bool, Failure> {
     let mut newer = false;
     for _ in 0..SESSIONS {
-        let mut session = session(upstream).await?;
+        let mut session = session(replica, upstream).await?;
         let mut exhausted = false;
         let exchange = session.changed_scopes(replica, scopes).await?;
         transfer.refuse(&exchange.refused);
@@ -336,7 +361,7 @@ async fn results(
         if incomplete.is_empty() {
             return Ok(unavailable);
         }
-        let mut session = session(upstream).await?;
+        let mut session = session(replica, upstream).await?;
         for scope in incomplete {
             session.bootstrap_scope(replica, scope, QUOTA).await?;
         }
@@ -349,7 +374,7 @@ async fn results(
         return Ok(true);
     }
     let mut retry = unavailable || missing.len() == RESULTS;
-    let mut session = session(upstream).await?;
+    let mut session = session(replica, upstream).await?;
     for sequence in missing {
         let pulled = session
             .pull_result(replica, domain, sequence, scopes.to_vec(), coordinator)
@@ -380,25 +405,18 @@ async fn results(
     Ok(retry)
 }
 
-/// Serves one admitted peer's session until it ends.
+/// Serves one peer's session until it ends: any peer whose chain verifies
+/// for this domain and that no held or exchanged statement revokes.
 pub async fn serve(
     stream: Stream,
     replica: &EncryptedReplica<TypedCommands>,
     node: PrivateKey,
     credentials: CredentialChain,
-    admitted: Vec<PublicKey>,
     coordinator: Option<&dyn Coordinator>,
     admitted_peer: impl FnOnce(PublicKey),
 ) -> Result<(), Failure> {
-    let mut session = NativeSession::accept(
-        stream,
-        node,
-        credentials,
-        replica.revocation_digest().await?,
-        |peer| admitted.contains(peer),
-        MAX_SECURE_BYTES,
-    )
-    .await?;
+    let mut session =
+        NativeSession::accept(stream, replica, node, credentials, MAX_SECURE_BYTES).await?;
     admitted_peer(session.peer());
     match coordinator {
         Some(coordinator) => Ok(session.serve_with_commands(replica, coordinator).await?),

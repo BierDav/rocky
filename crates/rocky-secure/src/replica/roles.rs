@@ -479,6 +479,9 @@ impl<A: RowApplication> Inner<A> {
             }
             reports.push((encode(&frontier.scope)?, frontier.logs.clone(), reads));
         }
+        self.touch_peer(peer);
+        let first = reports.iter().any(|(_, logs, _)| !logs.is_empty())
+            && self.unrecorded_peer(peer).await?;
         transaction!(self, |inner| {
             for (scope, logs, reads) in &reports {
                 for log in logs {
@@ -497,6 +500,9 @@ impl<A: RowApplication> Inner<A> {
                         ]),
                     ).await?;
                 }
+            }
+            if first {
+                inner.bound_peers().await?;
             }
             Ok(())
         })?;

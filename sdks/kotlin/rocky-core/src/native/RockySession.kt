@@ -192,8 +192,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     ).text("uri")
 
     /**
-     * Configures the device a contact names as a peer to sync with and serve, or learns its new routes.
-     * Both devices add each other. Its credentials are still checked on every session.
+     * Keeps the device a contact names as a contact to sync with, or learns its new routes. A contact grants
+     * nothing: any device of the domain whose credentials and the revocation set admit it is served.
      */
     suspend fun addPeer(contact: String): String = client.call(request("peer_add") { put("contact", contact) }).text("node")
 
@@ -201,6 +201,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     suspend fun removePeer(node: String) {
         client.call(request("peer_remove") { put("node", node) })
     }
+
+    /** Every peer met or kept as a contact; [Peer.isConfigured] tells them apart. */
     suspend fun peers(): List<Peer> = client.call(request("peers")).getValue("peers").jsonArray.map { peer(it.jsonObject) }
 
     /** The network service's state and bounds, independent of the database's. */
@@ -342,6 +344,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
         private fun peer(value: JsonObject) = Peer(
             value.text("node"),
             value.getValue("issuer").jsonPrimitive.boolean,
+            value.getValue("configured").jsonPrimitive.boolean,
             routes(value),
             value.text("state"),
             value.getValue("checked").jsonPrimitive.contentOrNull?.toLong(),

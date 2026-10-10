@@ -1,5 +1,5 @@
-//! Direct sync between configured authorized peers, and identities that
-//! do not depend on routes or transport kinds. See
+//! Direct sync between admitted peers, and identities that do not depend
+//! on routes or transport kinds. See
 //! `docs/runtime/sdk-enrollment.md` and `docs/runtime/sdk-transports.md`.
 use common::{Device, Failure, introduce};
 use data_encoding::BASE64URL_NOPAD;
@@ -39,8 +39,8 @@ async fn enroll(root: &Path, hub: &Arc<Hub>, members: &[&str]) -> Result<Vec<Dev
 async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
-    let devices = enroll(root.path(), &hub, &["b", "c", "d"]).await?;
-    let [a, b, c, d] = &devices[..] else {
+    let devices = enroll(root.path(), &hub, &["b", "c"]).await?;
+    let [a, b, c] = &devices[..] else {
         return Err("devices".into());
     };
     introduce(b, c).await;
@@ -80,21 +80,15 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     assert_eq!(network["kind"], "memory");
     assert_eq!(network["inbound"]["limit"], 32);
 
-    // An enrolled device nobody configured is refused, with valid credentials.
-    d.add_peer(&b.contact().await)
-        .await
-        .map_err(|e| e.to_string())?;
-    d.add(3, "Jam").await;
-    assert!(d.sync().await.is_err());
-    assert_eq!(d.peer(&b.node().await).await["state"], "unreachable");
-    assert_eq!(b.titles().await, ["Eggs", "Milk"]);
-    assert_eq!(d.titles().await, ["Jam"]);
-    // A removed peer is neither dialed nor served.
+    assert_eq!(c.peer(&b.node().await).await["configured"], true);
+    // A removed contact is no longer dialed; it is still served.
     b.ok(json!({"type": "peer_remove", "node": c.node().await}))
         .await;
-    c.add(4, "Tea").await;
-    assert!(c.sync().await.is_err());
-    assert_eq!(b.titles().await, ["Eggs", "Milk"]);
+    b.add(4, "Tea").await;
+    assert!(b.sync().await.is_err());
+    assert_eq!(c.titles().await, ["Eggs", "Milk"]);
+    c.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(c.titles().await, ["Eggs", "Milk", "Tea"]);
     // Any issuer renews any device: the last one can be removed, and the
     // member then reports that it has no issuer contact.
     let creator_node = creators[0]["node"].clone();
@@ -109,7 +103,7 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
         b.ok(json!({"type": "status"})).await["authority"]["issuer_contact"],
         false
     );
-    for device in [b, c, d] {
+    for device in [b, c] {
         device.close().await;
     }
     Ok(())

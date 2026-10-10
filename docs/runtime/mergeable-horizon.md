@@ -109,7 +109,7 @@ reverse a parent's retirement at the same cut.
 | Checkpoint | Format 7 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 6, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
 | File identity | `rocky.encrypted-replica.v9` |
-| Native session | `rocky.native-session.v8` |
+| Native session | `rocky.native-session.v9` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 3, with an explicit existence-base list.

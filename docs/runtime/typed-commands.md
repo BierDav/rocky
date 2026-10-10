@@ -185,8 +185,8 @@ ticket unchanged. At most 64 tickets may be unresolved per device; a further
 
 `command_run` advances one ticket or all unresolved ones. The coordinator
 names the executor. If it is this device, the command executes here.
-Otherwise it is sent to that device, which must be a configured peer with a
-route on the attached network. Both paths pass the same admission: signature,
+Otherwise it is sent to that device, which must be a contact with a route on
+the attached network. Both paths pass the same admission: signature,
 current credentials, registered method, supported version and invocation
 scope. A device that receives a command it is not assigned to execute refuses.
 

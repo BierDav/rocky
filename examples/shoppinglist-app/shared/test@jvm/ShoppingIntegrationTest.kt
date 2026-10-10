@@ -180,10 +180,12 @@ class ShoppingIntegrationTest {
             c.author(issuer = a)
             assertTrue(b.contact().uri.startsWith("rocky://peer/"))
             assertEquals(b.session().node, c.addPeer(b.contact().uri))
-            // Nobody is served before both sides configured each other.
+            // A device of the domain is served without being a contact: only the dialing side needs one.
             c.add("Eggs")
             a.close()
-            assertEquals(ConnectionState.Unavailable, c.syncOnce().state)
+            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertEquals(listOf("Eggs"), b.titles())
+            assertFalse(b.peers().single { it.node == c.session().node }.isConfigured)
             b.addPeer(c.contact().uri)
             b.add("Milk")
             assertEquals(ConnectionState.Connected, c.syncOnce().state)
@@ -204,7 +206,7 @@ class ShoppingIntegrationTest {
             assertEquals(ConnectionState.Connected, c.syncOnce().state)
             assertEquals(listOf("Bread", "Eggs", "Milk"), c.titles())
             b.removePeer(c.session().node)
-            assertTrue(b.peers().isEmpty())
+            assertTrue(b.peers().none { it.isConfigured })
         } finally {
             c?.close()
             b?.close()

@@ -131,12 +131,18 @@ storage. Raw database access is outside the application API threat boundary.
 
 ## Native transport and completeness
 
-`NativeSession` uses native TCP with pinned named peer public keys. Mutual fresh
-challenges bind both peers and their supplied credential chains; every frame
-binds that session and a monotonic sequence with an Ed25519 signature. The
-runtime verifies capabilities against current policy at transfer/ack admission.
-TCP is not TLS: routing identifiers, credentials, operation sizes and timing
-remain visible. Application data, old/new images and payloads remain encrypted.
+`NativeSession` runs over any reliable ordered stream. `authenticate` pins the
+peer's node key; `accept` takes whichever peer dialed. Mutual fresh challenges
+bind both peers and their credential chains; every frame binds that session
+and a monotonic sequence with an Ed25519 signature. The acceptor speaks only
+once the initiator's chain verified for this domain, so an outsider sees no
+chain of it. The handshake then exchanges the revocation statements either
+side lacks and refuses a peer the merged set revokes
+([decision 0051](../decisions/0051-roster-free-admission.md)); there is no
+roster. The runtime still verifies capabilities against the held set at every
+transfer and acknowledgment, and no session caches authority. Another session
+version is refused as a failed authentication. The stream is not TLS: routing
+identifiers, credentials, operation sizes and timing remain visible. Application data, old/new images and payloads remain encrypted.
 No discovery, NAT traversal, BLE or browser transport is qualified.
 
 Range sync by per-log frontiers, scope subscriptions, eviction and remote
@@ -152,6 +158,10 @@ never acknowledges operations it did not include.
 
 Frames are bounded to 256 KiB (`MAX_SECURE_FRAME`); native pages to 128 KiB;
 sessions to a caller budget of at most 32 MiB with a 10-second per-I/O timeout.
+Nothing about a peer is written before its chain verified, and a replica keeps
+horizon credentials and frontiers of at most 256 unconfigured peers
+(`MAX_UNCONFIGURED_PEERS`), dropping the least recently served first; the peers
+its owner configures and full nodes are kept.
 Retained row operations follow `RetentionLimits`: 32 MiB starts checkpointing
 and pruning, 64 MiB reports backpressure. Command, effect and recovery
 artifacts are not pruned and stop at 4,096 records or 32 MiB. Limits fail

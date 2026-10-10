@@ -628,25 +628,19 @@ async fn native_phone_publication_recovers_after_executor_exit() {
     let address = listener.local_addr().unwrap();
     let server = async {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            a.clone(),
-            acred,
-            crate::tests::unrevoked(),
-            phone_key.public_key(),
-            MAX_SECURE_FRAME * 8,
-        )
-        .await
-        .unwrap();
+        let mut session =
+            NativeSession::accept(stream, &source, a.clone(), acred, MAX_SECURE_FRAME * 8)
+                .await
+                .unwrap();
         session.serve_command_once(&source, &c).await.unwrap();
     };
     let client = async {
         let stream = TcpStream::connect(address).await.unwrap();
         let mut session = NativeSession::authenticate(
             stream,
+            &phone,
             phone_key.clone(),
             pcred,
-            crate::tests::unrevoked(),
             a.public_key(),
             MAX_SECURE_FRAME * 8,
         )

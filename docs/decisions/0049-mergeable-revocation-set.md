@@ -84,6 +84,8 @@ hello carries the sender's digest (`rocky.native-session.v8`, transport name
 `rocky/native-session/8`). After authenticating, each side refuses a peer with
 another digest as `revocation set differs`; the SDK reports it as
 `revocations_differ` and its sync renews once, which brings the statements.
+[0051](0051-roster-free-admission.md) replaced this interim with the
+statements themselves inside the handshake.
 
 **SDK.** `revoke(node)` builds the statement from the device's registry
 record (node, user, capability and pseudonym keys) and saves an intent holding

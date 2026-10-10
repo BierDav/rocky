@@ -3,6 +3,18 @@ use super::*;
 
 use crate::replica::roles::{FrontierReply, MAX_FRONTIER_SCOPES, validate_frontiers};
 
+#[derive(Serialize, Deserialize)]
+pub(super) enum FrontierMessage {
+    FrontiersQuery {
+        frontiers: Vec<ScopeFrontier>,
+        /// Tuples offered to a keyless custody peer; see decision 0045.
+        partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
+    },
+    Frontiers {
+        states: Vec<FrontierReply>,
+    },
+}
+
 /// The outcome of one frontier exchange, each list in input order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FrontierExchange {
@@ -45,12 +57,13 @@ impl NativeSession {
             let partitions = replica
                 .custody_offers(self.peer, &self.credentials, &batch)
                 .await?;
-            self.send(&Message::FrontiersQuery {
+            self.send(FrontierMessage::FrontiersQuery {
                 frontiers: frontiers.clone(),
                 partitions,
             })
             .await?;
-            let Message::Frontiers { states } = self.receive().await? else {
+            let FrontierMessage::Frontiers { states } = self.reply::<FrontierMessage>().await?
+            else {
                 return Err(denied("unexpected frontier batch response"));
             };
             if states.len() != batch.len()
@@ -117,5 +130,26 @@ impl NativeSession {
             changed: order(&changed),
             refused: order(&refused),
         })
+    }
+    pub(super) async fn answer_frontiers<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        message: FrontierMessage,
+    ) -> Result<(), Error> {
+        let FrontierMessage::FrontiersQuery {
+            frontiers,
+            partitions,
+        } = message
+        else {
+            return Err(denied("unexpected native request"));
+        };
+        let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
+        replica
+            .accept_custody_offers(self.peer, &self.credentials, &scopes, &partitions)
+            .await?;
+        let states = replica
+            .exchange_frontiers(self.peer, &self.credentials, &frontiers)
+            .await?;
+        self.send(FrontierMessage::Frontiers { states }).await
     }
 }

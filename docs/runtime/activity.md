@@ -52,8 +52,8 @@ sync. It is recorded when the error changes, not on every failed pass.
 
 `registry_failed` carries an error when an issuer could not read or update
 its [issuer registry](issuer-registry.md) outside an answer, such as while the
-registry's rows wait for a rotated key. Sync then admits configured peers only;
-answers that need the registry fail until it reads again.
+registry's rows wait for a rotated key. Sync admission does not read the
+registry; answers that need it fail until it reads again.
 
 A transfer names the table and, for a partition, its encryption commitment.
 `GroupPartition.status()` reports the same per-table partition identifier so an

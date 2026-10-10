@@ -26,6 +26,7 @@ naturally holds.
 | [0048](0048-replicated-issuer-registry.md) | Replicated issuer registry |
 | [0049](0049-mergeable-revocation-set.md) | A mergeable revocation set replaces the policy epoch |
 | [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
+| [0051](0051-roster-free-admission.md) | Roster-free admission and the revocation exchange in the native session |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
@@ -55,6 +56,7 @@ unreserved record is 0061.
 | Signed capabilities, encrypted row protocol | [permissions-and-sync](../runtime/permissions-and-sync.md#design-rationale) |
 | Credentials, grant profiles, issuer devices, key epochs | [credentials](../runtime/credentials.md#design-rationale) |
 | Revocation statements, mergeable sets, the frame rule | [0049](0049-mergeable-revocation-set.md), [revocations](../runtime/revocations.md) |
+| Admission by chain and revocation set, the session version | [0051](0051-roster-free-admission.md) |
 | Author pseudonyms and author ranges | [credential-primitives](../runtime/credential-primitives.md#design-rationale) |
 | Partitioned reader scopes, key envelopes | [partitioned-scopes](../runtime/partitioned-scopes.md#design-rationale) |
 | Typed command descriptors, tickets, handler hosts | [typed-commands](../runtime/typed-commands.md#design-rationale) |

@@ -883,31 +883,20 @@ async fn native_sessions_exchange_existence_logs() {
     .await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (key, credentials, replica, peer) = (
-        a.node.clone(),
-        a.credentials.clone(),
-        a.replica.clone(),
-        b.node.public_key(),
-    );
+    let (key, credentials, replica) = (a.node.clone(), a.credentials.clone(), a.replica.clone());
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            key,
-            credentials,
-            crate::tests::unrevoked(),
-            peer,
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
+        let mut session =
+            NativeSession::accept(stream, &replica, key, credentials, MAX_SECURE_BYTES)
+                .await
+                .unwrap();
         while session.serve_once(&replica).await.is_ok() {}
     });
     let mut session = NativeSession::authenticate(
         TcpStream::connect(address).await.unwrap(),
+        &b.replica,
         b.node.clone(),
         b.credentials.clone(),
-        crate::tests::unrevoked(),
         a.node.public_key(),
         MAX_SECURE_BYTES,
     )
@@ -2381,26 +2370,19 @@ async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_ke
         let source = full.replica.clone();
         let key = full.node.clone();
         let credentials = full.credentials.clone();
-        let peer = child.node.public_key();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut session = NativeSession::authenticate(
-                stream,
-                key,
-                credentials,
-                crate::tests::unrevoked(),
-                peer,
-                MAX_SECURE_BYTES,
-            )
-            .await
-            .unwrap();
+            let mut session =
+                NativeSession::accept(stream, &source, key, credentials, MAX_SECURE_BYTES)
+                    .await
+                    .unwrap();
             while session.serve_once(&source).await.is_ok() {}
         });
         let mut session = NativeSession::authenticate(
             TcpStream::connect(addr).await.unwrap(),
+            &child.replica,
             child.node.clone(),
             child.credentials.clone(),
-            crate::tests::unrevoked(),
             full.node.public_key(),
             MAX_SECURE_BYTES,
         )

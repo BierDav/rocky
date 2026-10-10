@@ -50,8 +50,9 @@ docker run --name rocky-peer --restart unless-stopped -p 7447:7447 \
 
 The process prints its public contact URI once, then serves until SIGTERM or
 SIGINT drains networking and flushes storage. Add its contact on each device,
-and each device's contact to `peers`; contacts grant no authority. The SDK caps
-configured peers at 16. TCP needs an explicit listening address. iroh is also
+and each device's contact to `peers`; contacts grant no authority, and the peer
+serves any device whose chain and the revocation set admit it. The SDK keeps
+64 contacts and dials 16 per pass. TCP needs an explicit listening address. iroh is also
 supported through the [starter options](sdk-transports.md#iroh); use a
 fixed UDP bind and published route or relay/discovery as appropriate.
 

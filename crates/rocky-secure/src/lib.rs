@@ -29,12 +29,12 @@ pub use replica::{
     FrontierLog, GenerationStatus, GenerationStep, Holding, HorizonPage, HorizonProgress,
     KeyMaterial, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS,
     MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_GENERATIONS, MAX_SNAPSHOT_BYTES,
-    MAX_SNAPSHOT_ROWS, PLAN_ROWS, PeerLag, ProjectionPlan, PruneBlock, PruneReport, ROWS_PER_FRAME,
-    RangePage, RebootstrapReport, ReceiveStatus, RemotePage, ReplicaRole, ReplicaStatus,
-    RetentionLimits, RetentionPolicy, RoleConfig, ScopeFrontier, ScopeStatus, SecureCommit,
-    SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
-    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, StrongSummary, UpdateMode,
-    Upgrade,
+    MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, PLAN_ROWS, PeerLag, ProjectionPlan, PruneBlock,
+    PruneReport, ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, RemotePage,
+    ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, ScopeFrontier,
+    ScopeStatus, SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot,
+    SecureSql, SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, StrongSummary,
+    UpdateMode, Upgrade,
 };
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;

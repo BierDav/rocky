@@ -298,7 +298,7 @@ typed secure tables, enrollment with grant profiles, the replicated
 [issuer registry](runtime/issuer-registry.md), renewal,
 revocation statements with key rotation and issuer tombstones, supplied credentials, durable pseudonym assignment
 and per-table signing keys, the `SecretStore` key
-provider, contact records and sync with configured peers
+provider, contact records and sync with any admitted peer
 ([SDK enrollment](runtime/sdk-enrollment.md)). Its transports are TCP, the
 in-process hub and the chunk adapter for transports defined outside Rust;
 iroh comes from `rocky-iroh` behind the default `iroh` feature

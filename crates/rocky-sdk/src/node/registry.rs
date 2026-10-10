@@ -16,19 +16,6 @@ impl Node {
         }
         Box::pin(registry::read(&self.replica, self.domain.registry())).await
     }
-    /// The records sync admission reads. While the registry cannot be read,
-    /// such as when its rows wait for a rotated key or a checkpoint, the
-    /// configured peers and the policy still decide.
-    pub(super) async fn admission(&self) -> Registry {
-        match self.registry().await {
-            Ok(registry) => registry,
-            Err(error) => {
-                self.activity
-                    .record_changed("registry_failed", json!({"error": error.to_string()}));
-                Registry::default()
-            }
-        }
-    }
     /// Installs this issuer's registry pseudonym, from its own author
     /// range, unless it holds a current one.
     async fn registry_author(&self) -> Result<(), Failure> {

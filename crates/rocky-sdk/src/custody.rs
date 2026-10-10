@@ -36,7 +36,7 @@ impl CustodyPeer {
             return Err("custody configuration quota".into());
         }
         let config: Configuration = serde_json::from_str(configuration)?;
-        if config.peers.len() > crate::enrollment::MAX_PEERS {
+        if config.peers.len() > crate::enrollment::MAX_CONTACTS {
             return Err("custody peer quota".into());
         }
         if matches!(

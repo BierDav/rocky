@@ -131,8 +131,19 @@ interface StreamTransport {
 /** One way to reach a device. A hint: whoever answers must still prove the device's key. */
 data class Route(val transport: String, val address: String)
 
-/** A configured peer, whether it renews credentials, and what the last sync with it did: `connected`, `unreachable` or `unknown`. */
-data class Peer(val node: String, val isIssuer: Boolean, val routes: List<Route>, val state: String, val checkedAtEpochSeconds: Long?, val error: String?)
+/**
+ * A peer met or kept as a contact: whether it renews credentials, whether it is a configured contact, its routes and what
+ * the last sync with it did: `connected`, `unreachable` or `unknown`. A peer met only through its own session has no routes.
+ */
+data class Peer(
+    val node: String,
+    val isIssuer: Boolean,
+    val isConfigured: Boolean,
+    val routes: List<Route>,
+    val state: String,
+    val checkedAtEpochSeconds: Long?,
+    val error: String?,
+)
 
 /** A `rocky://peer/…` URI naming this device and its current route. It grants nothing. */
 data class Contact(val uri: String, val node: String, val routes: List<Route>)

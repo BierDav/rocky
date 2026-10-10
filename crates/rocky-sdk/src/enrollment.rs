@@ -39,8 +39,10 @@ pub const VERSION: u32 = 12;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
-/// Peers one device syncs with and serves.
-pub const MAX_PEERS: usize = 16;
+/// Contacts one device keeps: routes to peers, which grant nothing.
+pub const MAX_CONTACTS: usize = 64;
+/// Contacts one sync pass dials.
+pub const MAX_DIALED: usize = 16;
 const MAX_ISSUERS: usize = 8;
 const MAX_ROUTES: usize = 4;
 const MAX_ADDRESS: usize = 2048;
@@ -122,8 +124,9 @@ pub struct Settings {
     pub issuers: Vec<PublicKey>,
     /// A fixed issuer whose pairing/renewal responses this custody node relays.
     pub enrollment_upstream: Option<PublicKey>,
-    /// The nodes this device syncs with and serves, by node key, with the
-    /// routes last learned for each.
+    /// This device's contacts, by node key, with the routes last learned
+    /// for each. A contact is a route that grants nothing: any admitted
+    /// peer is served, and sync dials contacts.
     pub peers: BTreeMap<PublicKey, Contact>,
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
@@ -713,7 +716,7 @@ impl Settings {
         {
             Contact::checked(contact.routes.clone())?;
         }
-        if settings.peers.len() > MAX_PEERS
+        if settings.peers.len() > MAX_CONTACTS
             || settings.issuers.len() > MAX_ISSUERS
             || settings.enrollment_routes.len() > MAX_ISSUERS
             || settings
@@ -853,29 +856,23 @@ impl Settings {
             )
             .collect()
     }
-    /// The node keys whose sync sessions this device serves: its
-    /// configured peers and, on an issuer, the devices the registry holds
-    /// and did not revoke. Each request is still authorized by credentials.
-    pub fn admitted(&self, registry: &Registry) -> Vec<PublicKey> {
-        let mut admitted: BTreeSet<PublicKey> = self.peers.keys().copied().collect();
-        if self.issuer() {
-            for (node, record) in &registry.records {
-                if record.revoked {
-                    admitted.remove(node);
-                } else if record.device.is_some() {
-                    admitted.insert(*node);
-                }
-            }
-        }
-        admitted.into_iter().collect()
+    /// The peers whose credentials and frontiers the replica keeps whatever
+    /// its bound on unconfigured peers: contacts and issuers.
+    pub fn kept(&self) -> Vec<PublicKey> {
+        self.peers
+            .keys()
+            .chain(&self.issuers)
+            .chain(&self.enrollment_upstream)
+            .copied()
+            .collect()
     }
-    /// The peers to sync with, issuers first.
-    pub fn targets(&self, registry: &Registry) -> Vec<(PublicKey, Contact)> {
-        let admitted = self.admitted(registry);
+    /// The contacts a sync may dial, issuers first: those with routes and
+    /// not revoked.
+    pub fn targets(&self) -> Vec<(PublicKey, Contact)> {
         let mut targets: Vec<_> = self
             .peers
             .iter()
-            .filter(|(node, contact)| admitted.contains(node) && !contact.routes.is_empty())
+            .filter(|(node, contact)| !contact.routes.is_empty() && !self.revoked(node))
             .map(|(node, contact)| (*node, contact.clone()))
             .collect();
         targets.sort_by_key(|(node, _)| !self.issuers.contains(node));
@@ -921,8 +918,8 @@ impl Settings {
         if self.revoked(&record.node) {
             return Err("the contact names a revoked device".into());
         }
-        if !self.peers.contains_key(&record.node) && self.peers.len() >= MAX_PEERS {
-            return Err("peer capacity reached".into());
+        if !self.peers.contains_key(&record.node) && self.peers.len() >= MAX_CONTACTS {
+            return Err("contact capacity reached".into());
         }
         if record.issuer && !self.issuers.contains(&record.node) {
             if self.issuers.len() >= MAX_ISSUERS {
@@ -2202,7 +2199,7 @@ impl Settings {
             if exclude.contains(node) || self.peers.contains_key(node) {
                 continue;
             }
-            if self.peers.len() >= MAX_PEERS {
+            if self.peers.len() >= MAX_CONTACTS {
                 break;
             }
             self.peers.insert(*node, contact.clone());
@@ -2268,7 +2265,7 @@ impl Settings {
         let Ok(contact) = Contact::checked(routes) else {
             return;
         };
-        let full = (!self.peers.contains_key(&node) && self.peers.len() >= MAX_PEERS)
+        let full = (!self.peers.contains_key(&node) && self.peers.len() >= MAX_CONTACTS)
             || (issuer && !self.issuers.contains(&node) && self.issuers.len() >= MAX_ISSUERS);
         if contact.routes.is_empty() || full {
             return;
@@ -2283,7 +2280,7 @@ impl Settings {
     }
     /// Forgets the peers and issuers a held statement revokes, such as a
     /// lost issuer another one revoked.
-    fn forget_revoked(&mut self) {
+    pub(crate) fn forget_revoked(&mut self) {
         let gone: Vec<PublicKey> = self
             .peers
             .keys()

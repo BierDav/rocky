@@ -104,7 +104,6 @@ async fn pull_once(
     let (target_node, target_credentials) = config(target).await;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let target_peer = target_node.public_key();
     let server = {
         let source = source.clone();
         std::thread::spawn(move || {
@@ -119,10 +118,9 @@ async fn pull_once(
                     stream.set_nodelay(true).unwrap();
                     let mut session = NativeSession::accept(
                         stream,
+                        &source,
                         source_node,
                         source_credentials,
-                        crate::tests::unrevoked(),
-                        |peer| *peer == target_peer,
                         MAX_SECURE_BYTES,
                     )
                     .await
@@ -135,9 +133,9 @@ async fn pull_once(
     stream.set_nodelay(true).unwrap();
     let mut session = NativeSession::authenticate(
         stream,
+        target,
         target_node,
         target_credentials,
-        crate::tests::unrevoked(),
         source_node_key(source).await,
         MAX_SECURE_BYTES,
     )

@@ -35,7 +35,7 @@ pub(crate) fn validity() -> (u64, u64, u64) {
         rocky_credentials::DAY,
     )
 }
-/// The digest of an empty revocation set, which a fixture's hello carries.
+/// The digest of an empty revocation set.
 pub(crate) fn unrevoked() -> Commitment {
     RevocationSet::new().digest(0).unwrap()
 }
@@ -88,9 +88,18 @@ impl Fixture {
         Employees::new(*self.publisher.public_key().as_bytes())
     }
     fn credentials(&self, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
+        self.chain(node, grants, &self.publisher, lifetime())
+    }
+    /// A node chain whose root `root` signs, valid from `not_before` to `expires`.
+    fn chain(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        root: &PrivateKey,
+        (not_before, expires): (u64, u64),
+    ) -> CredentialChain {
         let user = PrivateKey::new();
         let deployment = PrivateKey::new();
-        let (not_before, expires) = lifetime();
         let capability = |subject, kind, delegations| Capability {
             manifest: self.app().definition().hash(),
             subject,
@@ -103,11 +112,8 @@ impl Fixture {
                 .unwrap(),
         };
         CredentialChain(vec![
-            SignedCapability::sign(
-                capability(user.public_key(), PrincipalKind::User, 2),
-                &self.publisher,
-            )
-            .unwrap(),
+            SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 2), root)
+                .unwrap(),
             SignedCapability::sign(
                 capability(deployment.public_key(), PrincipalKind::Deployment, 1),
                 &user,
@@ -674,16 +680,10 @@ async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgmen
     let address = listener.local_addr().unwrap();
     let server = async {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            a.clone(),
-            acred,
-            crate::tests::unrevoked(),
-            b.public_key(),
-            MAX_SECURE_FRAME * 4,
-        )
-        .await
-        .unwrap();
+        let mut session =
+            NativeSession::accept(stream, &source, a.clone(), acred, MAX_SECURE_FRAME * 4)
+                .await
+                .unwrap();
         session.serve_once(&source).await.unwrap();
         session.serve_once(&source).await.unwrap();
     };
@@ -691,9 +691,9 @@ async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgmen
         let stream = TcpStream::connect(address).await.unwrap();
         let mut session = NativeSession::authenticate(
             stream,
+            &target,
             b.clone(),
             bcred,
-            crate::tests::unrevoked(),
             a.public_key(),
             MAX_SECURE_FRAME * 4,
         )
@@ -1159,12 +1159,11 @@ async fn native_pull(
     let address = listener.local_addr().unwrap();
     let server = async {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::authenticate(
+        let mut session = NativeSession::accept(
             stream,
+            source,
             source_identity.0.clone(),
             source_identity.1,
-            crate::tests::unrevoked(),
-            target_identity.0.public_key(),
             MAX_SECURE_FRAME * 8,
         )
         .await
@@ -1177,9 +1176,9 @@ async fn native_pull(
         let stream = TcpStream::connect(address).await.unwrap();
         let mut session = NativeSession::authenticate(
             stream,
+            target,
             target_identity.0.clone(),
             target_identity.1,
-            crate::tests::unrevoked(),
             source_identity.0.public_key(),
             MAX_SECURE_FRAME * 8,
         )
@@ -1489,6 +1488,7 @@ mod scaling;
 
 mod checkpoint;
 
+mod admission;
 mod bundles;
 mod constraints;
 mod delegation;

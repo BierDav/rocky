@@ -16,4 +16,4 @@ plugins:
     prepare: [build, -p, rocky-runtime, --example, sdk_host, --locked]
     rejected:
       fixtures: rejected
-      with: [../../../examples/shoppinglist-app/shared/test/Reservation.kt]
+      with: [../../../examples/market-app/marketShared/src/MarketCommands.kt]

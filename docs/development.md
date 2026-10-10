@@ -144,7 +144,10 @@ qualification steps are [toolchain plugins](../sdks/kotlin/README.md#build-tooli
 `./kotlin check` runs every check and test.
 Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
 and desktop compilation, `./examples/shoppinglist-app/qualify` for the
-multi-process [shopping qualification](runtime/shopping-qualification.md), and `./kotlin check qualify -m inventory-qualification`
+multi-process [shopping qualification](runtime/shopping-qualification.md),
+`./examples/market-app/check` and `./examples/market-app/qualify` for the
+[market](runtime/market-qualification.md) and its five scenarios against three
+voters, and `./kotlin check qualify -m inventory-qualification`
 for the existing SDK contract qualification. Run `./sdks/native/check` for the
 excluded UniFFI ABI crate. Run `./kotlin check packaged -m packaged-consumer` for an
 artifact-only JVM consumer, or `./kotlin do packageSdk -m packaged-consumer` to
@@ -264,9 +267,14 @@ and runs the exhaustive phase-2 byte-offset cancellation gate in the release
 profile. This job uses an x64 runner for the Android NDK and has not run on a
 hosted runner yet. Releases skip it and do not wait for its result.
 
+The `market` job runs `./examples/market-app/qualify`: the five
+[market scenarios](runtime/market-qualification.md) against three loopback
+voters, building the voter and custody peer itself, and keeps `evidence.json`
+as an artifact. Releases skip it too; it has not run on a hosted runner yet.
+
 A release calls the baseline workflow. Before it starts, it waits only for the
 push run's `lint`, `build` and `check` jobs for that commit; a failure in any of
-them fails the release. The `e2e`, `shopping` and baseline `android` jobs do
+them fails the release. The `e2e`, `shopping`, `market` and baseline `android` jobs do
 not gate it. When `check` passed for the tree, the release's `build` and `check`
 skip. A job whose build artifact is missing, for example after its one-day
 retention, builds what it runs itself; a release of an unchecked tree runs the

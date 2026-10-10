@@ -1,4 +1,8 @@
 modules:
+  - examples/market-app/marketAndroid
+  - examples/market-app/marketDesktop
+  - examples/market-app/marketQualification
+  - examples/market-app/marketShared
   - examples/shoppinglist-app/androidApp
   - examples/shoppinglist-app/desktopApp
   - examples/shoppinglist-app/libraryDemo

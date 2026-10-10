@@ -1,0 +1,8 @@
+#!/bin/sh
+# The market's commands, Room DAOs and schema through the packaged runtime, and
+# the applications' compilation. The multi-process scenarios are ./qualify.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+./kotlin test -m marketShared
+./kotlin build -m marketDesktop -m marketQualification

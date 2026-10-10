@@ -1,6 +1,7 @@
 # 19. Market example
 
-Status: not started.
+Status: complete on 2026-10-10; the gate passed locally, the CI `market` job
+has not run on a hosted runner yet. See [outcome](#outcome).
 Owner: a new `examples/market-app` and its harness; the audit and evidence
 guides. Depends on [phase 4](04-small-fixes.md). Wave 1.
 Follow the [execution contract](README.md#agent-execution-contract).
@@ -96,3 +97,21 @@ tree. Restore a small one that the mesh and iOS phases can run.
 - Removing or reworking shopping's approvals.
 - Optimistic updates and partitioned command tables.
 - More than the one screen, or a second copy of the fixtures.
+
+## Outcome
+
+- `examples/market-app` holds `marketShared`, `marketDesktop`, `marketAndroid`
+  and `marketQualification`: module names are unique in the workspace, so they
+  carry a prefix. `Reserve`, `Restock` and `ReservationCommandTest` moved from
+  the shopping example into `marketShared` (as `MarketCommands.kt` and
+  `MarketCommandTest`); the compile-fail fixture now uses them. The room
+  qualification's `Market.kt` stays, as the SDK's own Room fixture.
+- Buyers hold insert and update on `stock` and `holds`: a command's row effects
+  must lie within its caller's rights. SQL still refuses their direct writes.
+- Devices publish their command identity as a `memos` row; the owner admits
+  published identities with the next control revision.
+- An idle executor named by a new control acquires only with a ticket of its
+  own, so `takeover` has the backup restock first; the SDK was not changed.
+- The soak stopped at the buyer's byte budget after 2,065 commands.
+- Results, the emulator procedure and the limits are in
+  [market qualification](../runtime/market-qualification.md).

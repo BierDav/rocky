@@ -1,0 +1,10 @@
+#!/bin/sh
+# The market soak, outside the default checks: COMMANDS (default 4096) strong
+# commands between two device JVMs against three loopback voters, observing the
+# retained command record and byte budgets. Evidence: $ROCKY_EVIDENCE/soak.json.
+# See docs/runtime/market-qualification.md#soak.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+ROCKY_SOAK=${1:-4096} \
+ROCKY_EVIDENCE="${ROCKY_EVIDENCE:-$repo_root/local/market-soak}" \
+    exec "$repo_root/examples/market-app/qualify"

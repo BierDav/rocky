@@ -1,0 +1,20 @@
+#!/bin/sh
+# Multi-process market qualification: device JVMs, three rocky-voter processes on
+# loopback and the packaged rocky-peer custody launcher. Evidence goes to
+# $ROCKY_EVIDENCE (default local/market-qualification); ROCKY_SCENARIOS=last-item,loss
+# selects scenarios. See docs/runtime/market-qualification.md.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+# The voters and the custody peer are packaged binaries; the application has no
+# Rust source. Prebuilt ones may be given as $ROCKY_VOTER and $ROCKY_PEER.
+# One cargo invocation, so both share one feature resolution and build once.
+if [ -z "${ROCKY_VOTER:-}" ] || [ -z "${ROCKY_PEER:-}" ]; then
+    cargo build --locked -p rocky-coordinator --bin rocky-voter -p rocky-sdk --bin rocky-peer
+fi
+ROCKY_VOTER=${ROCKY_VOTER:-$repo_root/target/debug/rocky-voter}
+ROCKY_PEER=${ROCKY_PEER:-$repo_root/target/debug/rocky-peer}
+build=${ROCKY_BUILD:-${GITHUB_SHA:-$(jj log --no-graph --ignore-working-copy -r @ -T commit_id 2>/dev/null || echo unknown)}}
+ROCKY_VOTER="$ROCKY_VOTER" ROCKY_PEER="$ROCKY_PEER" ROCKY_BUILD="$build" \
+ROCKY_EVIDENCE="${ROCKY_EVIDENCE:-$repo_root/local/market-qualification}" \
+    ./kotlin run -m marketQualification

@@ -1,6 +1,7 @@
-package org.example.examples.shopping
+package org.example.examples.market
 
 import kotlinx.coroutines.*
+import org.junit.jupiter.api.BeforeAll
 import rocky.*
 import java.io.File
 import java.nio.file.Files
@@ -8,11 +9,15 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 /** Typed strong commands decided by a handler written in Kotlin, through the packaged runtime. */
-class ReservationCommandTest {
-    private fun directory(): File = Files.createTempDirectory("rocky-commands-test").toFile()
+class MarketCommandTest {
+    companion object {
+        @JvmStatic @BeforeAll
+        fun load() = loadNative()
+    }
+
+    private fun directory(): File = Files.createTempDirectory("market-commands-test").toFile()
     private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private fun handle() = RockyDatabase.newHandle()
-    private val writer = GrantProfile.Writer(setOf("stock", "holds"))
 
     /** Business columns only: without the trailing `id` and `row_kind`. */
     private fun List<Any?>.fields() = dropLast(2)
@@ -30,16 +35,16 @@ class ReservationCommandTest {
         val coordinator = DevelopmentCoordinator()
         val executor = RockyDatabase.create(
             File(root, "a"),
-            ReservationSchema,
+            MarketSchema,
             tcp(),
             automaticSync = false,
-            commands = CommandRuntime(coordinator, listOf(reserve, restock)),
+            commands = CommandRuntime(coordinator, MarketHandlers),
         )
-        // The caller holds the definitions and no handler: it invokes and reads, and cannot execute.
+        // A buyer holds the definitions and no handler: it invokes and reads, and cannot execute.
         val caller = RockyDatabase.join(
             File(root, "b"),
-            ReservationSchema,
-            executor.pairing(writer).uri,
+            MarketSchema,
+            executor.pairing(Market.Buyer).uri,
             PeerTransport.Tcp(),
             automaticSync = false,
             commands = CommandRuntime(coordinator),
@@ -91,7 +96,7 @@ class ReservationCommandTest {
         val root = directory()
         val coordinator = DevelopmentCoordinator()
         // The issuer holds no handler; it grants Execute as a raw right to another device.
-        val issuer = RockyDatabase.create(File(root, "a"), ReservationSchema, tcp(), automaticSync = false, commands = CommandRuntime(coordinator))
+        val issuer = RockyDatabase.create(File(root, "a"), MarketSchema, tcp(), automaticSync = false, commands = CommandRuntime(coordinator))
         var executor: RockyDatabase? = null
         try {
             val all = setOf(Right.Read, Right.Insert, Right.Update, Right.Delete, Right.Invoke, Right.Execute, Right.Custody)
@@ -99,10 +104,10 @@ class ReservationCommandTest {
             val keys = Credentials.prepare(File(root, "x"))
             executor = RockyDatabase.install(
                 File(root, "x"),
-                ReservationSchema,
+                MarketSchema,
                 issuer.credentials.grant(keys, grants),
                 transport = tcp(),
-                commands = CommandRuntime(coordinator, listOf(reserve, restock)),
+                commands = CommandRuntime(coordinator, MarketHandlers),
             )
             assertFalse(executor.isIssuer)
             assertEquals(GrantProfile.Grants(grants), executor.session().profile)
@@ -116,6 +121,25 @@ class ReservationCommandTest {
             assertEquals(TicketState.Applied, accepted.state)
             assertEquals(Outcome.Accepted(Remaining(1)), accepted.outcome)
             assertEquals(2, coordinator.sequence(identity))
+
+            // A hold key names one item: reserving under it again adds to the hold, another item is refused.
+            suspend fun reserve(item: String) = handle().let { handle ->
+                executor.submit(Reserve, ReserveArguments(item, 1, "mine"), handle)
+                executor.run(Reserve, handle).outcome
+            }
+            assertEquals(Outcome.Accepted(Remaining(0)), reserve("bolt"))
+            assertEquals(listOf(listOf<Any?>("mine", "bolt", 2L)), executor.confirmedRows("holds").rows.fields())
+            suspend fun restock(item: String, quantity: Long) = handle().let { handle ->
+                executor.submit(Restock, RestockArguments(item, quantity), handle)
+                executor.run(Restock, handle).outcome
+            }
+            assertEquals(Outcome.Accepted(Remaining(1)), restock("nut", 1))
+            assertEquals(Outcome.Rejected(Shortfall(1, 1)), reserve("nut"))
+            assertEquals(Outcome.Rejected(Unit), restock("bolt", 0))
+            // Each new row took the next id; an updated row kept its own.
+            suspend fun ids(table: String) = executor.confirmedRows(table).rows.associate { it[0] to it[it.size - 2] }
+            assertEquals(mapOf<Any?, Any?>("bolt" to (1L shl 32) + 1, "nut" to (1L shl 32) + 2), ids("stock"))
+            assertEquals(mapOf<Any?, Any?>("mine" to (1L shl 32) + 1), ids("holds"))
         } finally {
             executor?.close()
             issuer.close()
@@ -134,7 +158,7 @@ class ReservationCommandTest {
             try {
                 when (calls.incrementAndGet()) {
                     1 -> error("the handler threw")
-                    2 -> Thread.sleep(700)
+                    2 -> Thread.sleep(400)
                 }
                 reserve.handler.handle(context, arguments)
             } finally {
@@ -142,7 +166,7 @@ class ReservationCommandTest {
             }
         }
         val runtime = CommandRuntime(coordinator, listOf(flaky, restock), handlerDeadlineMillis = 250)
-        var executor = RockyDatabase.create(File(root, "a"), ReservationSchema, tcp(), automaticSync = false, commands = runtime)
+        var executor = RockyDatabase.create(File(root, "a"), MarketSchema, tcp(), automaticSync = false, commands = runtime)
         try {
             val owner = executor.commandIdentity()
             coordinator.register(owner)
@@ -179,7 +203,7 @@ class ReservationCommandTest {
             assertEquals(TicketState.OutcomeUnknown, executor.cancel(Reserve, second).state)
             val decided = calls.get()
             executor.close()
-            executor = RockyDatabase.resume(File(root, "a"), ReservationSchema, tcp(), automaticSync = false, commands = runtime)
+            executor = RockyDatabase.resume(File(root, "a"), MarketSchema, tcp(), automaticSync = false, commands = runtime)
             assertEquals(TicketState.OutcomeUnknown, executor.ticket(Reserve, second)?.state)
             val recovered = executor.run(Reserve, second)
             assertEquals(TicketState.Applied, recovered.state)
@@ -234,7 +258,7 @@ class ReservationCommandTest {
         }
         val executor = RockyDatabase.create(
             File(root, "a"),
-            ReservationSchema,
+            MarketSchema,
             tcp(),
             automaticSync = false,
             commands = CommandRuntime(coordinator, listOf(probe, restock)),

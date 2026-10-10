@@ -1,0 +1,25 @@
+# The market's schema, commands, Room DAOs and its one screen; no platform file API, so phase 21 adds iOS only.
+product:
+  type: kmp/lib
+  platforms: [jvm, android]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../../../sdks/kotlin/rocky-room: exported
+  - $compose.runtime
+  - $compose.foundation
+  - $compose.material3
+  - $compose.ui
+settings:
+  android:
+    minSdk: 26
+  compose:
+    enabled: true
+  kotlin:
+    allWarningsAsErrors: true
+    freeCompilerArgs: [-Xexpect-actual-classes]
+    ksp:
+      processors:
+        - androidx.room:room-compiler:2.8.4
+      processorOptions:
+        room.schemaLocation: ./schemas

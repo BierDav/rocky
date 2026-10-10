@@ -108,4 +108,5 @@ when they are:
 | `sdks/kotlin/room-qualification` | 13 | integration | Room on Rocky's file; `RoomGateTest` binds TCP ports and needs the free-port fix in [fix later](fix_later/README.md) before it runs in parallel |
 | `sdks/kotlin/schema-qualification` | 2 | integration | about 55 s in phase 1, so over budget until made faster |
 | `examples/shoppinglist-app/shared` | 27 | integration | devices in temporary directories, six at a time |
-| shopping qualification, packaged consumer | | e2e | several JVMs and the custody peer; CI only |
+| `examples/market-app/marketShared` | 6 | integration | devices in temporary directories; each under 1.7 s alone, the native library loaded once per class |
+| shopping and market qualification, packaged consumer | | e2e | several JVMs, voters and the custody peer; CI only |

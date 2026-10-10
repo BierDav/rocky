@@ -1,0 +1,19 @@
+product: android/app
+apply:
+  - //project.module-template.yaml
+
+dependencies:
+  - ../marketShared
+  # Rocky's native runtime; the shared code brings the Kotlin SDK.
+  - ../../../sdks/kotlin/rocky-runtime-android
+  - androidx.activity:activity-compose:1.13.0
+  - $compose.material3
+
+settings:
+  compose: enabled
+  android:
+    namespace: org.example.examples.market
+    applicationId: org.example.examples.market
+    minSdk: 26
+    # The ABIs Rocky's Android runtime is built for.
+    abiFilters: [arm64-v8a, x86_64]

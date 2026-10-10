@@ -64,7 +64,7 @@ val reserve = Reserve handledBy { context, arguments ->
 ```
 
 `Reserve` is a `Command<ReserveArguments, Remaining, Shortfall>`; the complete
-example is `examples/shoppinglist-app/shared/test/Reservation.kt`. Passing
+example is the market's [`MarketCommands.kt`](../../examples/market-app/marketShared/src/MarketCommands.kt). Passing
 another command's arguments, or reading its result as another type, does not
 compile. In Rust, implement `rocky_sdk::CommandHandler` or, for compile-time
 types, `rocky_core::TypedCommand`.
@@ -288,13 +288,16 @@ cargo test -p rocky-runtime typed_reservation
 ./sdks/native/check                 # read-handle lifetime and supported features
 ./kotlin test -m rocky-core         # keyed-read codecs
 ./kotlin check qualify -m inventory-qualification  # compile-fail fixtures
-./examples/shoppinglist-app/check   # Kotlin keyed reads through the native runtime
+./examples/market-app/check         # Kotlin keyed reads through the native runtime
+./examples/market-app/qualify       # JVM processes against three voters
 ```
 
 Covered: competing callers, forged inputs and grants, lost confirmation
 answers across reopen and takeover, handler failure and deadline, and that no
 descriptor, argument or row reaches the coordinator; in one process or over
-loopback, against the in-memory coordinator.
+loopback, against the in-memory coordinator. Contention, loss, takeover and
+voter faults as separate processes against three voters are in
+[market qualification](market-qualification.md).
 
 ## Design rationale
 

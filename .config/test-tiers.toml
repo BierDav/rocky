@@ -158,3 +158,96 @@ limit = "5s"
 measured = "4.39s"
 cause = "Three tenants register and are served through real coordinator clients; the registration round trips are the cost."
 expires = 2026-11-30
+
+# Accepted over-budget integration tests (Phase 19, shared check). Measured on a
+# loaded reference host (2026-10-10) while other phases built. Remove or fix before the expiry date.
+[[exception]]
+test = "rocky-secure tests::strong_history::missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_is_atomic"
+limit = "4s"
+measured = "3.63s"
+cause = "Strong-history acknowledgment and atomic prune across custody peers; the multi-peer setup is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-secure tests::sql::natural_key_relink_converges_and_old_identity_edits_never_touch_replacement"
+limit = "3s"
+measured = "2.69s"
+cause = "Natural-key relink converges across two identities; the SQL replay is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-secure tests::scaling::bounded_pages_scope_filtering_and_pending_passes_do_not_starve"
+limit = "4s"
+measured = "3.36s"
+cause = "Bounded paging with scope filtering over a large history; the population of the history is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::peers a_domain_survives_a_change_of_routes_and_transport_kind"
+limit = "5s"
+measured = "4.01s"
+cause = "Domain survives route and transport changes; each route change is a real peer reconnect."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::peers enrolled_peers_sync_directly_while_the_creator_is_offline"
+limit = "8s"
+measured = "7.29s"
+cause = "Enrolled peers sync directly without the creator; several real peers start and converge."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::peers edits_relayed_in_any_order_and_repeated_converge"
+limit = "15s"
+measured = "14.41s"
+cause = "Edits relayed in any order across repeated rounds; the convergence rounds are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::registry concurrent_enrollments_and_renewals_at_two_issuers_converge"
+limit = "4s"
+measured = "3.78s"
+cause = "Two issuers enroll and renew concurrently; the registry round trips are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::registry only_issuers_open_the_registry_and_custody_relays_it_sealed"
+limit = "12s"
+measured = "11.39s"
+cause = "Sealed registry relay through custody peers; the sealed round trips are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::registry_revocation another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_with_enroller_stopped"
+limit = "16s"
+measured = "15.11s"
+cause = "Revocation by a second issuer with the enroller stopped; the revocation propagation is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::typed trusted_move_keeps_foreign_identity_and_follows_original_stamp_once"
+limit = "3s"
+measured = "2.04s"
+cause = "Trusted move across identities with stamp following; the two-peer setup is the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::shared_lists a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arriving"
+limit = "11s"
+measured = "10.00s"
+cause = "Joined writer obtains authors and sees the list arrive; the join and arrival rounds are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::shared_lists an_enrolled_writer_syncs_a_list_shared_with_one_envelope"
+limit = "8s"
+measured = "7.02s"
+cause = "Enrolled writer syncs a shared list in one envelope; the enrollment and sync rounds are the cost."
+expires = 2026-11-30
+
+[[exception]]
+test = "rocky-sdk::shopping_release custody_keeps_offered_partitions_across_restart"
+limit = "5s"
+measured = "4.85s"
+cause = "Custody keeps offered partitions across a restart; the restart and re-sync are the cost."
+expires = 2026-11-30

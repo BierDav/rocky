@@ -3,7 +3,8 @@
 Native macOS arm64 loopback evidence for the composed SDK, coordination service
 and Kotlin package. Start with the [starter guide](getting-started.md) for what
 an application may rely on. The shopping application is not yet qualified; see
-[its audit](shopping-qualification.md).
+[its audit](shopping-qualification.md). The market's scenarios are in
+[market qualification](market-qualification.md).
 
 ## Reproduce
 
@@ -11,26 +12,26 @@ an application may rely on. The shopping application is not yet qualified; see
 cargo test -p rocky-sdk --locked --release --test commands -- --ignored --nocapture
 ```
 
-This runs the two latency probes below. The scenarios and the soak ran a
-Kotlin-only market application as separate JVM processes killed with SIGKILL
-against three `rocky-voter` processes. That application and its gate were
-removed with the other examples, so those results are not reproducible from
-the tree.
+This runs the two latency probes below. The scenarios and the soak first ran a
+Kotlin-only market application, since removed, as separate JVM processes
+killed with SIGKILL against three `rocky-voter` processes. The
+[market example](market-qualification.md) restores scenarios 3, 4 and 6 and the
+soak; the last column names the command that reproduces each scenario today.
 
 ## Scenarios
 
 All passed on 2026-10-07; the last rerun on 2026-10-08 passed 42 checks.
 
-| # | Result | Pointers |
-| --- | --- | --- |
-| 1 Two owners, one service | Two tenants each hold one open domain on the same voters. Another tenant's control and registration are `denied`. Voter files hold no application plaintext | [Public coordination](public-coordination.md) |
-| 2 Offline mergeable data | Edits on two members survive SIGKILL, converge directly while the creator is stopped, and the restarted creator catches up. A scoped writer is `denied` other collections and holds none of their bytes | [Permissions and sync](permissions-and-sync.md) |
-| 3 Competing commands | Of two reservations for the last item one is accepted, the other gets a typed rejection kept across kill and reopen. Command-controlled rows are read through a Room DAO; DAO and SQL writes to them are refused. Undeclared methods and versions, mistyped arguments, callers without invoke rights and non-executors are refused | [Typed commands](typed-commands.md) |
-| 4 Loss, cancellation, takeover | A lost reply, a killed client, a cancelled wait and a killed executor each complete the original ticket, with one handler call per identity. The owner fences the executor and the new one continues at the same head. An unconfirmed identity reads `Expired`; a confirmed one whose reply was lost reads `Retired` with no outcome | [Coordinator retention](coordinator-retention.md) |
-| 5 Shared endpoint | Rocky and an application protocol share one application-owned iroh endpoint across a Rocky close and reopen | [SDK transports](sdk-transports.md#iroh) |
-| 6 Service faults and custody | Strong work continues after leader loss, pauses at quorum loss while mergeable writes sync, and the pending identity applies once after restore. An executor without its results answers retryable `missing_head`, then recovers from the custodian; with the only copy removed it stays `missing_head` | [Coordinator operations](coordinator-operations.md), [custody](getting-started.md#optional-custody) |
-| 7 Upgrades and revocation | An issuer upgrades additively while an old peer writes; strong work waits with `unsupported_generation` until the executor activates the generation. Logout ends authority. Revocation rotates keys and the revoked writer receives no later plaintext | [Generations](generations.md), [credentials](credentials.md) |
-| 8 Retention soak | 669 commands in 21 windows of 20 s with a device kill and a new control revision per window. Voter responses, state bytes, sessions and retry records stayed within 125% of the largest earlier window (10–19 responses, 9–15 KB state) | [Coordinator retention](coordinator-retention.md) |
+| # | Result | Pointers | Reproduce |
+| --- | --- | --- | --- |
+| 1 Two owners, one service | Two tenants each hold one open domain on the same voters. Another tenant's control and registration are `denied`. Voter files hold no application plaintext | [Public coordination](public-coordination.md) | Not reproducible as processes; `ServiceOwnerTest` in `./kotlin test -m rocky-core` covers the tenant quota and a refused non-owner |
+| 2 Offline mergeable data | Edits on two members survive SIGKILL, converge directly while the creator is stopped, and the restarted creator catches up. A scoped writer is `denied` other collections and holds none of their bytes | [Permissions and sync](permissions-and-sync.md) | In part: `./examples/shoppinglist-app/qualify` covers offline edits through custody and creator loss ([shopping](shopping-qualification.md)); the SIGKILL and scoped-writer steps are not reproducible as processes |
+| 3 Competing commands | Of two reservations for the last item one is accepted, the other gets a typed rejection kept across kill and reopen. Command-controlled rows are read through a Room DAO; DAO and SQL writes to them are refused. Undeclared methods and versions, mistyped arguments, callers without invoke rights and non-executors are refused | [Typed commands](typed-commands.md) | `ROCKY_SCENARIOS=last-item,refused-writes ./examples/market-app/qualify`; undeclared and mistyped calls are refused in process by `cargo test -p rocky-sdk --test commands` |
+| 4 Loss, cancellation, takeover | A lost reply, a killed client, a cancelled wait and a killed executor each complete the original ticket, with one handler call per identity. The owner fences the executor and the new one continues at the same head. An unconfirmed identity reads `Expired`; a confirmed one whose reply was lost reads `Retired` with no outcome | [Coordinator retention](coordinator-retention.md) | `ROCKY_SCENARIOS=loss,takeover ./examples/market-app/qualify`; `Expired` and `Retired` are not reproducible as processes |
+| 5 Shared endpoint | Rocky and an application protocol share one application-owned iroh endpoint across a Rocky close and reopen | [SDK transports](sdk-transports.md#iroh) | Not reproducible as processes |
+| 6 Service faults and custody | Strong work continues after leader loss, pauses at quorum loss while mergeable writes sync, and the pending identity applies once after restore. An executor without its results answers retryable `missing_head`, then recovers from the custodian; with the only copy removed it stays `missing_head` | [Coordinator operations](coordinator-operations.md), [custody](getting-started.md#optional-custody) | `ROCKY_SCENARIOS=voters ./examples/market-app/qualify`; the `missing_head` recovery is not reproducible as processes |
+| 7 Upgrades and revocation | An issuer upgrades additively while an old peer writes; strong work waits with `unsupported_generation` until the executor activates the generation. Logout ends authority. Revocation rotates keys and the revoked writer receives no later plaintext | [Generations](generations.md), [credentials](credentials.md) | Not reproducible as processes |
+| 8 Retention soak | 669 commands in 21 windows of 20 s with a device kill and a new control revision per window. Voter responses, state bytes, sessions and retry records stayed within 125% of the largest earlier window (10–19 responses, 9–15 KB state) | [Coordinator retention](coordinator-retention.md) | Not reproducible; `./examples/market-app/soak` runs an unpaced soak without kills ([its result](market-qualification.md#soak)) |
 
 Syncing while a configured peer is stopped took about 75 s in scenario 2,
 because each dial runs to its timeout.
@@ -64,7 +65,9 @@ a peer below the horizon and confirms after takeover ([strong history](strong-hi
   stopped and a later ticket ended `Retired` without an outcome.
 - Each new receipt rewrites the device's whole coordinator evidence file, up to
   4,096 receipts. In the three-voter soak, mean confirmation rose from 230 ms to
-  512 ms over 20 windows. That soak has not been repeated since pruning.
+  512 ms over 20 windows. Since pruning, `./examples/market-app/soak` stops after
+  2,065 commands at the invoking buyer's byte budget, while the executor's
+  records stay at 384 ([market soak](market-qualification.md#soak)).
 - Retry markers and effect observations are not claimed to plateau.
 
 ## Not qualified

@@ -1,0 +1,14 @@
+# Multi-process market qualification: device JVMs running the app's MarketNode, three rocky-voter processes and the
+# packaged rocky-peer. See docs/runtime/market-qualification.md.
+product: jvm/app
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../marketShared
+  # Reads the soak's retained command budget from each device's file, read-only.
+  - androidx.sqlite:sqlite-bundled:2.6.2
+settings:
+  jvm:
+    mainClass: org.example.examples.market.qualification.QualificationKt
+  kotlin:
+    allWarningsAsErrors: true

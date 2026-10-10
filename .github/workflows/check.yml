@@ -417,6 +417,72 @@ jobs:
           job: shopping
           tree: ${{ steps.source.outputs.tree }}
 
+  market:
+    # The market's five multi-process scenarios against three loopback voters;
+    # see docs/runtime/market-qualification.md. It builds the voter and the
+    # custody peer itself, so it needs no architecture-specific artifact.
+    # Releases skip it, as `shopping`.
+    needs: build
+    if: ${{ !inputs.release }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    timeout-minutes: 60
+    steps:
+      - name: Download the exact source revision
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # GitHub and Gitea serve the same archive and commit endpoints.
+          api() {
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
+          }
+          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+
+      - id: reuse
+        uses: ./source/.github/actions/reuse-build
+        with:
+          job: market
+          tree: ${{ steps.source.outputs.tree }}
+          nextest: false
+
+      - uses: actions/setup-java@v5
+        if: steps.reuse.outputs.passed != 'true'
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Run the market qualification
+        if: steps.reuse.outputs.passed != 'true'
+        working-directory: source
+        env:
+          ROCKY_EVIDENCE: ${{ runner.temp }}/market
+        run: ./examples/market-app/qualify
+
+      - name: Keep the market evidence
+        if: always() && steps.reuse.outputs.passed != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-evidence
+          path: ${{ runner.temp }}/market/evidence.json
+          retention-days: 14
+
+      - uses: ./source/.github/actions/record-pass
+        if: steps.reuse.outputs.passed != 'true'
+        with:
+          job: market
+          tree: ${{ steps.source.outputs.tree }}
+
   android:
     # Runs the release workflow's Android build steps to keep its caches warm:
     # Gradle and Kotlin CLI toolchain files, and the Cargo registry with the

@@ -340,7 +340,10 @@ JVM desktop, Android and arm64 iOS device/simulator. In `rocky-core`, `src`
 is common code, including the runtime adapter under `src/native`; generated
 JNA/cinterop implementations supply the same contract. `src@jna` contains
 Java platform calls and `File` overloads; `src@ios` supplies Foundation and
-Security calls. The test-only `platform-test` module supplies file fixtures.
+Security calls, the device-only Keychain store and notification lifecycle
+([iOS](runtime/ios.md)). `sdks/kotlin/package-ios` stages iOS publications and
+the independent packaged consumer; `rocky-iroh` refreshes or rebinds starter
+sockets on foreground. The test-only `platform-test` module supplies file fixtures.
 `src@android` adds the Android Keystore store
 and lifecycle binding. The `rocky-android` plugin ships the same sources as an AAR for
 [Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` brings Android apps the native

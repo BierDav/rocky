@@ -1,6 +1,6 @@
 # 18. iOS packaging, Keychain and lifecycle
 
-Status: not started.
+Status: implemented; local software gates passed; physical completion gate blocked by signing. See [evidence](18-ios-evidence.md).
 Owner: `sdks/kotlin` packaging tooling and `rocky-core` iOS sources; the
 check and release workflows; `rocky-sdk`, `rocky-iroh` and `sdks/native` for
 the socket rebind of slice 5. Depends on

@@ -58,6 +58,7 @@ class RockyDatabase private constructor(
 
     /** Resumes automatic sync, starting with an immediate pass, if the database was opened with it. */
     suspend fun enterForeground() = lifecycle.withLock {
+        client.call(request("network_foreground"))
         if (automaticSync && synchronizing == null) {
             val status = setAutomaticSync(true)
             synchronizing = lifetime.launch { observeSync(status) }

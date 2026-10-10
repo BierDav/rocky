@@ -46,6 +46,8 @@ grouped commits since the last stable release.
 | Custody peer image | `ghcr.io/bierdav/rocky-db-peer` | the same |
 | JVM SDK, `darwin-aarch64` and `linux-x86-64` natives | GitHub Packages Maven | `rocky:rocky-core-jvm:<version>` |
 | Android SDK ([Android](runtime/android.md)) | GitHub Packages Maven | `rocky:rocky-core-android`, `rocky:rocky-sqlite`, `rocky:rocky-room` |
+| iOS SDK ([iOS](runtime/ios.md)) | GitHub Packages Maven | `rocky:rocky-core-ios`, `rocky:rocky-sqlite-ios`, `rocky:rocky-room-ios` and their target/cinterop publications |
+| iOS XCFramework, Kotlin artifacts and checksum inventory | GitHub release assets | `rocky-kotlin-sdk-<version>-ios.tar.gz` |
 | Android runtime | GitHub Packages Maven | `rocky:rocky-runtime-android` |
 | Packaged JVM SDK ([packaging](runtime/sdk-packaging.md)) | GitHub release assets | `rocky-kotlin-sdk-<version>-<platform>.tar.gz` |
 
@@ -71,7 +73,9 @@ dependencies { implementation("rocky:rocky-core-jvm:0.1.0-alpha.1") }
    qualification; it skips a tree whose checks already passed. Both images are built for amd64
    and arm64 after it, then merged and tagged at the release version.
 3. In parallel with them: the JVM SDK packaged and qualified per platform, and the Android
-   runtime and SDK built at the release version (`-ProckyVersion`, `ROCKY_VERSION`).
+   runtime and SDK built at the release version (`-ProckyVersion`, `ROCKY_VERSION`),
+   plus the iOS SDK and XCFramework packaged with `ROCKY_VERSION` and qualified
+   with Rust absent from the consumer PATH.
 4. Publish: merges the JVM natives into one jar (`scripts/release/jvm-maven`), uploads every Maven
    artifact (`scripts/release/maven-deploy`), then creates the tag and release last.
 

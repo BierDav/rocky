@@ -1,0 +1,121 @@
+# iOS
+
+The Kotlin Multiplatform SDK targets arm64 iPhones and arm64 simulators, with
+one common API and bundled SQLite. A consumer needs Xcode and Kotlin, without
+Cargo, rustup, Rust sources or a manual native linker flag.
+The [binding guide](kotlin-native-binding.md) covers callbacks and threading.
+
+## Package and consume
+
+Contributors run `./sdks/kotlin/package-ios`. It writes
+`local/packaged-ios`, containing:
+
+- `RockyRuntime.xcframework`: device and simulator static archives and the
+  generated UniFFI header.
+- `maven/`: `rocky:rocky-core-ios`, `rocky:rocky-sqlite-ios` and
+  `rocky:rocky-room-ios`, with common metadata, target klibs, cinterop klibs
+  and dependency metadata. The cinterop klibs embed their target's static
+  archive; Kotlin consumers need no additional link configuration.
+- `BUILD.json`: version, minimum iOS (13.0), Kotlin (2.4.20), Xcode version
+  and native build profile. These artifacts currently use the debug runtime.
+- `SHA256.json`: every other distributed file and its SHA-256 digest.
+
+`ROCKY_VERSION` selects the publication version (default `0.1.0`).
+[Releases](../releasing.md) publish the Maven repository and a tarball of the
+whole package. Local packages can be consumed as an isolated Maven local
+repository by setting `KOTLIN_CLI_JAVA_OPTIONS=-Dmaven.repo.local=/path/to/maven`
+and declaring `url: mavenLocal`. The
+[independent consumer](../../sdks/kotlin/packaged-ios-consumer/module.yaml)
+depends only on these coordinates. `./sdks/native/qualify-ios-package` copies
+it outside the source project, verifies the full inventory, builds for the
+device and runs it on the simulator with Rust tools absent from `PATH`.
+
+## Keychain secret store
+
+Pass `rocky.ios.KeychainSecretStore(service)` to every create, join, open,
+resume or restore for that installation. Choose a stable service string per
+installation and persist its public name in your application configuration.
+The default remains the file store; selecting the Keychain is explicit.
+
+Items are generic passwords identified by service and secret name, with
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and synchronization disabled.
+They are available while locked after the first unlock following boot. Before
+that unlock, inaccessible items produce errors. Only `errSecItemNotFound`
+loads as absent; every other Keychain failure includes its OSStatus and fails
+the operation. Store updates the existing item; delete is idempotent.
+`credentials.logout(purge = true)` removes the installation's secrets after
+the existing publisher-custody check permits logout. A sole issuer must first
+transfer custody to another issuer.
+
+Secrets exist in application process memory when used for signing and
+cryptography. They are absent from Rocky's identity directory and SQLite file.
+They are neither included in device backups nor synchronized through iCloud
+Keychain. A device restore carrying the identity's files without its Keychain
+items fails with the missing-secret error; open never manufactures replacement
+keys. Recover through fresh enrollment or the [restore](backup-and-restore.md)
+contract.
+
+Uninstall is not logout: iOS can retain an application's Keychain items across
+uninstall/reinstall. Do not rely on uninstall to purge them; invoke logout
+before removing the installation. A new identity directory creates a fresh
+installation even if old items remain. A device-only item cannot be restored
+to another device. The simulator's Keychain does not qualify device hardware
+protection or locked-device behavior.
+
+## Visibility and sockets
+
+Register `rocky.ios.RockyLifecycle.register()` on the main thread at startup.
+`follow(database, onApplied, onError)` applies current visibility and observes
+`UIApplicationDidEnterBackgroundNotification` and
+`UIApplicationWillEnterForegroundNotification`. Each database has one ordered
+worker and a conflated pending state: rapid changes finish in the latest state.
+Callbacks run on that worker. Handle errors explicitly, especially when the
+application owns the endpoint. `unfollow` leaves the database in its current
+state; `unregister` removes observers and workers. Neither closes a database,
+a network or an endpoint.
+
+`enterBackground()` cancels automatic sync, including a stalled dial, within
+one second. Local reads and writes remain available and committed writes remain
+durable. There are no background tasks, push wakeups or background sync.
+`enterForeground()` refreshes the starter's sockets and resumes an immediate
+sync pass when automatic sync was enabled at open. A dead starter endpoint is
+rebound with the original transport key, retaining its node ID. Live starter iroh
+endpoints receive a network-change notification to refresh reachability.
+An application-owned dead endpoint produces an error; its owner must bind a
+replacement and attach it. Rocky never closes it as part of foregrounding.
+Android uses the same runtime call and keeps its existing lifecycle contract.
+
+## Process death
+
+| Lost with the process | What the next open does |
+| --- | --- |
+| Reactor, sessions, subscriptions and waits | Creates new handles; the application subscribes again |
+| Starter endpoint and sockets | Binds with the Keychain transport key, retaining the node ID |
+| Application-owned endpoint | The application binds it with its own secret and attaches it |
+| An in-flight sync pass | Retries from durable state; sync is idempotent |
+| A write whose reply was lost | `reconcile(handle)` reports whether its atomic local commit happened |
+| Development coordinator's memory ledger | Starts empty; use a persistent service for durable coordination |
+
+Persist the mutation handle before submitting a write. Rows, operations, outbox,
+revision and handle evidence commit atomically. A process killed before commit
+reopens without the write; a process killed after commit reopens with it,
+including when it never received the reply. Retry under the same handle only
+when reconciliation says it did not commit.
+
+## Qualification
+
+Run `./sdks/native/check-ios`, `./sdks/native/qualify-ios-sdk`,
+`./sdks/native/qualify-ios-lifecycle`, `./sdks/kotlin/package-ios`, then
+`./sdks/native/qualify-ios-package` on macOS/Xcode. CI owns these simulator and
+artifact gates. The lifecycle gate checks Keychain persistence, byte-searches
+for secrets, deletion and purge, notifications, the stalled-dial pause, automatic
+sync after injected socket closure and subprocess death at commit boundaries.
+The standalone simulator test harness embeds a test Keychain entitlement;
+applications use their own signing identity and access group.
+Only contributor simulator builds enable the `qualification` feature; published
+packages contain neither socket-fault calls nor commit-exit hooks.
+
+[Phase 18 evidence](../features_07/18-ios-evidence.md) records exact results and
+limits. Physical iPhone qualification additionally requires locked-device
+Keychain behavior, restart and restore refusal, and foregrounding after ten
+minutes in the background. Simulator results do not establish those properties.

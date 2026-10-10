@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Deterministic simulator fault hooks; never enabled in published artifacts.
+qualification = []
+
 [dependencies]
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

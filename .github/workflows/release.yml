@@ -542,9 +542,62 @@ jobs:
             source/local/release-maven
             source/local/packaged-android/maven
 
+  ios:
+    name: iOS SDK
+    needs: [version, check]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      ROCKY_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Download the exact source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_API_URL: ${{ github.api_url }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REVISION: ${{ github.sha }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --output "$RUNNER_TEMP/source.tar.gz" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
+          mkdir source
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+
+      - name: Install the pinned iOS toolchain
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/sdks/native -> target
+          shared-key: ios
+
+      - name: Package and qualify the versioned iOS SDK
+        working-directory: source
+        run: |
+          set -euo pipefail
+          ./sdks/kotlin/package-ios
+          ./sdks/native/qualify-ios-package
+          mkdir -p dist
+          tar -czf "dist/rocky-kotlin-sdk-${ROCKY_VERSION}-ios.tar.gz" -C local packaged-ios
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: |
+            source/local/packaged-ios/maven
+            source/dist/rocky-kotlin-sdk-*-ios.tar.gz
+
   publish:
     name: Publish
-    needs: [version, check, image-manifest, jvm, android]
+    needs: [version, check, image-manifest, jvm, android, ios]
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
     timeout-minutes: 20
@@ -586,7 +639,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
             rm -rf dist
             if gh run download "${GITHUB_RUN_ID}" --dir dist \
-                --pattern 'notes' --pattern 'android' --pattern 'jvm-*' &&
+                --pattern 'notes' --pattern 'android' --pattern 'ios' --pattern 'jvm-*' &&
               test -f dist/notes/notes.md; then
               exit 0
             fi
@@ -614,6 +667,12 @@ jobs:
           pattern: jvm-*
           path: dist
 
+      - uses: actions/download-artifact@v4
+        if: github.server_url != 'https://github.com'
+        with:
+          name: ios
+          path: dist/ios
+
       - name: Publish the Maven artifacts
         env:
           MAVEN_USER: ${{ github.server_url == 'https://github.com' && github.actor || github.repository_owner }}
@@ -628,7 +687,7 @@ jobs:
           source/scripts/release/jvm-maven "${VERSION}" dist/maven-jvm \
             dist/jvm-darwin-aarch64/rocky-core-jvm.jar dist/jvm-linux-x86-64/rocky-core-jvm.jar
           source/scripts/release/maven-deploy dist/maven-jvm \
-            dist/android/release-maven dist/android/packaged-android/maven
+            dist/android/release-maven dist/android/packaged-android/maven dist/ios/local/packaged-ios/maven
 
       - name: Create the GitHub release
         if: github.server_url == 'https://github.com'
@@ -644,7 +703,7 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "v${VERSION}" \
             --notes-file dist/notes/notes.md \
-            dist/jvm-*/rocky-kotlin-sdk-*.tar.gz
+            dist/jvm-*/rocky-kotlin-sdk-*.tar.gz dist/ios/dist/rocky-kotlin-sdk-*-ios.tar.gz
 
       - name: Create the Gitea release
         if: github.server_url != 'https://github.com'
@@ -665,7 +724,7 @@ jobs:
             '{tag_name: $tag, target_commitish: $target, name: $tag, body: $body, draft: false, prerelease: $prerelease}')"
           id="$(api --request POST --header 'Content-Type: application/json' --data "${payload}" \
             "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases" | jq -r .id)"
-          for asset in dist/jvm-*/rocky-kotlin-sdk-*.tar.gz; do
+          for asset in dist/jvm-*/rocky-kotlin-sdk-*.tar.gz dist/ios/dist/rocky-kotlin-sdk-*-ios.tar.gz; do
             api --request POST --form "attachment=@${asset}" \
               "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/releases/${id}/assets?name=$(basename "${asset}")" > /dev/null
           done

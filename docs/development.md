@@ -165,6 +165,16 @@ runs the common SDK/driver/Room tests and the endpoint, command, cancellation
 and lifetime gates with iroh. [The binding guide](runtime/kotlin-native-binding.md)
 records the toolchain, dependency repair, threading contract and evidence.
 
+Phase 18 adds `./sdks/kotlin/package-ios` and
+`./sdks/native/qualify-ios-package` for the independent packaged consumer, and
+`./sdks/native/qualify-ios-lifecycle` for Keychain, suspension and crash probes.
+The new Rust endpoint ownership/rebind tests are integration tests through
+`kind(test)` in `.config/test-tiers.toml`, with the same 2 s budget. The iOS
+acceptance tests run in the macOS job; they are platform integration gates,
+not additions to the Rust unit tier. The lifecycle gate enforces 2 s for each
+of its seven tests; the packaged consumer enforces the same budget. See
+[iOS](runtime/ios.md).
+
 ## Android
 
 The [Android runtime](../sdks/kotlin/android-runtime/README.md) is a small Gradle build

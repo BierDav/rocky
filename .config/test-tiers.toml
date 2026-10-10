@@ -14,6 +14,8 @@ suite = "10s"
 # Phase 8: secure history/retirement and SDK delivery/recovery exercise real
 # SQLite or credential sealing. The package filters below include them; the
 # pure rocky-core epoch-order property and SDK capacity check stay in unit.
+# Phase 18 endpoint socket-rebind and borrowed-ownership tests use real
+# loopback sockets; kind(test) includes them with the unchanged 2 s budget.
 [integration]
 per-test = "2s"
 suite = "5m"

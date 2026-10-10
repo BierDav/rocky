@@ -757,6 +757,8 @@ impl<A: RowApplication> SecureSql<A> {
         let mut rows = rows.unwrap_or_else(|| empty(lease, SqlState::Idle));
         rows.state = SqlState::Idle;
         let inner = &mut *held.0;
+        #[cfg(feature = "qualification")]
+        qualification_kill("before");
         let sealed = self.seal(inner, handle).await;
         inner.strict_projection = false;
         let committed = match sealed? {
@@ -769,7 +771,13 @@ impl<A: RowApplication> SecureSql<A> {
             Sealed::Commit(committed) => committed,
         };
         let conn = inner.conn.connection();
+        #[cfg(feature = "qualification")]
+        if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|point| point == "during") {
+            conn.qualification_exit_in_commit().map_err(Error::from)?;
+        }
         conn.run_now("COMMIT").map_err(Error::from)?;
+        #[cfg(feature = "qualification")]
+        qualification_kill("after");
         inner.note_commit().await;
         inner.publish_revision().await?;
         // The frames may leave the device.
@@ -1018,5 +1026,14 @@ fn empty<A: RowApplication>(lease: &Lease<A>, state: SqlState) -> SecureRows {
         last_insert_rowid: lease.observed.last_insert_rowid,
         state,
         committed: None,
+    }
+}
+
+// Only qualification builds read this variable. Exit without destructors so
+// SQLite must recover the pending WAL/transaction on the next process open.
+#[cfg(feature = "qualification")]
+fn qualification_kill(point: &str) {
+    if std::env::var("ROCKY_SQL_KILL_AT").is_ok_and(|selected| selected == point) {
+        std::process::exit(87);
     }
 }

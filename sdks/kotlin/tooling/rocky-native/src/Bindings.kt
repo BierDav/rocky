@@ -55,11 +55,24 @@ fun buildIosBinding(
     @Input definition: Path,
     @Input rustSources: List<Path>,
     @Output defFile: Path,
+    @Output library: Path,
 ) {
+    val qualification = if (target == "aarch64-apple-ios-sim") listOf("--features", "qualification") else emptyList()
     run(
-        listOf("cargo", "build", "--manifest-path", "sdks/native/Cargo.toml", "--lib", "--target", target, "--locked"),
+        listOf("cargo", "build", "--manifest-path", "sdks/native/Cargo.toml", "--lib", "--target", target, "--locked") + qualification,
         Path(repositoryRoot),
         mapOf("IPHONEOS_DEPLOYMENT_TARGET" to "13.0"),
     )
-    definition.copyTo(defFile.createParentDirectories(), overwrite = true)
+    val archive = Path(repositoryRoot) / "sdks/native/target" / target / "debug/librocky_uniffi.a"
+    archive.copyTo(library.createParentDirectories(), overwrite = true)
+    val entitlements = if (target == "aarch64-apple-ios-sim") {
+        " -sectcreate __TEXT __entitlements ${Path(repositoryRoot) / "sdks/native/qualification/keychain-entitlements.plist"}"
+    } else {
+        ""
+    }
+    defFile.createParentDirectories().writeText(
+        definition.readText()
+            .replace(Regex("(?m)^libraryPaths = .*$"), "libraryPaths = ${library.parent}")
+            .replace("-liconv", "-liconv$entitlements"),
+    )
 }

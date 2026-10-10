@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+qualification = ["rocky-core/qualification", "rocky-secure/qualification", "rocky-iroh?/qualification"]
 default = ["iroh"]
 # The iroh transport: handlers for an application's endpoint and the starter's
 # own, and the client of a coordination service reached over it.

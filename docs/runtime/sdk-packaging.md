@@ -96,7 +96,7 @@ fresh restore and additive upgrade with reopen, on a development coordinator.
 | macOS arm64 (`darwin-aarch64`) | Clean packaged consumer, JDK 25 |
 | Linux x86_64 (`linux-x86-64`) | Clean packaged consumer, Debian 12, OpenJDK 17, under emulation |
 | Windows x86_64 | Best-effort build, no claim |
-| iOS arm64 device/simulator | [Kotlin/Native binding qualification](kotlin-native-binding.md); consumer packaging belongs to phase 18 |
+| iOS arm64 device/simulator | [Kotlin/Native binding qualification](kotlin-native-binding.md); [packaged artifacts](ios.md#package-and-consume) |
 | web | Unqualified |
 
 The iOS binding uses cinterop over UniFFI’s generated header and the static
@@ -105,8 +105,7 @@ bundled-SQLite runtime; the JVM and Android retain JNA. Common openers take
 arrive on Rust threads and must be thread-safe; foreign async traits use
 Kotlin’s default dispatcher. Explicit closure releases owned handles and
 application endpoints remain borrowed. See the [binding guide](kotlin-native-binding.md#threads-cancellation-and-ownership)
-for cancellation, ownership and measured limits. iOS consumer artifacts,
-Keychain storage and lifecycle are phase 18 work.
+for cancellation, ownership and measured limits. [iOS](ios.md) describes consumer artifacts, Keychain storage and lifecycle.
 
 JVM bytecode targets 17. The JVM package carries the locked development
 native profile; publication, optimized artifacts and signing/notarization are

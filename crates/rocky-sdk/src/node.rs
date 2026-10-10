@@ -689,6 +689,26 @@ impl Node {
                     }
                 }
             }
+            #[cfg(feature = "qualification")]
+            "network_fault_close" => {
+                let attached = self.network.read().await;
+                let link = attached
+                    .as_ref()
+                    .ok_or(ServiceError::NetworkRequired("fault injection"))?;
+                link.transport.fault_close_sockets().await?;
+                Ok(json!({}))
+            }
+            "network_foreground" => {
+                if let Some(link) = self.network.read().await.as_ref() {
+                    link.transport
+                        .foreground()
+                        .await
+                        .map_err(|error| ServiceError::Unreachable(error.to_string()))?;
+                }
+                self.reset_retry(None);
+                self.wake_sync();
+                Ok(json!({}))
+            }
             "network" => Ok(self.network_status().await),
             "pairing" | "renew" | "sync" | "contact" | "authors" => {
                 self.networked(client, kind, request).await

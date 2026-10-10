@@ -35,7 +35,9 @@ tasks:
         - ${project.rootDir}/sdks/native/Cargo.lock
         - ${project.rootDir}/sdks/native/uniffi.toml
         - ${project.rootDir}/sdks/native/src
+        - ${project.rootDir}/sdks/native/qualification/keychain-entitlements.plist
       defFile: ${taskOutputDir}/rocky.def
+      library: ${taskOutputDir}/librocky_uniffi.a
   iosDevice:
     action: !rocky.build.buildIosBinding
       repositoryRoot: ${project.rootDir}
@@ -52,6 +54,7 @@ tasks:
         - ${project.rootDir}/sdks/native/uniffi.toml
         - ${project.rootDir}/sdks/native/src
       defFile: ${taskOutputDir}/rocky.def
+      library: ${taskOutputDir}/librocky_uniffi.a
 
 generated:
   sources:

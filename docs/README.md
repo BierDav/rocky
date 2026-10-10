@@ -13,6 +13,7 @@ Select the guide for your task rather than reading every document.
 | Upgrade schema/handlers or resume a projection plan | [Generations](runtime/generations.md) |
 | Back up a database and restore under a fresh signer | [Backup/restore](runtime/backup-and-restore.md) |
 | Compose independent Kotlin APIs or consume packaged artifacts | [SDK packaging](runtime/sdk-packaging.md) |
+| Package for iOS, use the Keychain and follow application lifecycle | [iOS](runtime/ios.md) |
 | Inspect phase-8 execution/platform evidence | [Recovery/SDK evidence](runtime/sdk-packaging.md#build-and-consume-a-package) |
 | Set up tooling or run checks | [Development](development.md) |
 | Write commit messages | [Commit messages](commits.md) |
@@ -94,4 +95,3 @@ implementation guidance belongs in focused documents such as the phase briefs.
 
 - [Wide schemas and domain placement](runtime/wide-schemas.md), with [qualification](runtime/scaling-limits.md#measured-limits).
 - [Full and partial replicas](runtime/replica-roles.md), with [qualification](runtime/scaling-limits.md#measured-limits).
-

@@ -84,13 +84,13 @@ async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Re
     // Until a service listens, Rocky's ALPNs are refused; the echo is not.
     assert!(refused(&*dialing, &served.address().await?).await);
     assert_eq!(attachment.refused(), 1);
-    assert_eq!(echo(other.endpoint(), endpoint.addr()).await?, b"hello");
+    assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
     served.listen(true);
     dialing.listen(true);
 
     rocky(&*dialing, &*served).await?;
     rocky(&*served, &*dialing).await?;
-    assert_eq!(echo(other.endpoint(), endpoint.addr()).await?, b"hello");
+    assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
 
     // Closing Rocky's side releases its streams and refuses its ALPNs.
     served.close().await;
@@ -104,7 +104,7 @@ async fn rocky_and_an_application_protocol_share_an_application_endpoint() -> Re
     assert!(attachment.refused() >= 1);
     // The endpoint, the router and the application's protocol are untouched.
     assert!(!endpoint.is_closed() && !router.is_shutdown());
-    assert_eq!(echo(other.endpoint(), endpoint.addr()).await?, b"hello");
+    assert_eq!(echo(&other.endpoint(), endpoint.addr()).await?, b"hello");
 
     // The final shutdown is the application's.
     router.shutdown().await?;
@@ -132,5 +132,43 @@ async fn the_starter_shuts_down_everything_it_bound() -> Result<(), Failure> {
             .await
             .is_err()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_rebinds_dead_starter_with_the_same_identity() -> Result<(), Failure> {
+    let first = local().start([31; 32]).await?;
+    let second = local().start([32; 32]).await?;
+    let identity = first.endpoint().id();
+    first.listen(true);
+    second.listen(true);
+    first.endpoint().close().await;
+    first.foreground().await?;
+    assert_eq!(first.endpoint().id(), identity);
+    assert!(!first.endpoint().is_closed());
+    rocky(&first, &second).await?;
+    rocky(&second, &first).await?;
+    first.close().await;
+    second.close().await;
+    assert!(first.foreground().await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_reports_a_dead_borrowed_endpoint() -> Result<(), Failure> {
+    let endpoint = local().bind([33; 32]).await?;
+    let attachment = Attachment::new(endpoint.clone());
+    endpoint.close().await;
+    let error = attachment
+        .foreground()
+        .await
+        .err()
+        .ok_or("dead endpoint accepted")?;
+    assert!(
+        error
+            .to_string()
+            .contains("application-owned endpoint is dead")
+    );
+    assert_eq!(attachment.endpoint().id(), endpoint.id());
     Ok(())
 }

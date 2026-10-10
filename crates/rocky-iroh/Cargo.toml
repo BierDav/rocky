@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Deterministic simulator fault hooks; never enabled in published artifacts.
+qualification = ["rocky-core/qualification"]
+
 [dependencies]
 rocky-core.workspace = true
 iroh = "1.3"

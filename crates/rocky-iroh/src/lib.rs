@@ -84,7 +84,8 @@ fn stream(connection: Connection, (send, recv): (SendStream, RecvStream)) -> Str
 }
 
 struct Shared {
-    endpoint: Endpoint,
+    endpoint: watch::Sender<Endpoint>,
+    restart: Mutex<Option<(Options, [u8; 32])>>,
     sender: mpsc::Sender<(Protocol, Stream)>,
     incoming: Mutex<mpsc::Receiver<(Protocol, Stream)>>,
     connections: Mutex<HashMap<(EndpointId, Protocol), Connection>>,
@@ -122,7 +123,8 @@ impl Attachment {
     fn build(endpoint: Endpoint, relays: bool, protocols: Vec<Protocol>) -> Self {
         let (sender, receiver) = mpsc::channel(PENDING);
         Self(Arc::new(Shared {
-            endpoint,
+            endpoint: watch::channel(endpoint).0,
+            restart: Mutex::new(None),
             sender,
             incoming: Mutex::new(receiver),
             connections: Mutex::new(HashMap::new()),
@@ -154,8 +156,8 @@ impl Attachment {
     pub fn transport(&self) -> Arc<dyn Transport> {
         Arc::new(self.clone())
     }
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.0.endpoint
+    pub fn endpoint(&self) -> Endpoint {
+        self.0.endpoint.borrow().clone()
     }
     /// Inbound connections and streams refused: closed, busy or queue full.
     pub fn refused(&self) -> u64 {
@@ -229,13 +231,26 @@ impl ProtocolHandler for Handler {
 impl Transport for Attachment {
     fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
-        let mut addresses = self.0.endpoint.watch_addr();
+        let mut endpoints = self.0.endpoint.subscribe();
+        let mut addresses = self.endpoint().watch_addr();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = events.closed() => break,
-                    changed = addresses.updated() => {
+                    changed = endpoints.changed() => {
                         if changed.is_err() { break; }
+                        addresses = endpoints.borrow_and_update().watch_addr();
+                        events.send_replace(());
+                    }
+                    changed = addresses.updated() => {
+                        if changed.is_err() {
+                            // A closed endpoint's watcher ends. Wait for the starter's replacement.
+                            tokio::select! {
+                                _ = events.closed() => break,
+                                changed = endpoints.changed() => { if changed.is_err() { break; } }
+                            }
+                            addresses = endpoints.borrow_and_update().watch_addr();
+                        }
                         events.send_replace(());
                     }
                 }
@@ -252,9 +267,9 @@ impl Transport for Attachment {
             if self.0.relays {
                 // An address with a home relay is reachable beyond the LAN.
                 let _ =
-                    tokio::time::timeout(Duration::from_secs(5), self.0.endpoint.online()).await;
+                    tokio::time::timeout(Duration::from_secs(5), self.endpoint().online()).await;
             }
-            Ok(serde_json::to_string(&self.0.endpoint.addr())?)
+            Ok(serde_json::to_string(&self.endpoint().addr())?)
         })
     }
     fn connect<'a>(
@@ -276,7 +291,7 @@ impl Transport for Attachment {
                 return Ok(stream(connection, pair));
             }
             let connection =
-                tokio::time::timeout(TIMEOUT, self.0.endpoint.connect(address, protocol.name()))
+                tokio::time::timeout(TIMEOUT, self.endpoint().connect(address, protocol.name()))
                     .await??;
             let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
             let mut connections = self.0.connections.lock().await;
@@ -309,10 +324,52 @@ impl Transport for Attachment {
             });
         }
     }
+    #[cfg(feature = "qualification")]
+    fn fault_close_sockets(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async {
+            self.endpoint().close().await;
+            Ok(())
+        })
+    }
+    fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async {
+            let restart = self.0.restart.lock().await;
+            if *self.0.closed.borrow() {
+                return Err("the iroh attachment is closed".into());
+            }
+            let endpoint = self.endpoint();
+            let Some((options, secret)) = restart.as_ref() else {
+                return if endpoint.is_closed() {
+                    Err("application-owned endpoint is dead; its owner must rebind it".into())
+                } else {
+                    Ok(())
+                };
+            };
+            if !endpoint.is_closed() {
+                endpoint.network_change().await;
+                return Ok(());
+            }
+            let replacement = options.bind(*secret).await?;
+            let router = self.register(Router::builder(replacement.clone())).spawn();
+            self.0.endpoint.send_replace(replacement);
+            let old = self
+                .0
+                .router
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .replace(router);
+            if let Some(old) = old {
+                let _ = old.shutdown().await;
+            }
+            self.0.connections.lock().await.clear();
+            Ok(())
+        })
+    }
     /// Ends Rocky's streams and connections. Only a starter's own router
     /// and endpoint are shut down; a borrowed endpoint stays open.
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {
+            let _restart = self.0.restart.lock().await;
             self.0.closed.send_replace(true);
             self.0.incoming.lock().await.close();
             for (_, connection) in self.0.connections.lock().await.drain() {
@@ -397,6 +454,7 @@ impl Options {
     ) -> Result<Attachment, Failure> {
         let endpoint = self.bind(secret).await?;
         let attachment = Attachment::build(endpoint.clone(), self.relays(), protocols);
+        *attachment.0.restart.lock().await = Some((self.clone(), secret));
         let router = attachment.register(Router::builder(endpoint)).spawn();
         *attachment
             .0

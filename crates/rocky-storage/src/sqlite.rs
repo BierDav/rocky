@@ -605,6 +605,18 @@ impl Connection {
         self.raw()?.wal_hook(Some(record));
         Ok(())
     }
+    /// Qualification hook: exit from SQLite's callback while COMMIT is executing.
+    #[cfg(feature = "qualification")]
+    pub fn qualification_exit_in_commit(&self) -> Result<()> {
+        let raw = self.raw()?;
+        raw.commit_hook(Some(|| std::process::exit(87)))?;
+        let result = raw.execute_batch("COMMIT");
+        raw.commit_hook(None::<fn() -> bool>)?;
+        result?;
+        Err(Error::Type(
+            "qualification COMMIT returned without invoking its callback".into(),
+        ))
+    }
     /// Test hook: kill the process when SQLite would wait for another connection.
     #[cfg(any(test, feature = "test-support"))]
     pub fn abort_when_busy(&self) -> Result<()> {

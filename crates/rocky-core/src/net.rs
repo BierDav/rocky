@@ -83,6 +83,16 @@ pub trait Transport: Send + Sync {
     /// Drops what the transport keeps for reaching `address`, such as a
     /// cached connection, after an exchange over it failed.
     fn forget(&self, _address: &str) {}
+    /// Qualification-only simulation of sockets reclaimed during suspension.
+    #[cfg(feature = "qualification")]
+    fn fault_close_sockets(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async { Err("socket fault injection is unsupported by this transport".into()) })
+    }
+    /// Refreshes sockets after suspension. Borrowed endpoints must report a
+    /// dead endpoint instead of closing or replacing application resources.
+    fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        Box::pin(async { Ok(()) })
+    }
     /// Releases what the transport itself started. Its owner calls this.
     fn close(&self) -> BoxFuture<'_, ()>;
 }

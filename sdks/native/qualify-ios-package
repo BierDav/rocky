@@ -1,0 +1,31 @@
+#!/bin/sh
+# Runs an independent consumer with Cargo and rustup absent from PATH.
+set -eu
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$repo_root"
+package="$repo_root/local/packaged-ios"
+version=${ROCKY_VERSION:-0.1.0}
+python3 sdks/kotlin/tooling/verify-ios-inventory.py "$package"
+consumer=$(mktemp -d "${TMPDIR:-/tmp}/rocky-ios-consumer.XXXXXX")
+trap 'rm -rf "$consumer"' EXIT
+cp -R sdks/kotlin/packaged-ios-consumer/. "$consumer/"
+cp kotlin "$consumer/kotlin"
+cp sdks/native/qualification/keychain-entitlements.plist "$consumer/"
+python3 - "$consumer/module.yaml" "$package/maven" "$version" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace('file:///ROCKY_IOS_MAVEN', Path(sys.argv[2]).as_uri()).replace('ROCKY_IOS_VERSION', sys.argv[3]).replace('ROCKY_IOS_ENTITLEMENTS_PATH', str(path.parent / 'keychain-entitlements.plist')))
+PY
+# Standard macOS/Xcode tools only. Kotlin provisions its own JVM/compiler.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH IPHONEOS_DEPLOYMENT_TARGET=13.0
+KOTLIN_CLI_JAVA_OPTIONS="${KOTLIN_CLI_JAVA_OPTIONS:-} -Dmaven.repo.local=$package/maven"
+export KOTLIN_CLI_JAVA_OPTIONS
+if command -v cargo >/dev/null 2>&1 || command -v rustup >/dev/null 2>&1; then
+    echo 'qualification PATH contains Rust tooling' >&2
+    exit 1
+fi
+cd "$consumer"
+./kotlin build -p iosArm64
+./kotlin test -p iosSimulatorArm64

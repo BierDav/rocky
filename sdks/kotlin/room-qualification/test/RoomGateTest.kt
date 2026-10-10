@@ -235,7 +235,12 @@ class RoomGateTest {
         assertEquals(listOf("Milk"), roomA.shop().items("l1").map { it.title })
         assertEquals(roomA.shop().items("l1"), roomB.shop().items("l1"))
         val state = "SELECT hex(scope),hex(digest),rows,tombstones FROM secure_scope_state ORDER BY scope"
-        assertEquals(file(File(directory, "a")) { it.rows(state) }, file(File(directory, "b")) { it.rows(state) })
+        val memberState = file(File(directory, "b")) { it.rows(state) }
+        val issuerState = file(File(directory, "a")) { it.rows(state) }
+        assertEquals(2, memberState.size, "the member holds the two application tables")
+        assertEquals(3, issuerState.size, "the issuer also holds its private registry")
+        val sharedScopes = memberState.map { it.first() }.toSet()
+        assertEquals(memberState, issuerState.filter { it.first() in sharedScopes })
         assertEquals(listOf(listOf("0")), file(File(directory, "a")) { it.rows("SELECT sum(tombstones) FROM secure_scope_state") })
         assertTrue(a.horizons.maintain("items", 1).getValue("finalized").jsonPrimitive.boolean)
     }

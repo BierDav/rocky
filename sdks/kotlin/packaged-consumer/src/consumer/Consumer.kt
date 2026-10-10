@@ -53,7 +53,8 @@ private suspend fun credentialPrimitives(root: File) {
         val asked = x.credentials.pseudonymRequest("items")
         val credential = issuer.credentials.assignPseudonym(asked)
         val author = x.credentials.installPseudonym(credential)
-        check(author == AuthorPseudonym("items", 3))
+        // The registry uses author 1; the delegate's range reserves 2 and 3.
+        check(author == AuthorPseudonym("items", 4))
         check(x.credentials.installPseudonym(issuer.credentials.assignPseudonym(asked)) == author)
         check(issuer.credentials.pseudonymOwner(credential).node == x.session().node)
         check(runCatching { x.credentials.pseudonymOwner(credential) }.exceptionOrNull() is RockyException)
@@ -65,7 +66,8 @@ private suspend fun credentialPrimitives(root: File) {
             x.credentials.delegate(delegated, writes, authors = 1),
         ).also { delegate = it }
         check(!d.isIssuer)
-        check(d.credentials.installPseudonym(x.credentials.assignPseudonym(d.credentials.pseudonymRequest("items"))) == AuthorPseudonym("items", 2))
+        // Delegating one author reserves 2; x assigns the next free number, 3.
+        check(d.credentials.installPseudonym(x.credentials.assignPseudonym(d.credentials.pseudonymRequest("items"))) == AuthorPseudonym("items", 3))
     } finally {
         delegate?.close()
         executor?.close()

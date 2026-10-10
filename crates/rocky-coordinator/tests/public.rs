@@ -426,3 +426,74 @@ async fn a_completely_restored_service_stays_fenced() {
         assert!(status.fenced && status.leader.is_none(), "{status:?}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn owner_closure_drops_only_its_cached_head_and_frees_only_open_quota() {
+    let cluster = PublicCluster::start(limits(), 3).await;
+    let tenant = Tenant::new("closure");
+    let first = tenant.scope(1);
+    let second = tenant.scope(2);
+    let third = tenant.scope(3);
+    let (owner, executor) = registered(&cluster, &tenant, first).await;
+    owner
+        .register(
+            tenant.grant(),
+            Some(cluster.admission(&tenant)),
+            tenant.control(&cluster.genesis, second, 1, &[&tenant.executor]),
+            [2; 32],
+        )
+        .await
+        .unwrap();
+    let head = owner.head(first).await.unwrap();
+    owner.head(second).await.unwrap();
+    assert_eq!(owner.usage().await.unwrap().open_domains, 2);
+    assert_eq!(
+        executor.close_domain(head.clone(), [8; 32]).await,
+        Err(CoordinationError::Denied)
+    );
+    assert_eq!(owner.usage().await.unwrap().closed_domains, 0);
+    let closed = owner.close_domain(head.clone(), [9; 32]).await.unwrap();
+    assert!(closed.epoch > head.epoch);
+    assert_eq!(owner.close_domain(head, [9; 32]).await.unwrap(), closed);
+    drop(owner);
+    let owner = tenant.client(&cluster, &tenant.key, "owner").await;
+    #[derive(serde::Deserialize)]
+    struct Heads {
+        heads: Vec<StrongHead>,
+    }
+    // The reopened client is backed by the same durable evidence file.
+    let bytes = std::fs::read(cluster.dir.path().join("closure-owner.evidence")).unwrap();
+    let cache: Heads = p2panda_core::cbor::decode_cbor(bytes.as_slice()).unwrap();
+    assert_eq!(
+        cache
+            .heads
+            .iter()
+            .map(|head| head.scope)
+            .collect::<Vec<_>>(),
+        vec![second]
+    );
+    let usage = owner.usage().await.unwrap();
+    assert_eq!((usage.open_domains, usage.closed_domains), (1, 1));
+    assert!(usage.bytes > 0);
+    owner
+        .register(
+            tenant.grant(),
+            Some(cluster.admission(&tenant)),
+            tenant.control(&cluster.genesis, third, 1, &[&tenant.executor]),
+            [3; 32],
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner.usage().await.unwrap().open_domains, 2);
+    assert_eq!(
+        owner
+            .register(
+                tenant.grant(),
+                Some(cluster.admission(&tenant)),
+                tenant.control(&cluster.genesis, first, 1, &[&tenant.executor]),
+                [4; 32]
+            )
+            .await,
+        Err(CoordinationError::Denied)
+    );
+}

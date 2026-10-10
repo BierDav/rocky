@@ -707,3 +707,133 @@ async fn results_applied_by_every_target_are_acknowledged_for_retirement() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn stale_fences_requeue_durably_for_release_or_a_fresh_preparation() {
+    for stale_head in [false, true] {
+        for release in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let r = open(&dir, fixtures::LAPTOP).await;
+            create(&r, "sealed").await;
+            let req = r
+                .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
+                .await
+                .unwrap();
+            let (entered, waiting) = oneshot::channel();
+            let (resume, blocked) = oneshot::channel();
+            let c = Arc::new(BarrierCoordinator {
+                inner: coordinator(),
+                entered: std::sync::Mutex::new(Some(entered)),
+                resume: std::sync::Mutex::new(Some(blocked)),
+            });
+            let executing = r.clone();
+            let coordinator = c.clone();
+            let pass = tokio::spawn(async move { executing.execute_pending(&*coordinator).await });
+            waiting.await.unwrap();
+            let expected_sequence = if stale_head {
+                let competing = r
+                    .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
+                    .await
+                    .unwrap();
+                let package = prepare(&r, &c.inner, competing).await;
+                let receipt = c.inner.confirm(package.confirmation().unwrap()).unwrap();
+                r.receive_result(package.encode().unwrap(), receipt.encode(), &c.inner)
+                    .await
+                    .unwrap();
+                2
+            } else {
+                c.inner
+                    .takeover(fixtures::SCOPE, fixtures::OWNER, fixtures::LAPTOP, 1)
+                    .unwrap();
+                1
+            };
+            resume.send(()).unwrap();
+            assert!(matches!(
+                pass.await.unwrap(),
+                Err(Error::StrongPending(PendingReason::StaleFence))
+            ));
+            let progress = r
+                .strong_status()
+                .await
+                .unwrap()
+                .commands
+                .into_iter()
+                .find(|p| p.request.id == req.id)
+                .unwrap();
+            assert_eq!(progress.state, CommandState::Queued);
+            assert!(
+                matches!(request(&r, strong::Request::Attempts(req.id)).await.unwrap(), strong::Response::Packages(p) if p.is_empty())
+            );
+            // Cut after the settle's durable flush, before another pass.
+            r.close().await.unwrap();
+            let r = open(&dir, fixtures::LAPTOP).await;
+            let progress = r
+                .strong_status()
+                .await
+                .unwrap()
+                .commands
+                .into_iter()
+                .find(|p| p.request.id == req.id)
+                .unwrap();
+            assert_eq!(progress.request, req);
+            assert_eq!(progress.state, CommandState::Queued);
+            if release {
+                r.release_command(req.id).await.unwrap();
+                assert_eq!(r.retention_status().await.unwrap().hold, None);
+                r.checkpoint().await.unwrap();
+                r.execute_pending(&c.inner).await.unwrap();
+                assert!(c.inner.lookup(req.scope, req.id).unwrap().is_none());
+            } else {
+                r.execute_pending(&c.inner).await.unwrap();
+                r.execute_pending(&c.inner).await.unwrap();
+                let publications = r.confirmed_publications().await.unwrap();
+                assert_eq!(
+                    publications
+                        .iter()
+                        .filter(|p| p.package.request.id == req.id)
+                        .count(),
+                    1
+                );
+                let receipt = c.inner.lookup(req.scope, req.id).unwrap().unwrap();
+                assert_eq!(receipt.sequence, expected_sequence);
+                assert_eq!(
+                    receipt.confirmation.epoch,
+                    c.inner.head(req.scope).unwrap().epoch
+                );
+            }
+            r.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn refused_preparation_and_requeue_roll_back_together() {
+    let dir = TempDir::new().unwrap();
+    let r = open(&dir, fixtures::LAPTOP).await;
+    let c = coordinator();
+    create(&r, "sealed").await;
+    let req = r
+        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
+        .await
+        .unwrap();
+    prepare(&r, &c, req.clone()).await;
+    fault(&r, worker::Fault::FailCommit).await;
+    assert!(matches!(
+        request(
+            &r,
+            strong::Request::Settle(req.id, strong::Settled::StaleFence)
+        )
+        .await,
+        Err(Error::InjectedFailure)
+    ));
+    r.close().await.unwrap();
+    let r = open(&dir, fixtures::LAPTOP).await;
+    assert_eq!(
+        r.strong_status().await.unwrap().commands[0].state,
+        CommandState::OutcomeUnknown
+    );
+    assert!(r.release_command(req.id).await.is_err());
+    r.execute_pending(&c).await.unwrap();
+    assert_eq!(c.head(req.scope).unwrap().sequence, 1);
+    r.close().await.unwrap();
+}

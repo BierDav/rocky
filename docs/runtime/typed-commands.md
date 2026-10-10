@@ -217,7 +217,13 @@ Values are tagged as in [the call contract](sdk-contract.md#ownership-and-wire-e
 Without `complete`, `command_rows` withholds the rows; it never returns an
 invented empty table. Error codes added here: `handler_unavailable`,
 `unknown_confirmation`, `missing_head`, `executor_unavailable` (all retryable
-with the same ticket) and `quota`. An executor behind the confirmed predecessor
+with the same ticket), `stale_fence` and `quota`. The trusted runtime settles
+`StaleHead` or `StaleEpoch` by atomically discarding the refused preparation and
+returning its request to queued, then flushing before returning `stale_fence`.
+A queued request can be released; otherwise the next pass prepares the same
+identity and sealed cut against the new head. A certified confirmation with a
+lost reply still yields its receipt even after another executor advances the
+head. An executor behind the confirmed predecessor
 reports `missing_head` until a sync brings the results. A domain with no assigned
 executor reports `executor_unavailable`, and an executor that does not answer
 reports `unreachable`. `complete` with a `sequence` lower than another device's is

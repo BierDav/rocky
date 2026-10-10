@@ -82,6 +82,14 @@ class ServiceOwner internal constructor(private val session: RockySession, tenan
             put("id", handleBytes(id))
         },
     ).let { it.getValue("active").jsonPrimitive.boolean && it["sequence"] != null }
+
+    /** Permanently closes this domain at its current head and frees its open-domain quota. */
+    suspend fun close(id: String): JsonObject = session.client.call(
+        request("command_service_close") {
+            put("tenant", tenant)
+            put("id", handleBytes(id))
+        },
+    )
     suspend fun usage(): ServiceUsage = session.client.call(request("command_service_usage") { put("tenant", tenant) }).let {
         ServiceUsage(it.int("open_domains"), it.int("closed_domains"), it.getValue("bytes").jsonPrimitive.long, it.int("registrations_today"))
     }

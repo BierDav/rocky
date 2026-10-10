@@ -122,6 +122,19 @@ mod service {
                 "command_service_usage" => {
                     return Ok(serde_json::to_value(client.usage().await?)?);
                 }
+                "command_service_close" => {
+                    use rocky_core::Coordinator;
+                    let head = client.head(domain.scope).await?;
+                    // A retry reads the head again, including after closure.
+                    // Keep each exact-head attempt's wire identity stable.
+                    let close_id = rocky_core::commitment(
+                        "rocky.sdk.service-close.v1",
+                        &serde_json::to_vec(&(id(request, "id")?, &head))?,
+                    );
+                    return Ok(serde_json::to_value(
+                        client.close_domain(head, close_id).await?,
+                    )?);
+                }
                 "command_service_activate" => {
                     let activation = domain
                         .activation

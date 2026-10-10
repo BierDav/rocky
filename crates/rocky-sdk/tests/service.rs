@@ -417,6 +417,27 @@ async fn devices_run_typed_commands_through_a_registered_service_domain() -> Res
         "{ticket}"
     );
 
+    let denied = b_call(json!({"type": "command_service_close", "tenant": PrivateKey::new().to_hex(), "id": vec![8u8; 32]})).await?;
+    assert_eq!(denied["error"]["code"], "denied");
+    let close =
+        json!({"type": "command_service_close", "tenant": tenant.to_hex(), "id": vec![9u8; 32]});
+    let closed = call(&a, &scope, close.clone()).await?;
+    assert_eq!(closed["sequence"], 3);
+    assert_eq!(call(&a, &scope, close).await?, closed);
+    let usage = call(
+        &a,
+        &scope,
+        json!({"type": "command_service_usage", "tenant": tenant.to_hex()}),
+    )
+    .await?;
+    assert_eq!(
+        (
+            usage["open_domains"].clone(),
+            usage["closed_domains"].clone()
+        ),
+        (json!(0), json!(1))
+    );
+
     b.close().await?;
     opened.database.close().await?;
     Ok(())

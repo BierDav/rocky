@@ -36,15 +36,15 @@ class CredentialPrimitivesTest {
             val asked = w.credentials.pseudonymRequest("items")
             val credential = a.credentials.assignPseudonym(asked)
             val item = w.credentials.installPseudonym(credential)
-            assertEquals(AuthorPseudonym("items", 3), item)
+            assertEquals(AuthorPseudonym("items", 4), item)
             assertEquals(item, w.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
-            assertEquals(PseudonymOwner(w.session().node, "items", 3), a.credentials.pseudonymOwner(credential))
+            assertEquals(PseudonymOwner(w.session().node, "items", 4), a.credentials.pseudonymOwner(credential))
             assertFalse(credential.toString().contains(w.session().node))
             assertFalse(credential.toString().contains(a.session().principal))
             assertFailsWith<RockyException> { w.credentials.pseudonymOwner(credential) }
             assertFailsWith<RockyException> { a.credentials.installPseudonym(credential) }
             val noteCredential = a.credentials.assignPseudonym(w.credentials.pseudonymRequest("notes"))
-            assertEquals(AuthorPseudonym("notes", 4), w.credentials.installPseudonym(noteCredential))
+            assertEquals(AuthorPseudonym("notes", 5), w.credentials.installPseudonym(noteCredential))
             // Each table uses a distinct signing key, bound in its credential leaf.
             assertNotEquals(
                 credential.last().jsonObject["capability"]!!.jsonObject["subject"],
@@ -56,7 +56,7 @@ class CredentialPrimitivesTest {
                 schema,
                 a.credentials.grant(otherKeys, writes),
             ).also { other = it }
-            for ((collection, number) in listOf("items" to 1, "notes" to 2)) {
+            for ((collection, number) in listOf("items" to 2, "notes" to 3)) {
                 val assigned = w.credentials.assignPseudonym(recipient.credentials.pseudonymRequest(collection))
                 assertEquals(AuthorPseudonym(collection, number), recipient.credentials.installPseudonym(assigned))
             }
@@ -95,7 +95,8 @@ class CredentialPrimitivesTest {
             val current = Json.parseToJsonElement(identity.readText()).jsonObject
             val database = File(directory, "rocky.sqlite")
             val kept = database.readBytes()
-            for (version in listOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 10, Int.MAX_VALUE)) {
+            val currentVersion = current.getValue("version").jsonPrimitive.int
+            for (version in (0..currentVersion + 1).filter { it != currentVersion } + Int.MAX_VALUE) {
                 val bytes = JsonObject(current + ("version" to JsonPrimitive(version))).toString().toByteArray()
                 identity.writeBytes(bytes)
                 val error = assertFailsWith<RockyException> { RockyDatabase.open(directory, ItemsSchema) }

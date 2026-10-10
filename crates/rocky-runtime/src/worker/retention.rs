@@ -1117,9 +1117,7 @@ where
             .await?;
         Ok(())
     }
-    /// Records that the coordinator will never execute `id`. Unlike a
-    /// release this holds even with a submitted attempt of unknown outcome:
-    /// the coordinator's answer settles it.
+    /// A stale fence discards refused preparations; terminal answers release the cut.
     pub(super) async fn settle_request(
         &self,
         id: RequestId,
@@ -1134,6 +1132,22 @@ where
             .await?;
         if known.next().await?.is_none() {
             return Err(Error::Rejected("unknown command request".into()));
+        }
+        if settled == crate::strong::Settled::StaleFence {
+            for (package, _, receipt, _, applied) in self.attempts().await? {
+                if package.request.id != id {
+                    continue;
+                }
+                if receipt.is_some() || applied {
+                    return Err(Error::Corrupt("stale fence for a confirmed request".into()));
+                }
+                self.conn()
+                    .execute(
+                        "DELETE FROM rocky_preparations WHERE hash=?",
+                        [package.confirmation()?.result.to_vec()],
+                    )
+                    .await?;
+            }
         }
         self.mark_hold(id, settled as i64).await
     }

@@ -377,3 +377,43 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         status.disk_bytes, status.logs, status.snapshots
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn certified_lost_reply_survives_another_executors_advance() {
+    let mut cluster = Cluster::start().await;
+    let admin = cluster.client(&cluster.admin, "admin");
+    let issuer = cluster.client(&cluster.issuer, "issuer");
+    let alice = cluster.client(&cluster.executor, "alice");
+    let alternate = cluster.client(&cluster.alternate, "alternate");
+    issuer
+        .control(cluster.app_control(1), [1; 32])
+        .await
+        .unwrap();
+    let head = alice.acquire(cluster.scope, [2; 32]).await.unwrap();
+    let caller = directory_app::principal(*cluster.user.public_key().as_bytes());
+    let first = proposal(&head, cluster.phone.public_key(), caller, 1);
+    let leader = cluster.wait_leader(&admin).await;
+    cluster.arm(leader, "reply.before_send");
+    let _ = alice.confirm(first.clone()).await;
+    cluster.wait_exit(leader).await;
+    cluster.wait_leader(&admin).await;
+    let receipt = alternate
+        .lookup(cluster.scope, first.request)
+        .await
+        .unwrap()
+        .unwrap();
+    alternate
+        .evidence(&receipt)
+        .await
+        .unwrap()
+        .verify(&cluster.genesis)
+        .unwrap();
+    let head = alternate
+        .takeover(cluster.scope, head.epoch, [3; 32])
+        .await
+        .unwrap();
+    let next = proposal(&head, cluster.phone.public_key(), caller, 2);
+    alternate.confirm(next).await.unwrap();
+    assert_eq!(alice.confirm(first).await.unwrap(), receipt);
+    assert_eq!(alternate.head(cluster.scope).await.unwrap().sequence, 2);
+}

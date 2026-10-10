@@ -45,6 +45,7 @@ val owner = session.service(tenantKey)           // 32-byte tenant secret
 owner.register(registration, executors = listOf(executor), invokers = listOf(executor, member))
 owner.control(revision = 2, id, executors = listOf(member), invokers = listOf(executor, member))
 owner.activate(id)                                // after a declared upgrade
+owner.close(id)                                   // permanent; returns the closed head
 owner.usage()
 ```
 
@@ -56,6 +57,7 @@ The same JSON calls serve every language binding:
 | `command_coordination_grant` | `tenant` (public key) or `tenant_secret`, `lifetime` (1 s to 366 days); issuer only | `grant` |
 | `command_service_control` | `tenant`, `id`, `revision` above 1, `executors`, `invokers`, `lifetime` | the same |
 | `command_service_activate` | `tenant`, `id` | `active`, the activated `sequence` |
+| `command_service_close` | `tenant`, `id` (32 bytes); owner only | the closed `StrongHead` |
 | `command_service_usage` | `tenant` | open/closed domains, accounted bytes, registrations today |
 
 An issuer signs the grant in the same call. Any other device needs `Execute` in its
@@ -75,9 +77,18 @@ the same registration or control ID returns the same answer: the device keeps
 each ID's signing time in `tenant.requests` and re-signs the identical control.
 The same ID with other devices, lifetime or grant is `RequestConflict`.
 
+The tenant owner can read its domain's head for closure and activation without
+being listed as an executor or invoker. Other tenants' head reads remain denied.
+
 A registered scope's authority is fixed: control revisions must be signed by
 the registering tenant; registering a scope another tenant holds, or a closed
-one, is refused. Moving a domain to another tenant or provider is a migration
+one, is refused. `ServiceOwner.close(id)` reads the current head and closes
+there; retry the same ID after a lost reply. Each exact-head attempt has a
+stable wire identity derived from that ID and the head, so a retry reading the
+closed head still returns the closed head. Closing frees only the tenant's
+open-domain quota: its marker still counts toward accounted bytes and the
+service's 4,096 domains. A device without the tenant owner key cannot close it.
+Moving a domain to another tenant or provider is a migration
 and is not supported.
 
 ## Configure a device

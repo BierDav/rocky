@@ -1,6 +1,6 @@
 use crate::{
     certified::*,
-    machine::Request,
+    machine::{MAX_PUBLIC_DOMAINS, Request},
     raft_store::atomic_write,
     service::{Operation, Outcome, ReceiptEvidence, Registration, Reply, Status},
     transport::*,
@@ -175,7 +175,7 @@ impl NetworkCoordinator {
         // service is a migration, never an address change.
         if cache.genesis != genesis.id()?
             || cache.receipts.len() > MAX_EVIDENCE
-            || cache.heads.len() > 64
+            || cache.heads.len() > MAX_PUBLIC_DOMAINS
             || cache.heads.iter().any(|head| {
                 (!public && head.scope.mesh != mesh)
                     || head.configuration != genesis.genesis.configuration
@@ -329,50 +329,7 @@ impl NetworkCoordinator {
                     if let Ok(Outcome::Head(head)) = &reply.result
                         && live_head
                     {
-                        let mut cache = self.cache.lock().await;
-                        // Retained evidence at this head is the same durable watermark.
-                        let mut covered = false;
-                        if let Some(receipt) = cache
-                            .receipts
-                            .iter()
-                            .filter(|e| e.receipt.confirmation.scope == head.scope)
-                            .max_by_key(|e| e.receipt.sequence)
-                        {
-                            let p = &receipt.receipt.confirmation;
-                            if head.sequence < receipt.receipt.sequence
-                                || head.epoch < p.epoch
-                                || (head.sequence == receipt.receipt.sequence
-                                    && head.head != p.new_head)
-                            {
-                                return Err(CoordinationError::CoordinationStateLost);
-                            }
-                            covered =
-                                head.sequence == receipt.receipt.sequence && head.epoch == p.epoch;
-                        }
-                        let known = cache.heads.iter().position(|h| h.scope == head.scope);
-                        if let Some(old) = known.map(|index| &cache.heads[index])
-                            && (head.sequence < old.sequence
-                                || head.epoch < old.epoch
-                                || (head.sequence == old.sequence && head.head != old.head))
-                        {
-                            return Err(CoordinationError::CoordinationStateLost);
-                        }
-                        if known.is_none_or(|index| cache.heads[index] != *head) {
-                            let set = |cache: &mut ClientCache| match known {
-                                Some(index) => cache.heads[index] = head.clone(),
-                                None => cache.heads.push(head.clone()),
-                            };
-                            // The whole cache is one file: it is written only
-                            // for a watermark no retained evidence records.
-                            if covered {
-                                set(&mut cache);
-                            } else {
-                                let mut updated = cache.clone();
-                                set(&mut updated);
-                                self.persist(&updated)?;
-                                *cache = updated;
-                            }
-                        }
+                        self.observe_head(head).await?;
                     }
                     return reply.result;
                 }
@@ -476,6 +433,54 @@ impl NetworkCoordinator {
             _ => Err(CoordinationError::Corrupt),
         }
     }
+    async fn observe_head(&self, head: &StrongHead) -> Result<(), CoordinationError> {
+        let mut cache = self.cache.lock().await;
+        // Retained evidence at this head is the same durable watermark.
+        let mut covered = false;
+        if let Some(receipt) = cache
+            .receipts
+            .iter()
+            .filter(|e| e.receipt.confirmation.scope == head.scope)
+            .max_by_key(|e| e.receipt.sequence)
+        {
+            let p = &receipt.receipt.confirmation;
+            if head.sequence < receipt.receipt.sequence
+                || head.epoch < p.epoch
+                || (head.sequence == receipt.receipt.sequence && head.head != p.new_head)
+            {
+                return Err(CoordinationError::CoordinationStateLost);
+            }
+            covered = head.sequence == receipt.receipt.sequence && head.epoch == p.epoch;
+        }
+        let known = cache.heads.iter().position(|h| h.scope == head.scope);
+        if let Some(old) = known.map(|index| &cache.heads[index])
+            && (head.sequence < old.sequence
+                || head.epoch < old.epoch
+                || (head.sequence == old.sequence && head.head != old.head))
+        {
+            return Err(CoordinationError::CoordinationStateLost);
+        }
+        if known.is_none() && cache.heads.len() >= MAX_PUBLIC_DOMAINS {
+            return Err(CoordinationError::Configuration);
+        }
+        if known.is_none_or(|index| cache.heads[index] != *head) {
+            let set = |cache: &mut ClientCache| match known {
+                Some(index) => cache.heads[index] = head.clone(),
+                None => cache.heads.push(head.clone()),
+            };
+            // The whole cache is one file: it is written only
+            // for a watermark no retained evidence records.
+            if covered {
+                set(&mut cache);
+            } else {
+                let mut updated = cache.clone();
+                set(&mut updated);
+                self.persist(&updated)?;
+                *cache = updated;
+            }
+        }
+        Ok(())
+    }
     /// Owner-initiated closure of `head.scope` at exactly `head`.
     pub async fn close_domain(
         &self,
@@ -483,7 +488,14 @@ impl NetworkCoordinator {
         id: Commitment,
     ) -> Result<StrongHead, CoordinationError> {
         match self.call(id, Operation::Close { head }).await? {
-            Outcome::Head(head) => Ok(head),
+            Outcome::Head(head) => {
+                let mut cache = self.cache.lock().await;
+                let mut updated = cache.clone();
+                updated.heads.retain(|old| old.scope != head.scope);
+                self.persist(&updated)?;
+                *cache = updated;
+                Ok(head)
+            }
             _ => Err(CoordinationError::Corrupt),
         }
     }

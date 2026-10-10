@@ -108,8 +108,12 @@ fn lost_reply_is_reconciled_without_another_sequence() {
     c.drop_next_reply().unwrap();
     assert_eq!(c.confirm(p.clone()), Err(CoordinationError::Unavailable));
     let old = c.lookup(p.scope, p.request).unwrap().unwrap();
+    c.takeover(fixtures::SCOPE, fixtures::OWNER, fixtures::PHONE, 1)
+        .unwrap();
+    let next = proposal(&c, 2);
+    c.confirm(next).unwrap();
     assert_eq!(c.confirm(p).unwrap(), old);
-    assert_eq!(c.head(fixtures::SCOPE).unwrap().sequence, 1);
+    assert_eq!(c.head(fixtures::SCOPE).unwrap().sequence, 2);
 }
 
 #[test]

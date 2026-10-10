@@ -198,9 +198,10 @@ class ShoppingIntegrationTest {
             assertTrue(network.attached && network.owned)
             assertEquals("tcp", network.kind)
             assertEquals(32, network.inboundLimit)
-            assertFailsWith<RockyException> { b.removePeer(peers.single { it.isIssuer }.node) }
+            b.removePeer(peers.single { it.isIssuer }.node)
+            assertEquals(listOf(c.session().node), b.peers().map { it.node })
             b.removePeer(c.session().node)
-            assertEquals(listOf(true), b.peers().map { it.isIssuer })
+            assertTrue(b.peers().isEmpty())
         } finally {
             c?.close()
             b?.close()

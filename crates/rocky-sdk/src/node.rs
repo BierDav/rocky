@@ -2190,6 +2190,7 @@ impl Node {
             // key; the tenant secret stays in this process.
             "command_service_register"
             | "command_service_control"
+            | "command_service_close"
             | "command_service_usage"
             | "command_service_activate" => {
                 let service = self.service.as_ref().ok_or_else(|| {

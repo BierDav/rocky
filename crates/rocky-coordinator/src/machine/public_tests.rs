@@ -287,6 +287,7 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     for (key, operation) in [
         (&b.executor, Operation::Acquire { scope: sa }),
         (&b.phone, Operation::Head { scope: sa }),
+        (&b.key, Operation::Head { scope: sa }),
         (&b.phone, lookup.clone()),
         (&b.key, Operation::Control(b.control(sa, 2, &[&b.executor]))),
         (

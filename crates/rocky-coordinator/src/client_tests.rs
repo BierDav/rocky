@@ -204,3 +204,135 @@ fn eviction_preserves_equal_newest_watermarks_and_pinned_requests() {
     assert!(cache.receipts.contains(&newest));
     assert!(!cache.receipts.contains(&evictable));
 }
+
+fn public_genesis() -> CertifiedGenesis {
+    let root = PrivateKey::new();
+    CertifiedGenesis::sign(
+        Genesis {
+            mesh: fixtures::SCOPE.mesh,
+            configuration: [7; 16],
+            voters: (1..=3)
+                .map(|id| Voter {
+                    id,
+                    address: format!("127.0.0.1:{}", 10000 + id),
+                    key: PrivateKey::new().public_key(),
+                })
+                .collect(),
+            initial_voters: std::collections::BTreeSet::from([1, 2, 3]),
+            membership_authority: root.public_key(),
+            directory_definition: [0; 32],
+            directory: None,
+            authorities: Vec::new(),
+            max_control_lifetime: 86400,
+            public: Some(PublicService {
+                endpoints: vec![ClientEndpoint {
+                    voter: 1,
+                    kind: "test".into(),
+                    address: "test".into(),
+                }],
+                admission: None,
+                limits: crate::Limits::default(),
+                tenants: 1,
+                registrations_per_day: 4096,
+                tenant_lanes: 1,
+            }),
+        },
+        &root,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn observed_heads_reopen_at_65_and_the_public_cap_without_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heads.evidence");
+    let genesis = public_genesis();
+    let key = PrivateKey::new();
+    let open = || {
+        NetworkCoordinator::open(
+            genesis.clone(),
+            genesis.root,
+            genesis.genesis.mesh,
+            key.clone(),
+            path.clone(),
+        )
+        .unwrap()
+    };
+    let mut client = open();
+    let head = |index: usize| StrongHead {
+        scope: Scope {
+            domain: DomainId((index as u128).to_le_bytes()),
+            ..fixtures::SCOPE
+        },
+        configuration: [7; 16],
+        executor: fixtures::LAPTOP,
+        epoch: 2,
+        sequence: 1,
+        head: [9; 32],
+        schema: 1,
+        handler: 1,
+    };
+    for index in 0..65 {
+        client.observe_head(&head(index)).await.unwrap();
+    }
+    drop(client);
+    client = open();
+    assert_eq!(client.cache.lock().await.heads.len(), 65);
+    // Seed the observed-head snapshot, then exercise insertion at the cap.
+    // Avoid thousands of whole-file fsyncs in the regression test.
+    {
+        let mut cache = client.cache.lock().await;
+        let mut updated = cache.clone();
+        updated.heads.extend((65..MAX_PUBLIC_DOMAINS - 1).map(head));
+        client.persist(&updated).unwrap();
+        *cache = updated;
+    }
+    client
+        .observe_head(&head(MAX_PUBLIC_DOMAINS - 1))
+        .await
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    eprintln!(
+        "4096 cached heads: {} bytes (store cap {})",
+        bytes.len(),
+        MAX_STORE
+    );
+    assert!(bytes.len() <= MAX_STORE);
+    assert_eq!(
+        client.observe_head(&head(MAX_PUBLIC_DOMAINS)).await,
+        Err(CoordinationError::Configuration)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    drop(client);
+    let client = open();
+    assert_eq!(client.cache.lock().await.heads.len(), MAX_PUBLIC_DOMAINS);
+    let mut lower = head(0);
+    lower.epoch -= 1;
+    assert_eq!(
+        client.observe_head(&lower).await,
+        Err(CoordinationError::CoordinationStateLost)
+    );
+    lower = head(0);
+    lower.sequence -= 1;
+    assert_eq!(
+        client.observe_head(&lower).await,
+        Err(CoordinationError::CoordinationStateLost)
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let mut oversized = client.cache.lock().await.clone();
+    oversized.heads.push(head(MAX_PUBLIC_DOMAINS));
+    persist_cache(&path, &oversized).unwrap();
+    let oversized_bytes = std::fs::read(&path).unwrap();
+    drop(client);
+    assert!(matches!(
+        NetworkCoordinator::open(
+            genesis.clone(),
+            genesis.root,
+            genesis.genesis.mesh,
+            key,
+            path.clone()
+        ),
+        Err(CoordinationError::Configuration)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), oversized_bytes);
+}

@@ -88,9 +88,13 @@ Export, import and eviction rules are in
 [retention](coordinator-retention.md#keep-verifiable-results-on-application-nodes).
 Clients reject regression to an older sequence/epoch or a different head at the
 same sequence (`CoordinationStateLost`). Evidence files are bound to one
-certified genesis. During quorum loss, strong work remains pending; admitted
-mergeable edits still commit locally. No success receipt is synthesized from
-minority state.
+certified genesis. The unchanged format 3 cache accepts at most 4,096 observed
+scope heads, on both insert and open. It refuses another head with
+`Configuration` before writing, and evicts none. Only a successful closure by
+this client drops that scope's cached head; merely observing a closed domain
+cannot identify it as closed. During quorum loss, strong work remains pending;
+admitted mergeable edits still commit locally. No success receipt is synthesized
+from minority state.
 
 ## Durability and recovery authority
 

@@ -28,12 +28,18 @@ class HouseholdTest {
     }
     private suspend fun ShoppingNode.holds(list: Long) = rocky.list(list).status().isKeyed
 
+    /** The household records an enrollment asynchronously, using its single pending invitation. */
+    private suspend fun ShoppingNode.awaitEnrollment(node: ShoppingNode, name: String, kind: NodeKind) = withTimeout(30_000) {
+        household.devices().first { devices -> devices.any { it.node == node.self && it.name == name && it.kind == kind.name.lowercase() } }
+    }
+
     @Test fun `revocation keeps the new list keys away from the removed device and reaches remaining devices`() = runBlocking {
         val root = Files.createTempDirectory("rocky-revocation").toFile()
         val opened = mutableListOf<ShoppingNode>()
         try {
             val trusted = ShoppingNode.create(platform(root, "desk")).also { opened += it }
             val removed = ShoppingNode.join(platform(root, "removed"), trusted.household.invite(NodeKind.Full, "Removed")).also { opened += it }
+            trusted.awaitEnrollment(removed, "Removed", NodeKind.Full)
             val remaining = ShoppingNode.join(platform(root, "remaining"), trusted.household.invite(NodeKind.Full, "Remaining")).also { opened += it }
             val list = trusted.repository.createList("Weekly")
             trusted.repository.add(list, "Milk")
@@ -119,6 +125,7 @@ class HouseholdTest {
         try {
             val trusted = ShoppingNode.create(platform(root, "desk")).also { opened += it }
             val full = ShoppingNode.join(platform(root, "laptop"), trusted.household.invite(NodeKind.Full, "Laptop")).also { opened += it }
+            trusted.awaitEnrollment(full, "Laptop", NodeKind.Full)
             val partial = ShoppingNode.join(platform(root, "phone"), trusted.household.invite(NodeKind.Partial, "Phone")).also { opened += it }
             // The trusted device recorded both enrollments with the kinds it chose.
             withTimeout(30_000) {

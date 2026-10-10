@@ -265,9 +265,8 @@ impl Metadata {
             Operation::Acquire { scope } | Operation::Takeover { scope, .. } => {
                 self.authorized(*scope, request, true, time).map(|_| ())
             }
-            Operation::Head { scope }
-            | Operation::Lookup { scope, .. }
-            | Operation::Retire { scope, .. } => {
+            Operation::Head { scope } => self.head_authorized(*scope, request, time),
+            Operation::Lookup { scope, .. } | Operation::Retire { scope, .. } => {
                 self.authorized(*scope, request, false, time).map(|_| ())
             }
             Operation::Replace {
@@ -361,7 +360,7 @@ impl Metadata {
         let time = self.state.time;
         match &request.operation {
             Operation::Head { scope } => {
-                self.authorized(*scope, request, false, time)?;
+                self.head_authorized(*scope, request, time)?;
                 Ok(Outcome::Head(self.state.find(*scope)?.head.clone()))
             }
             Operation::Lookup { scope, request: id } => {
@@ -736,6 +735,16 @@ impl Metadata {
         }
         Ok(c)
     }
+    /// An owner needs the current head to fence a closure or activation.
+    fn head_authorized(
+        &self,
+        scope: Scope,
+        request: &Request,
+        time: u64,
+    ) -> Result<(), CoordinationError> {
+        self.closure_authorized(request, scope)
+            .or_else(|_| self.authorized(scope, request, false, time).map(|_| ()))
+    }
     fn closure_authorized(&self, request: &Request, scope: Scope) -> Result<(), CoordinationError> {
         if !self.authority(scope, request.key) || self.issuer(scope) != Some(request.key) {
             return Err(CoordinationError::Denied);
@@ -935,7 +944,7 @@ impl Metadata {
                     .map(Outcome::Head)
             }
             Operation::Head { scope } => {
-                self.authorized(*scope, request, false, time)?;
+                self.head_authorized(*scope, request, time)?;
                 Ok(Outcome::Head(self.state.domain(*scope)?.head.clone()))
             }
             Operation::Lookup { scope, request: id } => {

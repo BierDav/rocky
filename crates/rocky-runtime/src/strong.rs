@@ -22,9 +22,10 @@ pub enum CommandState {
     /// Its admission window closed unconfirmed: it was never executed.
     Expired,
 }
-/// What the coordinator settled about a request it will never execute.
+/// The coordinator's definite refusal of an attempt or request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Settled {
+    StaleFence = 0,
     Retired = 2,
     Expired = 3,
 }
@@ -106,7 +107,7 @@ pub(crate) enum Request {
     ResultPage(Option<Commitment>),
     RequestsPage(Option<RequestId>),
     Release(RequestId),
-    /// Records what the coordinator settled; the request is never executed.
+    /// Discards a refused preparation, or records a terminal request outcome.
     Settle(RequestId, Settled),
     /// The highest own sequence through which every request is settled.
     Acknowledgeable,
@@ -463,6 +464,7 @@ where
                         .await?
                 }
                 Err(CoordinationError::StaleHead | CoordinationError::StaleEpoch) => {
+                    self.settle(id, Settled::StaleFence).await?;
                     return Err(Error::StrongPending(crate::PendingReason::StaleFence));
                 }
                 Err(CoordinationError::Retired) => self.settle(id, Settled::Retired).await?,

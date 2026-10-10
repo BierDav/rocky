@@ -175,8 +175,11 @@ jobs:
           cargo build --locked -p rocky-sdk --bin rocky-peer
           cp target/debug/rocky-peer "$RUNNER_TEMP/build/"
 
+      # Gitea's artifact service intermittently fails to finalize an artifact
+      # this large; `check`, `slow` and `shopping` rebuild when it is missing.
       - uses: actions/upload-artifact@v4
         if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
         with:
           name: build
           path: ${{ runner.temp }}/build

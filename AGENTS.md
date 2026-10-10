@@ -73,7 +73,8 @@
 
 ## Verification
 
-- During development, use `cargo test -p <package>` and targeted checks.
+- During development, use `./scripts/check --unit`, `cargo test -p <package>`
+  and targeted checks. Keep each test within its [tier](docs/testing.md)'s budget.
 - Before finishing workspace changes, run `./scripts/lint` and `./scripts/check`
   from any directory. `./scripts/lint --fix` applies formatting.
 - Test meaningful behavior, invariants and regressions, not trivial duplication.

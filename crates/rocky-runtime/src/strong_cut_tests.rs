@@ -129,7 +129,7 @@ fn frontier(entries: &[(NodeId, u64)]) -> AppliedFrontier {
 /// after it; a replica that rebootstrapped from the checkpoint verifies the
 /// same result; the bound is reached by operations after the base only.
 #[tokio::test]
-#[ignore = "soak; run by scripts/check --slow"]
+#[ignore = "soak; run by the e2e tier, scripts/check --e2e"]
 async fn soak_a_long_lived_domain_executes_and_verifies_a_cut_since_its_checkpoint() {
     const LIFETIME: u64 = 100_001;
     let dir = TempDir::new().unwrap();

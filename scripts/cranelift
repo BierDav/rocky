@@ -1,0 +1,52 @@
+#!/bin/sh
+# Local test builds with the workspace crates on Cranelift and dependencies on
+# LLVM; see docs/development.md#cranelift.
+#
+#   scripts/cranelift install        install the pinned nightly under local/cranelift
+#   scripts/cranelift installed      succeed when it is installed
+#   scripts/cranelift cargo ARGS...  run its cargo; `cargo nextest` works too
+#
+# It builds into target/cranelift. scripts/check and scripts/test-tiers use it
+# when installed, unless ROCKY_CRANELIFT=0.
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+home=$repo_root/local/cranelift
+toolchain=nightly-2026-10-10
+host=$(rustc -vV | sed -n 's/^host: //p')
+bin=$home/rustup/toolchains/$toolchain-$host/bin
+
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+case "${1:-}" in
+install)
+    init=$("$repo_root/scripts/tools" rustup-init)/rustup-init
+    export RUSTUP_HOME="$home/rustup" CARGO_HOME="$home/cargo"
+    [ -x "$CARGO_HOME/bin/rustup" ] ||
+        "$init" -y --no-modify-path --profile minimal --default-toolchain none
+    "$CARGO_HOME/bin/rustup" toolchain install "$toolchain" --profile minimal \
+        --component rustc-codegen-cranelift-preview
+    ;;
+installed)
+    [ "${ROCKY_CRANELIFT:-1}" != 0 ] && [ -x "$bin/cargo" ]
+    ;;
+cargo)
+    shift
+    [ -x "$bin/cargo" ] || { echo "cranelift: run scripts/cranelift install" >&2; exit 1; }
+    export PATH="$bin:$PATH" RUSTC="$bin/rustc" RUSTDOC="$bin/rustdoc" \
+        CARGO_TARGET_DIR="$repo_root/target/cranelift"
+    # Dependencies stay on LLVM at their opt-level: on Cranelift the crypto
+    # makes tests slower. Cargo does not pass these to `nextest`'s build, which
+    # takes them after its own subcommand.
+    if [ "${1:-}" = nextest ] && [ $# -ge 2 ]; then
+        sub=$2 && shift 2
+        exec "$bin/cargo" nextest "$sub" -Z codegen-backend \
+            --config 'profile.dev.codegen-backend="cranelift"' \
+            --config 'profile.dev.package."*".codegen-backend="llvm"' "$@"
+    fi
+    exec "$bin/cargo" -Z codegen-backend \
+        --config 'profile.dev.codegen-backend="cranelift"' \
+        --config 'profile.dev.package."*".codegen-backend="llvm"' "$@"
+    ;;
+*) usage ;;
+esac

@@ -25,11 +25,12 @@ naturally holds.
 | [0047](0047-verifiable-identity-retirement.md) | Retire only identities whose results stay verifiable |
 | [0048](0048-replicated-issuer-registry.md) | Replicated issuer registry |
 | [0049](0049-mergeable-revocation-set.md) | A mergeable revocation set replaces the policy epoch |
+| [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0060.
+unreserved record is 0061.
 
 ## Rationale by topic
 

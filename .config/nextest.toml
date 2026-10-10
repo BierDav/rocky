@@ -1,12 +1,7 @@
-# Test runner settings; see docs/development.md#test-budgets.
+# Test runner settings; see docs/development.md#test-tiers.
 
-# At most eight of the long tests below at once, so they do not all contend
-# at the start of a run.
-[test-groups]
-long = { max-threads = 8 }
-
-# A test is reported slow after 30 s and terminated after 60 s, the per-test
-# budget.
+# A test run outside the tier checks is reported slow after 30 s and
+# terminated after 60 s.
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 2 }
 
@@ -18,59 +13,25 @@ threads-required = "num-test-threads"
 priority = 100
 slow-timeout = { period = "60s", terminate-after = 10 }
 
-# Tests that legitimately need longer: each took 30 s or more in a parallel
-# run of the measured baseline (docs/features_07/01-test-speed-evidence.md).
-# They start first, so they do not end the run alone, and keep the 10 minutes
-# CI allowed before. Add a test here only with its measured time.
-[[profile.default.overrides]]
-filter = '''
-    (package(rocky-sdk) & (
-        test(=a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer)
-        | test(=an_interrupted_rotation_resumes_to_one_epoch_across_the_group)
-        | test(=two_phones_never_online_together_pass_the_release_gate_through_custody)
-        | test(=bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it)
-        | test(=partitioned_issuers_revocations_merge_when_a_syncs_first)
-        | test(=partitioned_issuers_revocations_merge_when_b_syncs_first)
-        | test(=a_device_joining_after_a_move_starts_the_list_from_a_checkpoint)
-        | test(=a_cut_stream_loses_nothing_and_applies_nothing_in_part)
-    ))
-    | (package(rocky-secure) & (
-        test(=tests::roles::a_far_behind_replica_catches_up_while_both_sides_keep_writing)
-        | test(=tests::roles::interrupted_transfers_resume_and_a_replacement_full_node_converges)
-        | test(=tests::roles::a_sync_larger_than_a_session_continues_on_the_next)
-        | test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
-        | test(=tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure)
-        | test(=tests::checkpoint::offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edits)
-        | test(=tests::group::wal_stays_bounded_under_sustained_authoring)
-        | test(=tests::existence::a_horizon_proposal_alone_never_releases_tombstones_or_existence_history)
-        | test(=tests::existence::horizon_finalization_and_retention_plateau)
-        | test(=tests::strong_history::executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base)
-        | test(=tests::partition_foreign_keys::row_moves::process::six_scenarios_across_device_processes)
-    ))
-    | (package(rocky-runtime) & (
-        test(=retention_tests::death_inside_any_step_leaves_a_file_that_opens_and_audits)
-        | test(=stored_state_tests::open_does_not_replay_and_a_domain_outgrows_the_former_quota)
-        | test(=audit_tests::observer_and_retained_history_quotas_preserve_existing_work)
-    ))
-    | (package(rocky-coordinator) & (
-        test(=outages_and_restarts_keep_state_and_restore_is_fenced)
-        | test(=an_application_runs_strong_commands_on_a_registered_domain)
-    ))
-'''
-priority = 100
-test-group = 'long'
-slow-timeout = { period = "60s", terminate-after = 10 }
-
-# The soak tests confirm thousands of commands; they run only in `--slow`.
+# The soak tests confirm thousands of commands in the e2e tier; the longest,
+# they start first.
 [[profile.default.overrides]]
 filter = 'test(/::soak_/)'
+priority = 90
 slow-timeout = { period = "60s", terminate-after = 30 }
 
-# The runners' per-core speed is unmeasured, so CI allows twice the budget;
-# the overrides above apply unchanged.
-[profile.ci]
+# The tiers' profiles; scripts/test-tiers judges their budgets from the JUnit
+# reports. The limits here only stop a test that hung or is far over budget.
+[profile.integration]
 fail-fast = false
-# The SDK persists `identity.json` from its runtime thread; a fault-injection
-# test can race the temporary path a persist briefly holds. Retry once.
-retries = 1
-slow-timeout = { period = "60s", terminate-after = 2 }
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+[profile.integration.junit]
+path = "junit.xml"
+
+[profile.e2e]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.e2e.junit]
+path = "junit.xml"

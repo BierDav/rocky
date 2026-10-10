@@ -9,7 +9,7 @@ on:
   # other long-lived branches or pull requests.
   push:
     branches: [main]
-  # The release workflow gates every release on these checks, without `slow`
+  # The release workflow gates every release on these checks, without `e2e`
   # and `shopping`. Its build and checks are skipped for a tree that passed.
   workflow_call:
     inputs:
@@ -30,7 +30,9 @@ env:
   CARGO_TERM_COLOR: always
   # Smaller test binaries and build cache; backtraces keep line numbers.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  NEXTEST_PROFILE: ci
+  # The SDK persists `identity.json` from its runtime thread; a fault-injection
+  # test can race the temporary path a persist briefly holds. Retry once.
+  NEXTEST_RETRIES: 1
 
 jobs:
   lint:
@@ -102,7 +104,7 @@ jobs:
 
   build:
     # Compiles once: clippy and the test binaries as nextest archives, plus the
-    # custody peer. `check`, `slow` and `shopping` run those artifacts instead of
+    # custody peer. `check`, `e2e` and `shopping` run those artifacts instead of
     # building again, each downloading only what it runs.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
@@ -183,7 +185,7 @@ jobs:
           cp target/debug/rocky-peer "$RUNNER_TEMP/build/"
 
       # One artifact per consumer so a failure to finalize the large shared
-      # archive cannot also lose the small ones, and `slow` and `shopping`
+      # archive cannot also lose the small ones, and `shopping`
       # download only what they run. Gitea's artifact service intermittently
       # fails on the large upload; a consumer rebuilds when its artifact is gone.
       - name: Upload the workspace test archive
@@ -254,7 +256,7 @@ jobs:
           sdk-archive: true
           dependencies: fallback
 
-      - name: Run shared checks
+      - name: Run formatting and the unit and integration tiers
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
@@ -273,12 +275,13 @@ jobs:
           job: check
           tree: ${{ steps.source.outputs.tree }}
 
-  slow:
-    # Soak tests: on pushes to the default branch only; releases do not wait for them.
+  e2e:
+    # The end-to-end tier, soak tests included; it runs only in CI. On pushes to
+    # the default branch; releases do not wait for it.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - name: Download the exact source revision
         id: source
@@ -304,25 +307,27 @@ jobs:
       - id: reuse
         uses: ./source/.github/actions/reuse-build
         with:
-          job: slow
+          job: e2e
           tree: ${{ steps.source.outputs.tree }}
           workspace-archive: true
+          sdk-archive: true
           dependencies: fallback
 
-      - name: Run soak tests
+      - name: Run the end-to-end tier
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
         run: |
-          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ]; then
-            ./scripts/check --slow --from "$RUNNER_TEMP/build"
+          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ] \
+              && [ -f "$RUNNER_TEMP/build/sdk-without-defaults.tar.zst" ]; then
+            ./scripts/check --e2e --from "$RUNNER_TEMP/build"
           else
-            ./scripts/check --slow
+            ./scripts/check --e2e
           fi
 
       - uses: ./source/.github/actions/record-pass
         if: steps.reuse.outputs.passed != 'true'
         with:
-          job: slow
+          job: e2e
           tree: ${{ steps.source.outputs.tree }}
 
   shopping:

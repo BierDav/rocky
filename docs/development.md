@@ -58,29 +58,23 @@ project dependencies.
 
 `scripts/check` resolves the repository from its own location. It runs formatting,
 workspace Clippy with `clippy::all` denied and warnings treated as errors, and
-workspace tests. The doc tests are opt-in with `--doc` and no CI job passes it.
-Dependency resolution uses the committed lockfile.
-It uses [cargo-nextest](https://nexte.st) when installed, which runs every test
-binary in parallel, and falls back to `cargo test`. Settings are in
-`.config/nextest.toml`: a test is reported slow after 30 seconds and terminated
-after 60, the [per-test budget](#test-budgets); CI allows twice that. The
-named long tests start first and may take 10 minutes. The coordinator Raft
-store probe gets all test threads because parallel tests would distort its
-fsync latency measurement. CI disables fail-fast and retries a failing test
-once.
+the unit and integration [test tiers](testing.md). The doc tests are opt-in
+with `--doc` and no CI job passes it. Dependency resolution uses the committed
+lockfile. It needs [cargo-nextest](https://nexte.st) and Python 3.11 or newer.
 
-Soak tests are `#[ignore]`d and named `soak_*`; `./scripts/check --slow` runs
-only those. Keep a short variant of each soak test in the baseline.
-Dependencies are built with `opt-level = 2` in the dev profile, since crypto
-and SQLite dominate test time; workspace crates stay unoptimized.
-
-During development, narrow verification to the package you changed:
+During development, run the unit tier, or narrow verification to the package
+you changed:
 
 ```sh
+./scripts/check --unit
 cargo test -p rocky-runtime --locked
 cargo clippy -p rocky-runtime --all-targets --locked -- -D warnings
 cargo fmt --all
 ```
+
+`./scripts/check --unit` builds on [Cranelift](testing.md#cranelift) once
+`scripts/cranelift install` has run. `./scripts/check --e2e` runs the end-to-end
+tier, which only CI runs otherwise; soak tests are part of it.
 
 Run the shared checks before completing workspace changes. Introduce explicit
 checks for supported feature combinations when platform features are added.
@@ -90,32 +84,28 @@ and `./sdks/native/check` builds the ABI without it.
 
 ### Test budgets
 
-Measured on an 18-core Apple M5 Pro shared with other builds; the baseline,
-the result and the host are in the
-[phase 1 evidence](features_07/01-test-speed-evidence.md). A change that
-misses a budget names the cause and its largest test, or makes it faster.
+The per-tier budgets, how they are measured and how to fix a miss are in
+[testing](testing.md); [decision 0060](decisions/0060-test-tiers-and-budgets.md)
+records why. Measured on an 18-core Apple M5 Pro shared with other builds; the
+runs and their load are in the [tier evidence](features_07/01-test-tiers-evidence.md)
+and the earlier [phase 1 evidence](features_07/01-test-speed-evidence.md). A
+change that misses a budget names the cause and its largest test, or makes it
+faster.
 
 | Budget | Checked by | Result |
 | --- | --- | --- |
-| A single test: 60 s; 120 s in CI | `./scripts/check`, which terminates it | named long tests may take 10 min |
-| One package's tests after an incremental build: 60 s | `cargo nextest run -p <package>` | `rocky-sdk` 56 s, `rocky-secure` 58 s; `rocky-coordinator` 72 s |
-| `./scripts/check` with a warm build: 6 min | `./scripts/check` | 241 to 300 s |
-| `./kotlin check` with a warm build: 4 min | `./kotlin check` | 110 to 127 s |
-| `./examples/shoppinglist-app/check` with a warm build: 3 min | that command | 82 to 97 s |
-| `./sdks/native/check` with a warm build: 30 s | that command | 2 to 3 s |
-| `./scripts/lint`: 30 s | `./scripts/lint` | 5 to 9 s |
+| A unit test: 10 ms alone, in process | `./scripts/check`, `--unit` | 132 tests; the slowest 7.9 ms in the run |
+| The unit tier: 10 s | the same | 0.09 to 0.12 s |
+| An integration test: 2 s alone | `./scripts/check`, `--integration` | 682 tests; the slowest 1.52 s alone |
+| The integration tier: 5 min | the same | 92 to 98 s |
+| The e2e tier: 15 min | `./scripts/check --e2e`, the CI `e2e` job | 55 tests in 272 s locally; CI not measured |
+| `./scripts/check` with a warm build: 6 min | `./scripts/check` | 249 s |
+| The edit loop after touching `rocky-core`: no budget | `./scripts/check --unit` | 11 s on Cranelift, 33 to 38 s on LLVM |
+| `./kotlin check` with a warm build: 4 min | `./kotlin check` | 95 s |
+| `./examples/shoppinglist-app/check` with a warm build: 3 min | that command | 60 s |
+| `./sdks/native/check` with a warm build: 30 s | that command | 6 s |
+| `./scripts/lint`: 30 s | `./scripts/lint` | 25 s beside a full check |
 | CI from push to a green `check` with a restored cache: 30 min; `lint`: 5 min | the hosted run | not yet measured |
-
-`rocky-coordinator` misses its budget by the fsync probe, which runs alone for
-about 20 s, and `outages_and_restarts_keep_state_and_restore_is_fenced`, which
-waits about 50 s on the client's 12 s request deadline and voter restarts.
-
-The tests that legitimately need longer are named in `.config/nextest.toml`,
-each with a run of 30 s or more in the measured baseline. They start first, at
-most eight at a time, so they neither end a run alone nor all contend at its
-start; the fsync probe runs alone before them. Add a test there only with its
-measured time; a test that only waits belongs on Tokio's paused clock or the
-in-process hub's faults instead.
 
 ## Kotlin desktop integration
 
@@ -160,7 +150,7 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 The baseline workflow runs for pushes to the default branch and for the release
 workflow's call, not for pull requests. Its `lint` job runs `scripts/tools` and
 `scripts/lint` on Linux; it needs no build and fails within minutes. The
-`build`, `check`, `slow`
+`build`, `check`, `e2e`
 and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
 On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
 they exchange architecture-specific nextest archives and custody peer, while
@@ -176,13 +166,13 @@ workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 `check` downloads both test archives and runs `scripts/check --from` them:
-`cargo fmt --all -- --check` and the tests, without compiling. `slow` downloads
-only `nextest-workspace` for its soak tests; `shopping` downloads only
+`cargo fmt --all -- --check` and the unit and integration tiers, without
+compiling. `e2e` downloads both for the end-to-end tier; `shopping` downloads only
 `rocky-peer`; `android` needs no Rust artifact and keeps its own Gradle and
 native caches. The downloads are best-effort: Gitea's artifact service sometimes
 fails to finalize an artifact, and a job that finds one missing rebuilds the
 test binaries from the dependency cache (`check` runs `scripts/check --no-clippy`
-so it does not repeat the Clippy the `build` job already ran). `check` and `slow`
+so it does not repeat the Clippy the `build` job already ran). `check` and `e2e`
 compile nothing otherwise, so they restore the Rust cache only then.
 It needs no version-control CLI or repository history, and never invokes Git.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
@@ -199,8 +189,11 @@ the jobs after it build what they still run themselves. The Rust cache keeps
 both dependencies and workspace crates; it is saved from `main` and restored on
 other refs.
 
-The `slow` job runs `./scripts/check --slow` on pushes to `main`; releases do not
+The `e2e` job runs `./scripts/check --e2e` on pushes to `main`; releases do not
 wait for it.
+The tier budgets apply in CI as they do locally, scaled by the runner's load;
+no hosted run has measured them yet. CI retries a failing nextest test once
+(`NEXTEST_RETRIES`).
 
 The `android` job runs only on pushes to `main`. It performs the release
 workflow's Android build steps to keep two caches warm: the Gradle and Kotlin
@@ -220,7 +213,7 @@ wait for its result.
 
 A release calls the baseline workflow. Before it starts, it waits only for the
 push run's `lint`, `build` and `check` jobs for that commit; a failure in any of
-them fails the release. The `slow`, `shopping` and baseline `android` jobs do
+them fails the release. The `e2e`, `shopping` and baseline `android` jobs do
 not gate it. When `check` passed for the tree, the release's `build` and `check`
 skip. A job whose build artifact is missing, for example after its one-day
 retention, builds what it runs itself; a release of an unchecked tree runs the
@@ -268,7 +261,7 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   particular architecture use `ubuntu-latest-any-arch` on Gitea, carried by
   runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
-  arm64 Linux host. The baseline `build`, `check`, `slow` and `shopping` jobs
+  arm64 Linux host. The baseline `build`, `check`, `e2e` and `shopping` jobs
   exchange architecture-specific binaries, so they pin `ubuntu-24.04-arm` rather
   than the mixed `-any-arch` label.
 - The release job that produces the `darwin-aarch64` JVM SDK still uses macOS

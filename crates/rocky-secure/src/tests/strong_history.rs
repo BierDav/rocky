@@ -94,7 +94,7 @@ async fn executor_and_reader_cross_commands_with_a_window_and_recover_from_the_b
 }
 
 #[tokio::test]
-#[ignore = "soak; run by scripts/check --slow"]
+#[ignore = "soak; run by the e2e tier, scripts/check --e2e"]
 async fn soak_executor_and_reader_cross_4096_commands_with_a_window() {
     cross_commands_with_a_window(4100).await;
 }

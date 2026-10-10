@@ -27,6 +27,14 @@ all = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "deny"
 
-# Crypto and SQLite dominate test time; optimize dependencies, not workspace crates.
+# Crypto and SQLite dominate test time; optimize dependencies. Generic code
+# such as encoding is compiled in the crate that uses it, so the two crates
+# that encode most are optimized as well; decision 0060 has the measurements.
 [profile.dev.package."*"]
 opt-level = 2
+
+[profile.dev.package.rocky-core]
+opt-level = 1
+
+[profile.dev.package.rocky-credentials]
+opt-level = 1

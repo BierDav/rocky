@@ -10,6 +10,9 @@ binaries were not merged: link time does not dominate. No hosted CI run was
 observed (GitHub starts no job for billing; the Gitea API needs a token), so the
 CI budgets and the CI side of the per-test limit were checked only with the
 `ci` profile locally.
+Superseded in part by [decision 0060](../decisions/0060-test-tiers-and-budgets.md):
+three test tiers with enforced budgets replace the per-test limit and `--slow`
+([evidence](01-test-tiers-evidence.md)).
 Owner: `scripts/check`, `.config/nextest.toml`, `.github/workflows`,
 `sdks/native/check`, the root `./kotlin check` and
 `examples/shoppinglist-app/check`. No dependency. Wave 0.

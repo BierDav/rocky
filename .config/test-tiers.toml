@@ -1,0 +1,115 @@
+# Test tiers and their budgets; see docs/development.md#test-tiers and
+# docs/decisions/0060-test-tiers-and-budgets.md. `scripts/test-tiers` enforces them.
+#
+# A test belongs to the first tier whose filter matches it (nextest filterset
+# syntax): e2e, then integration; every other test is a unit test. So each test
+# has exactly one tier, and a new test starts as a unit test unless it is in an
+# integration test target. Ignored tests run only in e2e, and only those its
+# filter names; the others are helpers and explicit measurements.
+
+[unit]
+per-test = "10ms"
+suite = "10s"
+
+[integration]
+per-test = "2s"
+suite = "5m"
+filter = '''
+    kind(test)
+    | (package(rocky-secure) & test(/^tests::/))
+    | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
+    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
+    | (package(rocky-sdk) & test(/^(commands|database|enrollment|node)::/))
+    | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
+    | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
+    | (package(runtime-scaling) & test(/^(soak|wide)::tests::/))
+    | (package(todo-desktop) & test(/^secure_demo::/))
+'''
+
+# End to end: soak tests, the fsync probe, and the tests that need more than the
+# integration budget even alone: crash sweeps over every step, full-size
+# limits, multi-process clusters, and waits on production deadlines (the
+# coordinator client's 12 s request deadline, the 5 s write lease, the service
+# drain). Each was over 1.5 s alone on the reference host; the measurements are
+# in docs/features_07/01-test-tiers-evidence.md. Name a test here only with its
+# measured time; a test that is only slow should be made faster instead.
+[e2e]
+suite = "15m"
+filter = '''
+    test(/::soak_/)
+    | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
+    | (binary_id(rocky-coordinator) & (
+          test(=raft_store::tests::openraft_storage_contract)
+    ))
+    | (binary_id(rocky-coordinator::applications) & (
+          test(=directory_and_alice_share_metadata_voters_and_quorum_loss_keeps_local_work)
+    ))
+    | (binary_id(rocky-coordinator::cluster) & (
+          test(=certified_lost_reply_survives_another_executors_advance)
+        | test(=crashes_at_log_commit_apply_reply_and_snapshot_boundaries)
+        | test(=three_persistent_voters_fence_recover_and_verify_offline)
+    ))
+    | (binary_id(rocky-coordinator::public) & (
+          test(=a_completely_restored_service_stays_fenced)
+        | test(=outages_and_restarts_keep_state_and_restore_is_fenced)
+    ))
+    | (binary_id(rocky-coordinator::public_runtime) & (
+          test(=an_application_runs_strong_commands_on_a_registered_domain)
+    ))
+    | (binary_id(rocky-runtime) & (
+          test(=audit_tests::observer_and_retained_history_quotas_preserve_existing_work)
+        | test(=instrumentation_tests::checkpoint_intervals_are_recorded_in_monotonic_order_when_instrumented)
+        | test(=retention_tests::death_inside_any_step_leaves_a_file_that_opens_and_audits)
+        | test(=stored_state_tests::open_does_not_replay_and_a_domain_outgrows_the_former_quota)
+    ))
+    | (binary_id(rocky-sdk::adapter) & (
+          test(=a_chunk_transport_carries_enrollment_and_sync)
+    ))
+    | (binary_id(rocky-sdk::bootstrap) & (
+          test(=join_restores_large_rows_across_checkpoint_pages)
+    ))
+    | (binary_id(rocky-sdk::composition) & (
+          test(=a_closing_service_cancels_work_that_outlasts_its_drain)
+    ))
+    | (binary_id(rocky-sdk::driver) & (
+          test(=bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it)
+    ))
+    | (binary_id(rocky-sdk::faults) & (
+          test(=a_cut_stream_loses_nothing_and_applies_nothing_in_part)
+        | test(=a_slow_reader_holds_the_writer_back_without_loss)
+        | test(=inbound_streams_over_budget_are_dropped_and_served_again_later)
+    ))
+    | (binary_id(rocky-sdk::group_secrets) & (
+          test(=an_interrupted_rotation_resumes_to_one_epoch_across_the_group)
+    ))
+    | (binary_id(rocky-sdk::issuers) & (
+          test(=a_second_issuer_carries_the_domain_after_the_creator_is_lost)
+    ))
+    | (binary_id(rocky-sdk::registry) & (
+          test(=a_full_registry_refuses_the_257th_device_and_syncs_to_a_new_issuer)
+    ))
+    | (binary_id(rocky-sdk::revocations) & (
+          test(=partitioned_issuers_revocations_merge_when_a_syncs_first)
+        | test(=partitioned_issuers_revocations_merge_when_b_syncs_first)
+    ))
+    | (binary_id(rocky-sdk::service) & (
+          test(=devices_run_typed_commands_through_a_registered_service_domain)
+    ))
+    | (binary_id(rocky-sdk::shopping_release) & (
+          test(=a_device_joining_after_a_move_starts_the_list_from_a_checkpoint)
+        | test(=two_phones_never_online_together_pass_the_release_gate_through_custody)
+    ))
+    | (binary_id(rocky-secure) & (
+          test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
+        | test(=tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure)
+        | test(=tests::existence::a_horizon_proposal_alone_never_releases_tombstones_or_existence_history)
+        | test(=tests::existence::horizon_finalization_and_retention_plateau)
+        | test(=tests::generations::a_local_plan_survives_an_interruption_at_every_step)
+        | test(=tests::group::wal_stays_bounded_under_sustained_authoring)
+        | test(=tests::partition_foreign_keys::row_moves::process::six_scenarios_across_device_processes)
+        | test(=tests::roles::a_far_behind_replica_catches_up_while_both_sides_keep_writing)
+        | test(=tests::roles::a_sync_larger_than_a_session_continues_on_the_next)
+        | test(=tests::roles::interrupted_transfers_resume_and_a_replacement_full_node_converges)
+        | test(=tests::strong_history::executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base)
+    ))
+'''

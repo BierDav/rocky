@@ -1,32 +1,36 @@
 #!/bin/sh
 # Shared checks; see docs/development.md#shared-checks.
 #
-#   scripts/check                   formatting, clippy and every test
+#   scripts/check                   formatting, clippy, the unit and integration tiers
+#   scripts/check --unit            the unit tier of the workspace build: the edit loop,
+#                                   on Cranelift if installed
+#   scripts/check --integration     only the integration tier
+#   scripts/check --e2e             only the e2e tier, which CI runs, soak tests included
 #   scripts/check --doc             also the doc tests
-#   scripts/check --slow            only the ignored `soak_` tests
 #   scripts/check --build DIR       clippy, then archive the test binaries in DIR
-#   scripts/check [--slow] --from DIR
-#                                   the same checks with DIR's test binaries,
+#   scripts/check [TIER] --from DIR the same checks with DIR's test binaries,
 #                                   without clippy, which --build ran
-#   scripts/check --no-clippy       every test, without clippy, when --build
-#                                   already ran clippy but its archives are gone
+#   scripts/check --no-clippy       the tests without clippy, when --build already
+#                                   ran clippy but its archives are gone
 #
-# CI builds once with --build and runs the other jobs --from its archives.
+# Tiers combine, as in `--unit --integration`. scripts/test-tiers enforces each
+# tier's budgets. CI builds once with --build and runs the tiers --from its archives.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
-mode=all
+tiers=
+build=
 archives=
 clippy=true
 doc=false
 while [ $# -gt 0 ]; do
     case "$1" in
-    --slow) mode=slow ;;
-    --build) mode=build && archives=${2:-} && shift ;;
+    --unit | --integration | --e2e) tiers="$tiers ${1#--}" ;;
+    --build) build=true && archives=${2:-} && shift ;;
     --from) archives=${2:-} && shift ;;
     --no-clippy) clippy=false ;;
     --doc) doc=true ;;
@@ -34,20 +38,15 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ "$mode" != build ] || [ -n "$archives" ] || usage
+[ -z "$build" ] || [ -n "$archives" ] || usage
 
-# nextest runs every test binary in parallel; cargo test runs them in sequence.
-nextest=false
-if cargo nextest --version >/dev/null 2>&1; then
-    nextest=true
-fi
-if [ -n "$archives" ] && ! $nextest; then
-    echo "check: archives need cargo-nextest" >&2
+cargo nextest --version >/dev/null 2>&1 || {
+    echo "check: install cargo-nextest (https://nexte.st)" >&2
     exit 1
-fi
-profile=${NEXTEST_PROFILE:-default}
+}
 
-# The archives --build writes and --from reads; each has its build arguments.
+# The two builds of the tests: the workspace, and the SDK without iroh, since
+# the database, sessions and other transports must not need it.
 archive_args() { # name
     case "$1" in
     workspace) echo --workspace ;;
@@ -55,30 +54,17 @@ archive_args() { # name
     esac
 }
 
-run_tests() { # archive [nextest run arguments...]
-    name=$1 && shift
+run_tier() { # tier [test-tiers arguments...]
     if [ -n "$archives" ]; then
-        cargo nextest run --profile "$profile" --workspace-remap "$repo_root" \
-            --archive-file "$archives/$name.tar.zst" "$@"
-    elif $nextest; then
-        # shellcheck disable=SC2046 # the build arguments are words
-        cargo nextest run --locked --profile "$profile" $(archive_args "$name") "$@"
+        scripts/test-tiers "$@" --archive "$archives/workspace.tar.zst" \
+            --archive "$archives/sdk-without-defaults.tar.zst"
     else
-        # shellcheck disable=SC2046
-        cargo test --locked $(archive_args "$name") -- "$@"
+        scripts/test-tiers "$@" --build=--workspace \
+            "--build=$(archive_args sdk-without-defaults)"
     fi
 }
 
-case "$mode" in
-slow)
-    if $nextest; then
-        run_tests workspace --run-ignored only -E 'test(/::soak_/)'
-    else
-        cargo test --workspace --locked -- --ignored ::soak_
-    fi
-    exit
-    ;;
-build)
+if [ -n "$build" ]; then
     cargo clippy --workspace --all-targets --locked -- -D warnings
     # nextest cannot archive doc tests; --doc runs them here, where the workspace
     # is already compiled, so a later --from needs no compile.
@@ -87,21 +73,32 @@ build)
     fi
     mkdir -p "$archives"
     for name in workspace sdk-without-defaults; do
-        # shellcheck disable=SC2046
+        # shellcheck disable=SC2046 # the build arguments are words
         cargo nextest archive --locked $(archive_args "$name") \
             --archive-file "$archives/$name.tar.zst"
     done
     exit
-    ;;
-esac
-
-cargo fmt --all -- --check
-[ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
-run_tests workspace
-# nextest skips doc tests, which are opt-in so a check does not compile them;
-# plain `cargo test` still runs them.
-if $nextest && $doc; then
-    cargo test --workspace --doc --locked
 fi
-# The database, sessions and other transports must not need iroh.
-run_tests sdk-without-defaults
+
+# The edit loop builds only the workspace, on Cranelift when installed. Cranelift
+# cannot unwind panics on every target; any other run uses the LLVM build that
+# CI and clippy share.
+if [ "$tiers" = " unit" ] && [ -z "$archives" ]; then
+    if scripts/cranelift installed; then
+        exec scripts/test-tiers unit --cranelift --build=--workspace
+    fi
+    exec scripts/test-tiers unit --build=--workspace
+fi
+if [ -z "$tiers" ]; then
+    tiers="unit integration"
+    cargo fmt --all -- --check
+    [ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
+fi
+# Every tier runs, so one failure does not hide another's.
+status=0
+for tier in $tiers; do run_tier "$tier" || status=1; done
+# nextest skips doc tests, which are opt-in so a check does not compile them.
+if $doc; then
+    cargo test --workspace --doc --locked || status=1
+fi
+exit $status

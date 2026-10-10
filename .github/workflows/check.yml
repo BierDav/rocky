@@ -101,7 +101,9 @@ jobs:
   build:
     # Compiles once: clippy, the test binaries as nextest archives and the custody
     # peer, which `check`, `slow` and `shopping` run instead of building again.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    # Those jobs consume architecture-specific binaries, so they all pin one
+    # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 45
     steps:
       - name: Download the exact source revision
@@ -184,7 +186,7 @@ jobs:
 
   check:
     needs: build
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 30
     steps:
       - name: Download the exact source revision
@@ -279,7 +281,7 @@ jobs:
     # Soak tests: on pushes to the default branch only; releases do not wait for them.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
     steps:
       - name: Download the exact source revision
@@ -374,7 +376,7 @@ jobs:
     # Releases skip it; the release refuses a commit whose run of it failed.
     needs: build
     if: ${{ !inputs.release }}
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 45
     steps:
       - name: Download the exact source revision

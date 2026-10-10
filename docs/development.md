@@ -129,7 +129,9 @@ This is not part of `./scripts/check`. See [Android](runtime/android.md).
 The baseline workflow's `lint` job runs `scripts/tools` and `scripts/lint` on
 Linux; it needs no build and fails within minutes. The `build`, `check`, `slow`
 and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
-On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-latest-any-arch`.
+On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
+they exchange architecture-specific nextest archives and custody peer, while
+`lint` uses `ubuntu-latest-any-arch`.
 The `build` job downloads an archive of the exact
 event revision and runs `scripts/check --build`: strict workspace Clippy, then
 the test binaries as nextest archives, uploaded with the custody peer binary.
@@ -202,7 +204,9 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   particular architecture use `ubuntu-latest-any-arch` on Gitea, carried by
   runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
-  arm64 Linux host.
+  arm64 Linux host. The baseline `build`, `check`, `slow` and `shopping` jobs
+  exchange architecture-specific binaries, so they pin `ubuntu-24.04-arm` rather
+  than the mixed `-any-arch` label.
 - The release job that produces the `darwin-aarch64` JVM SDK still uses macOS
   because it builds a macOS native library. Other release jobs use Linux.
 - Images and Maven artifacts go to the instance's registries with the

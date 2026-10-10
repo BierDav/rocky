@@ -11,3 +11,9 @@ threads-required = "num-test-threads"
 [profile.ci]
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The soak tests confirm thousands of commands; they run only in `--slow` and
+# outlive the 10-minute cap above.
+[[profile.ci.overrides]]
+filter = 'test(/::soak_/)'
+slow-timeout = { period = "60s", terminate-after = 30 }

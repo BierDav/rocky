@@ -16,7 +16,7 @@ token, renewals are signed, and sync runs
 encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/9`,
+Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/10`,
 `rocky/sdk-renew/2`, `rocky/command/1`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream.

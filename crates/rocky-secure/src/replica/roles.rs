@@ -98,7 +98,7 @@ impl ScopeFrontier {
             })
             .sum()
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.logs.len() > MAX_CHECKPOINT_LOGS
             || self
                 .logs
@@ -766,6 +766,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         credentials: &CredentialChain,
         after: Option<ResourceScope>,
     ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
+        self.held_scopes_proved(peer, credentials, after, None)
+            .await
+    }
+    pub(crate) async fn held_scopes_proved(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        after: Option<ResourceScope>,
+        proved: Option<&BTreeSet<ResourceScope>>,
+    ) -> Result<(Vec<ResourceScope>, Option<ResourceScope>), Error> {
         let inner = self.inner.lock().await;
         let grants = inner.peer_grants(peer, credentials)?;
         let mut scopes = BTreeSet::new();
@@ -782,7 +792,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let mut held = Vec::new();
         for scope in scopes {
-            if after.is_some_and(|after| scope <= after) || !inner.holds(scope).await? {
+            if proved.is_some_and(|proved| inner.partitioned(scope) && !proved.contains(&scope))
+                || after.is_some_and(|after| scope <= after)
+                || !inner.holds(scope).await?
+            {
                 continue;
             }
             if grants.iter().any(|grant| {

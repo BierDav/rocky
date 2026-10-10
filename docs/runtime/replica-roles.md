@@ -52,7 +52,7 @@ admission and limits, [decision 0046](../decisions/0046-per-scope-frontier-refus
 refusal and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v9`) pulls by frontier:
+`NativeSession` (label `rocky.native-session.v10`) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |
@@ -79,6 +79,29 @@ frontiers or horizon credentials, and the least recently served lose theirs
 first. Full nodes and the peers named with `configure_peers` are never
 dropped; a dropped frontier only delays pruning
 ([decision 0051](../decisions/0051-roster-free-admission.md)).
+
+### Proving a partition
+
+A whole-table profile grant does not reveal every list. In each native session,
+a reader proves a named partition with a value derived from one of its retained
+key epochs. The session binds the proof to both fresh handshake challenges;
+replaying it in another session fails. The client supplies at most four epochs,
+newest first; a peer accepts a retained losing sibling or previous generation.
+A peer without any matching epoch refuses the member, and renewal or envelope
+delivery supplies the missing keys.
+
+A keyless custody peer checks the tuple and the grants instead. A custodian
+asking a reader uses its custody grant and tuple. A reader asking a reader still
+needs a key proof. Tuples can be guessed and former readers retain them: custody
+has this weaker privacy boundary. Unpartitioned scopes keep their grant rule.
+
+Frontier batches carry proofs automatically. Scoped client calls establish them
+before their first request; later calls reuse session memory. `peer_scopes`
+returns only unpartitioned scopes and partitions already proved; use
+`prove_scopes(replica, scopes)` before listing known partitions. An unproved
+partition receives `Refused(scope)` in a batch, or `ciphertext custody denied` and
+session termination for a raw scoped request, exactly like an unknown scope.
+[Decision 0052](../decisions/0052-holding-proofs.md) defines derivation and bounds.
 
 ### Custody and pruning
 
@@ -111,7 +134,8 @@ incomplete.
   and uncovered retained operations, pruned logs, local operations, how many of
   them each full node has applied, and lag against every peer that reported a
   frontier.
-- **New full node.** Open a replica with keys and grants for every scope, list
+- **New full node.** Open a replica with keys and grants for every scope,
+  `prove_scopes` for the partitions whose envelopes it received, list
   `peer_scopes` of an existing full node and `sync_scope` each one.
 - **Replacing a lost full node.** The same, from another full node, or from the
   lost node's file under its key. Partial replicas hold only their subsets.

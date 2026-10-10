@@ -175,6 +175,21 @@ Trusted typed ID helpers require a partition when a table has duplicate IDs:
 `update_partition_id`/`delete_partition_id`; an ambiguous unqualified ID errors.
 SQL updates already identify the row by its complete business key.
 
+## Proving holdings during sync
+
+Possessing a profile grant alone reveals no partition holdings through a native
+session. Clients prove a named scope with up to four session-bound values derived
+from retained table keys. Readers accept any retained proved epoch, including
+losing siblings and superseded generations. Keyless custody instead requires the
+tuple and a whole-scope grant. A former reader keeps the tuple and a guessable
+tuple proves little; custody cannot verify secret possession.
+
+A partition without a matching proof is indistinguishable from an unknown scope;
+it is omitted from scope enumeration. Proofs stay in session memory. Group secrets,
+envelopes and epoch identities retain their formats. See
+[proving a partition](replica-roles.md#proving-a-partition) and
+[decision 0052](../decisions/0052-holding-proofs.md).
+
 ## SQL and completeness
 
 A table is complete when a verified grant covers every schema partition column

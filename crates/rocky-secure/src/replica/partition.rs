@@ -94,7 +94,11 @@ impl<A: RowApplication> Inner<A> {
             })
         })
     }
-    fn check_tuple(&self, scope: ResourceScope, tuple: &PartitionTuple) -> Result<(), Error> {
+    pub(super) fn check_tuple(
+        &self,
+        scope: ResourceScope,
+        tuple: &PartitionTuple,
+    ) -> Result<(), Error> {
         if tuple
             .scope(scope.domain, scope.table)
             .map_err(|error| denied(&error.to_string()))?
@@ -534,7 +538,7 @@ fn custody_only(grants: &[rocky_core::ResourceGrant]) -> bool {
 
 impl<A: RowApplication> Inner<A> {
     /// `chain`'s grants on one concrete partition, under the policy of its generation.
-    fn partition_grants(
+    pub(super) fn partition_grants(
         &self,
         chain: &CredentialChain,
         key: PublicKey,
@@ -631,23 +635,25 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if !scopes.contains(scope) {
                 return Err(denied("partition offers outside the frontier batch"));
             }
+            inner.check_tuple(*scope, tuple)?;
+            let sender = inner.partition_grants(credentials, peer, *scope, tuple)?;
+            if !sender.iter().any(|grant| {
+                grant.rows == RowSelection::All
+                    && (grant.rights.contains(&Right::Read)
+                        || grant.rights.contains(&Right::Custody))
+            }) {
+                return Err(denied(
+                    "partition offer from a peer without read or custody",
+                ));
+            }
             if inner.partitions.contains_key(scope) {
                 continue;
             }
-            inner.check_tuple(*scope, tuple)?;
             let own = inner.config.node.public_key();
             let held = inner.partition_grants(&inner.config.credentials, own, *scope, tuple)?;
             if !custody_only(&held) {
                 return Err(denied(
                     "only a keyless custody node registers offered partitions",
-                ));
-            }
-            let sender = inner.partition_grants(credentials, peer, *scope, tuple)?;
-            if !sender.iter().any(|grant| {
-                grant.rights.contains(&Right::Read) || grant.rights.contains(&Right::Custody)
-            }) {
-                return Err(denied(
-                    "partition offer from a peer without read or custody",
                 ));
             }
             accepted.push((*scope, tuple.clone()));

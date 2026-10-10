@@ -21,6 +21,7 @@ mod checkpoints;
 mod commands;
 mod existence;
 mod frontiers;
+pub(crate) mod holdings;
 mod horizon;
 mod revocations;
 mod rows;
@@ -29,6 +30,7 @@ use commands::CommandMessage;
 use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
+use holdings::HoldingMessage;
 use horizon::HorizonMessage;
 use revocations::RevocationMessage;
 use rows::RowMessage;
@@ -138,6 +140,7 @@ enum Message {
     Existence(ExistenceMessage),
     Commands(CommandMessage),
     Revocations(RevocationMessage),
+    Holdings(HoldingMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -165,6 +168,7 @@ families!(
     Existence(ExistenceMessage),
     Commands(CommandMessage),
     Revocations(RevocationMessage),
+    Holdings(HoldingMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -183,6 +187,10 @@ pub struct NativeSession {
     credentials: CredentialChain,
     /// The encoded start of every message's signed bytes.
     signing: Vec<u8>,
+    binding: Commitment,
+    proved: std::collections::BTreeSet<ResourceScope>,
+    offered: std::collections::BTreeSet<ResourceScope>,
+    served_frames: std::collections::BTreeMap<Hash, ResourceScope>,
     sent: u64,
     received: u64,
     remaining: usize,
@@ -296,6 +304,10 @@ impl NativeSession {
             peer: peer.node,
             credentials: peer.credentials,
             signing: frame_signing_head(&binding)?,
+            binding: rocky_core::commitment("rocky.holding-session.v1", &binding),
+            proved: Default::default(),
+            offered: Default::default(),
+            served_frames: Default::default(),
             sent: 0,
             received: 0,
             remaining: byte_budget,
@@ -448,7 +460,9 @@ impl NativeSession {
         replica
             .record_horizon_credentials(self.peer, &self.credentials)
             .await?;
+        self.guard_message(replica, &message).await?;
         match message {
+            Message::Holdings(message) => self.answer_holdings(replica, message).await,
             Message::Rows(message) => self.answer_rows(replica, message).await,
             Message::Checkpoints(message) => self.answer_checkpoints(replica, message).await,
             Message::Horizon(message) => self.answer_horizon(replica, message).await,

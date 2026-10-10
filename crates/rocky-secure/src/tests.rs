@@ -1510,4 +1510,4 @@ mod formats;
 
 mod partition_foreign_keys;
 
-mod group_sync_measurement;
+pub(crate) mod group_sync_measurement;

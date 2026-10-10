@@ -97,9 +97,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b.titles().await, ["Eggs", "Jam", "Milk"]);
 
-    // Closing the databases leaves the endpoint and the protocol usable.
+    // Closing the borrowing database leaves the endpoint and protocol usable.
     a.close().await;
-    b.close().await;
     assert!(!endpoint.is_closed() && !router.is_shutdown());
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
     let a = Device::open(
@@ -110,8 +109,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     a.close().await;
 
     // The final shutdown is the application's.
-    router.shutdown().await?;
-    caller.close().await;
+    let ((), shutdown, ()) = tokio::join!(b.close(), router.shutdown(), caller.close());
+    shutdown?;
     assert!(endpoint.is_closed());
     Ok(())
 }

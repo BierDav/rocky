@@ -465,20 +465,24 @@ async fn a_device_granted_execute_registers_and_executes_without_being_an_issuer
     let (bundle, _admin) = service(root.path()).await?;
     let opened = {
         let (directory, bundle) = (root.path().join("a"), bundle.clone());
-        tokio::task::spawn_blocking(move || Database::create(composed(&directory, &bundle), None))
-            .await??
+        tokio::task::spawn_blocking(move || {
+            let mut options = composed(&directory, &bundle);
+            options.secrets = Some(Arc::new(support::secrets::Keys::default()));
+            Database::create(options, None)
+        })
+        .await??
     };
     let a = opened.database.session();
     let scope: Value = serde_json::from_str(&opened.database.scope())?;
     // The issuer grants Execute, a raw right, to a device it does not make an issuer.
-    let prepare = |name: &str| Database::device(&root.path().join(name), None);
     let execute = json!([{"scope": "counts",
         "rights": ["read", "insert", "update", "delete", "invoke", "execute", "custody"]}]);
     let writes =
         json!([{"scope": "counts", "rights": ["read", "insert", "update", "invoke", "custody"]}]);
     let mut opened_devices = Vec::new();
     for (name, grants) in [("x", &execute), ("w", &writes)] {
-        let keys = prepare(name)?;
+        let store = Arc::new(support::secrets::Keys::default());
+        let keys = Database::device(&root.path().join(name), Some(store.clone()))?;
         let supplied = call(
             &a,
             &scope,
@@ -488,10 +492,9 @@ async fn a_device_granted_execute_registers_and_executes_without_being_an_issuer
             .clone();
         let (directory, bundle) = (root.path().join(name), bundle.clone());
         let device = tokio::task::spawn_blocking(move || {
-            Database::install(
-                composed(&directory, &bundle),
-                serde_json::from_value(supplied)?,
-            )
+            let mut options = composed(&directory, &bundle);
+            options.secrets = Some(store);
+            Database::install(options, serde_json::from_value(supplied)?)
         })
         .await??;
         opened_devices.push(device);
@@ -529,9 +532,6 @@ async fn a_device_granted_execute_registers_and_executes_without_being_an_issuer
     }
     let registered = call(&x, &scope, register(grant.clone())).await?;
     assert_eq!(registered["tenant"], tenant.public_key().to_hex());
-    // Refused attempts under the same ID do not unsettle its retry.
-    next_second().await?;
-    assert_eq!(call(&x, &scope, register(grant)).await?, registered);
     // The granted device acquires the domain and executes.
     call(
         &x,
@@ -551,9 +551,15 @@ async fn a_device_granted_execute_registers_and_executes_without_being_an_issuer
         ticket["tickets"][0]["outcome"]["values"][0]["value"], "5",
         "{ticket}"
     );
-    for device in opened_devices {
-        device.database.close().await?;
-    }
-    opened.database.close().await?;
+    // Refused attempts under the same ID do not unsettle its retry.
+    // Crossing the signing clock is covered by the service e2e test above.
+    assert_eq!(call(&x, &scope, register(grant)).await?, registered);
+    futures_util::future::try_join_all(
+        opened_devices
+            .iter()
+            .map(|device| device.database.close())
+            .chain(std::iter::once(opened.database.close())),
+    )
+    .await?;
     Ok(())
 }

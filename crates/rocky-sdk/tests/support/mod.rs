@@ -1,5 +1,6 @@
 //! Consumer fixtures use definition tables and the public SQL/pseudonym APIs.
 #![allow(dead_code)]
+pub mod secrets;
 use rocky_sdk::{Database, Engine};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, OnceLock, Weak};

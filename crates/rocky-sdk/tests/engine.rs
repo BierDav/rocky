@@ -38,10 +38,18 @@ struct Db {
 }
 impl Db {
     fn open(directory: &Path, mode: Value, transport: Value) -> Result<Self, Failure> {
+        Self::with_secrets(directory, mode, transport, None)
+    }
+    fn with_secrets(
+        directory: &Path,
+        mode: Value,
+        transport: Value,
+        secrets: Option<Arc<dyn rocky_sdk::SecretStore>>,
+    ) -> Result<Self, Failure> {
         let mut options = mode;
         options["directory"] = json!(directory);
         options["transport"] = transport;
-        let engine = Engine::open(&options.to_string(), SCHEMA, None)?;
+        let engine = Engine::open(&options.to_string(), SCHEMA, secrets)?;
         let scope = serde_json::from_str(&engine.scope())?;
         support::engine(&engine);
         Ok(Self { engine, scope })
@@ -152,12 +160,24 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     // The creator keeps its port across the restart.
     let port = free_port();
     let transport = || at(port);
-    let creator = Db::create(&root.path().join("a"), transport())?;
+    let a_keys = Arc::new(support::secrets::Keys::default());
+    let b_keys = Arc::new(support::secrets::Keys::default());
+    let creator = Db::with_secrets(
+        &root.path().join("a"),
+        json!({"mode":"create"}),
+        transport(),
+        Some(a_keys.clone()),
+    )?;
     assert_eq!(
         creator.ok(json!({"type": "domain"})).await["issuer"],
         json!(true)
     );
-    let member = Db::join(&root.path().join("b"), &creator.invite().await, at(0))?;
+    let member = Db::with_secrets(
+        &root.path().join("b"),
+        json!({"mode":"join", "invitation":creator.invite().await}),
+        at(0),
+        Some(b_keys.clone()),
+    )?;
     assert_eq!(
         member.ok(json!({"type": "domain"})).await["issuer"],
         json!(false)
@@ -194,7 +214,6 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
         .ok(json!({"type": "connection", "online": true}))
         .await;
     member.sync().await;
-    member.sync().await;
     assert_eq!(creator.items().await, member.items().await);
     assert!(
         creator
@@ -219,22 +238,29 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
         .await
         .map_err(|error| error.to_string())?;
     member.sync().await;
-    member.sync().await;
     assert_eq!(titles(&member.items().await), ["Eggs"]);
     assert_eq!(creator.items().await, member.items().await);
 
     // Both sides survive a restart and keep syncing.
-    member.close().await;
-    creator.close().await;
-    let creator = Db::resume(&root.path().join("a"), transport())?;
-    let member = Db::resume(&root.path().join("b"), at(0))?;
+    tokio::join!(member.close(), creator.close());
+    let creator = Db::with_secrets(
+        &root.path().join("a"),
+        json!({"mode":"resume"}),
+        transport(),
+        Some(a_keys),
+    )?;
+    let member = Db::with_secrets(
+        &root.path().join("b"),
+        json!({"mode":"resume"}),
+        at(0),
+        Some(b_keys),
+    )?;
     member.add(7, "Bread").await;
     creator.add(8, "Jam").await;
     member.sync().await;
     assert_eq!(titles(&creator.items().await), ["Bread", "Eggs", "Jam"]);
     assert_eq!(creator.items().await, member.items().await);
-    member.close().await;
-    creator.close().await;
+    tokio::join!(member.close(), creator.close());
     Ok(())
 }
 
@@ -244,7 +270,7 @@ async fn devices_converge_over_tcp() -> Result<(), Failure> {
 }
 
 #[cfg(feature = "iroh")]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devices_converge_over_iroh() -> Result<(), Failure> {
     converge(iroh_at).await
 }

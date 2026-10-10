@@ -128,6 +128,7 @@ impl NativeSession {
         after: Option<Hash>,
         quota: usize,
     ) -> Result<Pulled, Error> {
+        self.ensure_holding(replica, &scopes).await?;
         self.send(RowMessage::Pull {
             scopes: scopes.clone(),
             after,
@@ -211,6 +212,7 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<CatchUp, Error> {
+        self.ensure_holding(replica, &[scope]).await?;
         self.send(HorizonMessage::MergeableCut { scope }).await?;
         let HorizonMessage::MergeableState { signed, behind } =
             self.reply::<HorizonMessage>().await?
@@ -359,6 +361,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<ScopeFrontier, Error> {
+        self.ensure_holding(replica, &[scope]).await?;
         self.send(RowMessage::FrontierQuery { scope }).await?;
         let RowMessage::Frontier { frontier } = self.reply::<RowMessage>().await? else {
             return Err(denied("unexpected frontier response"));
@@ -400,6 +403,7 @@ impl NativeSession {
         after: Option<Commitment>,
         max_rows: usize,
     ) -> Result<RemotePage, Error> {
+        self.ensure_holding(replica, &[scope]).await?;
         self.send(RowMessage::Read {
             scope,
             after,
@@ -448,6 +452,9 @@ impl NativeSession {
                 let page = replica
                     .transfer_page(self.peer, &self.credentials, &scopes, after, quota)
                     .await?;
+                for frame in &page.frames {
+                    self.served_frames.insert(frame.id()?, frame.scope()?);
+                }
                 self.send(RowMessage::Page {
                     frames: page.frames,
                     next: page.next,
@@ -483,6 +490,9 @@ impl NativeSession {
                 let page = replica
                     .range_page(self.peer, &self.credentials, &frontier, after, quota)
                     .await?;
+                for frame in &page.frames {
+                    self.served_frames.insert(frame.id()?, frame.scope()?);
+                }
                 self.send(RowMessage::RangeFrames { page }).await
             }
             RowMessage::Held { frontier } => {
@@ -524,7 +534,7 @@ impl NativeSession {
             }
             RowMessage::ScopesQuery { after } => {
                 let (scopes, next) = replica
-                    .held_scopes(self.peer, &self.credentials, after)
+                    .held_scopes_proved(self.peer, &self.credentials, after, Some(&self.proved))
                     .await?;
                 self.send(RowMessage::Scopes { scopes, next }).await
             }

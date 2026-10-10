@@ -117,6 +117,17 @@ identities; the hub fixtures use an in-memory secret provider. They receive the
 same 10 ms/2 s budgets, with no new exception. Measurements and coverage are in
 [the phase 8 evidence](features_07/08-concurrent-rotation-evidence.md).
 
+Phase 10's pure holding-proof binding test stays in unit. Its authenticated
+SQLite privacy, replay, retained-epoch and custody scenarios run in integration
+through the `network::holdings::tests` filter. The full-size four-table,
+200-partition idle proof gate runs in e2e and asserts the 10 s phase budget.
+No new test-budget exception is added. See the
+[phase 10 evidence](features_07/10-holdings-evidence.md).
+The existing owned-iroh restart and executing-device service scenarios also run
+in e2e: their real QUIC shutdown cycles exceed 2 s after fixture optimization.
+The deterministic revocation recovery sweep remains in integration, separated
+by secret, table and commit boundaries with the same twenty fault stops.
+
 ## Kotlin desktop integration
 
 The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.

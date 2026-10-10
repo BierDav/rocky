@@ -9,6 +9,7 @@ pub(super) enum FrontierMessage {
         frontiers: Vec<ScopeFrontier>,
         /// Tuples offered to a keyless custody peer; see decision 0045.
         partitions: Vec<(ResourceScope, rocky_core::PartitionTuple)>,
+        proofs: Vec<(ResourceScope, Vec<holdings::HoldingProof>)>,
     },
     Frontiers {
         states: Vec<FrontierReply>,
@@ -55,11 +56,12 @@ impl NativeSession {
             }
             validate_frontiers(&frontiers)?;
             let partitions = replica
-                .custody_offers(self.peer, &self.credentials, &batch)
+                .tuple_proofs(self.peer, &self.credentials, &batch)
                 .await?;
             self.send(FrontierMessage::FrontiersQuery {
                 frontiers: frontiers.clone(),
                 partitions,
+                proofs: replica.holding_proofs(self.binding, &batch).await?,
             })
             .await?;
             let FrontierMessage::Frontiers { states } = self.reply::<FrontierMessage>().await?
@@ -81,7 +83,10 @@ impl NativeSession {
                 .iter()
                 .zip(states)
                 .filter_map(|(local, reply)| match reply {
-                    FrontierReply::Held(state) => Some((local, state)),
+                    FrontierReply::Held(state) => {
+                        self.offered.insert(local.scope);
+                        Some((local, state))
+                    }
                     FrontierReply::Refused(scope) => {
                         refused.push(scope);
                         None
@@ -139,17 +144,45 @@ impl NativeSession {
         let FrontierMessage::FrontiersQuery {
             frontiers,
             partitions,
+            proofs,
         } = message
         else {
             return Err(denied("unexpected native request"));
         };
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
-        replica
-            .accept_custody_offers(self.peer, &self.credentials, &scopes, &partitions)
+        validate_frontiers(&frontiers)?;
+        for frontier in &frontiers {
+            frontier.validate()?;
+        }
+        self.accept_proofs(replica, &scopes, &proofs, &partitions)
             .await?;
-        let states = replica
-            .exchange_frontiers(self.peer, &self.credentials, &frontiers)
-            .await?;
+        let mut allowed = Vec::new();
+        for frontier in &frontiers {
+            if self.require_holding(replica, frontier.scope).await.is_ok() {
+                allowed.push(frontier.clone());
+            }
+        }
+        let replies = if allowed.is_empty() {
+            // Even an entirely unproved batch must verify current credentials.
+            replica.admit_chain(self.peer, &self.credentials).await?;
+            Vec::new()
+        } else {
+            replica
+                .exchange_frontiers(self.peer, &self.credentials, &allowed)
+                .await?
+        };
+        let mut replies: std::collections::BTreeMap<_, _> = replies
+            .into_iter()
+            .map(|reply| (reply.scope(), reply))
+            .collect();
+        let states = scopes
+            .iter()
+            .map(|scope| {
+                replies
+                    .remove(scope)
+                    .unwrap_or(FrontierReply::Refused(*scope))
+            })
+            .collect();
         self.send(FrontierMessage::Frontiers { states }).await
     }
 }

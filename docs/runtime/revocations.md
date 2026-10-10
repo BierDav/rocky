@@ -120,7 +120,7 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
 | `Revocation` | `app`, `issuer`, `time`, `nodes`, `users`, `capabilities`, `pseudonyms`; ID `rocky.revocation.id.v1` |
 | `SignedRevocation` | Publisher signature `rocky.revocation.v1`, issuer signature `rocky.revocation-issuer.v1`; at most 2,048 bytes |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
-| Native session | `rocky.native-session.v9`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
+| Native session | `rocky.native-session.v10`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
 | Checkpoint statement | Format 7, `revocations` digest of its signer |
 | Horizon statement | Format 3, `revocations` digest of its declaring issuer |
 | Encrypted replica | `rocky.encrypted-replica.v9`; `secure_metadata.revocations` |

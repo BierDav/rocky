@@ -27,6 +27,16 @@ pub(super) enum CommandMessage {
     },
 }
 
+impl CommandMessage {
+    pub(super) fn scopes(&self) -> Vec<ResourceScope> {
+        match self {
+            Self::Execute { scopes, .. } | Self::ResultPull { scopes, .. } => scopes.clone(),
+            Self::ResultPush { result } => result.parts.iter().map(|part| part.scope).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 impl NativeSession {
     pub async fn execute_command<A: rocky_core::RowCommandApplication>(
         &mut self,
@@ -35,7 +45,11 @@ impl NativeSession {
         scopes: Vec<ResourceScope>,
         coordinator: &dyn rocky_core::Coordinator,
     ) -> Result<ConfirmedCommand, Error> {
-        let expected_request = command.request()?.hash()?;
+        let request = command.request()?;
+        let expected_request = request.hash()?;
+        let invocation: EncryptedPackage = decode(&request.arguments)?;
+        self.ensure_holding(replica, &scopes).await?;
+        self.ensure_holding(replica, &[invocation.scope]).await?;
         self.send(CommandMessage::Execute {
             command,
             scopes: scopes.clone(),
@@ -70,6 +84,14 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         result: ConfirmedCommand,
     ) -> Result<(), Error> {
+        let scopes: Vec<_> = result
+            .parts
+            .iter()
+            .map(|part| part.scope)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.ensure_holding(replica, &scopes).await?;
         self.send(CommandMessage::ResultPush {
             result: result.clone(),
         })
@@ -127,6 +149,7 @@ impl NativeSession {
         scopes: Vec<ResourceScope>,
         coordinator: &dyn rocky_core::Coordinator,
     ) -> Result<bool, Error> {
+        self.ensure_holding(replica, &scopes).await?;
         self.send(CommandMessage::ResultPull {
             domain,
             sequence,
@@ -165,10 +188,15 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         coordinator: &dyn rocky_core::Coordinator,
     ) -> Result<(), Error> {
-        let Message::Commands(message) = self.receive().await? else {
-            return Err(denied("unexpected native command request"));
-        };
-        self.answer_command(replica, coordinator, message).await
+        loop {
+            match self.receive().await? {
+                Message::Commands(message) => {
+                    return self.answer_command(replica, coordinator, message).await;
+                }
+                Message::Holdings(message) => self.answer_holdings(replica, message).await?,
+                _ => return Err(denied("unexpected native command request")),
+            }
+        }
     }
     /// Serves row sync and command transfers until the peer ends the
     /// session. An executed command passes the admission of a local one.
@@ -192,12 +220,29 @@ impl NativeSession {
             }
         }
     }
+    pub(super) async fn require_command_holding<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        message: &CommandMessage,
+    ) -> Result<(), Error> {
+        for scope in message.scopes() {
+            self.require_holding(replica, scope).await?;
+        }
+        if let CommandMessage::Execute { command, .. } = message {
+            let request = command.request()?;
+            let invocation: EncryptedPackage = decode(&request.arguments)?;
+            self.require_holding(replica, invocation.scope).await?;
+        }
+        Ok(())
+    }
+
     async fn answer_command<A: rocky_core::RowCommandApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
         coordinator: &dyn rocky_core::Coordinator,
         message: CommandMessage,
     ) -> Result<(), Error> {
+        self.require_command_holding(replica, &message).await?;
         match message {
             CommandMessage::Execute { command, scopes } => {
                 replica

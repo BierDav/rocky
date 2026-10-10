@@ -58,6 +58,8 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
         Network::Owned(hub.connector("w")),
     )?;
     let asked = request(&w).await;
+    // Stop automatic sync before injecting a failure in the shared writer path.
+    a.network.take().ok_or("attached network")?.close().await;
     // A failed durable write returns no assignment and consumes no number.
     let before = identity(root, "a")?;
     std::fs::create_dir(root.join("a/identity.tmp"))?;
@@ -68,6 +70,11 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
     );
     assert_eq!(identity(root, "a")?, before);
     std::fs::remove_dir(root.join("a/identity.tmp"))?;
+    a.network = Some(
+        a.database
+            .attach(Network::Owned(hub.connector("a")))
+            .await?,
+    );
     // The issuer's first registry write takes its own registry author, 1.
     let chain = assign(&a, &asked).await;
     assert_eq!(author(&chain)?, 2);

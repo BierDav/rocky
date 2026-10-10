@@ -1,6 +1,8 @@
 # 10. Holdings after authentication
 
-Status: not started.
+Status: complete, 2026-10-10.
+Implementation: [decision 0052](../decisions/0052-holding-proofs.md).
+Coverage and measurements: [phase evidence](10-holdings-evidence.md).
 Owner: `rocky-secure` session, frontier exchange and custody offers;
 `rocky-sdk` sync. Depends on [phase 8](08-concurrent-rotation.md) and
 [phase 9](09-roster-free-admission.md). Wave 3.

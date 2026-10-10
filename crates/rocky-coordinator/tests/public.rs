@@ -61,8 +61,8 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let cluster = PublicCluster::start(limits(), 3).await;
     let (a, b) = (Tenant::new("notes"), Tenant::new("ledger"));
     let (sa, sb) = (a.scope(1), b.scope(2));
-    let (a_owner, a_exec) = registered(&cluster, &a, sa).await;
-    let (b_owner, b_exec) = registered(&cluster, &b, sb).await;
+    let ((a_owner, a_exec), (b_owner, b_exec)) =
+        tokio::join!(registered(&cluster, &a, sa), registered(&cluster, &b, sb));
     let first = confirm(&a_exec, &a, sa, 1).await.unwrap();
     confirm(&b_exec, &b, sb, 1).await.unwrap();
     // Receipt evidence verifies offline for a tenant's own mesh.
@@ -186,13 +186,13 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     // Fairness: four of A's connections flood its lanes; B confirms within
     // its latency budget.
     let node = node_id(a.alternate.public_key());
-    let mut flooders = Vec::new();
-    for n in 0..4 {
-        flooders.push(Arc::new(
-            a.client(&cluster, &a.alternate, &format!("flood-{n}"))
-                .await,
-        ));
-    }
+    let (one, two, three, four) = tokio::join!(
+        a.client(&cluster, &a.alternate, "flood-0"),
+        a.client(&cluster, &a.alternate, "flood-1"),
+        a.client(&cluster, &a.alternate, "flood-2"),
+        a.client(&cluster, &a.alternate, "flood-3"),
+    );
+    let flooders = [one, two, three, four].map(Arc::new);
     let flood: Vec<_> = (0..64)
         .map(|n| {
             let client = flooders[n % 4].clone();

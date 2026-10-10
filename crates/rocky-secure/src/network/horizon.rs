@@ -47,6 +47,7 @@ impl NativeSession {
         let Ok(ack) = replica.acknowledge_horizon(scope).await else {
             return Ok(false);
         };
+        self.ensure_holding(replica, &[scope]).await?;
         self.send(HorizonMessage::HorizonAck { scope, ack }).await?;
         self.acknowledged("unexpected horizon acknowledgment")
             .await?;

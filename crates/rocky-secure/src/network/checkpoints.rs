@@ -50,6 +50,7 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<Option<RebootstrapReport>, Error> {
+        self.ensure_holding(replica, &[scope]).await?;
         let signed = self
             .checkpoint_offer(scope)
             .await?
@@ -158,6 +159,7 @@ impl NativeSession {
                 },
             }));
         }
+        self.ensure_holding(replica, &[scope]).await?;
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };

@@ -102,6 +102,18 @@ The commit is admitted under the replica lock inside the write transaction.
 A revocation learned before that point refuses it; one learned after it applies
 to later calls. Bytes already returned cannot be taken back.
 
+## Native peer sessions
+
+Authenticated network sessions use version 10. A partition's grants are checked
+in addition to its [holding proof](replica-roles.md#proving-a-partition). Reader
+proofs bind the key epoch, scope and mutual handshake; keyless custody uses the
+tuple and custody authority. Frontier batches refuse unproved members alone.
+Scoped requests fail with the same denial and session outcome as an unknown
+scope, before row, checkpoint, horizon or command result state is inspected.
+Scope enumeration includes only proved partitions and granted unpartitioned
+scopes. Proof memory is local to that native session; the application
+`SecureSession` transaction and invalidation rules above are unchanged.
+
 ## Qualification
 
 `cargo test -p rocky-secure --lib tests::bundles`:

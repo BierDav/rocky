@@ -17,7 +17,7 @@ pub type Stream = Box<dyn SessionStream>;
 /// (`rocky/native-session/N`) and its signing label; a session change adds
 /// a message module and raises it. Another version is refused, never
 /// negotiated. See `docs/decisions/0051-roster-free-admission.md`.
-pub const NATIVE_SESSION_VERSION: u32 = 9;
+pub const NATIVE_SESSION_VERSION: u32 = 10;
 static NATIVE_SESSION: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| format!("rocky/native-session/{NATIVE_SESSION_VERSION}"));
 

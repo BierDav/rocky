@@ -9,6 +9,7 @@ mod evict;
 mod existence;
 mod generation;
 pub(super) mod group;
+mod holdings;
 mod horizon;
 mod identity;
 mod protection;

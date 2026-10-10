@@ -2277,10 +2277,16 @@ impl Node {
             }
         }
         self.sync_state.send_replace("syncing");
+        // Table roots remain in the SQL catalog; only concrete holdings sync.
+        let scopes: Vec<_> = self
+            .scopes()
+            .into_iter()
+            .filter(|scope| !self.domain.partitioned_table(scope))
+            .collect();
         let (newer, retry, transfer) = sync::reconcile(
             &self.replica,
             &upstream,
-            &self.scopes(),
+            &scopes,
             coordinator,
             |bootstrap| {
                 self.sync_state.send_replace(if bootstrap {

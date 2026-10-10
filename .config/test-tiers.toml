@@ -20,6 +20,7 @@ suite = "5m"
 filter = '''
     kind(test)
     | (package(rocky-secure) & test(/^tests::/))
+    | (package(rocky-secure) & test(/^network::holdings::tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
     | (package(rocky-sdk) & test(/^(commands|database|enrollment|node)::/))
@@ -36,6 +37,7 @@ filter = '''
 # drain). Each was over 1.5 s alone on the reference host; the measurements are
 # in docs/features_07/01-test-tiers-evidence.md. Name a test here only with its
 # measured time; a test that is only slow should be made faster instead.
+# Phase 10 evidence records the owned QUIC shutdown tests at 2.7/2.6 s.
 [e2e]
 suite = "15m"
 filter = '''
@@ -77,6 +79,9 @@ filter = '''
     | (binary_id(rocky-sdk::driver) & (
           test(=bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it)
     ))
+    | (binary_id(rocky-sdk::engine) & (
+          test(=devices_converge_over_iroh)
+    ))
     | (binary_id(rocky-sdk::faults) & (
           test(=a_cut_stream_loses_nothing_and_applies_nothing_in_part)
         | test(=a_slow_reader_holds_the_writer_back_without_loss)
@@ -97,13 +102,15 @@ filter = '''
     ))
     | (binary_id(rocky-sdk::service) & (
           test(=devices_run_typed_commands_through_a_registered_service_domain)
+        | test(=a_device_granted_execute_registers_and_executes_without_being_an_issuer)
     ))
     | (binary_id(rocky-sdk::shopping_release) & (
           test(=a_device_joining_after_a_move_starts_the_list_from_a_checkpoint)
         | test(=two_phones_never_online_together_pass_the_release_gate_through_custody)
     ))
     | (binary_id(rocky-secure) & (
-          test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
+          test(=tests::group_sync_measurement::holdings_idle_200_partition_four_table_fixture)
+        | test(=tests::checkpoint::process_exit_inside_any_checkpoint_step_leaves_a_file_that_opens_and_audits)
         | test(=tests::checkpoint::retained_bytes_trigger_checkpoints_and_pruning_then_backpressure)
         | test(=tests::existence::a_horizon_proposal_alone_never_releases_tombstones_or_existence_history)
         | test(=tests::existence::horizon_finalization_and_retention_plateau)

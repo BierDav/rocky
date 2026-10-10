@@ -11,7 +11,7 @@ use crate::network::NativeSession;
 use crate::replica::roles::FrontierReply;
 use std::time::{Duration, Instant};
 
-mod fixture;
+pub(crate) mod fixture;
 use fixture::Fixture;
 
 async fn database_bytes(replica: &EncryptedReplica<TypedRows>) -> i64 {
@@ -552,5 +552,18 @@ async fn batch_frontiers_preserve_horizons_and_refuse_ungranted_scopes() {
             .exchange_frontiers(peer, &credentials, &vec![allowed; 65])
             .await
             .is_err()
+    );
+}
+
+/// Full-size Phase 10 gate: every idle frontier carries session-bound proofs.
+#[tokio::test]
+#[ignore = "full-size e2e holding-proof qualification"]
+async fn holdings_idle_200_partition_four_table_fixture() {
+    let result = measure(4, 200).await;
+    println!("P10 four_table_idle_ms={}", result.idle.as_millis());
+    assert!(
+        result.idle < Duration::from_secs(10),
+        "idle with proofs: {:?}",
+        result.idle
     );
 }

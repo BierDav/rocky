@@ -112,11 +112,9 @@ fn tombstones(directory: &std::path::Path, node: PublicKey) -> Result<i64, Failu
 }
 
 #[test]
-fn reopen_completes_each_revocation_boundary_with_one_tombstone_and_the_same_statement_and_keys()
--> Result<(), Failure> {
+fn reopen_completes_each_revocation_secret_boundary() -> Result<(), Failure> {
     use fault::Stage;
-    // Four collection keys and two group secrets, then both sides of commit.
-    let stops = [
+    reopen_at_revocation_boundaries(&[
         (Stage::Begun, 0),
         (Stage::Key, 0),
         (Stage::Key, 1),
@@ -126,18 +124,35 @@ fn reopen_completes_each_revocation_boundary_with_one_tombstone_and_the_same_sta
         (Stage::Key, 5),
         (Stage::Key, 6),
         (Stage::Key, 7),
+    ])
+}
+
+#[test]
+fn reopen_completes_each_revocation_table_boundary() -> Result<(), Failure> {
+    use fault::Stage;
+    reopen_at_revocation_boundaries(&[
         (Stage::Table, 0),
         (Stage::Table, 1),
         (Stage::Table, 2),
         (Stage::Table, 3),
         (Stage::Table, 4),
         (Stage::Table, 5),
+    ])
+}
+
+#[test]
+fn reopen_completes_each_revocation_commit_boundary() -> Result<(), Failure> {
+    use fault::Stage;
+    reopen_at_revocation_boundaries(&[
         (Stage::Signed, 0),
         (Stage::Renewed, 0),
         (Stage::Tombstone, 0),
         (Stage::Committed, 0),
         (Stage::Clearing, 0),
-    ];
+    ])
+}
+
+fn reopen_at_revocation_boundaries(stops: &[(fault::Stage, usize)]) -> Result<(), Failure> {
     let runtime = || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -157,7 +172,7 @@ fn reopen_completes_each_revocation_boundary_with_one_tombstone_and_the_same_sta
     // The stops are independent, and the injected stop is per thread.
     std::thread::scope(|scope| {
         let runs: Vec<_> = stops
-            .chunks(3)
+            .chunks(2)
             .map(|chunk| {
                 let (template, keys) = (template.path(), &keys);
                 scope.spawn(move || -> Result<(), Failure> {

@@ -1,14 +1,14 @@
 use super::*;
 
-pub(super) struct Fixture {
-    pub(super) publisher: PrivateKey,
-    pub(super) schema: rocky_core::LogicalSchema,
-    pub(super) domain: rocky_core::Scope,
-    pub(super) manifest: SignedManifest,
-    pub(super) revocations: RevocationSet,
+pub(crate) struct Fixture {
+    pub(crate) publisher: PrivateKey,
+    pub(crate) schema: rocky_core::LogicalSchema,
+    pub(crate) domain: rocky_core::Scope,
+    pub(crate) manifest: SignedManifest,
+    pub(crate) revocations: RevocationSet,
 }
 impl Fixture {
-    pub(super) fn new(tables: usize) -> Self {
+    pub(crate) fn new(tables: usize) -> Self {
         let publisher = PrivateKey::new();
         let mut members = vec![
             serde_json::json!({"name":"customers","class":"mergeable","columns":[{"name":"customer","type":"integer","not_null":true},{"name":"title","type":"text"}],"primary_key":["customer","id"],"partition_by":["customer"],"partition_group":"erp"}),
@@ -53,10 +53,10 @@ impl Fixture {
             revocations,
         }
     }
-    pub(super) fn app(&self) -> TypedRows {
+    pub(crate) fn app(&self) -> TypedRows {
         TypedRows::new(self.schema.clone(), vec![self.domain.domain]).unwrap()
     }
-    pub(super) fn tuple(&self, name: &str, partition: i64) -> PartitionTuple {
+    pub(crate) fn tuple(&self, name: &str, partition: i64) -> PartitionTuple {
         let table = self.schema.table(name).unwrap();
         PartitionTuple::new([(
             self.schema
@@ -72,7 +72,7 @@ impl Fixture {
         )])
         .unwrap()
     }
-    pub(super) fn scope(&self, name: &str, partition: i64) -> ResourceScope {
+    pub(crate) fn scope(&self, name: &str, partition: i64) -> ResourceScope {
         let table = self.schema.table(name).unwrap();
         if table.partition_by.is_empty() {
             return ResourceScope {
@@ -88,7 +88,7 @@ impl Fixture {
             )
             .unwrap()
     }
-    pub(super) fn grants(
+    pub(crate) fn grants(
         &self,
         partitions: Option<&[i64]>,
         rights: &[Right],
@@ -132,7 +132,7 @@ impl Fixture {
             })
             .collect()
     }
-    pub(super) async fn open(
+    pub(crate) async fn open(
         &self,
         path: &Path,
         node: PrivateKey,
@@ -233,7 +233,7 @@ impl Fixture {
         replica
     }
 
-    pub(super) async fn keys(
+    pub(crate) async fn keys(
         &self,
         replica: &EncryptedReplica<TypedRows>,
         partition: i64,
@@ -250,7 +250,7 @@ impl Fixture {
                 .unwrap();
         }
     }
-    pub(super) fn key(&self, name: &str, partition: i64) -> KeyMaterial {
+    pub(crate) fn key(&self, name: &str, partition: i64) -> KeyMaterial {
         if name == "products" {
             return KeyMaterial::new(self.scope(name, 0), 1, [8; 32]);
         }
@@ -270,7 +270,7 @@ impl Fixture {
             .unwrap(),
         )
     }
-    pub(super) fn write(&self, name: &str, partition: i64) -> RowWrite {
+    pub(crate) fn write(&self, name: &str, partition: i64) -> RowWrite {
         let app = self.app();
         let table = app.tables().find(|table| table.sql_name == name).unwrap();
         // Partitioned tables continue one creation log per author and table.

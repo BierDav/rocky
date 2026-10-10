@@ -1015,3 +1015,77 @@ async fn room_reads_each_reference_action_when_references_share_a_partition_colu
     database.close().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let mut schema: Value = serde_json::from_str(SHOPPING)?;
+    schema["tables"][0]["indexes"] = json!([{"name":"list_by_title", "unique":false,
+        "columns":[{"name":"title","descending":false}]}]);
+    schema["tables"]
+        .as_array_mut()
+        .ok_or("tables")?
+        .push(json!({
+            "name":"devices", "class":"mergeable",
+            "columns":[{"name":"key","type":"text","not_null":true},
+                {"name":"name","type":"text","not_null":true}], "primary_key":["key"], "indexes":[{"name":"devices_by_name", "columns":[{"name":"name","descending":false}]}]
+        }));
+    let schema = schema.to_string();
+    let a_path = root.path().join("a");
+    let b_path = root.path().join("b");
+    let setup = |directory, name| Open {
+        directory,
+        schema: &schema,
+        secrets: None,
+        network: Some(Network::Owned(hub.connector(name))),
+        commands: None,
+    };
+    let a = Database::create(setup(&a_path, "a"), None)?.database;
+    let invitation = call(
+        &a,
+        json!({"type":"pairing", "profile":{"kind":"reader", "scopes":["lists"]}}),
+    )
+    .await?;
+    let b = Database::join(
+        setup(&b_path, "b"),
+        invitation["uri"].as_str().ok_or("uri")?,
+    )?
+    .database;
+    {
+        let reader = b.connect(READER).await?;
+        all(&reader, "SELECT * FROM lists", vec![]).await?;
+        for table in ["devices", "items", "issuer_registry", "keys", "identities"] {
+            let error = all(&reader, &format!("SELECT * FROM {table}"), vec![])
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("no such table"), "{error}");
+            let file = rusqlite::Connection::open_with_flags(
+                b_path.join("rocky.sqlite"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            let count: i64 = file.query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?",
+                [table],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, 0, "{table}");
+        }
+        reader.close().await;
+    }
+    b.close().await?;
+    let b = Database::open(setup(&b_path, "b"))?.database;
+    let reader = b.connect(READER).await?;
+    assert!(
+        all(&reader, "SELECT * FROM devices", vec![])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no such table")
+    );
+    all(&reader, "SELECT * FROM lists", vec![]).await?;
+    reader.close().await;
+    b.close().await?;
+    a.close().await?;
+    Ok(())
+}

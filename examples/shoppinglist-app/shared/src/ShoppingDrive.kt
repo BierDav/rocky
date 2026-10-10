@@ -3,6 +3,7 @@ package org.example.examples.shopping
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
+import rocky.GrantProfile
 import rocky.RockyEvent
 
 /** Debug qualification actions, called only after the platform checks its build is debuggable. */
@@ -17,6 +18,7 @@ suspend fun driveShopping(node: ShoppingNode, parameters: Map<String, String>, l
     } ?: error("no item $title")
     if ("contact" in parameters) rocky.contact().let { log("contact ${it.node} ${it.uri}") }
     parameters["peer"]?.let { log("peer " + rocky.addPeer(it)) }
+    parameters["revoke"]?.let { node.household.revoke(it) }
     parameters["forget"]?.let { rocky.removePeer(it) }
     if (parameters["background"] == "true") rocky.enterBackground()
     parameters["online"]?.let { rocky.setOnline(it.toBoolean()) }
@@ -27,7 +29,13 @@ suspend fun driveShopping(node: ShoppingNode, parameters: Map<String, String>, l
     }
     parameters["share"]?.let { title ->
         val target = list(title) ?: error("no list $title")
-        val devices = parameters["to"]?.let { listOf(it).also { to -> repository.share(target, to) } } ?: repository.shareWithDevices(target)
+        val devices = parameters["recipientContact"]?.let { contact ->
+            listOf(node.household.shareWithContact(target, contact))
+        } ?: parameters["to"]?.let { recipient ->
+            check(node.isTrusted) { "A member shares by scanning a contact" }
+            check(rocky.devices().any { it.node == recipient && !it.revoked && it.profile !is GrantProfile.Custody }) { "Pick a live reading device from the registry" }
+            listOf(recipient).also { repository.share(target, it) }
+        } ?: repository.shareWithDevices(target)
         devices.forEach { device -> log("share $device") }
     }
     parameters["check"]?.let { title -> item(title).let { repository.check(it.list, it.id, !it.completed) } }

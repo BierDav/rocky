@@ -31,6 +31,16 @@ fun SyncScreen(model: SyncViewModel) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item { StatusCard(state, now, onOnline = model::setOnline, onSync = model::syncNow) }
         item { IdentityCard(state) }
+        item { SectionTitle("Sync partners", "Known peers and Rocky's reason for choosing each one.") }
+        items(state.peers, key = { it.node }) { peer ->
+            OutlinedCard(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(peer.node.take(12), style = MaterialTheme.typography.titleSmall)
+                    Text("${peer.source} · ${peer.choice} · ${peer.state}", style = MaterialTheme.typography.bodySmall)
+                    peer.error?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                }
+            }
+        }
         item { SectionTitle("Lists on this device", "Each list is one partition group: one secret, one key epoch per table, held or not.") }
         items(state.holdings, key = { it.list.id }) { holding -> HoldingCard(holding) }
         if (state.holdings.isEmpty()) item { Text("No list is held here yet.", style = MaterialTheme.typography.bodySmall) }

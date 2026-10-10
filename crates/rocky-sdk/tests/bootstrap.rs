@@ -487,8 +487,8 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         .sync()
         .await
         .expect("resume only the remaining scope");
-    // One pending scope session, then one ordinary reconciliation session.
-    assert_eq!(*attempts.borrow() - before, 2);
+    // Resolve the saved route, resume one scope, then reconcile normally.
+    assert_eq!(*attempts.borrow() - before, 3);
     assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
     assert!(!path.join("bootstrap.json").exists());
     member.close().await;

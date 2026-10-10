@@ -55,21 +55,28 @@ class Approvals internal constructor(
     /** Revisions moved on after refusals in a row; bounded, so a refusing service is not asked forever. */
     private var refusals = 0
 
-    fun requests(): Flow<List<Approval>> = combine(
-        database.approvals().requests(),
-        database.approvals().decisions(),
-        database.identities().observe(),
-        household.devices(),
-    ) { requests, decisions, identities, devices ->
-        // Handlers record the authenticated command node; identities map it to the device's key.
-        val keys = identities.mapNotNull { row -> runCatching { CommandIdentity.decode(row.identity).node to row.node }.getOrNull() }.toMap()
-        fun name(commandNode: String) = keys[commandNode]?.let { node -> devices.firstOrNull { it.node == node }?.name ?: "Device ${node.take(6)}" }
-            ?: "Device ${commandNode.take(6)}"
-        requests.map { request ->
-            val decision = decisions.firstOrNull { it.key == request.key }
-            Approval(request.key, request.title, request.note, name(request.requester), decision?.approved, decision?.let { name(it.decider) })
+    fun requests(): Flow<List<Approval>> {
+        val names = if (rocky.isIssuer) {
+            household.registry().map { devices ->
+                devices.mapNotNull { device -> device.command?.let { it to device.node } }.toMap()
+            }
+        } else {
+            flowOf(emptyMap())
         }
-    }.settledOnRocky()
+        val devices = if (rocky.isIssuer) household.devices() else flowOf(emptyList())
+        return combine(database.approvals().requests(), database.approvals().decisions(), names, devices) { requests, decisions, keys, rows ->
+            val own = rocky.commandIdentity().node
+            fun name(commandNode: String): String {
+                if (!rocky.isIssuer) return if (commandNode == own) "This device" else "Another device"
+                val node = if (commandNode == own) self else keys[commandNode]
+                return rows.firstOrNull { it.node == node }?.name ?: "Another device"
+            }
+            requests.map { request ->
+                val decision = decisions.firstOrNull { it.key == request.key }
+                Approval(request.key, request.title, request.note, name(request.requester), decision?.approved, decision?.let { name(it.decider) })
+            }
+        }.settledOnRocky()
+    }
 
     /** Asks the household to approve [title]; null once confirmed, else why it was not. */
     suspend fun ask(title: String, note: String): String? {
@@ -102,23 +109,12 @@ class Approvals internal constructor(
         }
     }
 
-    /** Runs until cancelled: publishes this device's identity, keeps the domain registered and retries tickets. */
+    /** Runs until cancelled: keeps the domain registered and retries tickets. */
     suspend fun run() {
         if (!coordinated) return
         coroutineScope {
-            launch { publishIdentity() }
             launch { retryTickets() }
             if (rocky.isIssuer) launch { register() }
-        }
-    }
-
-    private suspend fun publishIdentity() {
-        val identity = retrying { rocky.commandIdentity().encoded }
-        database.identities().observe().settledOnRocky().collectLatest { rows ->
-            // A purge's pending horizon refuses the write until it is finalized.
-            if (rows.none { it.node == self && it.identity == identity }) {
-                while (attempt { database.identities().publish(self, identity) } == null) delay(15_000)
-            }
         }
     }
 
@@ -133,21 +129,24 @@ class Approvals internal constructor(
 
     @OptIn(FlowPreview::class)
     private suspend fun register() {
-        combine(household.trusted.coordination(), database.identities().observe(), household.devices(), household.revokedDevices()) { row, identities, devices, revoked ->
-            Triple(row, identities, devices.filter { it.node !in revoked })
-        }.settledOnRocky().debounce(1_000).collectLatest { (row, identities, devices) ->
+        val renewals = flow {
+            while (true) {
+                emit(Unit)
+                delay(60_000)
+            }
+        }
+        combine(household.trusted.coordination(), household.registry(), renewals) { row, devices, _ ->
+            row to devices.filter { !it.revoked && it.profile !is GrantProfile.Custody }
+        }.settledOnRocky().debounce(1_000).collectLatest { (row, devices) ->
             if (row == null) {
                 mutableStatus.value = Coordinated.Waiting("Waiting for the household's coordination key to sync")
                 return@collectLatest
             }
-            val live = identities.filter { identity -> devices.any { it.node == identity.node } }
-            val trusted = devices.filter { NodeKind.of(it.kind) == NodeKind.Trusted }.map { it.node }.toSet()
-            val members = Members(live.filter { it.node in trusted }.map { it.node }.sorted().toSet(), live.map { it.node }.sorted().toSet())
-            if (self !in members.executors) {
-                mutableStatus.value = Coordinated.Waiting("Waiting for this device's identity to sync")
-                return@collectLatest
-            }
-            val now = kotlin.time.Clock.System.now().toEpochMilliseconds() / 1000
+            val own = rocky.commandIdentity()
+            val live = devices.filter { it.command != null }.associate { it.node to it.commandIdentity(own).encoded } + (self to own.encoded)
+            val executors = devices.filter { it.profile == GrantProfile.Issuer }.map { it.node }.toSet() + self
+            val members = Members(live.keys.filter { it in executors }.sorted().toSet(), live.keys.sorted().toSet())
+            val now = epochMillis() / 1000
             when {
                 // The founder's first revision names its members once there are any; nothing was sent yet.
                 !row.applied && row.revision == 1L && row.members.isEmpty() -> attempt {
@@ -166,8 +165,8 @@ class Approvals internal constructor(
     }
 
     /** Sends the stored revision until the service answers; a refused control moves on to the next revision. */
-    private suspend fun apply(row: CoordinationRow, members: Members, identities: List<IdentityRow>) {
-        fun of(nodes: Set<String>) = identities.filter { it.node in nodes }.map { CommandIdentity.decode(it.identity) }
+    private suspend fun apply(row: CoordinationRow, members: Members, identities: Map<String, String>) {
+        fun of(nodes: Set<String>) = identities.filterKeys { it in nodes }.values.map(CommandIdentity::decode)
         val owner = rocky.service(row.tenant)
         while (true) {
             try {
@@ -203,12 +202,6 @@ class Approvals internal constructor(
         }
     }
 
-    private suspend fun <T : Any> retrying(block: suspend () -> T): T {
-        while (true) {
-            attempt { block() }?.let { return it }
-            delay(5_000)
-        }
-    }
     private suspend fun <T> attempt(block: suspend () -> T): T? = try {
         block()
     } catch (cancelled: CancellationException) {

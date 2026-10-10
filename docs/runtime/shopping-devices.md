@@ -30,8 +30,8 @@ the activity feed's 512-event lifetime; they are discarded when the app closes.
 
 The [Compose app](../../examples/shoppinglist-app/androidApp) opens drive
 links (see `ShoppingLinks`), so the harness drives it with `adb` and reads the
-results from logcat. A host issuer enrolls both devices as issuing devices of
-the user and enrolls the packaged custody peer; then the host closes and its contact is removed from both phones. Both
+results from logcat. A host issuer enrolls A as trusted and B as a member, then enrolls the packaged
+custody peer; then the host closes and its contact is removed from both phones. Both
 devices reach the custody peer through `adb reverse` and never each other.
 
 ```sh
@@ -44,11 +44,19 @@ ROCKY_PHONES=<serial A>,<serial B> ROCKY_APK=<androidApp APK> \
 The run installs the app, clears its data, then:
 
 1. Phone A creates "Weekly" with Milk and "Weekend" with Eggs and shares both
-   with the driver's envelope codes; phone B opens the codes.
+   with B picked from the replicated issuer registry; envelopes reach B alone.
 2. A publishes to custody while B is offline, then B syncs from custody alone.
 3. Offline from A, B ticks Milk and adds Bread. A adds Bread and moves Milk to
    "Weekend". Each publishes while the other is offline.
 4. Both show "Weekly": Bread and "Weekend": Eggs, Milk ticked.
+5. Member B scans A's contact and shares Weekly back. No member reads a roster.
+6. Trusted A revokes B; B's next custody sync reports Revoked.
+
+For the interactive flow, B's **Devices** tab shows This device and local
+peers; **My contact code** is what another member scans. **Lists → Share list**
+opens a contact scanner on B and a registry picker on A. **Sync** shows each
+peer's source and ranking reason. Keep one contact when pairing; do not add
+reciprocal contacts. Local peer labels never replicate.
 
 Evidence goes to `local/shopping-qualification/phones.json` with each device's
 model, API level and ABI, and the app's log lines under `phones/`.
@@ -57,6 +65,8 @@ model, API level and ABI, and the app's log lines under `phones/`.
 
 | Date | Devices | Result |
 | --- | --- | --- |
+| 2026-10-11 | Two Android 15 (API 35) `arm64-v8a` emulators, `rocky-p20-repair-a` and `-b`; an iOS 27 iPhone 18 Pro Max simulator with one of them | Phase 20 final tree: `phones` passed in 22.065 s, zero write retries; `qualify-ios` in 36.98 s; `qualify-ios-pair` pair/share/revoke in 32.5 s; [evidence](../features_07/20-shopping-without-a-roster-evidence.md#final-verification-2026-10-11) |
+| 2026-10-11 | Two Android 15 (API 35) `arm64-v8a` emulators, `rocky-p20-a` and `rocky-p20-b`, `adb reverse` to the host | Phase 20 member pairing, sharing, merge/move and revocation passed in 18.605 s before the node-reference repair; [history](../features_07/20-shopping-without-a-roster-history.md) |
 | 2026-10-10 | Two Android 15 (API 35) `arm64-v8a` emulators, `adb reverse` to the host | 20 complete passes, zero write retries; [Phase 3](#emulator-pair-2026-10-10) |
 | 2026-10-09 | Two Android 15 (API 35) `arm64-v8a` emulators, `adb reverse` to the host | The procedure above, group schema; [below](#emulator-pair-2026-10-09) |
 | 2026-10-08 | Pixel 11 Pro, one host, LAN | Version-2 unpartitioned schema; [below](#physical-device-run-2026-10-08) |
@@ -143,13 +153,13 @@ as `deadline has elapsed` rather than a classified unreachable error.
 
 ## iOS procedure
 
-Both applications build their shared Compose sources for arm64 simulators and
+The application builds its shared Compose sources for arm64 simulators and
 arm64 iPhones. Run `./examples/shoppinglist-app/check-ios` on macOS/Xcode, then
-install `Shopping.app` and `Market.app` with `agent-device install`. The apps use
-[iOS Keychain and lifecycle](ios.md), with starter iroh endpoints. Their only
+install `Shopping.app` with `agent-device install`. The app uses
+[iOS Keychain and lifecycle](ios.md), with starter iroh endpoints. Its only
 usage-description permission is the camera. Local discovery on an iPhone is
-unavailable; neither app carries a multicast entitlement or a local-network
-usage description. Both iOS hosts explicitly disable mDNS and pair using
+unavailable; the app carries no multicast entitlement or local-network
+usage description. The iOS host explicitly disables mDNS and pairs using
 invitations. A simulator without a camera offers a paste field. System Paste consent may
 appear on this host's iOS 27 simulator; the procedure accepts only the named
 example's clipboard dialog.
@@ -159,7 +169,7 @@ The reproducible single-simulator gate is
 It requires fresh example installations and three loopback voters from
 `scripts/coordinator-local`. It writes named expectations and command output
 under `local/phase21-evidence`, and enforces the 15-minute e2e budget after
-build. CI builds both apps and owns this procedure in its macOS job.
+build. CI builds the app and owns this procedure in its macOS job.
 
 1. Open Shopping with `agent-device open org.example.rockyshopping --foreground`.
    Expect **Start a household**. Choose **Start**; expect **Create your first list**.
@@ -170,41 +180,33 @@ build. CI builds both apps and owns this procedure in its macOS job.
 3. Run `agent-device home`, then open Shopping in the foreground. Expect **Milk**.
    Relaunch the example and expect **Milk** again. These establish local
    persistence; they do not establish cross-device convergence.
-4. For a simulator/emulator pair, enroll both through the existing trusted
-   device's **Devices → Add device** flow (full or trusted as the procedure
-   needs). Paste the pairing code on the simulator; scan it on a signed iPhone.
-   Expect the named list on both devices before disconnecting either.
+4. For a simulator/emulator pair, a trusted device enrolls the simulator as
+   trusted and the emulator as a member through **Devices → Add device**. Paste
+   the pairing code on the simulator; scan it on a signed iPhone. A member needs
+   this one contact; it never adds the other device's contact.
 5. Run `./examples/shoppinglist-app/qualify-ios-pair` with `--ios-device`,
-   `--android-device`, both `--ios-shopping` / `--android-shopping` artifacts,
-   both `--ios-market` / `--android-market` artifacts, `--peer` and `--bundle`
-   from `emulator-service`. Add `--emulator-routes` for market: it enters
-   the host/emulator NAT address in the market’s **Direct pairing address
-   (optional)** field, leaving identity, credentials and token intact, and
-   removes its UDP redirects afterward. Android's raw UDP redirection replies
-   from a different NAT port; the reusable `market-app/emulator_udp.py` utility
-   normalizes that route while forwarding the real datagrams. The shared app
-   selects one IP route and retains any issuer relay fallback.
-   Market uses isolated iroh for this procedure: Android’s existing
-   launch extra and the iOS debug-only `-qualification-loopback YES` argument. Shopping
-   configures both reverse and forward TCP routes so custody can reach the
-   emulator’s listener and push new rows without polling.
-   `--scenario shopping` and `--scenario market` run the slices independently;
-   `--market-owner ios|android` isolates one reservation direction. Each slice
-   records its own expectation file. It removes only the example installations
-   so both markets use fresh identities. Its host enrolls both shopping devices,
-   stops, and verifies named expectations through `agent-device`.
-   First expect **Offline groceries** on both devices through the host custody
-   peer. Then take the simulator offline and add **Milk** to that shared list.
-   Restore connectivity while it is backgrounded, then foreground it. Without
-   pressing **Sync now**, expect **Milk** on the Android emulator. Keep the
-   enrollment host stopped and remove its contact from both devices so the
-   result proves custody delivery. Record both named row expectations.
+   `--android-device`, `--ios-shopping`, `--android-shopping` and `--peer`.
+   It configures reverse and forward TCP routes so custody can reach the
+   emulator's listener and push new rows without polling, and removes only the
+   example installations. Its host enrolls both devices, starts custody, stops,
+   and its contact is removed from both devices, so every later step proves
+   custody delivery. Each step is a named expectation through `agent-device`:
+   - The trusted simulator shares **Offline groceries** with the member it picks
+     from the issuer registry; expect the list on both devices.
+   - Take the simulator offline and add **Milk**. Restore connectivity while it
+     is backgrounded, then foreground it. Without pressing **Sync now**, expect
+     **Milk** on the emulator.
+   - The member shares the list with the simulator's scanned contact, without
+     reading a registry; expect `share <simulator node>`.
+   - The trusted simulator revokes the member; the member's next sync through
+     custody reports **Revoked**.
+   Expectations go to `local/phase21-evidence/pair/expectations-shopping.json`.
 6. On a signed iPhone, repeat install, pairing by the camera, offline write,
    background and resume. Expect the named list and row after each transition.
    Device signing is required; simulator success cannot replace this step.
 
-Phase 20 has not landed in this workspace. The pair/share/revoke iOS procedure
-on its roster-free schema remains owned by the later landing phase, as the
+[Phase 20](../features_07/20-shopping-without-a-roster.md) wrote the
+pair/share/revoke steps above on its roster-free schema, as the
 [Phase 21 brief](../features_07/21-shopping-and-market-on-ios.md) specifies.
 Debug simulator configuration accepts a certified local service bundle. Long
 qualification links are staged in bounded chunks because agent-device truncates

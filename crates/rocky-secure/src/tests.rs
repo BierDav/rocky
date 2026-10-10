@@ -133,8 +133,11 @@ impl Fixture {
             not_before,
             expires,
             delegations,
-            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-                .unwrap(),
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                ..Default::default()
+            })
+            .unwrap(),
         };
         CredentialChain(vec![
             SignedCapability::sign(capability(user.public_key(), PrincipalKind::User, 2), root)
@@ -961,6 +964,11 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         subject: node.public_key(),
         kind: PrincipalKind::Node,
         delegations: 0,
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: Some(rocky_credentials::PeerId::of(node.public_key())),
+            ..Default::default()
+        })
+        .unwrap(),
         ..root.clone()
     };
     for mutant in 0..4 {

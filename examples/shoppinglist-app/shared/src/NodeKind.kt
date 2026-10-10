@@ -20,17 +20,13 @@ enum class NodeKind(val label: String, val summary: String) {
     Partial("Partial", "Holds only the lists shared with it"),
     ;
 
-    /**
-     * What the device may do: members read devices, which only trusted devices write, and the unused `keys`, publish their own
-     * command identity, ask for approvals and read decisions. `coordination` holds the tenant key: trusted only.
-     */
+    /** Members read lists and approvals, edit list contents and invoke requests; management stays trusted-only. */
     val profile: GrantProfile get() = when (this) {
         Trusted -> GrantProfile.Issuer
 
         Full, Partial -> GrantProfile.Grants(
-            listOf("lists", "devices", "keys", "decisions").map { Grant(it, setOf(Right.Read)) } +
+            listOf("lists", "decisions").map { Grant(it, setOf(Right.Read)) } +
                 listOf("categories", "items").map { Grant(it, setOf(Right.Read, Right.Insert, Right.Update, Right.Delete)) } +
-                Grant("identities", setOf(Right.Read, Right.Insert, Right.Update)) +
                 // A command's row effects need the caller's right too; SQL never writes a command-controlled table.
                 Grant("requests", setOf(Right.Read, Right.Insert, Right.Invoke)),
         )

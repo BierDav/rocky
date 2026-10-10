@@ -372,7 +372,7 @@ impl<A: RowCommandApplication> Inner<A> {
         self.app
             .validate_confirmed(&output.changes)
             .map_err(|message| denied(&message))?;
-        let caller = self.verify_chain(&command.credentials, command.node, now()?)?;
+        let caller = self.verify_reference_chain(&command.credentials, command.node, now()?)?;
         let mut after = state.clone();
         let mut changed = BTreeSet::new();
         for change in &output.changes {
@@ -453,12 +453,20 @@ impl<A: RowCommandApplication> Inner<A> {
             command: command.clone(),
             package: package.encode()?,
             receipt: vec![],
-            executor: self.config.node.public_key(),
+            executor: rocky_credentials::PeerId::of(self.config.node.public_key()),
             credentials: self.config.credentials.clone(),
-            signature: self.config.node.sign(b""),
+            signature: self
+                .credential_signer
+                .as_ref()
+                .unwrap_or(&self.config.node)
+                .sign(b""),
             parts,
         };
-        result.signature = self.config.node.sign(&result.signature_bytes()?);
+        result.signature = self
+            .credential_signer
+            .as_ref()
+            .unwrap_or(&self.config.node)
+            .sign(&result.signature_bytes()?);
         if result.to_bytes()?.len() > MAX_SECURE_FRAME / 2 - 1024 {
             return Err(denied("result must reserve receipt space"));
         }

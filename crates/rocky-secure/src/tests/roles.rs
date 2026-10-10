@@ -207,7 +207,10 @@ async fn connect_with(
 fn partial(full: &[&Node], custody: usize) -> RoleConfig {
     RoleConfig {
         role: ReplicaRole::Partial,
-        full_nodes: full.iter().map(|node| node.key.public_key()).collect(),
+        full_nodes: full
+            .iter()
+            .map(|node| rocky_credentials::PeerId::of(node.key.public_key()))
+            .collect(),
         custody,
     }
 }
@@ -457,7 +460,11 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
     device
         .replica
         .set_role(RoleConfig {
-            full_nodes: [full.key.public_key(), custodian.key.public_key()].into(),
+            full_nodes: [
+                rocky_credentials::PeerId::of(full.key.public_key()),
+                rocky_credentials::PeerId::of(custodian.key.public_key()),
+            ]
+            .into(),
             ..partial(&[], 0)
         })
         .await
@@ -485,8 +492,16 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
         .find(|entry| entry.scope == scope)
         .unwrap();
     assert_eq!(entry.local_operations, 11);
-    assert!(entry.custody.contains(&(full.key.public_key(), 11)));
-    assert!(entry.custody.contains(&(custodian.key.public_key(), 0)));
+    assert!(
+        entry
+            .custody
+            .contains(&(rocky_credentials::PeerId::of(full.key.public_key()), 11))
+    );
+    assert!(
+        entry
+            .custody
+            .contains(&(rocky_credentials::PeerId::of(custodian.key.public_key()), 0))
+    );
 
     let report = device.replica.evict(scope).await.unwrap();
     assert_eq!(report.operations, 11);
@@ -613,7 +628,11 @@ async fn pruning_counts_full_nodes_only_once_they_applied() {
         .replica
         .set_role(RoleConfig {
             role: ReplicaRole::Partial,
-            full_nodes: [full.key.public_key(), custodian.key.public_key()].into(),
+            full_nodes: [
+                rocky_credentials::PeerId::of(full.key.public_key()),
+                rocky_credentials::PeerId::of(custodian.key.public_key()),
+            ]
+            .into(),
             custody: 1,
         })
         .await
@@ -914,14 +933,10 @@ async fn interrupted_transfers_resume_and_a_replacement_full_node_converges() {
         .iter()
         .find(|entry| entry.scope == scopes[0])
         .unwrap();
-    assert!(
-        entry
-            .peers
-            .iter()
-            .any(|lag| lag.peer == replacement.key.public_key()
-                && lag.behind == 0
-                && lag.ahead == 0)
-    );
+    assert!(entry.peers.iter().any(|lag| lag.peer
+        == rocky_credentials::PeerId::of(replacement.key.public_key())
+        && lag.behind == 0
+        && lag.ahead == 0));
 }
 
 #[tokio::test]

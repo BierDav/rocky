@@ -40,7 +40,7 @@ pub enum TicketState {
 /// ciphertext, or also its application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Custody {
-    pub peer: PublicKey,
+    pub peer: rocky_credentials::PeerId,
     pub scope: ResourceScope,
     pub applied: bool,
 }
@@ -304,8 +304,8 @@ impl<A: RowCommandApplication> Inner<A> {
                 return Err(denied("corrupt result acknowledgment"));
             };
             ticket.custody.push(Custody {
-                peer: PublicKey::try_from(peer.as_slice())
-                    .map_err(|_| denied("corrupt result acknowledgment"))?,
+                peer: rocky_credentials::PeerId::from_bytes(peer.as_slice().try_into()
+                    .map_err(|_| denied("corrupt result acknowledgment"))?),
                 scope: decode(scope)?,
                 applied: *applied != 0,
             });
@@ -337,7 +337,8 @@ impl<A: RowCommandApplication> Inner<A> {
     }
     /// The parts of a result the command's caller may hold.
     fn for_caller(&self, result: &ConfirmedCommand) -> Result<ConfirmedCommand, Error> {
-        let grants = self.verify_chain(&result.command.credentials, result.command.node, now()?)?;
+        let grants =
+            self.verify_reference_chain(&result.command.credentials, result.command.node, now()?)?;
         let mut filtered = result.clone();
         filtered.parts.retain(|part| {
             grants.iter().any(|grant| {

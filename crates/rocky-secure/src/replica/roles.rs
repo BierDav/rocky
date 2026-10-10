@@ -2,6 +2,7 @@
 //! Rules: `docs/runtime/replica-roles.md`.
 use super::checkpoint::{MAX_CHECKPOINT_LOGS, key_of};
 use super::*;
+use rocky_credentials::PeerId;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_roles(id INTEGER PRIMARY KEY CHECK(id=1),config BLOB NOT NULL)",
@@ -28,7 +29,7 @@ pub enum ReplicaRole {
 pub struct RoleConfig {
     pub role: ReplicaRole,
     /// Peers trusted as full replica nodes, pinned by key.
-    pub full_nodes: BTreeSet<PublicKey>,
+    pub full_nodes: BTreeSet<PeerId>,
     /// Full nodes that must have applied an operation before it is pruned or
     /// evicted. Zero keeps pruning on the retention policy alone; eviction
     /// always needs at least one.
@@ -178,7 +179,7 @@ pub struct RangePage {
 /// Lag between this replica and one peer in one scope, by applied operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerLag {
-    pub peer: PublicKey,
+    pub peer: PeerId,
     /// Operations this replica applied that the peer last reported lacking.
     pub behind: u64,
     /// Operations the peer last reported applied that this replica lacks.
@@ -198,7 +199,7 @@ pub struct ScopeStatus {
     /// Operations this node authored in the scope.
     pub local_operations: u64,
     /// Per configured full node: local operations it has applied.
-    pub custody: Vec<(PublicKey, u64)>,
+    pub custody: Vec<(PeerId, u64)>,
     pub peers: Vec<PeerLag>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -488,7 +489,7 @@ impl<A: RowApplication> Inner<A> {
                     inner.conn.execute(
                         "INSERT INTO secure_peer_frontiers VALUES(?,?,?,?,?) ON CONFLICT(peer,scope,author) DO UPDATE SET held=MAX(held,excluded.held),applied=MAX(applied,excluded.applied)",
                         bindings(vec![
-                            SqlValue::Blob(peer.as_bytes().to_vec()),
+                            SqlValue::Blob(PeerId::of(peer).as_bytes().to_vec()),
                             SqlValue::Blob(scope.clone()),
                             SqlValue::Blob(log.author.as_bytes().to_vec()),
                             SqlValue::Integer(log.held.min(i64::MAX as u64) as i64),
@@ -512,7 +513,7 @@ impl<A: RowApplication> Inner<A> {
     /// What `peer` last reported for one log: (held, applied) next sequences.
     pub(crate) async fn peer_mark(
         &self,
-        peer: PublicKey,
+        peer: PeerId,
         scope: &[u8],
         author: PublicKey,
     ) -> Result<(u64, u64), Error> {
@@ -538,7 +539,7 @@ impl<A: RowApplication> Inner<A> {
         scope: &[u8],
         author: PublicKey,
         sequence: u64,
-    ) -> Result<(BTreeSet<PublicKey>, BTreeSet<PublicKey>), Error> {
+    ) -> Result<(BTreeSet<PeerId>, BTreeSet<PeerId>), Error> {
         let mut held = BTreeSet::new();
         let mut applied = BTreeSet::new();
         for record in collect_rows(
@@ -559,7 +560,7 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(peer), SqlValue::Integer(covers)] = record.as_slice() else {
                 return Err(Error::Corrupt("peer frontier".into()));
             };
-            let peer = key_of(peer)?;
+            let peer = peer_id(peer)?;
             held.insert(peer);
             if *covers == 1 {
                 applied.insert(peer);
@@ -676,7 +677,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         if config.full_nodes.len() > 64
             || config.custody > config.full_nodes.len()
-            || config.full_nodes.contains(&inner.config.node.public_key())
+            || config
+                .full_nodes
+                .contains(&PeerId::of(inner.config.node.public_key()))
         {
             return Err(denied("invalid role configuration"));
         }
@@ -945,7 +948,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let [SqlValue::Blob(peer)] = record.as_slice() else {
                     return Err(Error::Corrupt("peer frontier".into()));
                 };
-                let peer = key_of(peer)?;
+                let peer = peer_id(peer)?;
                 let mut theirs = ScopeFrontier {
                     scope,
                     logs: vec![],
@@ -1054,4 +1057,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .filter(|scope| holds_whole(&grants, *scope))
             .collect())
     }
+}
+
+pub(super) fn peer_id(bytes: &[u8]) -> Result<PeerId, Error> {
+    bytes
+        .try_into()
+        .map(PeerId::from_bytes)
+        .map_err(|_| Error::Corrupt("peer reference".into()))
 }

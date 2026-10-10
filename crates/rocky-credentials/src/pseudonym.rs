@@ -14,7 +14,7 @@ use sha2::{Digest, Sha512};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
-const EXTENSION_VERSION: u32 = 2;
+const EXTENSION_VERSION: u32 = 3;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -146,6 +146,7 @@ struct Body {
     version: u32,
     authors: Option<AuthorRange>,
     device: Option<SealedDevice>,
+    node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
 }
 /// Reads only the version, whatever else a later body holds.
@@ -158,6 +159,8 @@ struct Versioned {
 pub struct Extended {
     pub authors: Option<AuthorRange>,
     pub device: Option<SealedDevice>,
+    /// Node credentials bind their signing alias to this opaque node reference.
+    pub node: Option<crate::PeerId>,
     /// Selector grants (extension version 2).
     pub partitions: Vec<crate::PartitionGrant>,
 }
@@ -168,6 +171,7 @@ impl Extension {
             partitions: extended.partitions,
             authors: extended.authors,
             device: extended.device,
+            node: extended.node,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -197,6 +201,7 @@ impl Extension {
             partitions: body.partitions,
             authors: body.authors,
             device: body.device,
+            node: body.node,
         })
     }
 }
@@ -372,9 +377,10 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 3, u32::MAX] {
+        for version in [0, 1, 2, 4, u32::MAX] {
             let other = Extension(
                 encode(&Body {
+                    node: None,
                     version,
                     authors: None,
                     device: None,

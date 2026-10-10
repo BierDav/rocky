@@ -221,6 +221,20 @@ pub struct NativeSession {
     received: u64,
     remaining: usize,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvePeer {
+    version: u32,
+    challenge: Commitment,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolvedPeer {
+    version: u32,
+    challenge: Commitment,
+    node: PublicKey,
+    signature: Signature,
+}
 impl NativeSession {
     /// Authenticates `expected_peer` over `stream`, admits it by its chain
     /// and the merged revocation set, and leaves `replica` holding the
@@ -244,7 +258,8 @@ impl NativeSession {
             byte_budget,
             NATIVE_SESSION_VERSION,
         )
-        .await
+        .await?
+        .ok_or_else(|| denied("peer resolution did not open a session"))
     }
     /// Authenticates whichever peer dialed, for a node that learns its peer
     /// only from the handshake. The peer is admitted when its chain verifies
@@ -257,6 +272,80 @@ impl NativeSession {
         credentials: CredentialChain,
         byte_budget: usize,
     ) -> Result<Self, Error> {
+        Self::handshake(
+            Box::new(stream),
+            replica,
+            (local, credentials),
+            (Side::Acceptor, None),
+            byte_budget,
+            NATIVE_SESSION_VERSION,
+        )
+        .await?
+        .ok_or_else(|| denied("peer resolution did not open a session"))
+    }
+    /// Resolves a pinned one-way contact reference without granting a session.
+    pub async fn resolve_peer(
+        mut stream: rocky_core::net::Stream,
+        expected: rocky_credentials::PeerId,
+    ) -> Result<PublicKey, Error> {
+        let mut challenge = [0; 32];
+        OsRng.fill_bytes(&mut challenge);
+        write_frame(
+            &mut stream,
+            &encode(&ResolvePeer {
+                version: NATIVE_SESSION_VERSION,
+                challenge,
+            })?,
+        )
+        .await?;
+        let proof: ResolvedPeer = decode(&read_frame(&mut stream).await?)?;
+        let bytes = signing_bytes(
+            "rocky.peer-resolution.v1",
+            &(proof.version, proof.challenge, proof.node),
+        )?;
+        if proof.version != NATIVE_SESSION_VERSION
+            || proof.challenge != challenge
+            || rocky_credentials::PeerId::of(proof.node) != expected
+            || !proof.node.verify(&bytes, &proof.signature)
+        {
+            return Err(denied(
+                "peer resolution does not prove the pinned reference",
+            ));
+        }
+        stream.shutdown().await.map_err(Error::Io)?;
+        Ok(proof.node)
+    }
+    /// Answers a node-reference challenge without opening a session or revealing credentials.
+    pub fn peer_resolution_reply(
+        bytes: &[u8],
+        local: &PrivateKey,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Ok(request) = decode::<ResolvePeer>(bytes) else {
+            return Ok(None);
+        };
+        if request.version != NATIVE_SESSION_VERSION {
+            return Err(denied("unsupported peer resolution version"));
+        }
+        let node = local.public_key();
+        let bytes = signing_bytes(
+            "rocky.peer-resolution.v1",
+            &(request.version, request.challenge, node),
+        )?;
+        Ok(Some(encode(&ResolvedPeer {
+            version: request.version,
+            challenge: request.challenge,
+            node,
+            signature: local.sign(&bytes),
+        })?))
+    }
+    /// Serves either an authenticated session or a bounded node-reference proof.
+    pub async fn accept_or_resolve<A: RowApplication>(
+        stream: impl SessionStream + 'static,
+        replica: &EncryptedReplica<A>,
+        local: PrivateKey,
+        credentials: CredentialChain,
+        byte_budget: usize,
+    ) -> Result<Option<Self>, Error> {
         Self::handshake(
             Box::new(stream),
             replica,
@@ -278,7 +367,7 @@ impl NativeSession {
         (side, expected): (Side, Option<PublicKey>),
         byte_budget: usize,
         version: u32,
-    ) -> Result<Self, Error> {
+    ) -> Result<Option<Self>, Error> {
         if byte_budget == 0 || byte_budget > MAX_SECURE_BYTES {
             return Err(denied("native session peer/budget"));
         }
@@ -301,6 +390,13 @@ impl NativeSession {
             }
             Side::Acceptor => read_frame(&mut stream).await?,
         };
+        if side == Side::Acceptor
+            && let Some(proof) = Self::peer_resolution_reply(&peer_bytes, &local)?
+        {
+            write_frame(&mut stream, &proof).await?;
+            stream.shutdown().await.map_err(Error::Io)?;
+            return Ok(None);
+        }
         let peer: Hello = decode(&peer_bytes).map_err(|_| denied(AUTHENTICATION_FAILED))?;
         if peer.version != version {
             return Err(denied(AUTHENTICATION_FAILED));
@@ -372,7 +468,7 @@ impl NativeSession {
         {
             return Err(denied(PEER_REVOKED));
         }
-        Ok(session)
+        Ok(Some(session))
     }
     /// A handshake under another session version, as another build runs.
     #[cfg(test)]
@@ -391,7 +487,8 @@ impl NativeSession {
             MAX_SECURE_BYTES,
             version,
         )
-        .await
+        .await?
+        .ok_or_else(|| denied("peer resolution did not open a session"))
     }
     pub fn peer(&self) -> PublicKey {
         self.peer

@@ -64,7 +64,7 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
                 app: f.app().definition().app,
                 issuer: issuer.public_key(),
                 time,
-                nodes: [node].into(),
+                nodes: [rocky_credentials::PeerId::of(node)].into(),
                 users: BTreeSet::new(),
                 capabilities: BTreeSet::new(),
                 pseudonyms: BTreeSet::new(),
@@ -163,7 +163,12 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     let told = |result: Result<NativeSession, Error>, node: &PrivateKey| match result {
         Err(Error::Application(error)) => {
             let Revoked(statement) = error.downcast_ref::<Revoked>().unwrap();
-            assert!(statement.statement.nodes.contains(&node.public_key()));
+            assert!(
+                statement
+                    .statement
+                    .nodes
+                    .contains(&rocky_credentials::PeerId::of(node.public_key()))
+            );
             assert_eq!(error.to_string(), REVOKED);
         }
         other => panic!("expected the revocation, got {:?}", other.err()),
@@ -268,7 +273,7 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     let (configured, full_node) = (PrivateKey::new(), PrivateKey::new());
     a.configure_peers([configured.public_key()]).await;
     a.set_role(RoleConfig {
-        full_nodes: [full_node.public_key()].into(),
+        full_nodes: [rocky_credentials::PeerId::of(full_node.public_key())].into(),
         ..RoleConfig::default()
     })
     .await

@@ -42,6 +42,7 @@ private fun JsonObject.long(name: String) = getValue(name).jsonPrimitive.long
 private fun JsonObject.longOrNull(name: String) = get(name)?.jsonPrimitive?.longOrNull
 
 private class DeviceProcess {
+    private var file: File? = null
     private var runtime: RockyDatabase? = null
     private var room: ShoppingDatabase? = null
     private val database get() = runtime ?: error("no open device")
@@ -50,6 +51,7 @@ private class DeviceProcess {
     private suspend fun opened(directory: File, open: suspend () -> RockyDatabase): JsonElement {
         val opened = open()
         runtime = opened
+        file = File(directory, "rocky.sqlite")
         room = Room.databaseBuilder<ShoppingDatabase>(File(directory, "shopping").absolutePath)
             .setRockyDatabase(opened).build()
         return buildJsonObject {
@@ -77,7 +79,7 @@ private class DeviceProcess {
 
             "grantWriter" -> database.grant(
                 request.getValue("device").jsonObject,
-                GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()),
+                NodeKind.Full.profile,
                 authors = ShoppingSchema.tables.size,
             )
 
@@ -98,7 +100,7 @@ private class DeviceProcess {
 
             "pairing" -> JsonPrimitive(
                 when (val profile = request.text("profile")) {
-                    "writer" -> database.pairing(GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()))
+                    "writer" -> database.pairing(NodeKind.Full.profile)
                     "custody" -> database.pairing(GrantProfile.Custody(ShoppingSchema.tables.map { it.name }.toSet()))
                     "issuer" -> database.pairDevice()
                     else -> error("unknown profile $profile")
@@ -182,17 +184,30 @@ private class DeviceProcess {
 
             "shareWithDevices" -> JsonArray(repository.shareWithDevices(list()).map(::JsonPrimitive))
 
+            // As the Devices tab names a device: its registry label and the trusted-only row.
+            "label" -> {
+                Household(room!!, database, database.session().node).record(request.text("device"), request.text("name"), NodeKind.Full)
+                JsonNull
+            }
+
             "deliveries" -> JsonObject(repository.deliveries(list()).associate { it.node to JsonPrimitive(it.state.name) })
 
-            // The former envelope table, which nothing writes any more.
-            "keyRows" -> JsonPrimitive(
-                room!!.useReaderConnection { reader ->
-                    reader.usePrepared("SELECT count(*) FROM keys") {
-                        it.step()
-                        it.getLong(0)
-                    }
-                },
-            )
+            "absentTables" -> {
+                val tables = if (database.isIssuer) listOf("keys", "identities") else listOf("devices", "keys", "identities")
+                val checks = tables.associateWith { table ->
+                    val error = runCatching {
+                        room!!.useReaderConnection { reader -> reader.usePrepared("SELECT * FROM $table") { it.step() } }
+                    }.exceptionOrNull()
+                    JsonPrimitive(error?.message ?: "table exists")
+                }
+                val process = ProcessBuilder("sqlite3", "-readonly", file!!.path, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('devices','keys','identities')").redirectErrorStream(true).start()
+                val physical = process.inputStream.bufferedReader().readText()
+                check(process.waitFor() == 0) { "SQLite inspection failed: $physical" }
+                buildJsonObject {
+                    put("sql", JsonObject(checks))
+                    put("physical", JsonArray(physical.lines().filter { it.isNotBlank() }.map(::JsonPrimitive)))
+                }
+            }
 
             "lists" -> JsonArray(room!!.lists().observe().first().map { JsonPrimitive("${it.id}:${it.title}") })
 

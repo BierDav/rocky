@@ -148,8 +148,11 @@ impl Erp {
             not_before,
             expires,
             delegations,
-            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-                .unwrap(),
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                ..Default::default()
+            })
+            .unwrap(),
         };
         CredentialChain(vec![
             SignedCapability::sign(
@@ -1076,18 +1079,23 @@ async fn horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen() {
     assert!(child.replica.acknowledge_horizon(scope).await.is_err());
     assert_eq!(
         all.replica.horizon_progress(scope).await.unwrap().waiting,
-        vec![node.public_key()]
+        vec![rocky_credentials::PeerId::of(node.public_key())]
     );
     erp.existence(&all, &child, "lists").await;
     let ack = child.replica.acknowledge_horizon(scope).await.unwrap();
-    let outsider = HorizonAck::sign(signed.id().unwrap(), &PrivateKey::new()).unwrap();
+    let outsider = HorizonAck::sign(
+        signed.id().unwrap(),
+        &PrivateKey::new(),
+        child.credentials.clone(),
+    )
+    .unwrap();
     assert!(
         all.replica
             .receive_horizon_ack(scope, outsider)
             .await
             .is_err()
     );
-    let wrong_cut = HorizonAck::sign([7; 32], &node).unwrap();
+    let wrong_cut = HorizonAck::sign([7; 32], &node, child.credentials.clone()).unwrap();
     assert!(
         all.replica
             .receive_horizon_ack(scope, wrong_cut)
@@ -1105,7 +1113,7 @@ async fn horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen() {
             .await
             .unwrap()
             .acknowledged,
-        vec![node.public_key()]
+        vec![rocky_credentials::PeerId::of(node.public_key())]
     );
     drop(child);
     let child = erp.open(&child_path, &node, 2, &["items"]).await;
@@ -1116,7 +1124,7 @@ async fn horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen() {
             .await
             .unwrap()
             .acknowledged,
-        vec![node.public_key()]
+        vec![rocky_credentials::PeerId::of(node.public_key())]
     );
     let deadline = signed.statement.issued + crate::credentials::HORIZON_WAIT_SECONDS;
     let progress = {
@@ -1124,7 +1132,10 @@ async fn horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen() {
         inner.horizon_progress_at(&signed, deadline).await.unwrap()
     };
     assert!(progress.behind.is_empty());
-    assert_eq!(progress.acknowledged, vec![node.public_key()]);
+    assert_eq!(
+        progress.acknowledged,
+        vec![rocky_credentials::PeerId::of(node.public_key())]
+    );
     let mut next = signed.statement.clone();
     next.sequence += 1;
     next.previous = Some(signed.id().unwrap());
@@ -1137,12 +1148,18 @@ async fn horizon_ack_waits_for_the_exact_existence_cut_and_survives_reopen() {
         .horizon_progress_at(&next, deadline - 1)
         .await
         .unwrap();
-    assert_eq!(waiting.waiting, vec![node.public_key()]);
+    assert_eq!(
+        waiting.waiting,
+        vec![rocky_credentials::PeerId::of(node.public_key())]
+    );
     let expired = inner.horizon_progress_at(&next, deadline).await.unwrap();
     assert!(expired.waiting.is_empty());
-    assert_eq!(expired.behind, vec![node.public_key()]);
+    assert_eq!(
+        expired.behind,
+        vec![rocky_credentials::PeerId::of(node.public_key())]
+    );
     drop(inner);
-    let late = HorizonAck::sign(next.id().unwrap(), &node).unwrap();
+    let late = HorizonAck::sign(next.id().unwrap(), &node, child.credentials.clone()).unwrap();
     crate::CLOCK_SKEW.with(|skew| skew.set(crate::credentials::HORIZON_WAIT_SECONDS));
     let result = all.replica.receive_horizon_ack(scope, late).await;
     crate::CLOCK_SKEW.with(|skew| skew.set(0));
@@ -1214,7 +1231,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 8);
+    assert_eq!(before_horizon.statement.format, 9);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1238,7 +1255,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 8);
+    assert_eq!(checkpoint.statement.format, 9);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1345,7 +1362,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v12");
+    assert_eq!(identity, "rocky.encrypted-replica.v14");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1591,7 +1608,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 8);
+    assert_eq!(a.statement.format, 9);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(
@@ -1756,7 +1773,9 @@ async fn horizon_drops_absent_local_edits_and_deletes_without_ending_plain_or_lo
             .set_retention_policy(
                 scope,
                 crate::RetentionPolicy {
-                    required: BTreeSet::from([witness.node.public_key()]),
+                    required: BTreeSet::from([rocky_credentials::PeerId::of(
+                        witness.node.public_key(),
+                    )]),
                     behind: BTreeSet::new(),
                     copies: 1,
                     window: 0,
@@ -2020,7 +2039,9 @@ async fn horizon_finalization_and_retention_plateau() {
             .set_retention_policy(
                 scope,
                 crate::RetentionPolicy {
-                    required: BTreeSet::from([peer.node.public_key()]),
+                    required: BTreeSet::from([rocky_credentials::PeerId::of(
+                        peer.node.public_key(),
+                    )]),
                     behind: BTreeSet::new(),
                     copies: 1,
                     window: 0,
@@ -2346,7 +2367,9 @@ async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_ke
         .set_retention_policy(
             scope,
             crate::RetentionPolicy {
-                required: BTreeSet::from([offline.node.public_key()]),
+                required: BTreeSet::from([rocky_credentials::PeerId::of(
+                    offline.node.public_key(),
+                )]),
                 behind: BTreeSet::new(),
                 copies: 1,
                 window: 0,

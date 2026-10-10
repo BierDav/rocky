@@ -125,3 +125,6 @@ fn apply_allowed() -> bool {
 mod tests;
 
 pub use replica::check_replica_format;
+
+/// One-way reference used by durable peer metadata.
+pub use rocky_credentials::PeerId;

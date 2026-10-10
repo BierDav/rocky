@@ -214,7 +214,9 @@ impl Node {
         let Some(node) = pending else {
             return Ok(());
         };
-        self.record_revocation(node).await?;
+        if let Some(node) = node {
+            self.record_revocation(node).await?;
+        }
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
         let registry = self.registry().await?;
         self.configure(|settings| {

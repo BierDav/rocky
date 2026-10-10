@@ -308,7 +308,7 @@ async fn push(client: &Node, server: &Node, scope: ResourceScope) -> Result<usiz
 fn partial(full: &Node) -> RoleConfig {
     RoleConfig {
         role: ReplicaRole::Partial,
-        full_nodes: [full.key.public_key()].into(),
+        full_nodes: [rocky_secure::PeerId::of(full.key.public_key())].into(),
         custody: 1,
     }
 }
@@ -504,7 +504,7 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
             world.scopes[1],
             RetentionPolicy {
                 required: Default::default(),
-                behind: [b.key.public_key()].into(),
+                behind: [rocky_secure::PeerId::of(b.key.public_key())].into(),
                 copies: 1,
                 window: 0,
             },

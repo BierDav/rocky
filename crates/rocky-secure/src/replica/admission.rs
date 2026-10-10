@@ -1,8 +1,8 @@
 //! Admission of a session peer by its chain, and the bound on what
 //! unconfigured peers leave behind
 //! (`docs/decisions/0051-roster-free-admission.md`).
-use super::checkpoint::key_of;
 use super::*;
+use rocky_credentials::PeerId;
 
 /// Unconfigured peers whose horizon credentials and frontiers a replica
 /// keeps; the least recently served beyond it lose theirs.
@@ -62,7 +62,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Whether `peer` has no row in either bounded table yet.
     pub(super) async fn unrecorded_peer(&self, peer: PublicKey) -> Result<bool, Error> {
-        let key = peer.as_bytes().to_vec();
+        let key = PeerId::of(peer).as_bytes().to_vec();
         let mut found = self
             .conn
             .query(
@@ -88,15 +88,21 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(peer)] = record.as_slice() else {
                 return Err(Error::Corrupt("peer key".into()));
             };
-            let peer = key_of(peer)?;
-            if !self.configured.contains(&peer) && !full.contains(&peer) {
+            let peer = PeerId::from_bytes(peer.as_slice().try_into().map_err(|_| Error::Corrupt("peer reference".into()))?);
+            if !self.configured.iter().any(|node| PeerId::of(*node) == peer) && !full.contains(&peer) {
                 unconfigured.push(peer);
             }
         }
         let Some(excess) = unconfigured.len().checked_sub(MAX_UNCONFIGURED_PEERS) else {
             return Ok(());
         };
-        unconfigured.sort_by_key(|peer| self.served.1.get(peer).copied().unwrap_or(0));
+        unconfigured.sort_by_key(|peer| {
+            self.served
+                .1
+                .iter()
+                .find_map(|(node, at)| (PeerId::of(*node) == *peer).then_some(*at))
+                .unwrap_or(0)
+        });
         for peer in &unconfigured[..excess] {
             let key = peer.as_bytes().to_vec();
             self.conn
@@ -108,7 +114,7 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute("DELETE FROM secure_peer_frontiers WHERE peer=?", [key])
                 .await?;
-            self.served.1.remove(peer);
+            self.served.1.retain(|node, _| PeerId::of(*node) != *peer);
         }
         Ok(())
     }

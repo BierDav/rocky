@@ -12,6 +12,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn can_read_scope(&self, scope: ResourceScope) -> bool {
         self.inner.lock().await.scope_key(scope).is_ok()
     }
+    /// Whether this holder may sign the checkpoint that finalization publishes.
+    pub async fn can_finalize_horizon(&self, scope: ResourceScope) -> Result<bool, Error> {
+        self.inner.lock().await.can_finalize_horizon(scope)
+    }
     pub(crate) async fn relay_finalized_horizon(
         &self,
         scope: ResourceScope,
@@ -63,7 +67,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("finalized horizon acknowledgment bound"));
         }
         for ack in &evidence.acks {
-            ack.verify().map_err(credential)?;
+            ack.verify(inner.config.publisher, signed.statement.manifest)
+                .map_err(credential)?;
             if ack.horizon != signed.id().map_err(credential)?
                 || !signed
                     .statement
@@ -105,6 +110,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     == Some((signed.statement.sequence, signed.id().map_err(credential)?));
                 let bootstrap = if finalized {
                     false
+                } else if !inner.can_finalize_horizon(scope)? {
+                    true
                 } else {
                     match inner.check_horizon_cut(&signed.statement).await {
                         Ok(()) => false,
@@ -139,7 +146,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             inner.index_pending_horizon(signed, false).await?;
-            inner.conn.execute("INSERT INTO secure_horizon_rejoined VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET horizon=excluded.horizon", [encode(&scope)?, inner.config.node.public_key().as_bytes().to_vec(), signed.id().map_err(credential)?.to_vec()]).await?;
+            inner.conn.execute("INSERT INTO secure_horizon_rejoined VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET horizon=excluded.horizon", [encode(&scope)?, rocky_credentials::PeerId::of(inner.config.node.public_key()).as_bytes().to_vec(), signed.id().map_err(credential)?.to_vec()]).await?;
             inner.conn.execute("INSERT INTO secure_mergeable_horizon VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET statement=excluded.statement", [encode(&scope)?,signed.to_bytes().map_err(credential)?]).await?;
             Ok(())
         })?;
@@ -166,7 +173,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None => self.admitted_horizon(scope).await?,
         };
         for ack in &acks {
-            ack.verify().map_err(credential)?;
+            let context = expected
+                .as_ref()
+                .ok_or_else(|| denied("acknowledgment has no horizon"))?;
+            let inner = self.inner.lock().await;
+            ack.verify(inner.config.publisher, context.statement.manifest)
+                .map_err(credential)?;
+            drop(inner);
             if expected.as_ref().is_none_or(|s| {
                 s.id().ok() != Some(ack.horizon)
                     || !s.statement.peers.iter().any(|peer| peer.node == ack.node)
@@ -189,5 +202,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Box::pin(self.receive_relay_finalized_horizon(*finalized)).await?;
         }
         Ok(())
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    fn can_finalize_horizon(&self, scope: ResourceScope) -> Result<bool, Error> {
+        Ok(self.scope_key(scope).is_ok()
+            && self.local_grants(now()?)?.iter().any(|grant| {
+                grant.scope == scope
+                    && grant.rows == RowSelection::All
+                    && grant.rights.contains(&Right::Read)
+                    && [Right::Insert, Right::Update, Right::Delete]
+                        .iter()
+                        .any(|right| grant.rights.contains(right))
+            }))
     }
 }

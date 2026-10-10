@@ -25,6 +25,10 @@ impl NativeSession {
         self.ensure_holding(replica, &[scope]).await?;
         let (signed, acks) = replica.horizon_relay(scope).await?;
         let finalized = replica.relay_finalized_horizon(scope).await?;
+        if let Some(evidence) = &finalized {
+            self.deposit_finalized_checkpoint(replica, &evidence.checkpoint)
+                .await?;
+        }
         self.send(HorizonRelayMessage::Exchange {
             scope,
             signed,
@@ -40,9 +44,20 @@ impl NativeSession {
         else {
             return Err(denied("unexpected horizon relay response"));
         };
+        let archive = if replica.can_read_scope(scope).await {
+            None
+        } else {
+            finalized
+                .as_ref()
+                .map(|evidence| evidence.checkpoint.clone())
+        };
         replica
             .receive_horizon_relay(scope, signed, acks, finalized)
-            .await
+            .await?;
+        if let Some(checkpoint) = archive {
+            self.archive_peer_checkpoint(replica, checkpoint).await?;
+        }
+        Ok(())
     }
     pub(super) async fn answer_horizon_relay<A: RowApplication>(
         &mut self,

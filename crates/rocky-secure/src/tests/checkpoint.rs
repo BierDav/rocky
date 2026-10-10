@@ -109,8 +109,14 @@ async fn count(replica: &Replica, sql: &str) -> i64 {
 }
 fn policy(required: &[&PrivateKey], behind: &[&PrivateKey]) -> RetentionPolicy {
     RetentionPolicy {
-        required: required.iter().map(|key| key.public_key()).collect(),
-        behind: behind.iter().map(|key| key.public_key()).collect(),
+        required: required
+            .iter()
+            .map(|key| rocky_credentials::PeerId::of(key.public_key()))
+            .collect(),
+        behind: behind
+            .iter()
+            .map(|key| rocky_credentials::PeerId::of(key.public_key()))
+            .collect(),
         copies: 1,
         window: 0,
     }
@@ -273,7 +279,7 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         .unwrap();
     assert!(matches!(
         a.prune(f.public).await.unwrap().blocked,
-        Some(PruneBlock::Unacknowledged { peer, .. }) if peer == b_key.public_key()
+        Some(PruneBlock::Unacknowledged { peer, .. }) if peer == rocky_credentials::PeerId::of(b_key.public_key())
     ));
     assert!(sync(&f, &a, (&b, &b_key, &b_credentials)).await.is_empty());
     // A domain that requires recovery custodians keeps complete history.

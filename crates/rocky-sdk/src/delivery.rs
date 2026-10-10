@@ -98,16 +98,16 @@ impl Contents {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pending {
-    pub recipient: PublicKey,
+    pub recipient: rocky_credentials::PeerId,
     /// The group address, as `groups` keys it.
     pub address: String,
     pub epoch: KeyEpoch,
     /// The sealed delivery in base64url; absent once delivered.
     pub delivery: Option<String>,
     /// Mailboxes selected durably before deposit; retries reuse these slots.
-    pub targets: Vec<PublicKey>,
+    pub targets: Vec<rocky_credentials::PeerId>,
     /// The mailboxes that stored it.
-    pub mailboxes: Vec<PublicKey>,
+    pub mailboxes: Vec<rocky_credentials::PeerId>,
 }
 impl Pending {
     pub fn state(&self) -> &'static str {
@@ -145,6 +145,9 @@ impl Settings {
         delivery: &SealedDelivery,
         again: bool,
     ) -> Result<(), Failure> {
+        let reference = rocky_credentials::PeerId::of(recipient);
+        self.delivery_nodes.insert(reference, recipient);
+        let recipient = reference;
         let address = record_key(&record.address);
         let held = self.deliveries.iter().find(|(_, pending)| {
             pending.recipient == recipient && pending.address == address && pending.epoch == epoch
@@ -184,13 +187,13 @@ impl Settings {
     pub(crate) fn drops_revoked_deliveries(&self) -> bool {
         self.deliveries
             .values()
-            .any(|pending| self.revocations.revokes(&pending.recipient))
+            .any(|pending| self.revocations.revokes_reference(&pending.recipient))
     }
     /// Drops every envelope of a recipient a held statement revokes.
     pub(crate) fn drop_revoked_deliveries(&mut self) {
         let revocations = &self.revocations;
         self.deliveries
-            .retain(|_, pending| !revocations.revokes(&pending.recipient));
+            .retain(|_, pending| !revocations.revokes_reference(&pending.recipient));
     }
     /// Seals the epoch a rotation made of each group partition to every
     /// unrevoked device whose registry record reads it whole: the sender's
@@ -213,7 +216,9 @@ impl Settings {
             .records
             .iter()
             .filter(|(node, _)| {
-                **node != own && **node != rotation.node && !self.revoked_device(node, registry)
+                **node != own
+                    && Some(**node) != rotation.node
+                    && !self.revoked_device(node, registry)
             })
             .collect();
         if rotation.groups.is_empty() || candidates.is_empty() {

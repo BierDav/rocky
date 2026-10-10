@@ -58,7 +58,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
 }
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v12", manifest, node))
+    encode(&("rocky.encrypted-replica.v14", manifest, node))
 }
 /// A newer definition keeps everything replicas of the older one agree
 /// on: its tables, fields, methods, operations and domains.
@@ -174,6 +174,41 @@ impl<A: RowApplication> Inner<A> {
             .map_or(self.manifest, |root| root.capability.manifest);
         let revocations = self.revocations_for(manifest, revocations)?;
         self.resolve_chain_at(chain, manifest, key, revocations, time)
+    }
+    pub(crate) fn verify_reference_chain_with(
+        &self,
+        chain: &CredentialChain,
+        node: rocky_credentials::PeerId,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let manifest = chain
+            .0
+            .first()
+            .map_or(self.manifest, |root| root.capability.manifest);
+        let revocations = self.revocations_for(manifest, revocations)?;
+        let (mut grants, selectors) = chain
+            .verify_reference_selectors(self.config.publisher, manifest, node, revocations, time)
+            .map_err(credential)?;
+        for (scope, tuple) in &self.partitions {
+            for selector in &selectors {
+                if let Some(grant) = selector
+                    .resolve(scope.domain, scope.table, tuple)
+                    .map_err(credential)?
+                {
+                    grants.push(grant);
+                }
+            }
+        }
+        Ok(grants)
+    }
+    pub(crate) fn verify_reference_chain(
+        &self,
+        chain: &CredentialChain,
+        node: rocky_credentials::PeerId,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        self.verify_reference_chain_with(chain, node, &self.config.revocations, time)
     }
     /// `revocations` once `manifest` names an admitted generation, or with
     /// a set other than the held one, any recorded generation.

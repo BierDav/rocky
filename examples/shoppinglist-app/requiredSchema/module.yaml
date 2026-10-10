@@ -3,7 +3,7 @@ product: jvm/app
 apply:
   - //project.module-template.yaml
 dependencies:
-  - ../../../sdks/kotlin/rocky-core
+  - ../shared
 settings:
   jvm:
     mainClass: shopping.qualification.RequiredSchemaKt

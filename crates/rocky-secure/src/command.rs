@@ -47,7 +47,7 @@ pub(crate) const CHAIN_MISMATCH: &str =
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedCommand {
     pub(super) request: Vec<u8>,
-    node: PublicKey,
+    node: rocky_credentials::PeerId,
     credentials: CredentialChain,
     signature: Signature,
 }
@@ -74,13 +74,13 @@ impl EncryptedCommand {
         time: u64,
     ) -> Result<StrongRequest, Error> {
         let request = self.request()?;
-        if !self.node.verify(
+        if !credential_signer(&self.credentials)?.verify(
             &signing_bytes(
                 "rocky.encrypted-command.v1",
                 &(&self.request, &self.credentials),
             )?,
             &self.signature,
-        ) || secure_node_id(self.node) != request.id.node
+        ) || self.node.node_id() != request.id.node
             || self
                 .credentials
                 .0
@@ -122,7 +122,8 @@ impl EncryptedCommand {
                 request.method, request.version
             )));
         }
-        let grants = inner.verify_chain_with(&self.credentials, self.node, revocations, time)?;
+        let grants =
+            inner.verify_reference_chain_with(&self.credentials, self.node, revocations, time)?;
         let invocation: EncryptedPackage = decode(&request.arguments)?;
         let resources = resources(inner, &request)?;
         if !invocation.generation.valid()
@@ -155,7 +156,7 @@ pub struct ConfirmedCommand {
     pub(super) command: EncryptedCommand,
     package: Vec<u8>,
     pub(super) receipt: Vec<u8>,
-    executor: PublicKey,
+    executor: rocky_credentials::PeerId,
     credentials: CredentialChain,
     signature: Signature,
     pub parts: Vec<EncryptedPackage>,
@@ -168,14 +169,14 @@ pub struct ConfirmedCommand {
 pub(crate) struct DetachedCommand {
     #[serde(with = "serde_bytes")]
     request: Vec<u8>,
-    node: PublicKey,
+    node: rocky_credentials::PeerId,
     caller: Commitment,
     submitted: Signature,
     #[serde(with = "serde_bytes")]
     package: Vec<u8>,
     #[serde(with = "serde_bytes")]
     receipt: Vec<u8>,
-    executor: PublicKey,
+    executor: rocky_credentials::PeerId,
     credentials: Commitment,
     signature: Signature,
     parts: Vec<DetachedPart>,
@@ -335,8 +336,13 @@ impl ConfirmedCommand {
         let time = self.historical(inner)?;
         let none = RevocationSet::new();
         Ok((
-            inner.verify_chain_with(&self.command.credentials, self.command.node, &none, time)?,
-            inner.verify_chain_with(&self.credentials, self.executor, &none, time)?,
+            inner.verify_reference_chain_with(
+                &self.command.credentials,
+                self.command.node,
+                &none,
+                time,
+            )?,
+            inner.verify_reference_chain_with(&self.credentials, self.executor, &none, time)?,
         ))
     }
     /// A confirmed result verifies with no revocation, at the time both
@@ -367,12 +373,15 @@ impl ConfirmedCommand {
         let request = self.command.verify_at(inner, revocations, time)?;
         let package = self.strong_package()?;
         let receipt = self.receipt()?;
-        let grants =
-            inner.verify_chain_with(&self.credentials, self.executor, revocations, time)?;
+        let grants = inner.verify_reference_chain_with(
+            &self.credentials,
+            self.executor,
+            revocations,
+            time,
+        )?;
         if request != package.request
-            || package.base.executor != secure_node_id(self.executor)
-            || !self
-                .executor
+            || package.base.executor != self.executor.node_id()
+            || !credential_signer(&self.credentials)?
                 .verify(&self.signature_bytes()?, &self.signature)
             || package.confirmation()? != receipt.confirmation
             || package.sequence != receipt.sequence
@@ -674,13 +683,17 @@ impl<A: RowCommandApplication> Inner<A> {
         };
         let request = request.encode()?;
         let credentials = self.config.credentials.clone();
-        let signature = self.config.node.sign(&signing_bytes(
-            "rocky.encrypted-command.v1",
-            &(&request, &credentials),
-        )?);
+        let signature = self
+            .credential_signer
+            .as_ref()
+            .unwrap_or(&self.config.node)
+            .sign(&signing_bytes(
+                "rocky.encrypted-command.v1",
+                &(&request, &credentials),
+            )?);
         Ok(EncryptedCommand {
             request,
-            node: self.config.node.public_key(),
+            node: rocky_credentials::PeerId::of(self.config.node.public_key()),
             credentials,
             signature,
         })
@@ -740,6 +753,14 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_tickets(handle BLOB PRIMARY KEY,request BLOB NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS secure_command_progress(request BLOB PRIMARY KEY,state INTEGER NOT NULL,sequence INTEGER)",
 ];
+
+fn credential_signer(chain: &CredentialChain) -> Result<PublicKey, Error> {
+    chain
+        .0
+        .last()
+        .map(|leaf| leaf.capability.subject)
+        .ok_or_else(|| denied("missing credential signer"))
+}
 
 #[cfg(test)]
 mod cut_tests {

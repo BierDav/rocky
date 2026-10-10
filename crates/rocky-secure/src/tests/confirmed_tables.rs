@@ -308,3 +308,39 @@ async fn a_projection_plan_keeps_confirmed_tables_in_place() {
         .to_string();
     assert!(refused.contains("command-controlled"), "{refused}");
 }
+
+#[tokio::test]
+async fn a_checkpoint_import_projects_its_confirmed_rows() {
+    let world = World::with_stock(TableClass::CommandControlled);
+    let executor = world.executor().await;
+    world.install(&executor).await;
+    world.restock(&executor, 5).await;
+    let other = Device::new();
+    let caller = world.caller("caller.db", &other).await;
+    world.install(&caller).await;
+    let credentials = caller.inner.lock().await.config.credentials.clone();
+    let signed = executor.checkpoint(world.stock).await.unwrap();
+    caller.begin_rebootstrap(signed.clone()).await.unwrap();
+    let mut cursor = None;
+    loop {
+        let page = executor
+            .checkpoint_page(
+                other.node.public_key(),
+                &credentials,
+                world.stock,
+                signed.id().unwrap(),
+                cursor,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        cursor = page.next;
+        caller.stage_checkpoint_page(page).await.unwrap();
+        if cursor.is_none() {
+            break;
+        }
+    }
+    caller.finish_rebootstrap(world.stock).await.unwrap();
+    // The imported strong state is the table's content, with no result to apply.
+    assert_eq!(world.stock_table(&caller).await, vec![stock(5)]);
+}

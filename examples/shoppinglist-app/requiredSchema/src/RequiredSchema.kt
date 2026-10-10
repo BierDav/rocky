@@ -1,51 +1,11 @@
 package shopping.qualification
 
 import kotlinx.coroutines.runBlocking
+import org.example.examples.shopping.ShoppingSchema
+import org.example.examples.shopping.shoppingRoomOverlay
 import rocky.*
 import java.io.File
 import java.nio.file.Files
-
-/** The scope's required definition: lists, categories and items in one `list` group. */
-val required = schema("shopping", version = 4) {
-    table("lists") {
-        text("title")
-        primaryKey("id")
-        partitionBy("id", group = "list")
-    }
-    table("categories") {
-        integer("list")
-        text("name")
-        primaryKey("list", "id")
-        partitionBy("list", group = "list")
-        reference("list", "lists", onDelete = Delete.Cascade)
-    }
-    table("items") {
-        integer("list")
-        text("key")
-        text("title")
-        boolean("completed")
-        integer("category", nullable = true)
-        primaryKey("list", "key")
-        partitionBy("list", group = "list")
-        unique("list", "title", onConflict = Conflict.LatestWins)
-        index("index_items_list_category", "list", "category")
-        reference("list", "lists", onDelete = Delete.Cascade)
-        reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
-    }
-    table("devices") {
-        text("node")
-        text("name")
-        text("kind")
-        primaryKey("node")
-    }
-    table("keys") {
-        text("recipient")
-        integer("list")
-        integer("epoch")
-        blob("envelope")
-        primaryKey("recipient", "list")
-    }
-}
 
 /**
  * The preflight before device qualification: the definition builds by hand and from the shopping app's Room export
@@ -53,15 +13,9 @@ val required = schema("shopping", version = 4) {
  */
 fun main() = runBlocking {
     val checkout = generateSequence(File(System.getProperty("user.dir")).absoluteFile) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/4.json").readText()
-    val imported = schemaFromRoom("shopping", export) {
-        table("lists") { partitionBy("id", group = "list") }
-        table("categories") { partitionBy("list", group = "list") }
-        table("items") {
-            partitionBy("list", group = "list")
-            onConflict("index_items_list_title", Conflict.LatestWins)
-        }
-    }
+    val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/6.json").readText()
+    val required = ShoppingSchema
+    val imported = schemaFromRoom("shopping", export, shoppingRoomOverlay)
     val definition = required.definitionJson("09".repeat(32))
     check(definition == imported.definitionJson("09".repeat(32))) { "the Room import differs from the hand-written definition" }
     check(required.json() == imported.json()) { "the Room import's installed schema differs" }

@@ -311,7 +311,7 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, u32::MAX] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, u32::MAX] {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;
@@ -372,5 +372,43 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
         assert!(hub.listens("a"));
     }
     transport.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn reopened_member_resolves_saved_routes_without_persisting_foreign_node_keys()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let issuer = Device::create(&root.path().join("issuer"), Some(memory(&hub, "issuer")))?;
+    let member_path = root.path().join("member");
+    let member = Device::join(&member_path, &issuer.invite().await, memory(&hub, "member"))?;
+    member.sync().await.map_err(|error| error.to_string())?;
+    let foreign: rocky_secure::PublicKey = serde_json::from_value(json!(issuer.node().await))?;
+    member.close().await;
+    issuer.add(1, "After restart").await;
+    let reopened = Device::open(&member_path, Some(memory(&hub, "reopened")))?;
+    reopened.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(reopened.titles().await, ["After restart"]);
+    reopened.close().await;
+    issuer.close().await;
+    let mut directories = vec![member_path];
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            for needle in [foreign.as_bytes().as_slice(), foreign.to_hex().as_bytes()] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|part| part == needle),
+                    "foreign node key in {}",
+                    path.display()
+                );
+            }
+        }
+    }
     Ok(())
 }

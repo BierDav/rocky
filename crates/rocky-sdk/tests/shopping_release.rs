@@ -60,7 +60,10 @@ impl Peer {
             .to_owned())
     }
     async fn author(&self, issuer: &Peer) -> Result<(), Failure> {
-        for table in TABLES {
+        self.author_tables(issuer, &TABLES).await
+    }
+    async fn author_tables(&self, issuer: &Peer, tables: &[&str]) -> Result<(), Failure> {
+        for table in tables {
             let request = self
                 .call(json!({"type":"pseudonym_request","collection":table}))
                 .await?;
@@ -214,12 +217,17 @@ async fn topology() -> Result<Topology, Failure> {
     let b = Peer::new(
         Database::join(
             open(&root.path().join("b"), &hub, "b"),
-            &a.invite(json!({"kind":"writer","scopes":TABLES})).await?,
+            &a.invite(json!({"kind":"grants","grants":[
+                {"scope":"lists","rights":["read"]},
+                {"scope":"categories","rights":["read","insert","update","delete"]},
+                {"scope":"items","rights":["read","insert","update","delete"]}
+            ]}))
+            .await?,
         )?
         .database,
     )?;
     a.author(&a).await?;
-    b.author(&a).await?;
+    b.author_tables(&a, &["categories", "items"]).await?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
     Ok(Topology {

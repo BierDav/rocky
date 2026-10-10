@@ -34,7 +34,11 @@ async fn retain(f: &Fixture, replica: &Replica, required: &[PublicKey], window: 
             .set_retention_policy(
                 scope,
                 RetentionPolicy {
-                    required: required.iter().copied().collect(),
+                    required: required
+                        .iter()
+                        .copied()
+                        .map(rocky_credentials::PeerId::of)
+                        .collect(),
                     window,
                     ..Default::default()
                 },
@@ -58,7 +62,7 @@ async fn command(f: &Fixture, replica: &Replica, c: &dyn Coordinator, n: u32) ->
 async fn bootstrap(f: &Fixture, source: &Replica, target: &Replica, config: &SecureConfig) {
     for scope in [f.public, f.private] {
         let signed = source.checkpoint(scope).await.unwrap();
-        assert_eq!(signed.statement.format, 8);
+        assert_eq!(signed.statement.format, 9);
         assert_eq!(signed.statement.strong.base, signed.statement.strong.head);
         target.begin_rebootstrap(signed.clone()).await.unwrap();
         let mut cursor = None;
@@ -404,8 +408,8 @@ async fn missing_and_custody_acknowledgments_block_the_domain_horizon_and_prune_
         a.set_retention_policy(
             scope,
             RetentionPolicy {
-                required: [b_key.public_key()].into(),
-                behind: [b_key.public_key()].into(),
+                required: [rocky_credentials::PeerId::of(b_key.public_key())].into(),
+                behind: [rocky_credentials::PeerId::of(b_key.public_key())].into(),
                 window: 0,
                 ..Default::default()
             },
@@ -433,8 +437,11 @@ fn epoch_config(f: &Fixture, node: &PrivateKey, epoch: u64, revoked: &[PublicKey
         not_before,
         expires,
         delegations,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+            ..Default::default()
+        })
+        .unwrap(),
     };
     SecureConfig {
         publisher: f.publisher.public_key(),

@@ -407,6 +407,11 @@ impl Node {
     }
     async fn group_status(&self, partition: GroupPartition) -> Result<Value, Failure> {
         let address = record_key(&partition.record.address);
+        let registry = if self.settings.lock().await.issuer() {
+            Some(self.registry().await?)
+        } else {
+            None
+        };
         let (epochs, recipients) = {
             let settings = self.settings.lock().await;
             // Only the sharer holds its deliveries: no other device sees them.
@@ -416,7 +421,10 @@ impl Node {
                 .filter(|pending| pending.address == address)
                 .map(|pending| {
                     json!({
-                        "node": pending.recipient.to_hex(),
+                        "node": settings.delivery_nodes.values().chain(settings.peers.keys()).chain(registry.iter().flat_map(|registry| registry.records.keys()))
+                            .find(|node| rocky_credentials::PeerId::of(**node) == pending.recipient)
+                            .map(PublicKey::to_hex),
+                        "reference": pending.recipient.to_hex(),
                         "epoch": pending.epoch,
                         "state": pending.state(),
                     })

@@ -322,11 +322,11 @@ impl<A: RowCommandApplication> Inner<A> {
         combined.verify_history(self)?;
         let grants = self.local_grants(now()?)?;
         let current = self
-            .verify_chain(&result.command.credentials, result.command.node, now()?)
+            .verify_reference_chain(&result.command.credentials, result.command.node, now()?)
             .and_then(|caller| {
                 Ok((
                     caller,
-                    self.verify_chain(&result.credentials, result.executor, now()?)?,
+                    self.verify_reference_chain(&result.credentials, result.executor, now()?)?,
                 ))
             });
         // A result confirmed before a later revocation keeps the grants it had.

@@ -435,14 +435,24 @@ pub fn device_chain(
 impl CredentialChain {
     /// Completes a chain that ends at `holder` with its node key: the same
     /// grants and validity, delegating nothing further.
-    pub fn complete(mut self, holder: &PrivateKey, node: PublicKey) -> Result<Self, Error> {
+    pub fn complete(self, holder: &PrivateKey, node: PublicKey) -> Result<Self, Error> {
+        self.complete_with_alias(holder, node, node)
+    }
+    /// Binds a distinct credential signing key to the node without exposing its key.
+    pub fn complete_with_alias(
+        mut self,
+        holder: &PrivateKey,
+        node: PublicKey,
+        alias: PublicKey,
+    ) -> Result<Self, Error> {
         let last = self.holder(holder)?;
         let leaf = Capability {
-            subject: node,
+            subject: alias,
             kind: PrincipalKind::Node,
             delegations: 0,
             extension: Extension::new(Extended {
                 partitions: last.extended()?.partitions,
+                node: Some(crate::PeerId::of(node)),
                 ..Extended::default()
             })?,
             ..last.clone()
@@ -546,6 +556,7 @@ impl CredentialChain {
             extension: Extension::new(Extended {
                 partitions: Vec::new(),
                 authors: Some(AuthorRange::new(author, author)?),
+                node: None,
                 device: Some(SealedDevice::seal(publisher, key, author, device)?),
             })?,
         };

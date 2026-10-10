@@ -994,8 +994,11 @@ async fn renewed_policy_preserves_applied_command_history_and_denies_old_invocat
         not_before,
         expires,
         delegations,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+            ..Default::default()
+        })
+        .unwrap(),
     };
     let credentials = CredentialChain(vec![
         SignedCapability::sign(

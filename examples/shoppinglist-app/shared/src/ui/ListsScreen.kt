@@ -28,7 +28,33 @@ import org.example.examples.shopping.ShoppingItem
 @Composable
 fun ListsScreen(model: ListsViewModel) {
     val state by model.state.collectAsState()
+    val recipients by model.recipients.collectAsState()
+    var sharing by remember { mutableStateOf(false) }
     var naming by remember { mutableStateOf<Naming?>(null) }
+    if (sharing) {
+        if (state.trusted) {
+            AlertDialog(
+                { sharing = false },
+                confirmButton = { TextButton({ sharing = false }) { Text("Done") } },
+                title = { Text("Share with a device") },
+                text = {
+                    LazyColumn {
+                        items(recipients, key = { it.node }) { recipient ->
+                            TextButton({
+                                model.shareWithDevice(recipient.node)
+                                sharing = false
+                            }) { Text(recipient.name) }
+                        }
+                    }
+                },
+            )
+        } else {
+            ContactDialog("Scan recipient contact", { sharing = false }) { code, label ->
+                sharing = false
+                model.shareWithContact(code, label)
+            }
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         ListTabs(state, onSelect = model::select, onNew = { naming = Naming.NewList })
         val list = state.selected
@@ -50,6 +76,7 @@ fun ListsScreen(model: ListsViewModel) {
             onSearch = model::search,
             onShowCompleted = model::showCompleted,
         )
+        OutlinedButton({ sharing = true }, Modifier.padding(horizontal = 12.dp)) { Text("Share list") }
         Categories(state, onSelect = model::selectCategory, onAdd = { naming = Naming.NewCategory }, onDelete = model::deleteCategory)
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),

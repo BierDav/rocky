@@ -6,10 +6,12 @@ use crate::{capture::Plan, scoped_connection::Names, storage};
 use rocky_core::{LogicalSchema, Scope, TableClass, TypedRows, TypedTable};
 
 pub(super) const SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS secure_projection_access(id INTEGER PRIMARY KEY CHECK(id=1),tables BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_typed(id INTEGER PRIMARY KEY CHECK(id=1),descriptor BLOB NOT NULL,domain BLOB NOT NULL,readers BLOB NOT NULL)",
 ];
 
 /// One typed table and the resource scope its rows belong to.
+#[derive(Clone)]
 pub(super) struct Projected {
     pub(super) table: TypedTable,
     pub(super) scope: ResourceScope,
@@ -29,6 +31,8 @@ pub(super) struct Typed {
     pub(super) rows: TypedRows,
     pub(super) domain: Scope,
     pub(super) tables: Vec<Projected>,
+    /// Full signed declarations, including tables with no physical projection.
+    pub(super) declarations: Vec<Projected>,
     pub(super) names: Names,
     /// Whether these are the shadow tables of a projection plan.
     pub(super) shadowed: bool,
@@ -157,10 +161,31 @@ impl Typed {
             names: Names::new(None, &statements),
             rows,
             domain,
+            declarations: tables.clone(),
             tables,
             shadowed: shadow,
             constraints,
         })
+    }
+    fn restrict(mut self, allowed: &BTreeSet<String>) -> Result<Self, Error> {
+        self.tables
+            .retain(|table| allowed.contains(&table.table.sql_name));
+        self.constraints = super::constraints::Constraints::new(self.rows.schema(), &self.tables)?;
+        Ok(self)
+    }
+    fn statements(&self) -> Vec<String> {
+        self.rows
+            .schema()
+            .tables
+            .iter()
+            .filter(|table| {
+                table.class == TableClass::LocalOnly || self.by_name(&table.sql_name).is_some()
+            })
+            .flat_map(|table| {
+                std::iter::once(table.create_sql.clone())
+                    .chain(table.indexes.iter().map(|index| index.create_sql.clone()))
+            })
+            .collect()
     }
     pub(super) fn partitioned(&self, table: &Projected) -> bool {
         self.rows
@@ -194,6 +219,19 @@ impl Typed {
     }
     pub(super) fn by_name(&self, sql_name: &str) -> Option<&Projected> {
         self.tables
+            .iter()
+            .find(|table| table.table.sql_name.eq_ignore_ascii_case(sql_name))
+    }
+    pub(super) fn declared_by_scope(&self, scope: ResourceScope) -> Option<&Projected> {
+        self.declarations.iter().find(|table| {
+            table.scope == scope
+                || (self.partitioned(table)
+                    && table.scope.domain == scope.domain
+                    && table.scope.table == scope.table)
+        })
+    }
+    pub(super) fn declared_by_name(&self, sql_name: &str) -> Option<&Projected> {
+        self.declarations
             .iter()
             .find(|table| table.table.sql_name.eq_ignore_ascii_case(sql_name))
     }
@@ -249,6 +287,45 @@ pub(super) fn statements(schema: &LogicalSchema) -> Vec<String> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Installs only tables covered by local read grants or partition selectors.
+    /// The complete descriptor still has to match the signed manifest.
+    pub async fn install_readable_tables(
+        &self,
+        schema: LogicalSchema,
+        domain: Scope,
+        readers: BTreeMap<String, Commitment>,
+    ) -> Result<(), Error> {
+        {
+            let mut inner = self.inner.lock().await;
+            inner.validate_typed(&schema, domain)?;
+            let typed = Typed::new(schema.clone(), domain, &readers)?;
+            let allowed = inner.readable_names(&typed)?;
+            typed.restrict(&allowed)?;
+            transaction!(inner, |inner| {
+                let previous = inner.projection_access().await?;
+                if previous.is_none() && inner.installed_typed().await?.is_some() {
+                    return Err(Error::Incompatible("a complete projection cannot become a readable projection; reinstall the database".into()));
+                }
+                if let Some(previous) = previous.as_ref() {
+                    let installed = inner.installed_typed().await?.map(|(schema, _, _)| schema);
+                    if !previous.is_subset(&allowed)
+                        || allowed.difference(previous).any(|name| {
+                            installed
+                                .as_ref()
+                                .is_some_and(|schema| schema.table(name).is_some())
+                        })
+                    {
+                        return Err(Error::Incompatible(
+                            "projection grants changed; reinstall the database".into(),
+                        ));
+                    }
+                }
+                inner.conn.execute("INSERT INTO secure_projection_access VALUES(1,?) ON CONFLICT(id) DO UPDATE SET tables=excluded.tables", [encode(&allowed)?]).await?;
+                Ok(())
+            })?;
+        }
+        self.install_tables(schema, domain, readers).await
+    }
     /// Installs typed tables for `schema` in `domain`; `readers` names the
     /// encryption scope of every mergeable table. The schema's manifest must
     /// be the replica's signed manifest. Existing rows project at once;
@@ -266,33 +343,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .require_row_identity()
             .map_err(|error| Error::Incompatible(error.to_string()))?;
         let mut inner = self.inner.lock().await;
-        let domains: Vec<_> = inner
-            .definition
-            .domains
-            .iter()
-            .map(|rule| rule.domain)
-            .collect();
-        if domain.app != inner.definition.app || !domains.contains(&domain.domain) {
-            return Err(denied("typed tables need a domain of the signed manifest"));
-        }
-        // Command methods and the generations are the installed
-        // application's; the tables must be exactly the signed ones.
-        let mut expected = schema.manifest_at(&domains, inner.definition.schema);
-        expected.methods = inner.definition.methods.clone();
-        expected.handler = inner.definition.handler;
-        if expected.hash() != inner.manifest {
-            return Err(Error::Incompatible(
-                "the schema's definition differs from the signed manifest".into(),
-            ));
-        }
-        if schema
-            .tables
-            .iter()
-            .any(|table| table.sql_name.to_ascii_lowercase().starts_with("secure_"))
-        {
-            return Err(Error::Incompatible("secure_ names are reserved".into()));
-        }
-        let typed = Typed::new(schema.clone(), domain, &readers)?;
+        inner.validate_typed(&schema, domain)?;
+        let typed = inner
+            .authorized_projection(Typed::new(schema.clone(), domain, &readers)?)
+            .await?;
         let record = [
             schema
                 .canonical()
@@ -317,7 +371,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 }
                 None => {}
             }
-            for sql in statements(&schema).iter().chain(
+            for sql in typed.statements().iter().chain(
                 typed
                     .constraints
                     .iter()
@@ -365,6 +419,122 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    fn validate_typed(&self, schema: &LogicalSchema, domain: Scope) -> Result<(), Error> {
+        schema
+            .require_row_identity()
+            .map_err(|error| Error::Incompatible(error.to_string()))?;
+        let domains: Vec<_> = self
+            .definition
+            .domains
+            .iter()
+            .map(|rule| rule.domain)
+            .collect();
+        if domain.app != self.definition.app || !domains.contains(&domain.domain) {
+            return Err(denied("typed tables need a domain of the signed manifest"));
+        }
+        // Command methods and the generations are the installed
+        // application's; the tables must be exactly the signed ones.
+        let mut expected = schema.manifest_at(&domains, self.definition.schema);
+        expected.methods = self.definition.methods.clone();
+        expected.handler = self.definition.handler;
+        if expected.hash() != self.manifest {
+            return Err(Error::Incompatible(
+                "the schema's definition differs from the signed manifest".into(),
+            ));
+        }
+        if schema
+            .tables
+            .iter()
+            .any(|table| table.sql_name.to_ascii_lowercase().starts_with("secure_"))
+        {
+            return Err(Error::Incompatible("secure_ names are reserved".into()));
+        }
+        Ok(())
+    }
+    async fn projection_access(&self) -> Result<Option<BTreeSet<String>>, Error> {
+        let mut rows = self
+            .conn
+            .query("SELECT tables FROM secure_projection_access WHERE id=1", ())
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| decode(&row.get::<Vec<u8>>(0)?))
+            .transpose()
+    }
+    pub(super) fn readable_names(&self, typed: &Typed) -> Result<BTreeSet<String>, Error> {
+        let (grants, selectors) = self
+            .config
+            .credentials
+            .verify_selectors(
+                self.config.publisher,
+                self.manifest,
+                self.config.node.public_key(),
+                &self.config.revocations,
+                now()?,
+            )
+            .map_err(credential)?;
+        let mut allowed: BTreeSet<String> = typed
+            .tables
+            .iter()
+            .filter(|table| {
+                grants
+                    .iter()
+                    .any(|grant| grant.scope == table.scope && grant.rights.contains(&Right::Read))
+                    || selectors.iter().any(|grant| {
+                        grant.domain == typed.domain
+                            && grant.table == table.scope.table
+                            && grant.rights.contains(&Right::Read)
+                    })
+            })
+            .map(|table| table.table.sql_name.clone())
+            .collect();
+        loop {
+            let before = allowed.len();
+            for table in &typed.rows.schema().tables {
+                if allowed.contains(&table.sql_name) {
+                    for key in &table.foreign_keys {
+                        if typed
+                            .rows
+                            .schema()
+                            .table(&key.table)
+                            .is_some_and(|parent| parent.existence_log)
+                        {
+                            allowed.insert(key.table.clone());
+                        }
+                    }
+                }
+            }
+            if before == allowed.len() {
+                break;
+            }
+        }
+        Ok(allowed)
+    }
+    pub(super) async fn authorized_projection(&self, typed: Typed) -> Result<Typed, Error> {
+        match self.projection_access().await? {
+            Some(_) => {
+                let allowed = self.readable_names(&typed)?;
+                typed.restrict(&allowed)
+            }
+            None => Ok(typed),
+        }
+    }
+    pub(super) async fn record_projection_access(&self, typed: &Typed) -> Result<(), Error> {
+        if self.projection_access().await?.is_some() {
+            let allowed: BTreeSet<String> = typed
+                .tables
+                .iter()
+                .map(|table| table.table.sql_name.clone())
+                .collect();
+            self.conn
+                .execute(
+                    "UPDATE secure_projection_access SET tables=? WHERE id=1",
+                    [encode(&allowed)?],
+                )
+                .await?;
+        }
+        Ok(())
+    }
     /// Loads the installed typed tables at open.
     pub(super) async fn load_typed(&mut self) -> Result<(), Error> {
         let stored = rows(
@@ -385,7 +555,9 @@ impl<A: RowApplication> Inner<A> {
         };
         let schema = LogicalSchema::parse(descriptor)
             .map_err(|_| Error::Corrupt("typed table descriptor".into()))?;
-        let typed = Typed::new(schema, decode(domain)?, &decode(readers)?)?;
+        let typed = self
+            .authorized_projection(Typed::new(schema, decode(domain)?, &decode(readers)?)?)
+            .await?;
         verify_constraint_indexes(&self.conn, &typed).await?;
         self.typed = Some(Arc::new(typed));
         self.start_events();
@@ -549,7 +721,7 @@ impl<A: RowApplication> Inner<A> {
         if self
             .typed
             .as_ref()
-            .is_some_and(|typed| typed.by_scope(scope).is_none())
+            .is_some_and(|typed| typed.declared_by_scope(scope).is_none())
         {
             return Err(Error::Corrupt("missing typed scope for eviction".into()));
         }
@@ -604,6 +776,7 @@ impl<A: RowApplication> Inner<A> {
                 self.touch(&table.table.sql_name);
                 reproject(&self.conn, &typed, table).await
             }
+            None if typed.declared_by_scope(scope).is_some() => Ok(()),
             None => Err(Error::Corrupt("missing typed scope for rebuild".into())),
         }
     }
@@ -781,6 +954,9 @@ async fn verify_constraint_indexes(
         .schema()
         .tables
         .iter()
+        .filter(|table| {
+            table.class == TableClass::LocalOnly || typed.by_name(&table.sql_name).is_some()
+        })
         .flat_map(|table| table.indexes.iter().map(|index| &index.create_sql))
         .chain(constraints.statements().filter(|sql| {
             sql.starts_with("CREATE ")

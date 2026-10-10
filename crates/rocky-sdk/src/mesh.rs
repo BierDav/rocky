@@ -120,6 +120,7 @@ impl Settings {
         {
             return Ok(false);
         }
+        self.bind_saved_contact(hint.node);
         if self
             .contact_meta
             .get(&hint.node)
@@ -142,7 +143,7 @@ impl Settings {
             self.contact_meta.remove(&node);
         }
         if !self.peers.contains_key(&hint.node)
-            && self.peers.len() >= crate::enrollment::MAX_CONTACTS
+            && self.contact_count() >= crate::enrollment::MAX_CONTACTS
         {
             let oldest = self
                 .peers
@@ -484,7 +485,10 @@ mod tests {
             app: a.domain()?.manifest().app,
             issuer: PrivateKey::from_bytes(&av.get("node")?).public_key(),
             time: now()?,
-            nodes: [PrivateKey::new().public_key()].into(),
+            nodes: [rocky_credentials::PeerId::of(
+                PrivateKey::new().public_key(),
+            )]
+            .into(),
             users: BTreeSet::new(),
             capabilities: BTreeSet::new(),
             pseudonyms: BTreeSet::new(),

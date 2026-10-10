@@ -35,11 +35,20 @@ class ShoppingNode private constructor(
     val self: String,
     commands: CommandRuntime?,
     foreground: Flow<Boolean>,
+    val contacts: ContactLabels,
+    private val kindPath: String,
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
     val approvals = Approvals(room.room, rocky, household, self, commands != null)
     val isTrusted: Boolean get() = rocky.isIssuer
+    var kind: NodeKind? = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
+        private set
+
+    private fun rememberKind(kind: NodeKind) {
+        replaceText(kindPath, kind.name)
+        this.kind = kind
+    }
     private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
         foreground.distinctUntilChanged().collectLatest { visible ->
             if (visible) {
@@ -65,6 +74,7 @@ class ShoppingNode private constructor(
         suspend fun create(platform: ShoppingPlatform): ShoppingNode = open(platform) { commands ->
             RockyDatabase.create(platform.directory, ShoppingSchema, platform.transport(), platform.secrets, commands = commands)
         }.configure {
+            rememberKind(NodeKind.Trusted)
             household.record(self, platform.deviceName, NodeKind.Trusted)
             Approvals.start(household.trusted)
         }
@@ -73,6 +83,7 @@ class ShoppingNode private constructor(
         suspend fun join(platform: ShoppingPlatform, code: PairingCode): ShoppingNode = open(platform) { commands ->
             RockyDatabase.join(platform.directory, ShoppingSchema, code.invitation, platform.transport(), platform.secrets, commands = commands)
         }.configure {
+            rememberKind(code.kind)
             rocky.partitions.role(code.kind.role)
             if (isTrusted) household.record(self, code.name, NodeKind.Trusted)
         }
@@ -104,7 +115,8 @@ class ShoppingNode private constructor(
                         val self = rocky.session().node
                         // Room keeps only a lock file next to Rocky's.
                         val room = platform.room("${platform.directory}/shopping").buildOnRocky(rocky)
-                        ShoppingNode(rocky, room, self, commands, platform.foreground).also { opened = it }
+                        val contacts = ContactLabels("${platform.directory}/contact-labels.json")
+                        ShoppingNode(rocky, room, self, commands, platform.foreground, contacts, "${platform.directory}/device-kind").also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) { rocky.close() }
                         throw error

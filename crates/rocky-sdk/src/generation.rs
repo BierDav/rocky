@@ -225,6 +225,7 @@ impl Settings {
         schema: &Schema,
         transport: &dyn Transport,
     ) -> Result<(), Failure> {
+        self.resolve_saved_routes(transport).await;
         let mut failure: Failure = ServiceError::NoRoute {
             peer: "an issuer",
             network: transport.kind().into(),

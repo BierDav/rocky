@@ -35,7 +35,7 @@ pub struct Revocation {
     /// The issuer's node key; its co-signature attributes, never authorizes.
     pub issuer: PublicKey,
     pub time: u64,
-    pub nodes: BTreeSet<PublicKey>,
+    pub nodes: BTreeSet<crate::PeerId>,
     pub users: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
     pub pseudonyms: BTreeSet<PublicKey>,
@@ -43,7 +43,7 @@ pub struct Revocation {
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v1",
+            "rocky.revocation.id.v2",
             &encode(self)?,
         ))
     }
@@ -61,7 +61,7 @@ impl Revocation {
     }
     /// Every key the statement revokes as a credential subject.
     pub fn subjects(&self) -> impl Iterator<Item = &PublicKey> {
-        self.nodes.iter().chain(&self.users).chain(&self.pseudonyms)
+        self.users.iter().chain(&self.pseudonyms)
     }
     fn empty(&self) -> bool {
         self.nodes.is_empty()
@@ -88,8 +88,8 @@ impl SignedRevocation {
             return Err(denied("invalid revocation"));
         }
         let signed = Self {
-            publisher: publisher.sign(&signing_bytes("rocky.revocation.v1", &statement)?),
-            issuer: issuer.sign(&signing_bytes("rocky.revocation-issuer.v1", &statement)?),
+            publisher: publisher.sign(&signing_bytes("rocky.revocation.v2", &statement)?),
+            issuer: issuer.sign(&signing_bytes("rocky.revocation-issuer.v2", &statement)?),
             statement,
         };
         if encode(&signed)?.len() > MAX_REVOCATION_BYTES {
@@ -104,11 +104,11 @@ impl SignedRevocation {
             || self.statement.empty()
             || encode(self)?.len() > MAX_REVOCATION_BYTES
             || !publisher.verify(
-                &signing_bytes("rocky.revocation.v1", &self.statement)?,
+                &signing_bytes("rocky.revocation.v2", &self.statement)?,
                 &self.publisher,
             )
             || !self.statement.issuer.verify(
-                &signing_bytes("rocky.revocation-issuer.v1", &self.statement)?,
+                &signing_bytes("rocky.revocation-issuer.v2", &self.statement)?,
                 &self.issuer,
             )
         {
@@ -123,6 +123,11 @@ impl SignedRevocation {
     pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
         let subject = &link.capability.subject;
         Ok(self.statement.subjects().any(|key| key == subject)
+            || link
+                .capability
+                .extended()?
+                .node
+                .is_some_and(|node| self.statement.nodes.contains(&node))
             || self.statement.capabilities.contains(&link.id()?))
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
@@ -261,12 +266,21 @@ impl RevocationSet {
         ))
     }
     /// Whether some statement revokes `key` as a credential subject.
+    pub fn revokes_reference(&self, node: &crate::PeerId) -> bool {
+        self.statements()
+            .any(|signed| signed.statement.nodes.contains(node))
+    }
     pub fn revokes(&self, key: &PublicKey) -> bool {
-        self.subjects.contains(key)
+        self.subjects.contains(key) || self.revokes_reference(&crate::PeerId::of(*key))
     }
     /// Whether some statement ends a chain through `link`.
     pub fn ends(&self, link: &SignedCapability) -> Result<bool, Error> {
         Ok(self.subjects.contains(&link.capability.subject)
+            || link
+                .capability
+                .extended()?
+                .node
+                .is_some_and(|node| self.revokes_reference(&node))
             || self.capabilities.contains(&link.id()?))
     }
     /// The first statement that ends `chain`, if any.

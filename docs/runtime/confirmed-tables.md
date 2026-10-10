@@ -42,6 +42,7 @@ with cause `confirmed`, so `followRocky` refreshes DAO flows.
 | Result applied | The result's rows, atomically with the application |
 | Application failed or rolled back | Unchanged |
 | Results confirmed before installation | Shown when the tables are installed |
+| Strong state imported from a checkpoint or recovery | Its rows, in the import's transaction |
 
 There are no optimistic overlays of pending commands. A scope this
 device holds no key for reads as `Unavailable`, as other typed tables do.
@@ -62,7 +63,7 @@ results change command-controlled rows.
 ## Qualification
 
 - `cargo test -p rocky-secure --lib confirmed_tables`: projection at install,
-  on confirmation and across reopen; a failed application changes nothing;
+  on confirmation, after a checkpoint import and across reopen; a failed application changes nothing;
   pending and unapplied results never show; each write kind is refused alone
   and inside a transaction with a valid mergeable insert, which publishes
   nothing; admission refuses row writes; a projection plan keeps the table.

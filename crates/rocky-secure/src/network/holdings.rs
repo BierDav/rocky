@@ -219,8 +219,13 @@ impl NativeSession {
             },
             Message::Checkpoints(
                 CheckpointMessage::CheckpointOffer { scope }
-                | CheckpointMessage::CheckpointPull { scope, .. },
+                | CheckpointMessage::CheckpointPull { scope, .. }
+                | CheckpointMessage::ArchiveChain { scope, .. },
             ) => vec![*scope],
+            Message::Checkpoints(CheckpointMessage::ArchiveBegin { signed }) => {
+                vec![signed.statement.scope]
+            }
+            Message::Checkpoints(CheckpointMessage::ArchivePage { page }) => vec![page.scope],
             Message::HorizonRelay(horizon_relay::HorizonRelayMessage::Exchange {
                 scope, ..
             }) => vec![*scope],

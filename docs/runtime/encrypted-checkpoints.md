@@ -143,6 +143,13 @@ against their digests, and the replay, in batches under the replica lock.
   command itself 128 KiB with both chains.
 - `export_recovery` and recovery custodians need complete mergeable history.
 
+A keyless custody holder can also serve a complete sealed archive of a writer's
+finalized checkpoint. Native horizon exchanges deposit the pages when the writer
+initiates, or pull them when custody initiates. Referenced existence bases travel
+before the pages. Interrupted transfers resume from a durable cursor; incomplete
+archives offer no checkpoint. Readers use the normal verified import path.
+See [decision 0061](../decisions/0061-readable-projections-and-checkpoint-custody.md).
+
 ## Offering an imported checkpoint back to its signer
 
 A replica refuses to rebootstrap from its own signed checkpoint. An authorized
@@ -156,9 +163,9 @@ key-epoch and transactional import checks remain enforced.
 ## The signed statement
 
 A checkpoint covers one `ResourceScope`. `SignedCheckpoint` is a
-`CheckpointStatement`, the signer's node key and credential chain, signed under
+`CheckpointStatement`, the signer's key and credential chain, signed under
 `rocky.encrypted-checkpoint.v3`; its identity is the
-`rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 6.
+`rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 9.
 Partition candidates, support rows and hidden marks are derived locally. A
 partition checkpoint carries only its authenticated tuple, materialized rows and
 identity marks; rebootstrap rebuilds its group partition and leaves other
@@ -209,3 +216,6 @@ one, else the previous checkpoint stays and pruning stops there) and install
 - Open: may a custody-only replica prune under a checkpoint signed by a reader a
   policy names as trusted, and should recovery packages carry a checkpoint so
   that domains with required custodians can prune?
+
+Typed SDK checkpoints use the table pseudonym as their signing key; its credential
+proves the same whole-scope read and write authority. See [node-key privacy](../decisions/0062-node-references-and-credential-aliases.md).

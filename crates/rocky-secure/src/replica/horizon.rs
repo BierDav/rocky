@@ -4,6 +4,7 @@ mod relay;
 use super::existence::ExistenceBaseAttachment;
 use super::*;
 pub(crate) use relay::HorizonFinalization;
+use rocky_credentials::PeerId;
 use rocky_credentials::{
     HorizonAck, HorizonCut, HorizonLog, HorizonPeer, HorizonStatement, SignedHorizon,
 };
@@ -22,9 +23,9 @@ pub(super) const SCHEMA: &[&str] = &[
 /// Required devices still awaited or expired at the statement's fixed deadline.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HorizonProgress {
-    pub acknowledged: Vec<PublicKey>,
-    pub waiting: Vec<PublicKey>,
-    pub behind: Vec<PublicKey>,
+    pub acknowledged: Vec<PeerId>,
+    pub waiting: Vec<PeerId>,
+    pub behind: Vec<PeerId>,
 }
 
 impl<A: RowApplication> Inner<A> {
@@ -94,7 +95,7 @@ impl<A: RowApplication> Inner<A> {
             .as_ref()
             .ok_or_else(|| denied("horizon needs installed typed tables"))?;
         let projected = typed
-            .by_scope(scope)
+            .declared_by_scope(scope)
             .ok_or_else(|| denied("horizon scope is not installed"))?;
         if projected.confirmed() {
             return Err(denied("confirmed tables use the strong horizon"));
@@ -115,7 +116,7 @@ impl<A: RowApplication> Inner<A> {
                 scope
             } else {
                 let parent = typed
-                    .by_name(&name)
+                    .declared_by_name(&name)
                     .ok_or_else(|| denied("missing horizon scope"))?;
                 if table.partition_by.is_empty() {
                     parent.scope
@@ -308,7 +309,7 @@ impl<A: RowApplication> Inner<A> {
             behind: Vec::new(),
         };
         for peer in &signed.statement.peers {
-            if self.config.revocations.revokes(&peer.node) {
+            if self.config.revocations.revokes_reference(&peer.node) {
                 continue;
             }
             let mut rows = self
@@ -320,7 +321,8 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             if let Some(row) = rows.next().await? {
                 let ack: HorizonAck = decode(&row.get::<Vec<u8>>(0)?)?;
-                ack.verify().map_err(credential)?;
+                ack.verify(self.config.publisher, signed.statement.manifest)
+                    .map_err(credential)?;
                 if ack.node != peer.node || ack.horizon != signed.id().map_err(credential)? {
                     return Err(Error::Corrupt("horizon acknowledgment context".into()));
                 }
@@ -375,7 +377,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .insert(
                     *node,
                     HorizonPeer {
-                        node: *node,
+                        node: PeerId::of(*node),
                         expires,
                     },
                 )
@@ -384,7 +386,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Err(denied("duplicate horizon peer"));
             }
         }
-        let peers = required.into_values().collect::<Vec<_>>();
+        let mut peers = required.into_values().collect::<Vec<_>>();
+        peers.sort_by_key(|peer| peer.node);
         drop(inner);
         self.horizon_statement_for_participants(scope, &peers).await
     }
@@ -559,8 +562,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.verify_horizon(&signed).await?;
         inner.ensure_horizon_current(scope).await?;
         inner.check_horizon_cut(&signed.statement).await?;
-        let ack = HorizonAck::sign(signed.id().map_err(credential)?, &inner.config.node)
-            .map_err(credential)?;
+        let ack = HorizonAck::sign(
+            signed.id().map_err(credential)?,
+            inner
+                .credential_signer
+                .as_ref()
+                .unwrap_or(&inner.config.node),
+            inner.config.credentials.clone(),
+        )
+        .map_err(credential)?;
         transaction!(inner, |inner| inner.store_horizon_ack(&signed, &ack).await)?;
         inner.flush()?;
         Ok(ack)
@@ -648,7 +658,8 @@ impl<A: RowApplication> Inner<A> {
         signed: &SignedHorizon,
         ack: &HorizonAck,
     ) -> Result<(), Error> {
-        ack.verify().map_err(credential)?;
+        ack.verify(self.config.publisher, signed.statement.manifest)
+            .map_err(credential)?;
         if ack.horizon != signed.id().map_err(credential)?
             || !signed
                 .statement
@@ -862,7 +873,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .conn
             .query(
                 "SELECT chain FROM secure_horizon_credentials WHERE node=?",
-                [node.as_bytes().to_vec()],
+                [rocky_credentials::PeerId::of(node).as_bytes().to_vec()],
             )
             .await?;
         if let Some(row) = rows.next().await?
@@ -874,7 +885,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let first = inner.unrecorded_peer(node).await?;
         transaction!(inner, |inner| {
             inner.keep_chain(chain).await?;
-            inner.conn.execute("INSERT INTO secure_horizon_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET chain=excluded.chain", [node.as_bytes().to_vec(),chain.digest().to_vec()]).await?;
+            inner.conn.execute("INSERT INTO secure_horizon_credentials VALUES(?,?) ON CONFLICT(node) DO UPDATE SET chain=excluded.chain", [rocky_credentials::PeerId::of(node).as_bytes().to_vec(),chain.digest().to_vec()]).await?;
             if first {
                 inner.bound_peers().await?;
             }
@@ -893,7 +904,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .conn
                 .query(
                     "SELECT chain FROM secure_horizon_credentials WHERE node=?",
-                    [node.as_bytes().to_vec()],
+                    [rocky_credentials::PeerId::of(*node).as_bytes().to_vec()],
                 )
                 .await?;
             let row = rows
@@ -990,12 +1001,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .mergeable_horizon(scope)
             .await?
             .ok_or_else(|| denied("no horizon for rebootstrap receipt"))?;
-        let id = inner.scope_id(scope).await?;
-        if signed.id().map_err(credential)? != horizon
-            || inner
+        let local = match inner.find_scope_id(scope).await? {
+            Some(id) => inner
                 .checkpoint_record(id, true)
                 .await?
-                .and_then(|record| record.signed)
+                .and_then(|record| record.signed),
+            None => None,
+        };
+        let checkpoint = match local {
+            Some(checkpoint) => Some(checkpoint),
+            None => inner.archived_checkpoint(scope, true).await?,
+        };
+        if signed.id().map_err(credential)? != horizon
+            || checkpoint
                 .is_none_or(|checkpoint| checkpoint.statement.finalized.as_ref() != Some(&signed))
         {
             return Err(denied(
@@ -1003,7 +1021,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             ));
         }
         transaction!(inner, |inner| {
-            inner.conn.execute("INSERT INTO secure_horizon_rejoined VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET horizon=excluded.horizon", [encode(&scope)?, peer.as_bytes().to_vec(), horizon.to_vec()]).await?;
+            inner.conn.execute("INSERT INTO secure_horizon_rejoined VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET horizon=excluded.horizon", [encode(&scope)?, PeerId::of(peer).as_bytes().to_vec(), horizon.to_vec()]).await?;
             Ok(())
         })?;
         inner.flush()?;
@@ -1026,13 +1044,22 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         node: PublicKey,
     ) -> Result<bool, Error> {
-        if node == self.config.node.public_key() && self.horizon_bootstrap(scope).await?.is_some() {
+        self.horizon_reference_behind(scope, PeerId::of(node)).await
+    }
+    pub(super) async fn horizon_reference_behind(
+        &self,
+        scope: ResourceScope,
+        node: PeerId,
+    ) -> Result<bool, Error> {
+        if node == PeerId::of(self.config.node.public_key())
+            && self.horizon_bootstrap(scope).await?.is_some()
+        {
             return Ok(true);
         }
         let Some(signed) = self.mergeable_horizon(scope).await? else {
             return Ok(false);
         };
-        if node == self.config.node.public_key()
+        if node == PeerId::of(self.config.node.public_key())
             && let Some(id) = self.find_scope_id(scope).await?
             && self
                 .checkpoint_record(id, true)
@@ -1086,9 +1113,13 @@ impl<A: RowApplication> Inner<A> {
             let [SqlValue::Blob(node)] = row.as_slice() else {
                 return Err(Error::Corrupt("horizon holder".into()));
             };
-            peers.insert(checkpoint::key_of(node)?);
+            peers.insert(PeerId::from_bytes(
+                node.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Corrupt("horizon peer reference".into()))?,
+            ));
         }
-        peers.remove(&self.config.node.public_key());
+        peers.remove(&PeerId::of(self.config.node.public_key()));
         Ok(peers.len())
     }
     pub(crate) async fn index_pending_horizon(
@@ -1493,11 +1524,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             statement.rows = sets.rows_summary();
             statement.tombstones = 0;
             statement.creations = sets.creations_summary();
-            let finalized = SignedCheckpoint::sign(
-                statement,
-                &inner.config.node,
-                inner.config.credentials.clone(),
-            )?;
+            let finalized = inner.sign_checkpoint(statement)?;
             for sql in [
                 "DELETE FROM secure_checkpoint_rows WHERE scope=?",
                 "INSERT INTO secure_checkpoint_rows SELECT ?,row,fields FROM secure_rows WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?)",

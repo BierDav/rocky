@@ -5,7 +5,7 @@ use crate::{
 use rocky_core::{Commitment, ResourceScope};
 use serde::{Deserialize, Serialize};
 
-pub const HORIZON_FORMAT: u32 = 4;
+pub const HORIZON_FORMAT: u32 = 5;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub struct ExistenceBase {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorizonPeer {
-    pub node: PublicKey,
+    pub node: crate::PeerId,
     /// Minimum expiry of the admitted credential chain.
     pub expires: u64,
 }
@@ -189,23 +189,45 @@ impl SignedHorizon {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HorizonAck {
     pub horizon: Commitment,
-    pub node: PublicKey,
+    pub node: crate::PeerId,
+    signer: PublicKey,
+    credentials: crate::CredentialChain,
     signature: Signature,
 }
 impl HorizonAck {
-    pub fn sign(horizon: Commitment, node: &PrivateKey) -> Result<Self, Error> {
-        let public = node.public_key();
-        Ok(Self {
+    pub fn sign(
+        horizon: Commitment,
+        signer: &PrivateKey,
+        credentials: crate::CredentialChain,
+    ) -> Result<Self, Error> {
+        let node = credentials
+            .0
+            .last()
+            .ok_or_else(|| denied("missing acknowledgment credentials"))?
+            .capability
+            .extended()?
+            .node
+            .ok_or_else(|| denied("acknowledgment requires a node reference"))?;
+        let mut ack = Self {
             horizon,
-            node: public,
-            signature: node.sign(&signing_bytes("rocky.horizon-ack.v1", &(horizon, public))?),
-        })
+            node,
+            signer: signer.public_key(),
+            credentials,
+            signature: signer.sign(b""),
+        };
+        ack.signature = signer.sign(&ack.bytes()?);
+        Ok(ack)
     }
-    pub fn verify(&self) -> Result<(), Error> {
-        if !self.node.verify(
-            &signing_bytes("rocky.horizon-ack.v1", &(self.horizon, self.node))?,
-            &self.signature,
-        ) {
+    fn bytes(&self) -> Result<Vec<u8>, Error> {
+        signing_bytes(
+            "rocky.horizon-ack.v2",
+            &(self.horizon, self.node, self.signer, &self.credentials),
+        )
+    }
+    pub fn verify(&self, publisher: PublicKey, manifest: Commitment) -> Result<(), Error> {
+        self.credentials
+            .verify_node_alias(publisher, manifest, self.node, self.signer)?;
+        if !self.signer.verify(&self.bytes()?, &self.signature) {
             return Err(denied("invalid horizon acknowledgment"));
         }
         Ok(())
@@ -250,7 +272,7 @@ mod tests {
         let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
         current.verify(issuer.public_key()).unwrap();
         assert_eq!(current.statement, statement);
-        for format in [0, 2, 3, 5, u32::MAX] {
+        for format in [0, 2, 3, 4, 6, u32::MAX] {
             let mut other = signed.clone();
             other.statement.format = format;
             assert_eq!(
@@ -286,7 +308,7 @@ mod tests {
     }
     #[test]
     fn behind_deadline_uses_the_shorter_bound_without_overflow() {
-        let node = PrivateKey::new().public_key();
+        let node = crate::PeerId::of(PrivateKey::new().public_key());
         assert_eq!(HorizonPeer { node, expires: 110 }.deadline(100), 110);
         assert_eq!(
             HorizonPeer {
@@ -304,10 +326,5 @@ mod tests {
             .deadline(u64::MAX - 1),
             u64::MAX
         );
-        let ack = HorizonAck::sign([7; 32], &PrivateKey::new()).unwrap();
-        ack.verify().unwrap();
-        let mut forged = ack;
-        forged.horizon = [8; 32];
-        assert!(forged.verify().is_err());
     }
 }

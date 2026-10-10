@@ -27,10 +27,10 @@ Platform additions and why:
   on Main. Showing QR with QRose is common. `Paste.ios.kt` uses a system `UIPasteControl`
   with UIKit's text-only receiver. This host's iOS 27 simulator still
   presents system Paste consent; the procedure accepts that named dialog.
-- `rocky-core/src@android/KeystoreSecretStore.kt`: accepts names through 250
-  ASCII bytes, retaining room for its atomic-write filename. The old 128-byte
-  cap refused current vault group-epoch names; the device run proves the
-  delivered group key is stored and used.
+- `rocky-core/src@android/KeystoreSecretStore.kt`: the old 128-byte cap
+  refused current vault group-epoch names; the device run proves the
+  delivered group key is stored and used. Phase 20 later made its temporary
+  file independent of the name, so names reach the contract's 255 bytes.
 - `rocky-core/src@ios/RockyLifecycle.kt`: an explicit scene visibility entry
   point feeds the same ordered worker as UIKit notifications; the existing
   integration regression now covers both sources.

@@ -1,5 +1,6 @@
 use super::*;
 use rocky_credentials::PartitionGrant;
+use rocky_credentials::device_chain;
 
 const SCHEMA: &str = r#"{"format":4,"application":"holders","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
@@ -75,6 +76,43 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
             .holder_changes(&vault, &renamed, &grants, 1, &registry)
             .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = issuer.vault(&store);
+    let node = PrivateKey::new().public_key();
+    let record = ContactRecord {
+        v: CONTACT_VERSION,
+        publisher: issuer.publisher,
+        node,
+        routes: vec![Route {
+            transport: "tcp".into(),
+            address: "127.0.0.1:9000".into(),
+        }],
+        issuer: false,
+        enrollment_only: false,
+    };
+    let uri = format!(
+        "rocky://peer/{}",
+        BASE64URL_NOPAD.encode(&serde_json::to_vec(&record)?)
+    );
+    issuer.add_peer(&vault, &uri)?;
+    assert!(issuer.contact_meta.contains_key(&node));
+    issuer.begin_revocation(node, &Registry::default())?;
+    issuer.rotate(&vault)?;
+    let path = directory.path().join("identity.json");
+    issuer.save(&path)?;
+    let reopened = Settings::load(&path)?;
+    assert!(!reopened.peers.contains_key(&node));
+    assert!(!reopened.contact_meta.contains_key(&node));
+    assert!(reopened.revocations.revokes(&node));
     Ok(())
 }
 
@@ -330,7 +368,10 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                         app,
                         issuer: other.public_key(),
                         time,
-                        nodes: [PrivateKey::new().public_key()].into(),
+                        nodes: [rocky_credentials::PeerId::of(
+                            PrivateKey::new().public_key(),
+                        )]
+                        .into(),
                         users: BTreeSet::new(),
                         capabilities: BTreeSet::new(),
                         pseudonyms: BTreeSet::new(),
@@ -645,5 +686,54 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     assert_eq!(b.groups[&address].epochs, before);
     assert_eq!(a.keys, before_keys);
     assert_eq!(b.keys, before_keys);
+    Ok(())
+}
+
+#[test]
+fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<(), Failure> {
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let mut settings = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = settings.vault(&store);
+    let node = PrivateKey::new().public_key();
+    let record = ContactRecord {
+        v: CONTACT_VERSION,
+        publisher: settings.publisher,
+        node,
+        routes: vec![Route {
+            transport: "tcp".into(),
+            address: "127.0.0.1:9000".into(),
+        }],
+        issuer: true,
+        enrollment_only: false,
+    };
+    let uri = format!(
+        "rocky://peer/{}",
+        BASE64URL_NOPAD.encode(&serde_json::to_vec(&record)?)
+    );
+    settings.add_peer(&vault, &uri)?;
+    let path = directory.path().join("identity.json");
+    settings.save(&path)?;
+    let bytes = std::fs::read(&path)?;
+    assert!(
+        !bytes
+            .windows(node.to_hex().len())
+            .any(|part| part == node.to_hex().as_bytes())
+    );
+    let mut reopened = Settings::load(&path)?;
+    assert!(reopened.peers.is_empty());
+    assert_eq!(reopened.unresolved_contacts().len(), 1);
+    reopened.save(&path)?;
+    reopened = Settings::load(&path)?;
+    reopened.bind_saved_contact(PrivateKey::new().public_key());
+    assert!(reopened.peers.is_empty());
+    reopened.bind_saved_contact(node);
+    assert_eq!(reopened.peers[&node].routes[0].address, "127.0.0.1:9000");
+    assert_eq!(reopened.issuers, [node]);
+    reopened.remove_peer(node)?;
+    reopened.save(&path)?;
+    assert!(Settings::load(&path)?.unresolved_contacts().is_empty());
     Ok(())
 }

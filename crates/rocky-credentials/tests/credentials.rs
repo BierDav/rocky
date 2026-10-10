@@ -243,6 +243,11 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
             subject: node.public_key(),
             kind: PrincipalKind::Node,
             delegations: 0,
+            extension: Extension::new(Extended {
+                node: Some(rocky_credentials::PeerId::of(node.public_key())),
+                ..Default::default()
+            })
+            .expect("node binding"),
             ..root.capability.clone()
         };
         change(&mut leaf.grants[0]);
@@ -934,6 +939,7 @@ fn a_frame_author_must_be_the_number_its_signing_key_was_assigned() {
         partitions: Vec::new(),
         authors: Some(AuthorRange::new(250, 250).expect("range")),
         device,
+        node: None,
     })
     .expect("extension");
     forged
@@ -1047,6 +1053,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         partitions: Vec::new(),
         authors: Some(AuthorRange::new(5, 15).expect("range")),
         device: None,
+        node: None,
     })
     .expect("extension");
     let widened = CredentialChain(vec![
@@ -1056,7 +1063,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     .complete(&delegate, node.public_key())
     .expect("chain");
     assert!(verify(&widened).is_err());
-    // A node link carries no extension.
+    // A node link cannot carry a user extension.
     let mut leaf = chain.0[2].capability.clone();
     leaf.extension = narrowed.0[1].capability.extension.clone();
     let mut tagged = chain.clone();
@@ -1070,7 +1077,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 3,
+        version: 4,
         authors: range,
         rotation: 9,
     })
@@ -1197,7 +1204,7 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
         bases: vec![],
         related: vec![],
         peers: vec![HorizonPeer {
-            node: peer.public_key(),
+            node: rocky_credentials::PeerId::of(peer.public_key()),
             expires: NOW + DAY,
         }],
     };
@@ -1257,4 +1264,69 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
     assert_eq!(signed.statement.peers[0].deadline(NOW), NOW);
     expired.peers[0].expires = 0;
     assert!(SignedHorizon::sign(expired, &domain.publisher).is_err());
+}
+
+#[test]
+fn alias_acknowledgments_prove_node_binding_without_disclosing_its_key() {
+    let domain = Domain::new();
+    let user = PrivateKey::new();
+    let node = PrivateKey::new();
+    let alias = PrivateKey::new();
+    let capability = domain
+        .authority()
+        .issue(
+            user.public_key(),
+            Profile::Writer {
+                scopes: Domain::names(&["notes"]),
+            }
+            .grants(&domain.resources)
+            .unwrap(),
+            VALIDITY,
+        )
+        .unwrap();
+    let chain = CredentialChain(vec![capability])
+        .complete_with_alias(&user, node.public_key(), alias.public_key())
+        .unwrap();
+    chain
+        .verify(
+            domain.publisher.public_key(),
+            domain.manifest.hash(),
+            node.public_key(),
+            &domain.policy(),
+            NOW,
+        )
+        .unwrap();
+    assert!(
+        chain
+            .verify(
+                domain.publisher.public_key(),
+                domain.manifest.hash(),
+                PrivateKey::new().public_key(),
+                &domain.policy(),
+                NOW
+            )
+            .is_err()
+    );
+    let ack = HorizonAck::sign([7; 32], &alias, chain.clone()).unwrap();
+    ack.verify(domain.publisher.public_key(), domain.manifest.hash())
+        .unwrap();
+    let bytes = encode(&ack).unwrap();
+    assert!(
+        !bytes
+            .windows(32)
+            .any(|part| part == node.public_key().as_bytes())
+    );
+    let mut forged = ack;
+    forged.horizon[0] ^= 1;
+    assert!(
+        forged
+            .verify(domain.publisher.public_key(), domain.manifest.hash())
+            .is_err()
+    );
+    let outsider = HorizonAck::sign([7; 32], &PrivateKey::new(), chain).unwrap();
+    assert!(
+        outsider
+            .verify(domain.publisher.public_key(), domain.manifest.hash())
+            .is_err()
+    );
 }

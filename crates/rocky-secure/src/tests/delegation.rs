@@ -28,6 +28,7 @@ fn delegated(
             partitions: Vec::new(),
             authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             device: None,
+            node: None,
         })
         .unwrap(),
     };
@@ -42,8 +43,11 @@ fn delegated(
         subject: node.public_key(),
         kind: PrincipalKind::Node,
         delegations: 0,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: Some(rocky_credentials::PeerId::of(node.public_key())),
+            ..Default::default()
+        })
+        .unwrap(),
         ..middle.clone()
     };
     CredentialChain(vec![
@@ -82,6 +86,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 partitions: Vec::new(),
                 authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
                 device: None,
+                node: None,
             })
             .unwrap()
         },

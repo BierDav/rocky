@@ -2,16 +2,8 @@ package org.example.examples.shopping
 
 import rocky.*
 
-/**
- * [ShoppingDatabase]'s tables as Rocky replicates them; importing its Room export with [shoppingRoomOverlay] yields
- * the same definition. `id` and `row_kind` are implicit. A list, its categories and items form the `list` group:
- * one secret per list derives every table's key, so one envelope shares the whole list; sync delivers it to its
- * recipient alone. `devices` names each device's kind and is written by trusted devices only; `keys` is no longer
- * written or read and goes with the roster. Each device
- * publishes its command identity in `identities`. Trusted devices alone read `invitations`, each one's open pairing
- * code, and `coordination`, the household's coordination tenant. `requests` and `decisions` change only through the [ApprovalCommands].
- */
-val ShoppingSchema = schema("shopping", version = 5) {
+/** Room tables plus trusted-only device management; list envelopes travel by direct delivery. */
+val ShoppingSchema = schema("shopping", version = 6) {
     table("lists") {
         text("title")
         primaryKey("id")
@@ -36,24 +28,6 @@ val ShoppingSchema = schema("shopping", version = 5) {
         index("index_items_list_category", "list", "category")
         reference("list", "lists", onDelete = Delete.Cascade)
         reference(listOf("list", "category"), "categories", onDelete = Delete.SetNull)
-    }
-    table("devices") {
-        text("node")
-        text("name")
-        text("kind")
-        primaryKey("node")
-    }
-    table("keys") {
-        text("recipient")
-        integer("list")
-        text("epoch")
-        blob("envelope")
-        primaryKey("recipient", "list")
-    }
-    table("identities") {
-        text("node")
-        text("identity")
-        primaryKey("node")
     }
     table("requests") {
         text("key")

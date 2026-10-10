@@ -34,8 +34,8 @@ val member = RockyDatabase.join(dir2, schema, invitationUri, commands = CommandR
 
 `bundleJson` is the provider's [trust bundle](public-coordination.md#configure-a-device).
 A device that only invokes commands composes no handlers. Invite with a grant
-profile (`Reader`, `Writer` or `Issuer`), then exchange `contact()` and `addPeer`
-so that devices sync with each other and with the executor. A local database works
+profile (`Reader`, `Writer` or `Issuer`), then keep one `contact()` with `addPeer`. Authenticated sessions hand over
+other contacts and command calls request the executor route when needed. A local database works
 with no network and no coordinator: `RockyDatabase.local(dir, schema)`. To share
 your own iroh endpoint, use `PeerTransport.Endpoint(RockyEndpoint.bind(...))`; see
 [iroh](sdk-transports.md#iroh).
@@ -111,19 +111,27 @@ list derives every table's key:
 
 1. `partitions.next("lists")` prepares a new list's secret; insert the list in
    the same transaction that reserves its id.
-2. On an issuer, `partitions.share("list", values, nodes)` returns one envelope
-   per device; the app delivers it and the device calls `install` and
-   `bootstrap`. Accept several lists before syncing if you like.
+2. `db.list(id).share(nodes)` seals the held secret to each recipient. The SDK
+   delivers and installs it through direct sessions or a custody mailbox and
+   bootstraps the list from a checkpoint. No key table is involved. In shopping,
+   members scan a recipient contact; trusted nodes pick from `devices()`.
 3. Run the packaged [custody peer](always-on-peer.md) with the same schema JSON
-   and add its contact on each device. Phones that are never online together
-   then sync through it; it learns new lists from the devices and reads nothing.
-4. `moveRow` moves an item to another list in one commit; an offline edit to it
-   follows it.
-5. Revoking a device rotates every list. Share each list it held again with the
-   remaining devices.
-6. A horizon declares per table and list. Finalize items, then categories, then
-   lists. Each participant syncs with an issuer to acknowledge: custody does not
-   relay horizons.
+   and keep its contact on each device. Phones that are never online together
+   sync through it; it learns new lists and reads nothing. Reciprocal contact
+   entries are unnecessary.
+4. `moveRow` moves an item to another list in one commit; an offline edit follows it.
+5. Revoking a recorded device rotates only scopes it could read, and queues new
+   epochs for remaining readers. No replicated row records recipients.
+6. A horizon declares per table and list, with participants from the issuer
+   registry. Finalize items, then categories, then lists. Custody relays the
+   statements and acknowledgments; a participant need not contact an issuer.
+
+Shopping version 6 exposes only lists, categories, items, requests and decisions
+on members. Device names and kinds are trusted-only; command identities in
+request/decision rows appear as **This device** or **Another device** on members.
+Local contact labels never replicate. A member's directory holds no other
+device's node key; saved contacts and proofs keep
+[one-way references](../decisions/0062-node-references-and-credential-aliases.md).
 
 `./examples/shoppinglist-app/qualify` runs exactly this with each device in its
 own process; the [shopping qualification](shopping-qualification.md) records

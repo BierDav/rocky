@@ -1420,7 +1420,7 @@ async fn scoped_results_stay_scoped_and_the_coordinator_sees_commitments_only() 
     assert_eq!(
         ticket.custody,
         vec![Custody {
-            peer: reader_device.node.public_key(),
+            peer: rocky_credentials::PeerId::of(reader_device.node.public_key()),
             scope: world.stock,
             applied: true
         }]
@@ -1615,7 +1615,10 @@ async fn mesh_another_issuer_revokes_executor_and_successor_finishes_pending_tic
         app: world.domain.app,
         issuer: world.successor.node.public_key(),
         time: now().unwrap(),
-        nodes: [world.executor.node.public_key()].into(),
+        nodes: [rocky_credentials::PeerId::of(
+            world.executor.node.public_key(),
+        )]
+        .into(),
         users: Default::default(),
         capabilities: Default::default(),
         pseudonyms: Default::default(),

@@ -98,18 +98,13 @@ internal fun phones(peer: File, evidence: File) {
                 phone.adb("shell", "pm", "clear", PACKAGE)
                 phone.adb("shell", "pm", "grant", PACKAGE, "android.permission.ACCESS_LOCAL_NETWORK", strict = false)
                 phone.adb("reverse", "tcp:$hostPort", "tcp:$hostPort")
-                // Each phone is an issuing device of the user, so it assigns its own authors and shares lists.
-                phone.send("invitation" to host.call("pairing", "profile" to "issuer").jsonPrimitive.content, "transport" to "tcp")
+                // A is trusted; B is a roster-free member.
+                phone.send("invitation" to host.call("pairing", "profile" to if (phone == a) "issuer" else "writer").jsonPrimitive.content, "transport" to "tcp")
             }
             val contacts = listOf(a, b).associateWith { phone ->
                 phone.send("contact" to "1").first { it.startsWith("contact ") }.split(" ").let { it[1] to it[2] }
             }
             val custody = run.custody(host.call("pairing", "profile" to "custody").jsonPrimitive.content, host)
-            // The custody peer serves configured contacts only: restart it with the phones'.
-            val config = File(root, "peer.json")
-            val stored = Json.parseToJsonElement(config.readText()).jsonObject
-            config.writeText(JsonObject(stored + ("peers" to JsonArray((contacts.values.map { it.second } + host.contact()).map(::JsonPrimitive)))).toString())
-            custody.restart()
             val custodyPort = custody.listen.substringAfterLast(':')
             for (phone in listOf(a, b)) {
                 phone.adb("reverse", "tcp:$custodyPort", "tcp:$custodyPort")
@@ -124,8 +119,7 @@ internal fun phones(peer: File, evidence: File) {
             a.send("add" to "Eggs", "list" to "Weekend")
             val bNode = contacts.getValue(b).first
             for (list in listOf("Weekly", "Weekend")) {
-                // B was enrolled by the host, so A names it; the Share button lists only A's own enrollments.
-                // The envelopes wait at A and reach B through custody.
+                // A learns B from the replicated issuer registry, without a reciprocal contact.
                 check(a.send("share" to list, "to" to bNode).any { it == "share $bNode" }) { "A did not share $list" }
             }
             fun relay(from: Phone, to: Phone) {
@@ -150,6 +144,13 @@ internal fun phones(peer: File, evidence: File) {
             check(a.dump() == converged) { "A: ${a.dump()}" }
             check(b.dump() == converged) { "B: ${b.dump()}" }
             notes += "${elapsed()} ms: one Bread survived; the moved Milk kept B's offline tick on both devices"
+            // The member scans A's contact and delegates an already held list; no registry access is used.
+            check(b.send("share" to "Weekly", "recipientContact" to contacts.getValue(a).second, "online" to "true", "sync" to "1").any { it == "share ${contacts.getValue(a).first}" })
+            notes += "${elapsed()} ms: member B shared Weekly with scanned contact A"
+            a.send("revoke" to bNode, "sync" to "1")
+            val revoked = b.send("online" to "true", "sync" to "1")
+            check(revoked.any { it.startsWith("sync Revoked") }) { "B did not report revocation: $revoked" }
+            notes += "${elapsed()} ms: trusted A revoked member B through custody"
         }
     }.exceptionOrNull()
     val result = buildJsonObject {

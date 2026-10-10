@@ -69,15 +69,19 @@ class KeystoreSecretStore(
         val iv = cipher.iv
         check(iv.size == IV_BYTES) { "unexpected GCM nonce length" }
         directory.mkdirs()
-        val partial = File(directory, ".$name.tmp")
-        FileOutputStream(partial).use { out ->
-            out.write(HEADER)
-            out.write(FORMAT.toInt())
-            out.write(iv)
-            out.write(sealed)
-            out.fd.sync()
+        val partial = File.createTempFile(".rocky-", ".tmp", directory)
+        try {
+            FileOutputStream(partial).use { out ->
+                out.write(HEADER)
+                out.write(FORMAT.toInt())
+                out.write(iv)
+                out.write(sealed)
+                out.fd.sync()
+            }
+            check(partial.renameTo(file)) { "cannot replace secret $name" }
+        } finally {
+            partial.delete()
         }
-        check(partial.renameTo(file)) { "cannot replace secret $name" }
     }
 
     override fun delete(name: String): Unit = synchronized(lock) {
@@ -90,8 +94,7 @@ class KeystoreSecretStore(
     private fun path(name: String): File {
         require(
             name.isNotEmpty() &&
-                // Leave five bytes for the atomic replacement file on a 255-byte filesystem.
-                name.length <= 250 &&
+                name.length <= 255 &&
                 !name.startsWith(".") &&
                 name.all { it in 'a'..'z' || it in '0'..'9' || it in "._-" },
         ) { "invalid secret name" }

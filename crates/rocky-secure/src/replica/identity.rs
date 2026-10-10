@@ -16,6 +16,22 @@ pub(super) struct RowAuthor {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// Registers the key of the local node credential's signing alias.
+    pub async fn register_credential_signer(&self, key: PrivateKey) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        inner
+            .config
+            .credentials
+            .verify_node_alias(
+                inner.config.publisher,
+                inner.manifest,
+                rocky_credentials::PeerId::of(inner.config.node.public_key()),
+                key.public_key(),
+            )
+            .map_err(credential)?;
+        inner.credential_signer = Some(key);
+        Ok(())
+    }
     /// Installs an externally held table pseudonym. Keys are not persisted;
     /// register them again after open or credential renewal.
     pub async fn register_row_author(
@@ -207,7 +223,7 @@ impl<A: RowApplication> Inner<A> {
         self.typed
             .as_ref()
             .and_then(|typed| {
-                typed.by_scope(scope).and_then(|table| {
+                typed.declared_by_scope(scope).and_then(|table| {
                     typed
                         .rows
                         .schema()

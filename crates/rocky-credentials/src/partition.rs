@@ -76,8 +76,12 @@ impl crate::CredentialChain {
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<PartitionGrant>), Error> {
         let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
-        if leaf.subject != subject
-            || leaf.delegations != 0
+        if (match leaf.kind {
+            rocky_core::PrincipalKind::Node => {
+                leaf.extended()?.node != Some(crate::PeerId::of(subject))
+            }
+            _ => leaf.subject != subject,
+        }) || leaf.delegations != 0
             || !matches!(
                 leaf.kind,
                 rocky_core::PrincipalKind::Node | rocky_core::PrincipalKind::Pseudonym
@@ -101,7 +105,7 @@ impl crate::CredentialChain {
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
         let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
-        if leaf.subject != subject
+        if leaf.extended()?.node != Some(crate::PeerId::of(subject))
             || leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.delegations != 0
         {
@@ -191,6 +195,7 @@ impl crate::CredentialChain {
             Vec::new(),
             crate::Extended {
                 authors: Some(crate::AuthorRange::new(author, author)?),
+                node: None,
                 device: Some(crate::SealedDevice::seal(publisher, key, author, device)?),
                 partitions,
             },

@@ -136,7 +136,13 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
         .call(json!({"type": "read", "query": {"sql": "SELECT label FROM tags", "values": [], "max_rows": 16}}))
         .await
         .expect_err("not granted");
-    assert_eq!(denied["code"], "denied");
+    assert_eq!(denied["code"], "rejected");
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("no such table")
+    );
     // A device joining now admits the domain's whole history.
     let invitation = a
         .invite_as(json!({"kind": "reader", "scopes": ["items", "tags"]}))

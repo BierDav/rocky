@@ -13,7 +13,10 @@ pub enum PruneBlock {
     /// The domain requires recovery custodians, whose archives need complete history.
     RecoveryCustody,
     /// A required peer has not acknowledged this operation.
-    Unacknowledged { peer: PublicKey, operation: Hash },
+    Unacknowledged {
+        peer: rocky_credentials::PeerId,
+        operation: Hash,
+    },
     /// Too few other nodes acknowledged this operation: it is a sole copy.
     SoleCopy { operation: Hash },
     /// Too few configured full nodes have applied this operation.
@@ -148,7 +151,7 @@ impl<A: RowApplication> Inner<A> {
             .is_some()
         {
             for peer in &policy.required {
-                if self.horizon_device_behind(scope, *peer).await? {
+                if self.horizon_reference_behind(scope, *peer).await? {
                     policy.behind.insert(*peer);
                 }
             }
@@ -243,21 +246,21 @@ impl<A: RowApplication> Inner<A> {
                     let [SqlValue::Blob(peer), SqlValue::Integer(done)] = peer.as_slice() else {
                         return Err(Error::Corrupt("acknowledgment".into()));
                     };
-                    peers.insert(key_of(peer)?);
+                    peers.insert(super::super::roles::peer_id(peer)?);
                     if *done == 1 {
-                        applied.insert(key_of(peer)?);
+                        applied.insert(super::super::roles::peer_id(peer)?);
                     }
                 }
                 // Receipt alone is not custody: full nodes count once applied.
                 let custodians = role
                     .full_nodes
                     .iter()
-                    .filter(|node| applied.contains(node))
+                    .filter(|node| applied.contains(*node))
                     .count();
                 step.blocked = policy
                     .required
                     .difference(&policy.behind)
-                    .find(|peer| !peers.contains(peer))
+                    .find(|peer| !peers.contains(*peer))
                     .map(|peer| PruneBlock::Unacknowledged {
                         peer: *peer,
                         operation,

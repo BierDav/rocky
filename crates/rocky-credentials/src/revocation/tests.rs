@@ -9,7 +9,7 @@ fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
         app: APP,
         issuer: issuer.public_key(),
         time,
-        nodes: [node].into(),
+        nodes: [crate::PeerId::of(node)].into(),
         users: [PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
         pseudonyms: BTreeSet::new(),
@@ -151,7 +151,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     forged
         .statement
         .nodes
-        .insert(PrivateKey::new().public_key());
+        .insert(crate::PeerId::of(PrivateKey::new().public_key()));
     let other_app = SignedRevocation::sign(
         Revocation {
             app: AppId([8; 16]),

@@ -35,11 +35,13 @@ naturally holds.
 | 0057 | [Discovery capability and topic](0057-discovery.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
+| [0061](0061-readable-projections-and-checkpoint-custody.md) | Readable physical projections and sealed finalized checkpoint custody |
+| [0062](0062-node-references-and-credential-aliases.md) | One-way node references and distinct credential signing aliases |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0061.
+unreserved record is 0063.
 
 ## Rationale by topic
 

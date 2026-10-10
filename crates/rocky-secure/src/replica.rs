@@ -190,6 +190,7 @@ pub(super) struct Inner<A> {
     /// Stored chains decoded recently, by digest.
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
     row_authors: BTreeMap<Commitment, identity::RowAuthor>,
+    pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
@@ -378,6 +379,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         moves::SCHEMA,
         partition::SCHEMA,
         checkpoint::SCHEMA,
+        checkpoint::ARCHIVE_SCHEMA,
         roles::SCHEMA,
         keys::SCHEMA,
         existence::SCHEMA,
@@ -417,7 +419,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v12" {
+    if label != "rocky.encrypted-replica.v14" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -558,6 +560,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chains: Default::default(),
             config,
             row_authors: BTreeMap::new(),
+            credential_signer: None,
             partitions: BTreeMap::new(),
             history,
             manifest: manifest.hash(),

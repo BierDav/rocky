@@ -1,6 +1,7 @@
 # 20. Shopping without a roster
 
-Status: not started.
+Status: complete, on main `8ffd2ed4` with Phase 21. See
+[evidence](20-shopping-without-a-roster-evidence.md).
 Owner: `examples/shoppinglist-app` and its harness; the starter guide and
 the audit. Depends on [phase 5](05-issuer-registry.md),
 [phase 12](12-direct-key-delivery.md), [phase 13](13-relayed-horizon.md) and
@@ -91,7 +92,9 @@ earlier phases provide.
 
 - Registry fields for application data beyond the label, or showing the
   registry to members.
-- Any change to an SDK format, session message or grant rule.
+- Grant-rule changes. SDK projection and checkpoint custody repairs, including
+  their current formats, are authorized for this implementation; see
+  [decision 0061](../decisions/0061-readable-projections-and-checkpoint-custody.md).
 - Removing approvals, or hiding command identities from members.
 - A replicated contact or label table.
 - Local or topic discovery in the application's flows.

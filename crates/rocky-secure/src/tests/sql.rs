@@ -199,8 +199,11 @@ impl Typed {
             not_before: crate::tests::lifetime().0,
             expires,
             delegations,
-            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-                .unwrap(),
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                ..Default::default()
+            })
+            .unwrap(),
         };
         CredentialChain(vec![
             SignedCapability::sign(
@@ -1856,7 +1859,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 8);
+    assert_eq!(signed.statement.format, 9);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 

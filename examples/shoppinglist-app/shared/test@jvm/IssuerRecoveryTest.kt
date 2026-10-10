@@ -11,7 +11,7 @@ class IssuerRecoveryTest {
     private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
 
     /** Room checks every table it declares, so a device reads the household and approval tables too. */
-    private val writer = GrantProfile.Writer(ShoppingTables.toSet() + listOf("devices", "keys", "identities", "requests", "decisions"))
+    private val writer = NodeKind.Full.profile
     private val rooms = mutableMapOf<RockyDatabase, ShoppingDatabase>()
     private var list = 0L
     private fun RockyDatabase.withRoom(directory: File) = also { rooms[it] = openShoppingDatabase(directory, it) }

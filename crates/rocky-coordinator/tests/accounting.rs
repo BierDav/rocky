@@ -143,8 +143,11 @@ async fn registration_does_not_authorize_accounting_and_learned_deletion_revokes
         not_before: time - rocky_credentials::DAY,
         expires: time + 300 * rocky_credentials::DAY,
         delegations,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+            ..Default::default()
+        })
+        .unwrap(),
     };
     let signed = SignedManifest::sign(&manifest, &accounting).unwrap();
     let config = |credentials| SecureConfig {

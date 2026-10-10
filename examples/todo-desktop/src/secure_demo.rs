@@ -112,7 +112,10 @@ impl SecureDemo {
                     expires,
                     delegations: 0,
                     extension: rocky_secure::credentials::Extension::new(
-                        rocky_secure::credentials::Extended::default(),
+                        rocky_secure::credentials::Extended {
+                            node: Some(rocky_secure::PeerId::of(node.public_key())),
+                            ..Default::default()
+                        },
                     )
                     .map_err(signing)?,
                 },

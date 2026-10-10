@@ -154,7 +154,12 @@ async fn a_joined_member_receives_later_writes_without_a_poll_or_contact_copy()
                 assert!(settings.peers.contains_key(&member_key));
                 assert!(!settings.issuers.contains(&member_key));
                 let saved: Settings = serde_json::from_slice(&std::fs::read(&issuer.path)?)?;
-                assert!(saved.peers.contains_key(&member_key));
+                assert!(
+                    saved
+                        .unresolved_contacts()
+                        .iter()
+                        .any(|(id, _)| *id == rocky_credentials::PeerId::of(member_key))
+                );
             }
             until(|| hub.dials_to("member") > 0).await;
             settled(&issuer).await;

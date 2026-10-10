@@ -21,7 +21,7 @@ configures roles, syncs scopes and frees space on a device.
 ```rust
 device.set_role(RoleConfig {
     role: ReplicaRole::Partial,
-    full_nodes: [full_node_key].into(),
+    full_nodes: [rocky_secure::PeerId::of(full_node_key)].into(),
     custody: 1,
 }).await?;
 device.subscribe(scope).await?;
@@ -204,3 +204,7 @@ limits. `audit` fails on an operation whose chain is missing.
   doubles as acknowledgment for pruning, custody and outbox clearing.
 - **Holding everything confers no execution or confirmation right**; strong
   commands still need the coordinator.
+
+Secure replica role configuration stores one-way `PeerId` references. Frontier
+acknowledgments resolve the same reference from the authenticated session. See
+[node-key privacy](../decisions/0062-node-references-and-credential-aliases.md).

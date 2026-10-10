@@ -237,6 +237,8 @@ pub(crate) struct Node {
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
+    resolution_retries:
+        std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
     forwarding: command_mesh::Slots,
     sync_control: watch::Sender<u64>,
     worker_running: watch::Sender<bool>,
@@ -305,6 +307,7 @@ impl Node {
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
             retries: std::sync::Mutex::new(BTreeMap::new()),
+            resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
             forwarding: command_mesh::Slots::default(),
             sync_control: watch::channel(0).0,
             worker_running: watch::channel(false).0,
@@ -797,11 +800,16 @@ impl Node {
                     json!({"current": HEXLOWER.encode(&current), "previous": previous.map(|topic| HEXLOWER.encode(&topic))}),
                 )
             }
-            "peers" => Ok(json!({
-                "peers": self.peers().await,
-                "discovery": self.discovery_status(),
-                "issuer_contact": self.settings.lock().await.issuer_contact(),
-            })),
+            "peers" => {
+                if let Some(link) = self.current() {
+                    Box::pin(self.resolve_saved_contacts(&*link.transport)).await;
+                }
+                Ok(json!({
+                    "peers": self.peers().await,
+                    "discovery": self.discovery_status(),
+                    "issuer_contact": self.settings.lock().await.issuer_contact(),
+                }))
+            }
             "enrollment_route" => Ok(json!({"uri": crate::route_enrollment(
                 request["uri"].as_str().ok_or_else(|| refused("uri must be an invitation or issuer contact"))?,
                 request["contact"].as_str().ok_or_else(|| refused("contact must name the custody peer"))?,
@@ -1233,7 +1241,11 @@ impl Node {
                 let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
                 let signed = rocky_credentials::SignedHorizon::sign(statement, &publisher)?;
                 let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-                let participates = signed.statement.peers.iter().any(|peer| peer.node == own);
+                let participates = signed
+                    .statement
+                    .peers
+                    .iter()
+                    .any(|peer| peer.node == rocky_credentials::PeerId::of(own));
                 self.replica.receive_horizon(signed).await?;
                 if participates {
                     self.replica.acknowledge_horizon(scope).await?;
@@ -1584,6 +1596,11 @@ impl Node {
         first: Option<PublicKey>,
         epochs_only: bool,
     ) -> Result<(), Failure> {
+        let attached = self.current();
+        let transport = transport.or_else(|| attached.as_ref().map(|link| &*link.transport));
+        if let Some(transport) = transport {
+            Box::pin(self.resolve_saved_contacts(transport)).await;
+        }
         let current = self.settings.lock().await.clone();
         let request = async {
             if epochs_only {
@@ -1898,6 +1915,13 @@ impl Node {
             .values()
             .filter(|state| state.pending)
             .filter_map(|state| state.retry.deadline())
+            .chain(
+                self.resolution_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .values()
+                    .filter_map(crate::scheduling::Retry::deadline),
+            )
             .min()
     }
     /// One worker per link; only pending work has a retry timer.
@@ -1994,6 +2018,24 @@ impl Node {
         let _syncing = self.syncing.lock().await;
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace("syncing");
+        Box::pin(self.resolve_saved_contacts(transport)).await;
+        let saved = self.settings.lock().await.clone();
+        if !automatic && self.dialed(&saved).is_empty() && !saved.unresolved_contacts().is_empty() {
+            if saved
+                .unresolved_contacts()
+                .iter()
+                .all(|(_, contact)| contact.addresses(transport.kind()).is_empty())
+            {
+                return Err(ServiceError::NoRoute {
+                    peer: "a saved peer",
+                    network: transport.kind().into(),
+                }
+                .into());
+            }
+            return Err(
+                ServiceError::Unreachable("saved contacts could not be resolved".into()).into(),
+            );
+        }
         let settings = self.settings.lock().await.clone();
         let member = !settings.issuer();
         if settings.expires() < now()?.saturating_add(settings.ttl / 2) {
@@ -2562,6 +2604,14 @@ impl Node {
                     if let Some(reply) = self.forward_enrollment(Protocol::Renew, &request).await? {
                         return Ok(reply);
                     }
+                    if let Some(reply) =
+                        rocky_secure::network::NativeSession::peer_resolution_reply(
+                            &request,
+                            &PrivateKey::from_bytes(&self.vault.get("node")?),
+                        )?
+                    {
+                        return Ok(reply);
+                    }
                     let settings = self.settings.lock().await.clone();
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
@@ -2632,9 +2682,9 @@ impl Node {
         request: &[u8],
     ) -> Result<Option<Vec<u8>>, Failure> {
         let settings = self.settings.lock().await.clone();
-        let Some(upstream) = settings.enrollment_upstream else {
+        if !settings.has_enrollment_upstream() {
             return Ok(None);
-        };
+        }
         if settings.issuer() || !matches!(settings.profile, Profile::Custody { .. }) {
             return Err(refused(
                 "enrollment forwarding requires a custody-only node",
@@ -2644,6 +2694,15 @@ impl Node {
         let link = attached
             .as_ref()
             .ok_or(ServiceError::NetworkRequired("enrollment forwarding"))?;
+        if settings.enrollment_upstream.is_none()
+            && let Some(node) = settings.resolve_saved_upstream(&*link.transport).await?
+        {
+            self.settings.lock().await.bind_saved_contact(node);
+        }
+        let settings = self.settings.lock().await.clone();
+        let upstream = settings
+            .enrollment_upstream
+            .ok_or_else(|| refused("enrollment upstream could not be resolved"))?;
         let contact = settings
             .peers
             .get(&upstream)

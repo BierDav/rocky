@@ -116,7 +116,14 @@ impl<A: RowApplication> Inner<A> {
                 && target <= record.position
             {
                 let signed = inner.verify_record(scope, record)?;
-                if signed.signer() == inner.config.node.public_key()
+                let signer = inner
+                    .row_authors
+                    .get(&scope.table)
+                    .map(|author| &author.key)
+                    .or(inner.credential_signer.as_ref())
+                    .unwrap_or(&inner.config.node)
+                    .public_key();
+                if signed.signer() == signer
                     && signed.statement.revocations == inner.revocation_digest()?
                     && signed.statement.key_epoch == inner.scope_key(scope)?.0
                     && signed.statement.strong.head == inner.capture_strong(scope).await?.head
@@ -311,11 +318,7 @@ impl<A: RowApplication> Inner<A> {
             };
             let strong_state = inner.capture_strong(scope).await?;
             inner.conn.execute("INSERT INTO secure_checkpoint_strong VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET state=excluded.state", bindings(vec![SqlValue::Integer(id),SqlValue::Blob(encode(&strong_state)?)])).await?;
-            let signed = SignedCheckpoint::sign(
-                statement,
-                &inner.config.node,
-                inner.config.credentials.clone(),
-            )?;
+            let signed = inner.sign_checkpoint(statement)?;
             inner
                 .conn
                 .execute(

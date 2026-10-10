@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simulator/Android emulator acceptance: shopping custody delivery."""
+"""Simulator/Android emulator acceptance: roster-free pairing, custody delivery, sharing and revocation."""
 import argparse
 import base64
 import json
@@ -194,6 +194,17 @@ def emulator_contact(contact, android, forwards):
     return prefix + base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
 
 
+def reverse_contact(contact, android, owned):
+    # The simulator listens on host loopback; the emulator reaches it through adb reverse.
+    encoded = contact.removeprefix("rocky://peer/")
+    value = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+    for route in value["routes"]:
+        if route["transport"] == "tcp":
+            port = int(route["address"].rsplit(":", 1)[1])
+            android.reverse_ports.append(port)
+            owned.append(port)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("ios-device", "android-device", "ios-shopping", "android-shopping", "peer"):
@@ -272,6 +283,18 @@ def main():
         ios.call("open", ios.package, "--foreground")
         android.expect("foreground automatically delivers the offline row through custody", "Milk")
         ios.expect("foreground keeps the committed local row", "Milk")
+        # The member scans the trusted simulator's contact; it reads no registry.
+        ios_node, ios_contact = contacts["ios"]
+        reverse_contact(ios_contact, android, reverse_owned)
+        shared = android.drive(share="Offline groceries", recipientContact=ios_contact, sync="1")
+        if "share " + ios_node not in shared:
+            raise RuntimeError("member share by scanned contact failed: " + repr(shared))
+        android.notes.append({"name": "member shares by scanned contact", "text": "share " + ios_node})
+        ios.drive(revoke=contacts["android"][0], sync="1")
+        revoked = android.drive(sync="1")
+        if not any(line.startswith("sync Revoked") for line in revoked):
+            raise RuntimeError("member did not report revocation: " + repr(revoked))
+        android.notes.append({"name": "trusted simulator revokes the member through custody", "text": "sync Revoked"})
         for mobile in (ios, android):
             mobile.call("close")
         custody.terminate()

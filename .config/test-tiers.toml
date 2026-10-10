@@ -24,6 +24,11 @@ suite = "10s"
 # Phase 21 Kotlin/Native application tests run in check-ios on macOS, enforce
 # the same 2 s integration budget, and are outside nextest. The agent-device
 # procedure is e2e (15 min). No Rust filter or budget exception is needed.
+# Phase 20 adds Kotlin application integration and shopping multi-process e2e
+# gates in the shopping CI job; scripts/test-tiers handles Rust binaries only.
+# The Rust driver projection and secure horizon custody regressions use real
+# SQLite and sessions; the existing integration filters include them.
+# No filter change or exception is needed.
 [integration]
 per-test = "2s"
 suite = "5m"

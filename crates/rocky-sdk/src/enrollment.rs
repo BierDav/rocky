@@ -19,7 +19,7 @@ use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelectio
 use rocky_credentials::{
     Admission, AuthorRange, Authority, Credentials, Invitation, MAX_LIVE_REVOCATIONS, PairRequest,
     Profile, PseudonymRequest, REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
-    device_chain, open_enrollment, seal_enrollment,
+    open_enrollment, seal_enrollment,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 16;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -97,6 +97,11 @@ const NOTICE_VERSION: u32 = 2;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    #[serde(skip)]
+    pub(crate) delivery_nodes: BTreeMap<rocky_credentials::PeerId, PublicKey>,
+    pub(crate) contact_refs: BTreeMap<rocky_credentials::PeerId, StoredContact>,
+    #[serde(skip)]
+    pub(crate) resolved_refs: BTreeSet<rocky_credentials::PeerId>,
     pub version: u32,
     pub installation: String,
     pub schema: Schema,
@@ -121,14 +126,19 @@ pub struct Settings {
     pub authority: Option<Issuing>,
     /// The issuers that renew this device, by node key. Their routes are
     /// in `peers`.
+    #[serde(skip)]
     pub issuers: Vec<PublicKey>,
     /// A fixed issuer whose pairing/renewal responses this custody node relays.
+    #[serde(skip)]
     pub enrollment_upstream: Option<PublicKey>,
     /// This device's contacts, by node key, with the routes last learned
     /// for each. A contact is a route that grants nothing: any admitted
     /// peer is served, and sync dials contacts.
+    #[serde(skip)]
     pub peers: BTreeMap<PublicKey, Contact>,
+    #[serde(skip)]
     pub contact_meta: BTreeMap<PublicKey, crate::mesh::ContactMeta>,
+    #[serde(skip)]
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
     /// The generations the domain left, oldest first. Empty until its
@@ -202,7 +212,7 @@ pub struct Issuing {
     pub rotation: Option<Rotation>,
     /// Every node and user key a statement this issuer learned revoked.
     /// Kept after the statement leaves the set: no renewal for them.
-    pub tombstones: BTreeSet<PublicKey>,
+    pub tombstones: BTreeSet<rocky_credentials::PeerId>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,7 +228,7 @@ pub struct Claim {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rotation {
-    pub node: PublicKey,
+    pub node: Option<PublicKey>,
     pub statement: Revocation,
     pub statements: Vec<Commitment>,
     pub keys: BTreeMap<String, u64>,
@@ -462,7 +472,7 @@ impl Intent {
             nonce: HEXLOWER.encode(&random::<32>()),
         };
         let vault = Vault::new(store.clone(), &intent.installation);
-        for role in ["user", "node", "transport"] {
+        for role in ["user", "node", "transport", "credential"] {
             vault.create(role)?;
         }
         write_private(path, &serde_json::to_vec(&intent)?)?;
@@ -670,9 +680,14 @@ impl Settings {
         if let Some(authority) = &mut self.authority {
             for signed in self.revocations.statements() {
                 let statement = &signed.statement;
-                authority
-                    .tombstones
-                    .extend(statement.nodes.iter().chain(&statement.users));
+                authority.tombstones.extend(
+                    statement.nodes.iter().copied().chain(
+                        statement
+                            .users
+                            .iter()
+                            .map(|key| rocky_credentials::PeerId::of(*key)),
+                    ),
+                );
             }
         }
         Ok(added)
@@ -757,11 +772,16 @@ impl Settings {
                 return Err("invalid epoch revocation IDs".into());
             }
         }
+        settings.validate_saved_contacts()?;
         settings.check_deliveries()?;
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<(), Failure> {
-        write_private(path, &serde_json::to_vec(self)?)
+        {
+            let saved = self.with_saved_contacts();
+            saved.validate_saved_contacts()?;
+            write_private(path, &serde_json::to_vec(&saved)?)
+        }
     }
     pub fn vault(&self, store: &std::sync::Arc<dyn crate::SecretStore>) -> Vault {
         Vault::new(store.clone(), &self.installation)
@@ -930,10 +950,11 @@ impl Settings {
             return Err("the contact names this device".into());
         }
         let learned = Contact::checked(record.routes)?;
+        self.bind_saved_contact(record.node);
         if self.revoked(&record.node) {
             return Err("the contact names a revoked device".into());
         }
-        if !self.peers.contains_key(&record.node) && self.peers.len() >= MAX_CONTACTS {
+        if !self.peers.contains_key(&record.node) && self.contact_count() >= MAX_CONTACTS {
             return Err("contact capacity reached".into());
         }
         if record.issuer && !self.issuers.contains(&record.node) {
@@ -968,7 +989,14 @@ impl Settings {
     /// Forgets a peer, an issuer included: any issuer renews any device,
     /// and a member left without issuer contact reports it.
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
-        self.peers.remove(&node).ok_or("unknown peer")?;
+        let saved = self
+            .contact_refs
+            .remove(&rocky_credentials::PeerId::of(node));
+        self.resolved_refs
+            .remove(&rocky_credentials::PeerId::of(node));
+        if self.peers.remove(&node).is_none() && saved.is_none() {
+            return Err("unknown peer".into());
+        }
         self.contact_meta.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
         self.enrollment_routes.remove(&node);
@@ -1007,6 +1035,7 @@ impl Settings {
             "node",
             "user",
             "transport",
+            "credential",
             "publisher",
             "invitation",
             "author-issuer",
@@ -1073,6 +1102,11 @@ impl Settings {
     /// configured issuer has routes.
     pub fn issuer_contact(&self) -> bool {
         self.issuer()
+            || self.contact_refs.iter().any(|(id, entry)| {
+                !self.resolved_refs.contains(id)
+                    && entry.issuer
+                    && (!entry.contact.routes.is_empty() || entry.enrollment.is_some())
+            })
             || self.issuers.iter().any(|issuer| {
                 self.peers
                     .get(issuer)
@@ -1100,6 +1134,7 @@ impl Settings {
         let user = PrivateKey::from_bytes(&vault.create("user")?);
         let node = PrivateKey::from_bytes(&vault.create("node")?);
         vault.create("transport")?;
+        vault.create("credential")?;
         let (mesh, domain) = (MeshId(random()), DomainId(random()));
         let bound = Domain::new(schema, *publisher.public_key().as_bytes(), mesh, domain)?;
         crate::mesh::create_root(&vault, &publisher, bound.scope)?;
@@ -1128,6 +1163,9 @@ impl Settings {
             authority: Some(Issuing::default()),
             issuers: Vec::new(),
             enrollment_upstream: None,
+            delivery_nodes: BTreeMap::new(),
+            contact_refs: BTreeMap::new(),
+            resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
@@ -1149,7 +1187,7 @@ impl Settings {
             grants,
             Some(AuthorRange::ALL),
         )?;
-        settings.credentials = settings.chain(capability, &user, &node, &bound)?;
+        settings.credentials = settings.chain(capability, &user, &node, &bound, &vault)?;
         Ok(settings)
     }
     fn validity(&self) -> Result<(u64, u64, u64), Failure> {
@@ -1185,8 +1223,14 @@ impl Settings {
         user: &PrivateKey,
         node: &PrivateKey,
         domain: &Domain,
+        vault: &Vault,
     ) -> Result<CredentialChain, Failure> {
-        let chain = device_chain(capability, user, node.public_key())?;
+        let alias = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+        let chain = CredentialChain(vec![capability]).complete_with_alias(
+            user,
+            node.public_key(),
+            alias,
+        )?;
         chain.verify_selectors(
             self.publisher,
             domain.manifest().hash(),
@@ -1737,9 +1781,35 @@ impl Settings {
         if chain
             .0
             .last()
+            .is_some_and(|last| last.capability.kind == rocky_core::PrincipalKind::Node)
+            && chain
+                .0
+                .iter()
+                .rev()
+                .nth(1)
+                .is_some_and(|parent| parent.capability.subject == user.public_key())
+        {
+            chain.verify_selectors(
+                self.publisher,
+                domain.manifest().hash(),
+                node.public_key(),
+                &credentials.revocations,
+                now()?,
+            )?;
+            let mut leaf = chain.0.pop().ok_or("missing node credential")?.capability;
+            leaf.subject = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+            chain.0.push(SignedCapability::sign(leaf, &user)?);
+        }
+        if chain
+            .0
+            .last()
             .is_some_and(|last| last.capability.subject == user.public_key())
         {
-            chain = chain.complete(&user, node.public_key())?;
+            chain = chain.complete_with_alias(
+                &user,
+                node.public_key(),
+                PrivateKey::from_bytes(&vault.get("credential")?).public_key(),
+            )?;
         }
         let mut revocations = self.revocations.clone();
         revocations.merge(
@@ -2228,7 +2298,7 @@ impl Settings {
             if exclude.contains(node) || self.peers.contains_key(node) {
                 continue;
             }
-            if self.peers.len() >= MAX_CONTACTS {
+            if self.contact_count() >= MAX_CONTACTS {
                 break;
             }
             self.peers.insert(*node, contact.clone());
@@ -2296,7 +2366,7 @@ impl Settings {
         let Ok(contact) = Contact::checked(routes) else {
             return;
         };
-        let full = (!self.peers.contains_key(&node) && self.peers.len() >= MAX_CONTACTS)
+        let full = (!self.peers.contains_key(&node) && self.contact_count() >= MAX_CONTACTS)
             || (issuer && !self.issuers.contains(&node) && self.issuers.len() >= MAX_ISSUERS);
         if contact.routes.is_empty() || full {
             return;
@@ -2312,6 +2382,8 @@ impl Settings {
     /// Forgets the peers and issuers a held statement revokes, such as a
     /// lost issuer another one revoked.
     pub(crate) fn forget_revoked(&mut self) {
+        self.contact_refs
+            .retain(|id, entry| entry.upstream || !self.revocations.revokes_reference(id));
         let gone: Vec<PublicKey> = self
             .peers
             .keys()
@@ -2389,6 +2461,9 @@ impl Settings {
             authority: None,
             issuers: Vec::new(),
             enrollment_upstream: None,
+            delivery_nodes: BTreeMap::new(),
+            contact_refs: BTreeMap::new(),
+            resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
@@ -2406,10 +2481,46 @@ impl Settings {
         if credentials.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
             return Err("the domain's manifest differs from this application schema".into());
         }
+        if settings
+            .credentials
+            .0
+            .last()
+            .is_some_and(|last| last.capability.kind == rocky_core::PrincipalKind::Node)
+            && settings
+                .credentials
+                .0
+                .iter()
+                .rev()
+                .nth(1)
+                .is_some_and(|parent| parent.capability.subject == user.public_key())
+        {
+            settings.credentials.verify_selectors(
+                settings.publisher,
+                domain.manifest().hash(),
+                node.public_key(),
+                &credentials.revocations,
+                now()?,
+            )?;
+            let mut leaf = settings
+                .credentials
+                .0
+                .pop()
+                .ok_or("missing node credential")?
+                .capability;
+            leaf.subject = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+            settings
+                .credentials
+                .0
+                .push(SignedCapability::sign(leaf, &user)?);
+        }
         // A chain that ends at this device's user is completed by the device.
         if let Some(last) = settings.credentials.0.pop() {
             if last.capability.subject == user.public_key() {
-                let own = device_chain(last, &user, node.public_key())?;
+                let own = CredentialChain(vec![last]).complete_with_alias(
+                    &user,
+                    node.public_key(),
+                    PrivateKey::from_bytes(&vault.get("credential")?).public_key(),
+                )?;
                 settings.credentials.0.extend(own.0);
             } else {
                 settings.credentials.0.push(last);
@@ -2557,6 +2668,9 @@ impl Joining {
             authority: None,
             issuers: vec![enrollment.issuer],
             enrollment_upstream: None,
+            delivery_nodes: BTreeMap::new(),
+            contact_refs: BTreeMap::new(),
+            resolved_refs: BTreeSet::new(),
             contact_meta: BTreeMap::new(),
             peers: BTreeMap::from([(
                 enrollment.issuer,
@@ -2596,7 +2710,8 @@ impl Joining {
         {
             return Err("the enrollment differs from its invitation".into());
         }
-        settings.credentials = settings.chain(enrollment.capability, &user, &node, &domain)?;
+        settings.credentials =
+            settings.chain(enrollment.capability, &user, &node, &domain, &vault)?;
         for (name, scope) in domain.scopes() {
             if !reads(&grants, scope) {
                 continue;
@@ -2888,7 +3003,7 @@ impl Settings {
         }
         let mut next = self.clone();
         next.learn_revocations(&renewal.revocations)?;
-        let chain = next.chain(renewal.capability, &user, &node, &domain)?;
+        let chain = next.chain(renewal.capability, &user, &node, &domain, vault)?;
         let Sealed {
             keys: received,
             groups,
@@ -2933,7 +3048,7 @@ impl Settings {
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let authors = self.minting.map(|minting| minting.range);
         let capability = self.issue(&publisher, &domain, user.public_key(), grants, authors)?;
-        self.chain(capability, &user, &node, &domain)
+        self.chain(capability, &user, &node, &domain, vault)
     }
     /// Renews into this identity's generation from an issuer, presenting
     /// `previous`'s chain. The grants are this device's profile over the
@@ -2962,7 +3077,7 @@ impl Settings {
         }
         let mut next = self.clone();
         next.learn_revocations(&renewal.revocations)?;
-        let chain = next.chain(renewal.capability, &user, &node, &domain)?;
+        let chain = next.chain(renewal.capability, &user, &node, &domain, vault)?;
         let Sealed {
             keys: received,
             groups,
@@ -3153,10 +3268,11 @@ impl Settings {
     /// an issuer, a tombstone.
     fn tombstoned(&self, key: &PublicKey) -> bool {
         self.revocations.revokes(key)
-            || self
-                .authority
-                .as_ref()
-                .is_some_and(|authority| authority.tombstones.contains(key))
+            || self.authority.as_ref().is_some_and(|authority| {
+                authority
+                    .tombstones
+                    .contains(&rocky_credentials::PeerId::of(*key))
+            })
     }
     /// Whether a statement, a tombstone or the registry revoked a device,
     /// or a statement or tombstone its recorded user.
@@ -3237,7 +3353,14 @@ impl Settings {
             .last()
             .map(|leaf| leaf.capability.subject)
             .ok_or("empty device credential chain")?;
-        if own == node {
+        if self
+            .credentials
+            .0
+            .last()
+            .and_then(|leaf| leaf.capability.extended().ok())
+            .and_then(|extension| extension.node)
+            == Some(rocky_credentials::PeerId::of(node))
+        {
             return Err("an issuer cannot revoke itself".into());
         }
         if self.revoked_device(&node, registry) {
@@ -3258,7 +3381,7 @@ impl Settings {
             app: domain.manifest().app,
             issuer: own,
             time,
-            nodes: [node].into(),
+            nodes: [rocky_credentials::PeerId::of(node)].into(),
             users: record.iter().filter_map(|record| record.user).collect(),
             capabilities: record
                 .iter()
@@ -3328,7 +3451,7 @@ impl Settings {
             return Err("the revocation names too many keys".into());
         }
         self.issuing("revokes devices")?.rotation = Some(Rotation {
-            node,
+            node: Some(node),
             statements: {
                 let mut ids = self
                     .revocations
@@ -3368,7 +3491,10 @@ impl Settings {
                 .iter()
                 .map(|node| {
                     registry
-                        .get(node)
+                        .records
+                        .iter()
+                        .find(|(key, _)| rocky_credentials::PeerId::of(**key) == *node)
+                        .map(|(_, record)| record)
                         .filter(|record| record.device.is_some() || !record.grants.is_empty())
                         .map(Revoking::of)
                 })
@@ -3454,7 +3580,11 @@ impl Settings {
             .collect::<Result<Vec<_>, _>>()?;
         statements.sort_unstable();
         self.issuing("rotates exposed scopes")?.rotation = Some(Rotation {
-            node,
+            node: registry
+                .records
+                .keys()
+                .find(|key| rocky_credentials::PeerId::of(**key) == node)
+                .copied(),
             statement,
             statements,
             keys,
@@ -3542,15 +3672,18 @@ impl Settings {
                 publisher: &publisher,
                 manifest: domain.manifest().hash(),
             }
-            .revoke(statement, &PrivateKey::from_bytes(&vault.get("node")?))?,
+            .revoke(
+                statement,
+                &PrivateKey::from_bytes(&vault.get("credential")?),
+            )?,
         };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;
         self.credentials = self.renew_locally(vault)?;
         fault::check(fault::Stage::Renewed)?;
-        self.peers.remove(&node);
-        self.issuers.retain(|issuer| *issuer != node);
-        self.enrollment_routes.remove(&node);
+        if let Some(node) = node {
+            let _ = self.remove_peer(node);
+        }
         // Keep the redo intent until the registry commits its tombstone.
         Ok(Some(keys))
     }
@@ -3570,7 +3703,7 @@ impl Settings {
         else {
             return Ok(());
         };
-        if !registry.revoked(&node) {
+        if node.is_some_and(|node| !registry.revoked(&node)) {
             return Err("revocation tombstone is not committed".into());
         }
         self.queue_rotation(vault, domain, registry)?;
@@ -3789,6 +3922,161 @@ fn whole_partitions(
             })
         })
         .collect()
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StoredContact {
+    contact: Contact,
+    meta: Option<crate::mesh::ContactMeta>,
+    issuer: bool,
+    enrollment: Option<Contact>,
+    upstream: bool,
+}
+impl Settings {
+    pub(crate) fn contact_count(&self) -> usize {
+        let mut ids: BTreeSet<_> = self
+            .contact_refs
+            .keys()
+            .filter(|id| !self.resolved_refs.contains(id))
+            .copied()
+            .collect();
+        ids.extend(
+            self.peers
+                .keys()
+                .map(|key| rocky_credentials::PeerId::of(*key)),
+        );
+        ids.len()
+    }
+    fn with_saved_contacts(&self) -> Self {
+        let mut saved = self.clone();
+        saved
+            .contact_refs
+            .retain(|id, _| !self.resolved_refs.contains(id));
+        for (node, contact) in &self.peers {
+            saved.contact_refs.insert(
+                rocky_credentials::PeerId::of(*node),
+                StoredContact {
+                    contact: contact.clone(),
+                    meta: self.contact_meta.get(node).cloned(),
+                    issuer: self.issuers.contains(node),
+                    enrollment: self.enrollment_routes.get(node).cloned(),
+                    upstream: self.enrollment_upstream == Some(*node),
+                },
+            );
+        }
+        saved
+    }
+    fn validate_saved_contacts(&self) -> Result<(), Failure> {
+        if self.contact_refs.len() > MAX_CONTACTS
+            || self
+                .contact_refs
+                .values()
+                .filter(|entry| entry.issuer)
+                .count()
+                > MAX_ISSUERS
+            || self
+                .contact_refs
+                .values()
+                .filter(|entry| entry.upstream)
+                .count()
+                > 1
+        {
+            return Err("identity holds too many contacts".into());
+        }
+        for entry in self.contact_refs.values() {
+            Contact::checked(entry.contact.routes.clone())?;
+            if let Some(contact) = &entry.enrollment {
+                Contact::checked(contact.routes.clone())?;
+                if !entry.issuer {
+                    return Err("enrollment route requires an issuer".into());
+                }
+            }
+            if entry.meta.as_ref().is_some_and(|meta| {
+                !matches!(
+                    meta.source.as_str(),
+                    "application" | "enrollment" | "handover" | "request" | "discovery"
+                )
+            }) {
+                return Err("invalid contact metadata".into());
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn bind_saved_contact(&mut self, node: PublicKey) {
+        let id = rocky_credentials::PeerId::of(node);
+        if self.resolved_refs.insert(id)
+            && let Some(entry) = self.contact_refs.get(&id)
+        {
+            self.peers.insert(node, entry.contact.clone());
+            if let Some(meta) = &entry.meta {
+                self.contact_meta.insert(node, meta.clone());
+            }
+            if entry.issuer && !self.issuers.contains(&node) {
+                self.issuers.push(node);
+            }
+            if let Some(contact) = &entry.enrollment {
+                self.enrollment_routes.insert(node, contact.clone());
+            }
+            if entry.upstream {
+                self.enrollment_upstream = Some(node);
+            }
+        }
+    }
+    pub(crate) async fn resolve_saved_route(
+        &self,
+        transport: &dyn Transport,
+        id: rocky_credentials::PeerId,
+    ) -> Result<Option<PublicKey>, Failure> {
+        let Some(entry) = self.contact_refs.get(&id) else {
+            return Ok(None);
+        };
+        let (contact, protocol) = if entry.contact.routes.is_empty() {
+            match &entry.enrollment {
+                Some(contact) => (contact, Protocol::Renew),
+                None => return Ok(None),
+            }
+        } else {
+            (&entry.contact, Protocol::Sync)
+        };
+        let addresses = contact.addresses(transport.kind());
+        if addresses.is_empty() {
+            return Ok(None);
+        }
+        let stream = dial(transport, &addresses, protocol).await?;
+        Ok(Some(
+            rocky_secure::network::NativeSession::resolve_peer(stream, id).await?,
+        ))
+    }
+    pub(crate) fn has_enrollment_upstream(&self) -> bool {
+        self.enrollment_upstream.is_some() || self.contact_refs.values().any(|entry| entry.upstream)
+    }
+    pub(crate) async fn resolve_saved_upstream(
+        &self,
+        transport: &dyn Transport,
+    ) -> Result<Option<PublicKey>, Failure> {
+        let Some((id, _)) = self.contact_refs.iter().find(|(_, entry)| entry.upstream) else {
+            return Ok(None);
+        };
+        self.resolve_saved_route(transport, *id).await
+    }
+    pub(crate) async fn resolve_saved_routes(&mut self, transport: &dyn Transport) {
+        let mut contacts = self.unresolved_contacts();
+        contacts
+            .sort_by_key(|(id, _)| !self.contact_refs.get(id).is_some_and(|entry| entry.issuer));
+        for (id, _) in contacts.into_iter().take(MAX_DIALED) {
+            if let Ok(Some(node)) = self.resolve_saved_route(transport, id).await {
+                self.bind_saved_contact(node);
+            }
+        }
+    }
+    pub(crate) fn unresolved_contacts(&self) -> Vec<(rocky_credentials::PeerId, Contact)> {
+        self.contact_refs
+            .iter()
+            .filter(|(id, _)| !self.resolved_refs.contains(id))
+            .map(|(id, entry)| (*id, entry.contact.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]

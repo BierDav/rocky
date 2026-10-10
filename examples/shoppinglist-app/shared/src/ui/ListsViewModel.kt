@@ -20,7 +20,7 @@ data class ListsState(
     val search: String = "",
     val showCompleted: Boolean = true,
     val category: Long? = null,
-    /** Only a trusted device creates, renames, deletes and shares lists. */
+    /** Only a trusted device creates, renames and deletes lists. */
     val trusted: Boolean = false,
 )
 
@@ -51,6 +51,22 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 }
             }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ListsState())
+
+    val recipients: StateFlow<List<DeviceRow>> = node.flatMapLatest { node ->
+        if (node.isTrusted) {
+            combine(node.household.devices(), node.household.registry()) { rows, devices ->
+                rows.filter { row -> devices.any { it.node == row.node && !it.revoked && it.profile !is rocky.GrantProfile.Custody } }
+            }
+        } else {
+            flowOf(emptyList())
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun shareWithContact(code: String, label: String) = onList { list ->
+        val recipient = household.shareWithContact(list, code)
+        contacts.name(recipient, label)
+    }
+    fun shareWithDevice(recipient: String) = onList { household.share(it, recipient) }
 
     fun select(list: Long) {
         selection.value = list

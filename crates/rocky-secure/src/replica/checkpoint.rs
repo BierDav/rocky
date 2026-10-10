@@ -1,5 +1,7 @@
 //! Signed checkpoints, pruning and rebootstrap of one encryption scope.
 //! Format and rules: `docs/runtime/encrypted-checkpoints.md`.
+mod archive;
+pub(super) use archive::SCHEMA as ARCHIVE_SCHEMA;
 mod audit;
 mod create;
 mod prune;
@@ -94,7 +96,7 @@ pub struct CustodySummary {
     pub archives: SetSummary,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 8;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 9;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -158,6 +160,96 @@ impl SignedCheckpoint {
         signed.signature = node.sign(&signed.signing_bytes()?);
         signed.to_bytes()?;
         Ok(signed)
+    }
+    fn checkpoint_grants(
+        &self,
+        publisher: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let kind = self
+            .credentials
+            .0
+            .last()
+            .ok_or_else(|| denied("checkpoint credentials missing"))?
+            .capability
+            .kind;
+        match kind {
+            rocky_core::PrincipalKind::Pseudonym => {
+                let (author, _) = self
+                    .credentials
+                    .verify_pseudonym_selectors(
+                        publisher,
+                        self.statement.definition,
+                        self.node,
+                        revocations,
+                        time,
+                    )
+                    .map_err(credential)?;
+                if author.table != self.statement.scope.table {
+                    return Err(denied("checkpoint author names another table"));
+                }
+                match &self.statement.partition {
+                    Some(tuple) => self
+                        .credentials
+                        .verify_partition_author(
+                            publisher,
+                            self.statement.definition,
+                            self.node,
+                            author.author,
+                            self.statement.scope,
+                            tuple,
+                            revocations,
+                            time,
+                        )
+                        .map_err(credential),
+                    None => Ok(author.grants),
+                }
+            }
+            rocky_core::PrincipalKind::Node => {
+                let node = self
+                    .credentials
+                    .0
+                    .last()
+                    .ok_or_else(|| denied("checkpoint credential missing"))?
+                    .capability
+                    .extended()
+                    .map_err(credential)?
+                    .node
+                    .ok_or_else(|| denied("checkpoint node binding missing"))?;
+                self.credentials
+                    .verify_node_alias(publisher, self.statement.definition, node, self.node)
+                    .map_err(credential)?;
+                let (mut grants, selectors) = self
+                    .credentials
+                    .verify_reference_selectors(
+                        publisher,
+                        self.statement.definition,
+                        node,
+                        revocations,
+                        time,
+                    )
+                    .map_err(credential)?;
+                if let Some(tuple) = &self.statement.partition {
+                    for grant in selectors {
+                        if let Some(grant) = grant
+                            .resolve(
+                                self.statement.scope.domain,
+                                self.statement.scope.table,
+                                tuple,
+                            )
+                            .map_err(credential)?
+                        {
+                            grants.push(grant);
+                        }
+                    }
+                }
+                Ok(grants)
+            }
+            _ => Err(denied(
+                "checkpoint requires a node or table-author credential",
+            )),
+        }
     }
     pub fn signer(&self) -> PublicKey {
         self.node
@@ -246,42 +338,7 @@ impl SignedCheckpoint {
             self.statement.scope,
             self.statement.partition.as_ref(),
         )?;
-        let grants = match &self.statement.partition {
-            Some(tuple) => self
-                .credentials
-                .verify_partition(
-                    inner.config.publisher,
-                    self.statement.definition,
-                    self.node,
-                    self.statement.scope,
-                    tuple,
-                    &revocations,
-                    time,
-                )
-                .map_err(credential)?,
-            None => {
-                // Unrelated partition selectors do not remove explicit table grants.
-                let (grants, _) = self
-                    .credentials
-                    .verify_selectors(
-                        inner.config.publisher,
-                        self.statement.definition,
-                        self.node,
-                        &revocations,
-                        time,
-                    )
-                    .map_err(credential)?;
-                if self
-                    .credentials
-                    .0
-                    .last()
-                    .is_none_or(|leaf| leaf.capability.kind != rocky_core::PrincipalKind::Node)
-                {
-                    return Err(denied("checkpoint requires a node credential"));
-                }
-                grants
-            }
-        };
+        let grants = self.checkpoint_grants(inner.config.publisher, &revocations, time)?;
         if !grants.iter().any(|grant| {
             grant.scope == self.statement.scope
                 && grant.rows == RowSelection::All
@@ -328,21 +385,11 @@ impl SignedCheckpoint {
             self.statement.scope,
             self.statement.partition.as_ref(),
         )?;
-        let grants = match &self.statement.partition {
-            Some(tuple) => self
-                .credentials
-                .verify_partition(
-                    inner.config.publisher,
-                    self.statement.definition,
-                    self.node,
-                    self.statement.scope,
-                    tuple,
-                    inner.revocations_for(self.statement.definition, &inner.config.revocations)?,
-                    time,
-                )
-                .map_err(credential)?,
-            None => inner.verify_chain(&self.credentials, self.node, time)?,
-        };
+        let grants = self.checkpoint_grants(
+            inner.config.publisher,
+            inner.revocations_for(self.statement.definition, &inner.config.revocations)?,
+            time,
+        )?;
         if !grants.iter().any(|grant| {
             grant.scope == self.statement.scope
                 && grant.rows == RowSelection::All
@@ -363,9 +410,9 @@ impl SignedCheckpoint {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RetentionPolicy {
     /// Peers that must have acknowledged an operation before it is pruned.
-    pub required: BTreeSet<PublicKey>,
+    pub required: BTreeSet<rocky_credentials::PeerId>,
     /// Peers declared behind the horizon: not waited for; they rebootstrap.
-    pub behind: BTreeSet<PublicKey>,
+    pub behind: BTreeSet<rocky_credentials::PeerId>,
     /// Other nodes that must hold a copy; at least one is always required.
     pub copies: usize,
     /// Newest covered operations kept for peers that catch up without a checkpoint.
@@ -634,6 +681,21 @@ fn integer(value: u64) -> SqlValue {
 }
 
 impl<A: RowApplication> Inner<A> {
+    pub(super) fn sign_checkpoint(
+        &self,
+        statement: CheckpointStatement,
+    ) -> Result<SignedCheckpoint, Error> {
+        match self.row_authors.get(&statement.scope.table) {
+            Some(author) => {
+                SignedCheckpoint::sign(statement, &author.key, author.credentials.clone())
+            }
+            None => SignedCheckpoint::sign(
+                statement,
+                self.credential_signer.as_ref().unwrap_or(&self.config.node),
+                self.config.credentials.clone(),
+            ),
+        }
+    }
     #[cfg(test)]
     pub(crate) fn fault(&mut self, stage: Stage) -> Result<(), Error> {
         if let Some((at, skip)) = &mut self.stage_fault
@@ -1213,7 +1275,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if policy.required.len() > 64
             || policy.behind.len() > 64
             || policy.copies > 64
-            || policy.required.contains(&inner.config.node.public_key())
+            || policy.required.contains(&rocky_credentials::PeerId::of(
+                inner.config.node.public_key(),
+            ))
         {
             return Err(denied("invalid retention policy"));
         }

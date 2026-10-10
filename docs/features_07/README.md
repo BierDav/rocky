@@ -1,6 +1,8 @@
 # features_07: an equal-issuer, roster-free mesh and iOS
 
-Status: sequenced and reviewed against the code on 2026-10-09; not started.
+Status: Phases 1–19 landed on main `b9b17694`. Phase 21 is on main `8ffd2ed4`
+and [blocked](21-shopping-and-market-on-ios.md) on device qualification.
+Phase 20 is complete on top of it; see its [evidence](20-shopping-without-a-roster-evidence.md).
 This is the next-work authority. The questions the scopes left open are
 [decided](scope-mesh.md#decided-2026-10-09); each brief states the ones it
 owns under "Settled" and records its own status.

@@ -262,7 +262,7 @@ async fn a_chain_goes_with_the_last_operation_that_names_it() {
     b.set_retention_policy(
         f.public,
         RetentionPolicy {
-            required: [alice.public_key()].into(),
+            required: [rocky_credentials::PeerId::of(alice.public_key())].into(),
             copies: 1,
             window: 0,
             ..Default::default()
@@ -331,7 +331,7 @@ async fn an_earlier_session_version_is_refused() {
     let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
     let (a, a_chain) = open(&f, &dir, &alice, 2).await;
     let (b, b_chain) = open(&f, &dir, &bob, 2).await;
-    assert_eq!(rocky_core::net::NATIVE_SESSION_VERSION, 12);
+    assert_eq!(rocky_core::net::NATIVE_SESSION_VERSION, 14);
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
     let (accepted, dialed) = tokio::join!(
         NativeSession::accept(

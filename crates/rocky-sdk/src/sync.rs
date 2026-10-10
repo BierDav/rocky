@@ -131,7 +131,15 @@ pub(crate) async fn reconcile(
     first: Option<NativeSession>,
 ) -> Result<(bool, bool, Transfer), Failure> {
     let mut transfer = Transfer::default();
-    let newer = rows(replica, upstream, scopes, progress, &mut transfer, first).await?;
+    let newer = Box::pin(rows(
+        replica,
+        upstream,
+        scopes,
+        progress,
+        &mut transfer,
+        first,
+    ))
+    .await?;
     // Rows stay in sync while a coordinator is unreachable or a peer holds
     // no results; a ticket then stays `confirmed` until a later sync.
     let retry = match coordinator {
@@ -325,7 +333,7 @@ async fn rows(
                         .acknowledge_mergeable_horizon(replica, *scope)
                         .await?;
                 }
-                if replica.can_read_scope(*scope).await
+                if replica.can_finalize_horizon(*scope).await?
                     && let Some(signed) = replica.admitted_horizon(*scope).await?
                     && replica.finalized_horizon(*scope).await?.as_ref() != Some(&signed)
                     && !replica.horizon_rebootstrap_required(*scope).await?
@@ -442,8 +450,12 @@ pub(crate) async fn serve_contacts(
     admitted_peer: impl FnOnce(PublicKey),
     handler: &dyn rocky_secure::network::ContactHandler,
 ) -> Result<(), Failure> {
-    let mut session =
-        NativeSession::accept(stream, replica, node, credentials, MAX_SECURE_BYTES).await?;
+    let Some(mut session) =
+        NativeSession::accept_or_resolve(stream, replica, node, credentials, MAX_SECURE_BYTES)
+            .await?
+    else {
+        return Ok(());
+    };
     admitted_peer(session.peer());
     Ok(session
         .serve_all(replica, coordinator, deliveries, Some(handler))

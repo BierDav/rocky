@@ -86,7 +86,15 @@ async fn custody_relays_signatures_and_restart_without_any_issuer_participant_se
     let pk = participant.inner.lock().await.config.node.clone();
     assert!(
         relay
-            .receive_horizon_ack(scope, HorizonAck::sign([5; 32], &pk).unwrap())
+            .receive_horizon_ack(
+                scope,
+                HorizonAck::sign(
+                    [5; 32],
+                    &pk,
+                    participant.inner.lock().await.config.credentials.clone()
+                )
+                .unwrap()
+            )
             .await
             .is_err()
     );
@@ -94,7 +102,12 @@ async fn custody_relays_signatures_and_restart_without_any_issuer_participant_se
         relay
             .receive_horizon_ack(
                 scope,
-                HorizonAck::sign(signed.id().unwrap(), &PrivateKey::new()).unwrap()
+                HorizonAck::sign(
+                    signed.id().unwrap(),
+                    &PrivateKey::new(),
+                    participant.inner.lock().await.config.credentials.clone()
+                )
+                .unwrap()
             )
             .await
             .is_err()
@@ -240,14 +253,17 @@ async fn revocation_during_a_pending_cut_removes_the_required_participant() {
     let scope = f.scope("lists", partition());
     let node = peer(&b).await.0;
     declare(&f, &a, scope, &[peer(&b).await]).await;
-    assert_eq!(a.horizon_progress(scope).await.unwrap().waiting, vec![node]);
+    assert_eq!(
+        a.horizon_progress(scope).await.unwrap().waiting,
+        vec![rocky_credentials::PeerId::of(node)]
+    );
     let issuer = PrivateKey::new();
     let signed = SignedRevocation::sign(
         Revocation {
             app: f.domain.app,
             issuer: issuer.public_key(),
             time: now().unwrap(),
-            nodes: [node].into(),
+            nodes: [rocky_credentials::PeerId::of(node)].into(),
             users: Default::default(),
             capabilities: Default::default(),
             pseudonyms: Default::default(),
@@ -346,7 +362,7 @@ async fn a_verified_pending_policy_survives_revocation_set_expiry() {
             app: f.domain.app,
             issuer: issuer.public_key(),
             time: now().unwrap(),
-            nodes: [revoked].into(),
+            nodes: [rocky_credentials::PeerId::of(revoked)].into(),
             users: Default::default(),
             capabilities: Default::default(),
             pseudonyms: Default::default(),
@@ -397,4 +413,152 @@ async fn finalized_relay_evidence_guards_a_stale_nonparticipant_until_checkpoint
         visible(&issuer, "lists").await,
         visible(&offline, "lists").await
     );
+}
+
+#[tokio::test]
+async fn a_read_only_participant_imports_the_finalized_checkpoint_from_restarted_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let f = Fixture::new();
+    let issuer = reader(&f, root.path(), "writer").await;
+    let participant = f
+        .open(
+            &root.path().join("read-only"),
+            PrivateKey::new(),
+            f.grants(None, &[Right::Read]),
+            None,
+        )
+        .await;
+    f.keys(&participant, partition(), &["lists"]).await;
+    let custody_node = PrivateKey::new();
+    let relay = custody(&f, root.path(), custody_node.clone()).await;
+    let scope = f.scope("lists", partition());
+    let bundle = issuer
+        .author_bundle(
+            [3; 32],
+            vec![f.write("lists", partition(), 1, None)],
+            vec![],
+        )
+        .await
+        .unwrap();
+    for frame in bundle {
+        relay.receive(frame.clone()).await.unwrap();
+        participant.receive(frame).await.unwrap();
+    }
+    participant.settle().await.unwrap();
+    let cut = declare(&f, &issuer, scope, &[peer(&participant).await]).await;
+    exchange(&issuer, &relay, scope).await;
+    exchange(&participant, &relay, scope).await;
+    participant.acknowledge_horizon(scope).await.unwrap();
+    exchange(&participant, &relay, scope).await;
+    assert!(!participant.can_finalize_horizon(scope).await.unwrap());
+    exchange(&issuer, &relay, scope).await;
+    let finalized = issuer.finalize_horizon(scope).await.unwrap();
+    let (writer_node, writer_chain) = peer(&issuer).await;
+    assert_eq!(
+        relay
+            .begin_checkpoint_archive(writer_node, &writer_chain, finalized.clone())
+            .await
+            .unwrap(),
+        (None, false)
+    );
+    let (reader_node, reader_chain) = peer(&participant).await;
+    assert!(
+        relay
+            .checkpoint_offer(reader_node, &reader_chain, scope)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (relay_node, relay_chain) = peer(&relay).await;
+    let mut invalid = issuer
+        .checkpoint_page(
+            relay_node,
+            &relay_chain,
+            scope,
+            finalized.id().unwrap(),
+            None,
+            MAX_SECURE_FRAME - 8192,
+        )
+        .await
+        .unwrap();
+    invalid.after = Some([9; 32]);
+    assert!(
+        relay
+            .archive_checkpoint_page(writer_node, &writer_chain, invalid)
+            .await
+            .is_err()
+    );
+    drop(relay);
+    let relay = custody(&f, root.path(), custody_node.clone()).await;
+    assert_eq!(
+        relay
+            .begin_checkpoint_archive(writer_node, &writer_chain, finalized.clone())
+            .await
+            .unwrap(),
+        (None, false)
+    );
+    exchange(&relay, &issuer, scope).await;
+    assert_eq!(
+        relay
+            .begin_checkpoint_archive(writer_node, &writer_chain, finalized)
+            .await
+            .unwrap(),
+        (None, true)
+    );
+    let (node, chain) = peer(&participant).await;
+    let checkpoint = relay
+        .checkpoint_offer(node, &chain, scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.statement.finalized.as_deref(), Some(&cut));
+    drop(relay);
+    let relay = custody(&f, root.path(), custody_node).await;
+    exchange(&participant, &relay, scope).await;
+    assert!(
+        participant
+            .horizon_rebootstrap_required(scope)
+            .await
+            .unwrap()
+    );
+    let (c, s) = tokio::io::duplex(1024 * 1024);
+    let (cn, cc) = {
+        let i = participant.inner.lock().await;
+        (i.config.node.clone(), i.config.credentials.clone())
+    };
+    let (sn, sc) = {
+        let i = relay.inner.lock().await;
+        (i.config.node.clone(), i.config.credentials.clone())
+    };
+    let (c, s) = tokio::join!(
+        NativeSession::authenticate(c, &participant, cn, cc, sn.public_key(), MAX_SECURE_BYTES),
+        NativeSession::accept(s, &relay, sn, sc, MAX_SECURE_BYTES)
+    );
+    let mut c = c.unwrap();
+    let mut s = s.unwrap();
+    let (imported, served) = tokio::join!(
+        async {
+            c.rebootstrap(&participant, scope, MAX_SECURE_FRAME - 8192)
+                .await?;
+            c.close().await
+        },
+        s.serve(&relay)
+    );
+    assert!(
+        imported.is_ok() && served.is_ok(),
+        "imported={imported:?}, served={served:?}"
+    );
+    assert_eq!(
+        participant
+            .finalized_horizon(scope)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(&cut)
+    );
+    assert_eq!(
+        visible(&participant, "lists").await,
+        visible(&issuer, "lists").await
+    );
+    assert!(!relay.can_read_scope(scope).await);
 }

@@ -180,6 +180,19 @@ the production 5 s service drain. The market harness's `mesh` scenario runs in
 the existing CI `market` job against three voters. No budget exception is added. See
 [Phase 16 evidence](features_07/16-strong-commands-evidence.md).
 
+Phase 20's Room schema, missing-table, registry-name, scanned-contact sharing
+and contact-handover tests belong to Kotlin integration in `shared`; the
+multi-process shopping scenarios and two-emulator procedure belong to e2e in
+the shopping CI job. `scripts/test-tiers` tiers Rust tests only; no Rust test
+filter or budget exception is needed for Kotlin application tests. The native
+shopping release regression remains in Rust e2e with read-only member list
+grants. The driver projection and secure horizon custody regressions use SQLite
+and sessions and belong to Rust integration through the existing filters.
+Measurements and remaining failures are recorded in the phase evidence. The literal
+member-directory byte audit remains inside the full `gate` scenario. See
+[Phase 20 evidence](features_07/20-shopping-without-a-roster-evidence.md).
+
+
 ## Kotlin desktop integration
 
 The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.

@@ -129,3 +129,59 @@ impl Node {
         Ok(json!({"node": null}))
     }
 }
+
+impl Node {
+    pub(super) async fn resolve_saved_contacts(&self, transport: &dyn Transport) {
+        let contacts = self.settings.lock().await.unresolved_contacts();
+        let ready: Vec<_> = {
+            let mut retries = self
+                .resolution_retries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            retries.retain(|id, _| contacts.iter().any(|(peer, _)| peer == id));
+            contacts
+                .into_iter()
+                .filter(|(id, _)| retries.entry(*id).or_default().ready())
+                .take(crate::enrollment::MAX_DIALED)
+                .collect()
+        };
+        let saved = self.settings.lock().await.clone();
+        for (id, _) in &ready {
+            if let Ok(Some(node)) = saved.resolve_saved_route(transport, *id).await {
+                self.settings.lock().await.bind_saved_contact(node);
+            }
+        }
+        for (id, _) in ready
+            .iter()
+            .filter(|(_, contact)| contact.routes.is_empty())
+        {
+            if !self
+                .settings
+                .lock()
+                .await
+                .unresolved_contacts()
+                .iter()
+                .any(|(peer, _)| peer == id)
+            {
+                continue;
+            }
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&id.as_bytes()[..16]);
+            let _ = self
+                .request_contact(transport, rocky_core::NodeId(bytes))
+                .await;
+        }
+        let unresolved = self.settings.lock().await.unresolved_contacts();
+        let mut retries = self
+            .resolution_retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (id, _) in ready {
+            if unresolved.iter().any(|(peer, _)| peer == &id) {
+                retries.entry(id).or_default().failed();
+            } else {
+                retries.remove(&id);
+            }
+        }
+    }
+}

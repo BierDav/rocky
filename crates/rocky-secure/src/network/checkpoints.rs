@@ -6,10 +6,25 @@ use rows::{CatchUp, ScopeSync};
 /// Bytes of one checkpoint page: the largest a frame holds, leaving room
 /// for the framing. The first page carries its scope's strong state; the
 /// latest confirmed command's credential chains travel beside it.
-const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
+pub(super) const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
 
 #[derive(Serialize, Deserialize)]
 pub(super) enum CheckpointMessage {
+    ArchiveProgress {
+        after: Option<Commitment>,
+        complete: bool,
+    },
+    ArchiveBegin {
+        signed: Box<SignedCheckpoint>,
+    },
+    ArchiveChain {
+        scope: ResourceScope,
+        checkpoint: Commitment,
+        chain: CredentialChain,
+    },
+    ArchivePage {
+        page: Box<CheckpointPage>,
+    },
     CheckpointOffer {
         scope: ResourceScope,
     },
@@ -33,6 +48,155 @@ pub(super) enum CheckpointMessage {
 }
 
 impl NativeSession {
+    pub(super) async fn deposit_finalized_checkpoint<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        signed: &SignedCheckpoint,
+    ) -> Result<(), Error> {
+        let scope = signed.statement.scope;
+        // Keyless archives may relay evidence but never manufacture pages.
+        if !replica.can_read_scope(scope).await {
+            return Ok(());
+        }
+        if let Some(finalized) = &signed.statement.finalized {
+            for base in &finalized.statement.bases {
+                if !self.push_existence_base(replica, base.scope).await? {
+                    return Err(denied(
+                        "native session byte budget exhausted; continue checkpoint deposit on a new session",
+                    ));
+                }
+            }
+        }
+        self.send(CheckpointMessage::ArchiveBegin {
+            signed: Box::new(signed.clone()),
+        })
+        .await?;
+        let CheckpointMessage::ArchiveProgress {
+            mut after,
+            complete,
+        } = self.reply::<CheckpointMessage>().await?
+        else {
+            return Err(denied("unexpected checkpoint archive progress"));
+        };
+        if complete {
+            return Ok(());
+        }
+        let checkpoint = signed.id()?;
+        loop {
+            if self.low(MAX_SECURE_FRAME) {
+                return Err(denied(
+                    "native session byte budget exhausted; continue checkpoint deposit on a new session",
+                ));
+            }
+            let mut page = replica
+                .checkpoint_page(
+                    self.peer,
+                    &self.credentials,
+                    scope,
+                    checkpoint,
+                    after,
+                    CHECKPOINT_PAGE,
+                )
+                .await?;
+            for chain in std::mem::take(&mut page.chains) {
+                self.send(CheckpointMessage::ArchiveChain {
+                    scope,
+                    checkpoint,
+                    chain,
+                })
+                .await?;
+                self.acknowledged("unexpected checkpoint archive chain acknowledgment")
+                    .await?;
+            }
+            after = page.next;
+            self.send(CheckpointMessage::ArchivePage {
+                page: Box::new(page),
+            })
+            .await?;
+            self.acknowledged("unexpected checkpoint archive page acknowledgment")
+                .await?;
+            if after.is_none() {
+                return Ok(());
+            }
+        }
+    }
+    pub(super) async fn archive_peer_checkpoint<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        signed: SignedCheckpoint,
+    ) -> Result<(), Error> {
+        let scope = signed.statement.scope;
+        let checkpoint = signed.id()?;
+        if let Some(finalized) = &signed.statement.finalized {
+            for base in &finalized.statement.bases {
+                let expected = ExistenceBaseAttachment {
+                    horizon: finalized.clone(),
+                    scope: base.scope,
+                };
+                if !self
+                    .pull_existence_base(replica, base.scope, Some(expected.id()?))
+                    .await?
+                {
+                    return Err(denied(
+                        "native session byte budget exhausted; continue checkpoint archive on a new session",
+                    ));
+                }
+            }
+        }
+        let (mut after, mut complete) = replica
+            .begin_checkpoint_archive(self.peer, &self.credentials, signed)
+            .await?;
+        while !complete {
+            if self.low(MAX_SECURE_FRAME) {
+                return Err(denied(
+                    "native session byte budget exhausted; continue checkpoint archive on a new session",
+                ));
+            }
+            self.send(CheckpointMessage::CheckpointPull {
+                scope,
+                checkpoint,
+                after,
+                quota: CHECKPOINT_PAGE,
+            })
+            .await?;
+            let mut reply = self.reply::<CheckpointMessage>().await?;
+            let mut chains = Vec::new();
+            while let CheckpointMessage::CheckpointChain { chain } = reply {
+                if after.is_some() || chains.len() == 2 {
+                    return Err(denied("unexpected checkpoint archive chain"));
+                }
+                chains.push(chain);
+                reply = self.reply::<CheckpointMessage>().await?;
+            }
+            let CheckpointMessage::CheckpointRows { page } = reply else {
+                return Err(denied("unexpected checkpoint archive page"));
+            };
+            if page.scope != scope
+                || page.checkpoint != checkpoint
+                || page.after != after
+                || !page.chains.is_empty()
+            {
+                return Err(denied("checkpoint archive page outside request"));
+            }
+            for chain in chains {
+                replica
+                    .archive_checkpoint_chain(
+                        self.peer,
+                        &self.credentials,
+                        scope,
+                        checkpoint,
+                        chain,
+                    )
+                    .await?;
+            }
+            after = page.next;
+            complete = after.is_none();
+            replica
+                .archive_checkpoint_page(self.peer, &self.credentials, *page)
+                .await?;
+        }
+        Ok(())
+    }
     /// Imports the peer's checkpoint of a scope and switches to it. An
     /// interrupted import of the same checkpoint continues where it stopped.
     pub async fn rebootstrap<A: RowApplication>(
@@ -181,6 +345,9 @@ impl NativeSession {
         let Some(signed) = self.checkpoint_offer(scope).await? else {
             return Ok(None);
         };
+        if signed.statement.finalized.is_none() && replica.owns_checkpoint_signer(&signed).await {
+            return Ok(None);
+        }
         let rebootstrap = self.import_within(replica, signed, CHECKPOINT_PAGE).await?;
         let catch_up = if rebootstrap.is_some() {
             self.catch_up(replica, scope, quota).await?
@@ -237,6 +404,35 @@ impl NativeSession {
         message: CheckpointMessage,
     ) -> Result<(), Error> {
         match message {
+            CheckpointMessage::ArchiveBegin { signed } => {
+                let (after, complete) = replica
+                    .begin_checkpoint_archive(self.peer, &self.credentials, *signed)
+                    .await?;
+                self.send(CheckpointMessage::ArchiveProgress { after, complete })
+                    .await
+            }
+            CheckpointMessage::ArchiveChain {
+                scope,
+                checkpoint,
+                chain,
+            } => {
+                replica
+                    .archive_checkpoint_chain(
+                        self.peer,
+                        &self.credentials,
+                        scope,
+                        checkpoint,
+                        chain,
+                    )
+                    .await?;
+                self.send(Message::Acknowledged).await
+            }
+            CheckpointMessage::ArchivePage { page } => {
+                replica
+                    .archive_checkpoint_page(self.peer, &self.credentials, *page)
+                    .await?;
+                self.send(Message::Acknowledged).await
+            }
             CheckpointMessage::CheckpointOffer { scope } => {
                 let signed = replica
                     .checkpoint_offer(self.peer, &self.credentials, scope)

@@ -90,7 +90,7 @@ impl<A: RowApplication> Inner<A> {
     async fn custody_coverage(
         &self,
         scope: ResourceScope,
-        full_nodes: &BTreeSet<PublicKey>,
+        full_nodes: &BTreeSet<rocky_credentials::PeerId>,
     ) -> Result<usize, Error> {
         let me = self.config.node.public_key();
         let Some(id) = self.find_scope_id(scope).await? else {

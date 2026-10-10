@@ -349,9 +349,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
                 return Ok(None);
             }
-            // A keyless custody replica holds only ciphertext: no offer.
+            let time = now()?;
+            // A keyless holder serves only complete, verified sealed archives.
             if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
-                return Ok(None);
+                return Ok(inner
+                    .archived_checkpoint(scope, true)
+                    .await?
+                    .filter(|signed| {
+                        signed.signer() != peer && signed.verify_authority(&inner, time).is_ok()
+                    }));
             }
             let (key_epoch, _) = inner.scope_key(scope)?;
             inner.settle(scope).await?;
@@ -397,6 +403,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .filter(|(_, signed)| signed.signer() != peer)
             .map(|(_, signed)| signed))
     }
+    pub(crate) async fn owns_checkpoint_signer(&self, signed: &SignedCheckpoint) -> bool {
+        let inner = self.inner.lock().await;
+        let signer = signed.signer();
+        signer == inner.config.node.public_key()
+            || inner
+                .credential_signer
+                .as_ref()
+                .is_some_and(|key| key.public_key() == signer)
+            || inner
+                .row_authors
+                .get(&signed.statement.scope.table)
+                .is_some_and(|author| author.key.public_key() == signer)
+    }
     /// One page of the checkpoint's rows after `after`, sealed with the scope
     /// key, within `byte_quota` encoded bytes. A checkpoint that was replaced
     /// meanwhile is refused; the peer starts again from a new offer.
@@ -414,6 +433,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.authorize_peer(peer, credentials, scope)?;
         if !(4096..=MAX_SECURE_FRAME).contains(&byte_quota) {
             return Err(denied("sync quota"));
+        }
+        if inner.scope_key(scope).is_err() {
+            return inner
+                .archived_page(scope, checkpoint, after, byte_quota)
+                .await;
         }
         let (generation, key) = inner.scope_key(scope)?;
         let Some((id, signed)) = inner.served_checkpoint(scope).await? else {

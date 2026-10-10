@@ -10,7 +10,7 @@ market scenario on devices are [outstanding](#outstanding). This is not an Inter
 | Command | Runs |
 | --- | --- |
 | `./examples/shoppinglist-app/qualify` | Builds the packaged `rocky-peer`, then the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt): every device is a JVM running the app's Room repository; evidence in `local/shopping-qualification/evidence.json` |
-| `cargo test -p rocky-sdk --test shopping_release` | The release gate, a checkpoint join after a move and custody restart, in `./scripts/check` |
+| `cargo test -p rocky-sdk --test shopping_release` | The native gate and checkpoint join run in the e2e tier; custody restart is integration |
 | `./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
 | `./kotlin check qualify -m schema-qualification` | Hand/Room equivalence and every partitioned refusal |
 | `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
@@ -23,7 +23,7 @@ modules contain no Rust source; the custody process is the packaged launcher
 
 The harness's `gate` scenario: phones A and B are never online together and
 meet only the custody process, which restarts in between. A and B share three
-lists through the Share button's codes, add the same title offline (one survives
+lists through direct envelope delivery, add the same title offline (one survives
 by `LatestWins`), and A moves an item B ticked offline: the item arrives in the
 other list ticked, its category nulled. Deleting a category nulls only
 `items.category`; deleting a list cascades to its items. A horizon on all nine
@@ -43,8 +43,8 @@ The deliverable is the shopping-list application as a packaged Kotlin app with
 no Rust source: Room DAOs on Rocky's file, lists, categories and items in one
 partition group, per-list sharing through one envelope that sync delivers to
 its recipient alone, a packaged always-on custody peer that holds envelopes as
-a mailbox, and a second issuing device. Every scenario ends by checking that
-no device holds a row in `keys`. Its lists merge; its approvals are strong
+a mailbox, and a second issuing device. Every scenario ends by querying the removed `keys` and `identities` tables
+and checking `no such table`; on members it also checks `devices`. Its lists merge; its approvals are strong
 commands the public coordination service orders, which this harness does not
 run: its devices open over TCP without a coordinator. Strong commands under
 contention, loss, takeover and voter faults are qualified by the
@@ -119,6 +119,27 @@ and every reference between groups is refused natively and in Kotlin:
 - The trusted profile installed a partitioned confirmed table.
 - The Compose screen crashed when a DAO flow's read transaction met an
   authority change or an incomplete list; the repository observes again.
+
+## Phase 20 audit
+
+Version 6 removes `keys` and `identities`, and keeps `devices` beside the
+trusted-only invitations and coordination tables. Kotlin `RosterFreeTest`
+checks missing tables, member sharing by scanned contact, and contact handover
+without discovery. `ApprovalsTest` checks member labels and trusted registry
+names; coordinator registration no longer waits for roster rows.
+
+After all functional steps, `gate` scans member B's entire directory for other
+devices' node keys (hex and raw bytes), names and registry labels, and checks
+that B addressed no envelope to another device. A control requires the names in
+the trusted device's directory. It writes `member-privacy.json` before
+asserting no matches. The SDK installs only readable physical projections,
+keyless custody serves archived finalized checkpoint pages to read-only
+horizon participants, and saved contacts and proofs keep
+[one-way references](../decisions/0062-node-references-and-credential-aliases.md)
+instead of node keys. The table-absence, custody-horizon and directory
+assertions pass; the [Phase 20 evidence](../features_07/20-shopping-without-a-roster-evidence.md)
+records the runs. The two-emulator and simulator/emulator pair/share/revoke
+procedures passed on version 6. The earlier passes below describe prior schemas.
 
 ## Evidence
 

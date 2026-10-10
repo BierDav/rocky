@@ -13,6 +13,7 @@ mod identity;
 mod issue;
 mod keys;
 mod partition;
+mod peer;
 mod pseudonym;
 mod revocation;
 mod signed;
@@ -41,6 +42,7 @@ pub use issue::{Authority, Grant, MAX_GRANTS, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::PartitionGrant;
+pub use peer::PeerId;
 pub use pseudonym::{
     AuthorRange, Extended, Extension, MAX_AUTHOR, Pseudonym, PseudonymRequest, SealedDevice,
 };

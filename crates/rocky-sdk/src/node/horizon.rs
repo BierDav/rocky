@@ -92,10 +92,21 @@ impl Node {
                 .capability()
                 .ok_or_else(|| refused("horizon participant has no recorded expiry"))?
                 .expires;
-            if peers.insert(node, HorizonPeer { node, expires }).is_some() {
+            if peers
+                .insert(
+                    node,
+                    HorizonPeer {
+                        node: rocky_credentials::PeerId::of(node),
+                        expires,
+                    },
+                )
+                .is_some()
+            {
                 return Err(refused("duplicate horizon participant"));
             }
         }
-        Ok(peers.into_values().collect())
+        let mut peers: Vec<_> = peers.into_values().collect();
+        peers.sort_by_key(|peer| peer.node);
+        Ok(peers)
     }
 }

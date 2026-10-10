@@ -35,8 +35,20 @@ fun main() {
         val notes = mutableListOf<String>()
         val error = runCatching {
             Run(root, peer, notes).use {
-                scenario(it)
-                it.noKeyRows()
+                var failure = runCatching { scenario(it) }.exceptionOrNull()
+                fun audit(block: () -> Unit) {
+                    runCatching(block).exceptionOrNull()?.let { error ->
+                        failure?.addSuppressed(error) ?: run { failure = error }
+                    }
+                }
+                audit { it.absentTables() }
+                if (name == "gate") {
+                    audit {
+                        val findings = it.auditMemberDirectory()
+                        expect(findings.isEmpty()) { "Member directory names another device: $findings" }
+                    }
+                }
+                failure?.let { throw it }
             }
         }.exceptionOrNull()
         val millis = (System.nanoTime() - started) / 1_000_000
@@ -77,6 +89,9 @@ private val JsonElement.asLong: Long get() = jsonPrimitive.long
 private fun expect(condition: Boolean, message: () -> String) {
     if (!condition) throw AssertionError(message())
 }
+
+private fun ByteArray.containsBytes(needle: ByteArray): Boolean = needle.isNotEmpty() &&
+    indices.any { start -> start + needle.size <= size && needle.indices.all { this[start + it] == needle[it] } }
 
 /** One device process. */
 internal class Device(val name: String, private val root: File) : AutoCloseable {
@@ -138,8 +153,7 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
         call("share", "list" to list, "recipients" to readers.map { it.node })
     }
 
-    /** Rows in the former envelope table, which must stay empty. */
-    fun keyRows(): Long = call("keyRows").jsonPrimitive.long
+    fun absentTables() = call("absentTables")
     override fun close() {
         if (process.isAlive) runCatching { call("close") }
         if (!process.waitFor(30, TimeUnit.SECONDS)) process.destroyForcibly()
@@ -199,17 +213,62 @@ internal class Custody(private val root: File, private val binary: File, invitat
 
 internal class Run(val root: File, val peer: File, val notes: MutableList<String>) : AutoCloseable {
     private val opened = mutableListOf<AutoCloseable>()
+    private val labels = mutableMapOf<String, String>()
     fun device(name: String) = Device(name, root).also { opened += it }
     fun custody(invitation: String, vararg devices: Device) = Custody(root, peer, invitation, devices.map { it.contact() }).also { opened += it }
     override fun close() {
         opened.asReversed().forEach { runCatching { it.close() } }
     }
 
-    /** Envelopes travel by sync: no device wrote a row to the former `keys` table. */
-    fun noKeyRows() {
+    /** Records the literal directory audit even when an earlier functional step fails. */
+    fun auditMemberDirectory(): List<String> {
+        val member = opened.filterIsInstance<Device>().firstOrNull { it.name == "b" } ?: return emptyList()
+        val foreign = opened.filterIsInstance<Device>().filter { it !== member }.map { it.node } +
+            opened.filterIsInstance<Custody>().map {
+                Json.parseToJsonElement(java.util.Base64.getUrlDecoder().decode(it.contact.substringAfter("rocky://peer/")).decodeToString()).jsonObject.getValue("node").jsonPrimitive.content
+            }
+        val names = labels.filterKeys { it != member.node }.flatMap { (_, name) ->
+            listOf(
+                name,
+                buildJsonObject {
+                    put("name", name)
+                    put("kind", "full")
+                }.toString(),
+            )
+        }
+        val findings = member.directory.walkTopDown().filter { it.isFile }.flatMap { file ->
+            val bytes = file.readBytes()
+            val keys = foreign.filter { key ->
+                key.length == 64 && (bytes.containsBytes(key.encodeToByteArray()) || bytes.containsBytes(key.chunked(2).map { it.toInt(16).toByte() }.toByteArray()))
+            }.map { key -> "${file.relativeTo(member.directory)}: foreign node $key" }
+            keys + names.filter { bytes.containsBytes(it.encodeToByteArray()) }.map { "${file.relativeTo(member.directory)}: foreign label $it" }
+        }.toList() +
+            member.call("lists").jsonArray.flatMap { entry ->
+                // Envelopes this member sent; it shared nothing, so it addresses no other device.
+                val list = entry.jsonPrimitive.content.substringBefore(":").toLong()
+                member.call("deliveries", "list" to list).jsonObject.keys.map { "list $list: envelope for $it" }
+            }
+        // The search must be able to see a name: the trusted device holds them in plaintext.
+        val issuer = opened.filterIsInstance<Device>().first { it.name == "a" }
+        val control = labels.values.filterNot { name ->
+            issuer.directory.walkTopDown().filter { it.isFile }.any { it.readBytes().containsBytes(name.encodeToByteArray()) }
+        }.map { "control: trusted device holds no $it" }
+        File(root, "member-privacy.json").writeText(JsonArray((findings + control).map(::JsonPrimitive)).toString())
+        notes += "member-directory audit (${names.size / 2} foreign labels, ${foreign.size} foreign keys, sent envelopes): ${findings.size} matches"
+        return findings + control
+    }
+
+    /** Removed tables are absent; a member cannot query the trusted roster either. */
+    fun absentTables() {
         val devices = opened.filterIsInstance<Device>().filter { it.alive }
-        for (device in devices) expect(device.keyRows() == 0L) { "${device.name} holds rows in keys" }
-        notes += "no row in keys on ${devices.size} devices"
+        val checks = devices.associate { it.name to it.absentTables() }
+        File(root, "member-tables.json").writeText(JsonObject(checks).toString())
+        for ((name, value) in checks) {
+            val check = value.jsonObject
+            expect(check.getValue("sql").jsonObject.values.all { "no such table" in it.jsonPrimitive.content }) { "$name SQL table absence: $check" }
+            expect(check.getValue("physical").jsonArray.none { it.jsonPrimitive.content in check.getValue("sql").jsonObject.keys }) { "$name still has physical roster tables: $check" }
+        }
+        notes += "removed tables absent on ${devices.size} devices"
     }
 
     /** An issuer and two enrolled writers that reach each other directly. */
@@ -219,7 +278,6 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         val c = device("c").open("join", "invitation" to a.call("pairing", "profile" to "writer").jsonPrimitive.content)
         for (writer in listOf(b, c)) {
             writer.sync()
-            a.call("addPeer", "contact" to writer.contact())
         }
         return Triple(a, b, c)
     }
@@ -236,7 +294,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
             val writer = device(name)
             val keys = writer.call("prepare", "directory" to writer.directory.path)
             writer.open("install", "supplied" to a.call("grantWriter", "device" to keys))
-            for (table in listOf("lists", "categories", "items")) {
+            for (table in listOf("categories", "items")) {
                 val request = writer.call("authorRequest", "table" to table).jsonPrimitive.content
                 val credential = a.call("authorAssign", "request" to request)
                 writer.call("authorInstall", "credential" to credential)
@@ -245,6 +303,12 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         }
         val b = writer("b")
         val c = writer("c")
+        // A names both writers as the Devices tab does; B must never hold C's name or label.
+        for (writer in listOf(b, c)) {
+            val label = "Gate phone ${writer.name}"
+            a.call("label", "device" to writer.node, "name" to label, "kind" to "full")
+            labels[writer.node] = label
+        }
         c.call("addPeer", "contact" to a.contact())
         val custody = custody(a.call("pairing", "profile" to "custody").jsonPrimitive.content, a, b, c)
         for (phone in listOf(a, b, c)) phone.call("addPeer", "contact" to custody.contact)
@@ -407,7 +471,6 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         val a = device("a").open("create")
         val d = device("d").open("join", "invitation" to a.call("pairing", "profile" to "issuer").jsonPrimitive.content)
         d.sync()
-        a.call("addPeer", "contact" to d.contact())
         val list = a.call("createList", "title" to "Groceries").asLong
         a.call("add", "list" to list, "title" to "Milk")
         a.share(list, d)
@@ -417,7 +480,6 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         d.call("revoke", "node" to a.node)
         val e = device("e").open("join", "invitation" to d.call("pairing", "profile" to "writer").jsonPrimitive.content)
         e.sync()
-        d.call("addPeer", "contact" to e.contact())
         d.share(list, e)
         e.sync()
         expect(e.items(list) == listOf("Milk")) { "E ${e.items(list)}" }

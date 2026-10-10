@@ -386,7 +386,7 @@ async fn cycles(fixture: &Fixture, directory: &std::path::Path) -> Result<(), Fa
         .set_retention_policy(
             fixture.scope,
             RetentionPolicy {
-                required: [custodian_key.public_key()].into(),
+                required: [rocky_secure::PeerId::of(custodian_key.public_key())].into(),
                 behind: Default::default(),
                 copies: 1,
                 window: 256,

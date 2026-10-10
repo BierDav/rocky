@@ -406,7 +406,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     item(&a, 1, "Before").await?;
     synced(&b).await?;
     let c_node = c.node().await;
-    let a_node = a.node().await;
     let devices = a.ok(json!({"type": "devices"})).await;
     let record = devices["devices"]
         .as_array()
@@ -430,11 +429,20 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         app: manifest
             .verify(serde_json::from_value(saved["publisher"].clone())?)?
             .app,
-        issuer: serde_json::from_value(json!(a_node))?,
+        issuer: serde_json::from_value(
+            saved["credentials"]
+                .as_array()
+                .and_then(|chain| chain.last())
+                .ok_or("node credential")?["capability"]["subject"]
+                .clone(),
+        )?,
         time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
-        nodes: [serde_json::from_value(json!(c_node))?].into(),
+        nodes: [rocky_credentials::PeerId::of(serde_json::from_value(
+            json!(c_node),
+        )?)]
+        .into(),
         users: [serde_json::from_value(record["user"].clone())?].into(),
         capabilities: [rocky_core::Commitment::try_from(
             data_encoding::HEXLOWER

@@ -44,7 +44,7 @@ impl NativeSession {
             .statement
             .peers
             .iter()
-            .any(|peer| peer.node == self.local.public_key())
+            .any(|peer| peer.node == rocky_credentials::PeerId::of(self.local.public_key()))
         {
             return Ok(false);
         }

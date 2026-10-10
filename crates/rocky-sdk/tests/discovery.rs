@@ -330,8 +330,8 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
     let root = tempfile::tempdir()?;
     let mut routers = Vec::new();
     let mut network = Vec::new();
-    for secret in [21, 22] {
-        let endpoint = relayed(secret, &relay).await?;
+    let (first, second) = tokio::try_join!(relayed(21, &relay), relayed(22, &relay))?;
+    for endpoint in [first, second] {
         let attachment = Attachment::new(endpoint.clone());
         routers.push(attachment.register(Router::builder(endpoint)).spawn());
         network.push(Network::Borrowed(attachment.transport()));

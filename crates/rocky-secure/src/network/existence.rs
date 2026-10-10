@@ -120,7 +120,7 @@ impl NativeSession {
         replica.finish_existence_base(scope).await?;
         Ok(true)
     }
-    async fn push_existence_base<A: RowApplication>(
+    pub(super) async fn push_existence_base<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,

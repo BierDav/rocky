@@ -25,26 +25,52 @@ import kotlinx.coroutines.delay
 import org.example.examples.pairing.QrCode
 import org.example.examples.shopping.NodeKind
 import org.example.examples.shopping.PairingCode
-import org.example.examples.shopping.Purge
 import rocky.SessionStatus
 
 @Composable
 fun DevicesScreen(model: DevicesViewModel) {
     val state by model.state.collectAsState()
     val busy by model.revoking.collectAsState()
+    val contact by model.contact.collectAsState()
+    var meeting by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<HouseholdDevice?>(null) }
     var revoking by remember { mutableStateOf<HouseholdDevice?>(null) }
     var forgetting by remember { mutableStateOf<HouseholdDevice?>(null) }
     var showRevoked by remember { mutableStateOf(false) }
     var showing by remember { mutableStateOf<PairingCode?>(null) }
+    if (meeting) {
+        ContactDialog("Meet a peer", { meeting = false }) { code, label ->
+            meeting = false
+            model.rememberContact(code, label)
+        }
+    }
+    contact?.let { code ->
+        AlertDialog(
+            { model.contact.value = null },
+            confirmButton = { TextButton({ model.contact.value = null }) { Text("Done") } },
+            title = { Text("My contact code") },
+            text = {
+                Column {
+                    QrCode(code, Modifier.size(240.dp))
+                    SelectionContainer { Text(code) }
+                }
+            },
+        )
+    }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.me?.let { me ->
                 item { SectionTitle("This device") }
                 item { SelfCard(me, state.self) }
             }
-            item { SectionTitle("Household", "Each device holds its own copy and syncs directly with its peers over iroh.") }
+            item { SectionTitle(if (state.trusted) "Household" else "Peers met", "Contacts and labels stay on this device.") }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(model::showContact) { Text("My contact code") }
+                    OutlinedButton({ meeting = true }) { Text("Scan contact") }
+                }
+            }
             if (state.devices.isEmpty()) {
                 item {
                     Text(
@@ -67,7 +93,6 @@ fun DevicesScreen(model: DevicesViewModel) {
                 item { SectionTitle("Open invitations", "Each trusted device has at most one: a new code replaces its last. A code works once, until it expires.") }
                 items(state.invitations, key = { "invitation-" + it.code.invitation }) { open -> InvitationCard(open, onShow = { showing = open.code }) }
             }
-            state.purge?.takeIf { !it.finalized }?.let { purge -> item { PurgeCard(purge) } }
             if (state.revoked.isNotEmpty()) {
                 item { RevokedHeader(state.revoked.size, showRevoked) { showRevoked = !showRevoked } }
                 if (showRevoked) {
@@ -135,14 +160,10 @@ fun DevicesScreen(model: DevicesViewModel) {
     forgetting?.let { device ->
         AlertDialog(
             onDismissRequest = { forgetting = null },
-            title = { Text("Remove ${device.name} permanently?") },
+            title = { Text("Clear ${device.name}'s name?") },
             text = {
                 Text(
-                    "Its record and its identity are deleted now and disappear from every device with " +
-                        "the next sync. The signed revocation stays: it is what keeps the old identity out.\n\n" +
-                        "Erasing the deletions' traces needs a horizon every other device acknowledges. It finishes once each " +
-                        "of them synced, at the latest 30 days from now or when a device's credentials expire. Until then, new " +
-                        "devices are recorded only after it finishes.",
+                    "Clears its application name. The registry tombstone and signed revocation remain, so the old identity stays revoked.",
                 )
             },
             confirmButton = {
@@ -212,35 +233,6 @@ private fun RevokedHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
     }
 }
 
-/** A purge in progress: how many devices still have to acknowledge it, and the latest it waits for them. */
-@Composable
-private fun PurgeCard(purge: Purge) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.ContentCut, null, tint = Color(0xFF8E24AA))
-                Spacer(Modifier.width(8.dp))
-                Text("Purging removed devices", style = MaterialTheme.typography.titleSmall)
-            }
-            Text(
-                when {
-                    purge.waiting == 0 -> "Every device acknowledged: it finishes with the next sync."
-
-                    else ->
-                        "Waiting for ${purge.waiting} device(s) to sync. It finishes as soon as they do" +
-                            (purge.deadlineEpochSeconds?.let { ", and at the latest on ${date(it)}, when those devices count as behind." } ?: ".")
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Text(
-                "Meanwhile, newly added devices are recorded once it finishes.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
 @Composable
 private fun DeviceCard(
     device: HouseholdDevice,
@@ -298,7 +290,7 @@ private fun DeviceCard(
                     TextButton(it) {
                         Icon(Icons.Filled.DeleteForever, null)
                         Spacer(Modifier.width(6.dp))
-                        Text("Remove permanently")
+                        Text("Clear name")
                     }
                 }
             }

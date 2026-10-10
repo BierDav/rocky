@@ -192,16 +192,24 @@ impl Node {
             let Some(delivery) = pending.sealed()? else {
                 continue;
             };
-            if pending.recipient == peer {
+            if pending.recipient == rocky_credentials::PeerId::of(peer) {
                 outgoing.direct.push(delivery);
             } else if mailbox
-                && (pending.targets.contains(&peer) || pending.targets.len() < MAX_MAILBOXES)
-                && !pending.mailboxes.contains(&peer)
+                && (pending
+                    .targets
+                    .contains(&rocky_credentials::PeerId::of(peer))
+                    || pending.targets.len() < MAX_MAILBOXES)
+                && !pending
+                    .mailboxes
+                    .contains(&rocky_credentials::PeerId::of(peer))
                 && delivery.payload_len() <= MAX_DEPOSIT_PAYLOAD
-                && !settings.revocations.revokes(&pending.recipient)
+                && !settings.revocations.revokes_reference(&pending.recipient)
             {
-                if !pending.targets.contains(&peer) {
-                    pending.targets.push(peer);
+                if !pending
+                    .targets
+                    .contains(&rocky_credentials::PeerId::of(peer))
+                {
+                    pending.targets.push(rocky_credentials::PeerId::of(peer));
                     reserved = true;
                 }
                 outgoing.deposits.push(delivery);
@@ -350,10 +358,12 @@ impl Node {
         for digest in stored {
             if let Some(pending) = draft.deliveries.get_mut(&digest_key(&digest))
                 && pending.delivery.is_some()
-                && !pending.mailboxes.contains(&peer)
+                && !pending
+                    .mailboxes
+                    .contains(&rocky_credentials::PeerId::of(peer))
                 && pending.mailboxes.len() < MAX_MAILBOXES
             {
-                pending.mailboxes.push(peer);
+                pending.mailboxes.push(rocky_credentials::PeerId::of(peer));
             }
         }
         draft.save(&self.path)?;
@@ -373,7 +383,7 @@ impl Node {
             for pending in settings
                 .deliveries
                 .values()
-                .filter(|pending| pending.recipient == peer)
+                .filter(|pending| pending.recipient == rocky_credentials::PeerId::of(peer))
             {
                 let Some(delivery) = pending.sealed()? else {
                     continue;
@@ -431,7 +441,10 @@ impl Node {
             for receipt in &receipts {
                 if let Some(pending) = draft.deliveries.get_mut(&digest_key(&receipt.digest()))
                     && pending.delivery.is_some()
-                    && receipt.verify(pending.recipient, receipt.digest()).is_ok()
+                    && rocky_credentials::PeerId::of(receipt.recipient()) == pending.recipient
+                    && receipt
+                        .verify(receipt.recipient(), receipt.digest())
+                        .is_ok()
                 {
                     pending.delivery = None;
                     pending.mailboxes.clear();

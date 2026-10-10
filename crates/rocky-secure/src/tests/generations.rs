@@ -247,8 +247,11 @@ impl Lineage {
             not_before,
             expires,
             delegations,
-            extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-                .unwrap(),
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+                ..Default::default()
+            })
+            .unwrap(),
         };
         CredentialChain(vec![
             SignedCapability::sign(
@@ -886,8 +889,8 @@ async fn a_checkpoint_of_the_previous_generation_rebootstraps_typed_rows_and_tom
         .set_retention_policy(
             items,
             RetentionPolicy {
-                required: [bob_key.public_key()].into(),
-                behind: [carol_key.public_key()].into(),
+                required: [rocky_credentials::PeerId::of(bob_key.public_key())].into(),
+                behind: [rocky_credentials::PeerId::of(carol_key.public_key())].into(),
                 copies: 1,
                 window: 0,
             },

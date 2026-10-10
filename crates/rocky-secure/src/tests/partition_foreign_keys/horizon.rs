@@ -193,7 +193,7 @@ async fn group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step() 
     reader
         .set_role(crate::RoleConfig {
             role: crate::ReplicaRole::Partial,
-            full_nodes: [full_node].into(),
+            full_nodes: [rocky_credentials::PeerId::of(full_node)].into(),
             custody: 1,
         })
         .await

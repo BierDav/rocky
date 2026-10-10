@@ -783,7 +783,7 @@ async fn run(
             .await?
         };
         if let Err(error) = replica
-            .install_tables(domain.logical().clone(), domain.scope, domain.readers())
+            .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
             .await
         {
             drop(replica);
@@ -809,6 +809,11 @@ async fn run(
                 }
             }
         }
+        replica
+            .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
+                &vault.get("credential")?,
+            ))
+            .await?;
         for (key, chain) in settings.row_authors(&vault)? {
             replica.register_row_author(key, chain).await?;
         }
@@ -1062,7 +1067,7 @@ async fn dispatch(bytes: &[u8], client: Result<Arc<Client>, Failure>, node: &Nod
         if call["version"] != 1 || call["scope"] != serde_json::to_value(node.domain.scope)? {
             return Err("foreign scope or SDK version".into());
         }
-        node.dispatch(&*client?, &call["request"]).await
+        Box::pin(node.dispatch(&*client?, &call["request"])).await
     }
     .await;
     let response = match result {

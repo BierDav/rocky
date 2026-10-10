@@ -222,11 +222,14 @@ impl<A: RowApplication> Inner<A> {
         let Some(record) = self.plan_record().await? else {
             return Ok(false);
         };
-        let shadow = Arc::new(Typed::shadow(
-            record.schema.clone(),
-            record.domain,
-            &record.readers,
-        )?);
+        let shadow = Arc::new(
+            self.authorized_projection(Typed::shadow(
+                record.schema.clone(),
+                record.domain,
+                &record.readers,
+            )?)
+            .await?,
+        );
         let tables = shadow.tables.len() as i64;
         let switched = transaction!(self, |inner| {
             match record.position {
@@ -284,11 +287,14 @@ impl<A: RowApplication> Inner<A> {
         })?;
         if switched {
             self.shadow = None;
-            self.typed = Some(Arc::new(Typed::new(
-                record.schema,
-                record.domain,
-                &record.readers,
-            )?));
+            self.typed = Some(Arc::new(
+                self.authorized_projection(Typed::new(
+                    record.schema,
+                    record.domain,
+                    &record.readers,
+                )?)
+                .await?,
+            ));
             self.start_events();
             // Sessions and cursors planned against the old tables end.
             self.bump_authority();
@@ -371,10 +377,23 @@ impl<A: RowApplication> Inner<A> {
         for table in installed.mergeable() {
             self.touch(&table.sql_name);
             self.conn
-                .execute(format!("DROP TABLE {}", quoted(&table.sql_name)), ())
+                .execute(
+                    format!("DROP TABLE IF EXISTS {}", quoted(&table.sql_name)),
+                    (),
+                )
                 .await?;
         }
-        for table in &record.schema.tables {
+        let projected = self
+            .authorized_projection(Typed::new(
+                record.schema.clone(),
+                record.domain,
+                &record.readers,
+            )?)
+            .await?;
+        self.record_projection_access(&projected).await?;
+        for table in record.schema.tables.iter().filter(|table| {
+            table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
+        }) {
             self.touch(&table.sql_name);
             match table.class {
                 TableClass::Mergeable => {

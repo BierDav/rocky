@@ -60,7 +60,7 @@ async fn issuer(
     )
     .await?;
     replica
-        .install_tables(domain.logical().clone(), domain.scope, domain.readers())
+        .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
         .await?;
     let path = directory.join("identity.json");
     settings.save(&path)?;

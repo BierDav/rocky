@@ -21,7 +21,10 @@ async fn node(
     )
     .await?;
     replica
-        .install_tables(domain.logical().clone(), domain.scope, domain.readers())
+        .register_credential_signer(PrivateKey::from_bytes(&vault.get("credential")?))
+        .await?;
+    replica
+        .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
         .await?;
     let node = Arc::new(Node::new(
         replica,

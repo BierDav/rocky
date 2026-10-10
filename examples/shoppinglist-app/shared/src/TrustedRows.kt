@@ -7,11 +7,16 @@ import rocky.Row
 import rocky.SchemaBuilder
 
 /**
- * Tables only trusted devices read, since they hold secrets: each trusted device's open pairing code, and the
- * household's coordination tenant. Members hold no grant on them, so their databases do not show the tables at all;
- * Room, which validates every entity it declares, therefore declares neither.
+ * Tables only trusted devices read: device names and kinds, each trusted device's open pairing code, and the
+ * household's coordination tenant. Members hold no grant on them. Room declares none of them, and the application never queries them on members.
  */
 internal val trustedTables: SchemaBuilder.() -> Unit = {
+    table("devices") {
+        text("node")
+        text("name")
+        text("kind")
+        primaryKey("node")
+    }
     table("invitations") {
         text("issuer")
         text("kind")
@@ -33,6 +38,9 @@ internal val trustedTables: SchemaBuilder.() -> Unit = {
     }
 }
 
+/** Trusted-only description, also carried by the registry label. */
+data class DeviceRow(val node: String, val name: String, val kind: String)
+
 /** The open pairing [code] of the trusted device [issuer]: Rocky keeps one per issuer, used once until [expires]. */
 data class InvitationRow(val issuer: String, val kind: String, val name: String, val code: String, val expires: Long)
 
@@ -52,6 +60,18 @@ class CoordinationRow(
 
 /** Reads and writes the [trustedTables] through Rocky's own API, on trusted devices only. */
 internal class TrustedRows(private val rocky: RockyDatabase) {
+    fun devices(): Flow<List<DeviceRow>> = rows("devices").map { rows ->
+        rows.map { DeviceRow(it.text("node"), it.text("name"), it.text("kind")) }
+    }
+
+    suspend fun record(node: String, name: String, kind: String) = write {
+        if (execute("UPDATE devices SET name = ?, kind = ? WHERE node = ?", name, kind, node) == 0L) {
+            execute("INSERT INTO devices(id, node, name, kind) VALUES(?, ?, ?, ?)", nextId("devices"), node, name, kind)
+        }
+    }
+
+    suspend fun forget(node: String) = write { execute("DELETE FROM devices WHERE node = ?", node) }
+
     fun invitations(): Flow<List<InvitationRow>> = rows("invitations").map { rows ->
         rows.map { InvitationRow(it.text("issuer"), it.text("kind"), it.text("name"), it.text("code"), it.integer("expires")) }
     }
@@ -108,5 +128,12 @@ internal class TrustedRows(private val rocky: RockyDatabase) {
     }
 
     private fun rows(table: String): Flow<List<Row>> = rocky.observe(ShoppingSchema.table(table).query()).map(Row::decode)
-    private suspend fun write(block: suspend rocky.SqlWrite.() -> Unit) = rocky.write(RockyDatabase.newHandle(), block)
+    private suspend fun write(block: suspend rocky.SqlWrite.() -> Unit) {
+        val session = rocky.openSession()
+        try {
+            session.write(RockyDatabase.newHandle(), block)
+        } finally {
+            session.close()
+        }
+    }
 }

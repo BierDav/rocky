@@ -72,14 +72,14 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
     suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) = database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
 
     /**
-     * Shares the whole list with [recipients] by node; needs a trusted device. Sync carries each envelope to its device
+     * Shares a held list with [recipients] by node; members obtain the node from a scanned contact. Sync carries each envelope to its device
      * alone, directly or through the custody peer, which installs it and starts a list new to it from a checkpoint.
      */
     suspend fun share(list: Long, recipients: List<String>) {
         rocky.list(list).share(recipients)
     }
 
-    /** Shares [list] with every other reading device this issuer enrolled, and returns them; custody holds no key. */
+    /** Shares [list] with every other reading device in the issuer registry, and returns them; custody holds no key. */
     suspend fun shareWithDevices(list: Long): List<String> {
         val own = rocky.session().node
         val devices = rocky.devices().filter { !it.revoked && it.node != own && it.profile !is GrantProfile.Custody }.map { it.node }

@@ -193,7 +193,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("acknowledgment right denied"));
         }
         transaction!(inner, |inner| {
-            inner.conn.execute("INSERT INTO secure_ack VALUES(?,?,?) ON CONFLICT(peer,hash) DO UPDATE SET applied=MAX(applied,excluded.applied)", bindings(vec![SqlValue::Blob(peer.as_bytes().to_vec()), SqlValue::Blob(id.as_bytes().to_vec()), SqlValue::Integer(i64::from(applied))])).await?;
+            inner.conn.execute("INSERT INTO secure_ack VALUES(?,?,?) ON CONFLICT(peer,hash) DO UPDATE SET applied=MAX(applied,excluded.applied)", bindings(vec![SqlValue::Blob(rocky_credentials::PeerId::of(peer).as_bytes().to_vec()), SqlValue::Blob(id.as_bytes().to_vec()), SqlValue::Integer(i64::from(applied))])).await?;
             Ok(())
         })?;
         // The peer is told its acknowledgment is recorded.

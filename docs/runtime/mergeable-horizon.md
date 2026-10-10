@@ -31,7 +31,7 @@ is for an author who schedules horizons, syncs across one, or changes the format
    in one transaction drops tombstones, hidden primary-key and unique losers and
    cascade orphans, stores substituted SET NULL values, preserves register
    stamps and identity high-water marks per author/partition, installs the
-   format-8 checkpoint and existence attachments, advances log floors and the
+   format-9 checkpoint and existence attachments, advances log floors and the
    revision. Notifications follow commit and flush. Retry is idempotent.
 5. `prune(scope)` then releases evidence only when the ordinary copy gates and
    `HorizonCustody` permit: `max(1, copies)` other holders must acknowledge the
@@ -82,6 +82,14 @@ reverse a parent's retirement at the same cut.
 
 ## After the cut
 
+A read-only participant acknowledges the cut and imports a writer's finalized
+checkpoint. Automatic sync finalizes locally only with whole-scope read and
+write authority; a reader must not publish a checkpoint that custody would
+reject for lacking write authority.
+Keyless custody retains the writer's finalized checkpoint as a sealed archive and
+serves it to read-only participants; see
+[encrypted checkpoints](encrypted-checkpoints.md).
+
 - An authenticated edit/delete of a definitely absent incarnation is consumed
   without row effects, including one whose creation was pruned. Its author log
   continues; a local one keeps operation/outbox/handle semantics. The trusted
@@ -95,7 +103,7 @@ reverse a parent's retirement at the same cut.
   winner rules. Reusing a released baseline key needs a signed causal dependency
   on the release and the same finalized basis.
 - Behind devices cannot sync rows or write until native `sync_scope` or SDK sync
-  imports a format-8 checkpoint. Learning the remote cut installs a durable
+  imports a format-9 checkpoint. Learning the remote cut installs a durable
   write/sync guard before pages download; only a covering finalized checkpoint
   clears it. Bootstrap fetches existence attachments, then row pages, then sends
   an authenticated finalized-bootstrap receipt.
@@ -110,15 +118,15 @@ reverse a parent's retirement at the same cut.
 
 | Boundary | Current |
 | --- | --- |
-| Horizon statement | Format 4 with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v1` bind statement and device key |
-| Checkpoint | Format 8 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
+| Horizon statement | Format 5 with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v2` bind statement, node reference and credential alias |
+| Checkpoint | Format 9 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v12` |
-| Native session | `rocky.native-session.v12` |
+| File identity | `rocky.encrypted-replica.v14` |
+| Native session | `rocky.native-session.v14` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
-Horizon statements accept only format 4, with an explicit existence-base list.
-Checkpoint 8, frame 8 and replica identity v12 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Horizon statements accept only format 5, with an explicit existence-base list.
+Checkpoint 9, frame 8 and replica identity v14 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.
@@ -169,6 +177,14 @@ durable copies; growing data, new authors or unavailable copies retain more.
 Without finalization, the same churn retains one tombstone and two existence
 records per cycle.
 
+Finalized checkpoints also travel to keyless custody as sealed page archives.
+The writer deposits referenced existence bases, the signed checkpoint and each
+bounded page before relaying finalization evidence. Page receipt and its resume
+cursor commit atomically; incomplete archives are not offered. Read-only
+participants import the writer's cut through the normal verified rebootstrap
+path after custody restarts. They never sign a checkpoint with an expanded grant.
+See [decision 0061](../decisions/0061-readable-projections-and-checkpoint-custody.md).
+
 ## Design rationale
 
 - The issuer, not a device quorum, declares the cut: only it can authenticate a
@@ -178,3 +194,7 @@ records per cycle.
 - Inserts bind the finalized basis because otherwise a dropped insert could
   return once a successor horizon removed its conflict.
 - Finalization never relaxes the durable-copy rule: the last copy is not released.
+
+Participants and acknowledgments retain one-way node references. An acknowledgment
+signs with a distinct credential alias bound to that reference. The issuer remains
+the trust anchor; see [decision 0062](../decisions/0062-node-references-and-credential-aliases.md).

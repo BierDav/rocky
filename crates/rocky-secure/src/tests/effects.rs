@@ -69,6 +69,11 @@ pub(super) fn config<A: RowCommandApplication>(
             subject: node.public_key(),
             kind: PrincipalKind::Node,
             delegations: 0,
+            extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                node: Some(rocky_credentials::PeerId::of(node.public_key())),
+                ..Default::default()
+            })
+            .unwrap(),
             ..cap
         },
         &user,

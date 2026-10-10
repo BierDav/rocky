@@ -61,16 +61,17 @@ creates a new device identity; it does not undo the old identity's revocation.
 Trusted devices also record their own enrollment. Each recipient's key delivery
 runs independently, so a refused recipient cannot block the remaining devices.
 
-**Remove permanently** on a revoked device deletes its record, identity and
-sealed keys at once; it disappears from every device with the next sync. The
-signed revocation stays, since it is what refuses the old identity. The
-deletions leave tombstones until a [horizon](../../docs/runtime/mergeable-horizon.md)
-on `devices` and `identities` is finalized: every other device must acknowledge
-it, which it does when it next syncs with a trusted device. The Devices tab
-shows how many are outstanding and the deadline, at most 30 days, after which
-a silent device counts as behind and must rebootstrap those tables. Declaring
-needs a prior sync with each device. Meanwhile both tables refuse writes, so a
-device enrolled then is recorded once the horizon is finalized.
+Members' **Devices** tab shows **This device** and only peers met here, with local labels.
+**My contact code** shows the code another member scans. **Scan contact** keeps a
+route and a local label; it grants no access and replicates no label. Pairing
+supplies one issuer contact; authenticated sessions hand over other contacts,
+so no reciprocal contact entry is needed. Discovery is not used by these flows.
+
+Trusted devices manage every device in the issuer registry, including devices
+enrolled elsewhere. The trusted-only `devices` table records name and kind;
+the same two fields form the opaque registry label, available before that table
+syncs. **Clear name** clears a revoked device's application description; its
+registry tombstone and signed revocation remain. No roster horizon is declared.
 
 ## Approvals
 
@@ -87,12 +88,13 @@ confirmed results; see [Approvals](shared/src/Approvals.kt) and
 The founding device creates the household's coordination tenant key in the
 `coordination` table, which only trusted devices read. Trusted devices keep the
 domain registered: every live device may invoke and every trusted device may
-execute, and the control is renewed before its 29 days end. Each device
-publishes its command identity in `identities`. The service learns request
+execute, and the control is renewed before its 29 days end. Command identities come from Kotlin `devices()` on trusted nodes; members never
+query the registry. Requests and decisions retain command identities, which members
+label **This device** or **Another device**. Trusted nodes show the registry name. The service learns request
 identities and commitments, never titles or decisions. A device opened over
 direct TCP, as in qualification, has no coordinator and shows the tab as
-unavailable. A member's request goes directly to the trusted device the
-coordinator assigned as executor, so that device must be reachable; a request
+unavailable. A member's request discovers the assigned executor through contacts, or is forwarded
+once by an admitted peer; a request
 that cannot be delivered stays stored and is retried in the background.
 Once its requests settle, a device lets the service retire their identities.
 The runtime retires only identities whose results other devices can still
@@ -106,22 +108,27 @@ the lists sent to them from the **Devices** tab. Sync carries each sealed
 secret to its recipient alone, directly or through the custody peer, which
 holds it without learning the list; the recipient installs it and bootstraps
 from a peer checkpoint. A revocation's rotation reaches the remaining devices
-the same way. No row records who holds which list: the `keys` table is no
-longer written or read and goes with the roster in
-[phase 20](../../docs/features_07/20-shopping-without-a-roster.md). The `devices` table records names and
-kinds. List title conflicts converge per list; deleting a list hides its
+the same way. No row records who holds which list. `keys` and `identities` are removed;
+members have no physical `devices` table. SQL against any removed member table
+returns `no such table`, including after reopen. A byte search of a member's
+directory finds no other device's node key; see
+[Phase 20 evidence](../../docs/features_07/20-shopping-without-a-roster-evidence.md).
+In **Lists → Share list**, a member
+scans or pastes the recipient's contact code; a trusted node chooses from the
+registry, including a device it has never contacted. List title conflicts converge per list; deleting a list hides its
 children, and deleting a category clears its items' category. Moving an item
 keeps an offline tick attached to it.
 
 The **Sync** tab shows readiness, connection state, domain and node identity,
 grants, revocation digest and count, credential expiry, per-table holdings and key epochs.
+Its partner list shows each known peer's source, ranking reason and last connection state.
 Its activity feed shows transfers, checkpoint imports, bootstrap, horizon
 finalization, author installation, enrollment and key delivery. The feed is
 bounded and lasts for the open database's lifetime; see
 [SDK activity](../../docs/runtime/activity.md). The top badge also reflects
 inbound sync on a trusted device that serves the phone.
 
-The current Room schema is version 5. Earlier application schemas are refused;
+The current Room schema is version 6. Earlier application schemas are refused;
 there is no migration or fallback. An existing household that cannot open
 shows **Retry** and preserves its data.
 

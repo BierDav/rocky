@@ -36,6 +36,15 @@ Typed rows follow every stored row change in the same transaction: authoring,
 receipt, rebuild, rebootstrap and eviction. Authorized typed tables are
 plaintext at rest, as stored rows are.
 
+The SDK calls `install_readable_tables`: unreadable replicated tables are physically
+absent, including their constraint candidates. Read selectors allow a partitioned
+table even before its first partition key arrives. Referenced existence support
+and local-only tables remain installed. The full descriptor is still checked
+against the signed manifest; reopening preserves the selected projection.
+The lower-level `install_tables` API installs all declared tables.
+See [the projection and custody decision](../decisions/0061-readable-projections-and-checkpoint-custody.md)
+for format and access-change rules.
+
 ## Row identities
 
 The identity contract is in [row identity](logical-schema.md#row-identity).

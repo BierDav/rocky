@@ -197,6 +197,8 @@ impl<A: RowApplication> Inner<A> {
                 self.conn.execute("INSERT INTO secure_results VALUES(?,?,?) ON CONFLICT(domain,sequence) DO UPDATE SET result=excluded.result", bindings(vec![SqlValue::Blob(encode(&scope.domain)?),SqlValue::Integer(sequence as i64),SqlValue::Blob(combined.to_bytes()?)])).await?;
             }
         }
+        // No result applies the imported rows, so the table follows them here.
+        self.project_confirmed(scope).await?;
         self.audited.remove(&scope);
         self.reconciled = None;
         Ok(())

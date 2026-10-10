@@ -328,8 +328,16 @@ async fn only_issuers_open_the_registry_and_custody_relays_it_sealed() -> Result
             let file = entry?.file_name().to_string_lossy().into_owned();
             assert!(!file.contains("issuer_registry"), "{name}: {file}");
         }
-        // Rows it holds stay sealed: none is open in the typed table.
-        assert_eq!(registry_rows(&directory, "%")?, 0, "{name}");
+        let file = rusqlite::Connection::open_with_flags(
+            directory.join("rocky.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let tables: i64 = file.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='issuer_registry'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(tables, 0, "{name}");
     }
     for device in [&c, &r, &w] {
         assert!(device.call(json!({"type": "devices"})).await.is_err());
@@ -767,7 +775,10 @@ async fn horizon_participants_come_from_unsynced_registry_records() -> Result<()
     a.ok(json!({"type":"grant","device":keys,"profile":{"kind":"reader","scopes":["items"]}}))
         .await;
     let declared = a.ok(json!({"type":"horizon","collection":"items","action":"declare","participants":[keys.node]})).await;
-    assert_eq!(declared["waiting"], json!([keys.node]));
+    assert_eq!(
+        declared["waiting"],
+        json!([rocky_credentials::PeerId::of(keys.node)])
+    );
     let bytes = data_encoding::HEXLOWER.decode(
         declared["statement"]
             .as_str()

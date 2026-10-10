@@ -10,7 +10,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return true;
         }
         if let Some(typed) = &inner.typed {
-            return !typed.tables.iter().any(|table| table.scope == scope);
+            return !typed.declarations.iter().any(|table| table.scope == scope);
         }
         !inner.tables.contains(&scope.table)
             || !inner.domains.contains(&scope.domain.domain)

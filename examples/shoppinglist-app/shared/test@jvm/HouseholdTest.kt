@@ -53,7 +53,7 @@ class HouseholdTest {
             val unused = household.invite(NodeKind.Trusted, "Next")
             // All enrollments are retained before the application collector starts.
             recording = launch { household.run() }
-            val devices = withTimeout(30_000) { household.devices().first { it.size == 2 } }
+            val devices = withTimeout(30_000) { household.devices().first { rows -> rows.map { it.name }.toSet() == setOf("Laptop", "Phone") } }
             assertEquals(setOf("Laptop" to "full", "Phone" to "partial"), devices.map { it.name to it.kind }.toSet())
             assertEquals(unused.toString(), household.invitations().first().single().code)
         } finally {

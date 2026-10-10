@@ -146,7 +146,7 @@ impl<A: RowApplication> Inner<A> {
     /// The installed scope of a table with an existence log.
     pub(super) fn existence_table(&self, scope: ResourceScope) -> bool {
         self.typed.as_ref().is_some_and(|typed| {
-            typed.by_scope(scope).is_some_and(|projected| {
+            typed.declared_by_scope(scope).is_some_and(|projected| {
                 typed
                     .rows
                     .schema()
@@ -726,7 +726,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let grants = inner.local_grants(now()?)?;
         let schema = typed.rows.schema();
         let keyed = |name: &str| {
-            typed.by_name(name).is_some_and(|projected| {
+            typed.declared_by_name(name).is_some_and(|projected| {
                 grants.iter().any(|grant| {
                     grant.scope == projected.scope
                         && (grant.rights.contains(&Right::Read)
@@ -762,7 +762,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .any(|key| key.table.eq_ignore_ascii_case(&table.sql_name))
             });
             if (keyed(&table.sql_name) || referenced)
-                && let Some(projected) = typed.by_name(&table.sql_name)
+                && let Some(projected) = typed.declared_by_name(&table.sql_name)
             {
                 scopes.push(projected.scope);
             }

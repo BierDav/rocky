@@ -165,7 +165,10 @@ impl CredentialChain {
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<Vec<ResourceGrant>, Error> {
         let leaf = self.links(publisher, manifest, current)?;
-        if leaf.subject != subject || leaf.kind != PrincipalKind::Node || leaf.delegations != 0 {
+        if leaf.extended()?.node != Some(crate::PeerId::of(subject))
+            || leaf.kind != PrincipalKind::Node
+            || leaf.delegations != 0
+        {
             return Err(denied("operation/session requires a node credential"));
         }
         if current.is_some() && !leaf.extended()?.partitions.is_empty() {
@@ -174,6 +177,23 @@ impl CredentialChain {
             ));
         }
         Ok(leaf.grants.clone())
+    }
+    /// Checks a node's alias-bound grants without requiring its public node key.
+    pub fn verify_reference_selectors(
+        &self,
+        publisher: PublicKey,
+        manifest: Commitment,
+        node: crate::PeerId,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
+        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
+        let extension = leaf.extended()?;
+        if leaf.kind != PrincipalKind::Node || leaf.delegations != 0 || extension.node != Some(node)
+        {
+            return Err(denied("credential does not bind the node reference"));
+        }
+        Ok((leaf.grants.clone(), extension.partitions))
     }
     /// Checks every link and returns the leaf: each is signed by its
     /// parent's subject, narrows it in grants, validity, depth and author
@@ -258,8 +278,12 @@ impl CredentialChain {
     /// carry one number, a sealed device and grants on one table.
     fn shape(capability: &Capability, extended: &Extended, root: bool) -> Result<(), Error> {
         let valid = match capability.kind {
-            PrincipalKind::Node => extended.authors.is_none() && extended.device.is_none(),
-            PrincipalKind::User | PrincipalKind::Deployment => extended.device.is_none(),
+            PrincipalKind::Node => {
+                extended.authors.is_none() && extended.device.is_none() && extended.node.is_some()
+            }
+            PrincipalKind::User | PrincipalKind::Deployment => {
+                extended.device.is_none() && extended.node.is_none()
+            }
             PrincipalKind::Pseudonym => {
                 let first = capability
                     .grants
@@ -277,6 +301,7 @@ impl CredentialChain {
                 !root
                     && capability.delegations == 0
                     && extended.device.is_some()
+                    && extended.node.is_none()
                     && extended
                         .authors
                         .is_some_and(|range| range.single().is_some())
@@ -387,6 +412,24 @@ impl CredentialChain {
             assigner,
             expires: self.expires(),
         })
+    }
+    /// Verifies a node's credential signing alias without revealing the node key.
+    pub fn verify_node_alias(
+        &self,
+        publisher: PublicKey,
+        manifest: Commitment,
+        node: crate::PeerId,
+        alias: PublicKey,
+    ) -> Result<(), Error> {
+        let leaf = self.links(publisher, manifest, None)?;
+        if leaf.kind != PrincipalKind::Node
+            || leaf.delegations != 0
+            || leaf.subject != alias
+            || leaf.extended()?.node != Some(node)
+        {
+            return Err(denied("credential alias does not bind the node reference"));
+        }
+        Ok(())
     }
     /// The node key of the device a pseudonym chain names, for a holder of
     /// the publisher key. Nobody else can open it.

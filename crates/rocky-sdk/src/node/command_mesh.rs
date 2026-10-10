@@ -167,6 +167,7 @@ impl Node {
                 let link = attached
                     .as_ref()
                     .ok_or(ServiceError::NetworkRequired("command forwarding"))?;
+                Box::pin(self.resolve_saved_contacts(&*link.transport)).await;
                 let settings = self.settings.lock().await.clone();
                 let (peer, contact) = settings
                     .peers
@@ -217,6 +218,7 @@ impl Node {
         executor: rocky_core::NodeId,
         envelope: Vec<u8>,
     ) -> Result<Vec<u8>, Failure> {
+        Box::pin(self.resolve_saved_contacts(transport)).await;
         let settings = self.settings.lock().await.clone();
         let candidates = self.dialed(&settings);
         if !settings

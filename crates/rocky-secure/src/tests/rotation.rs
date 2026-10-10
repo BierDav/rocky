@@ -24,8 +24,11 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
         not_before,
         expires,
         delegations,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
+            ..Default::default()
+        })
+        .unwrap(),
     };
     CredentialChain(vec![
         SignedCapability::sign(
@@ -547,7 +550,7 @@ async fn siblings_open_both_histories_converge_writers_and_retire_after_pruning(
     left.set_retention_policy(
         f.public,
         RetentionPolicy {
-            required: [b.public_key()].into(),
+            required: [rocky_credentials::PeerId::of(b.public_key())].into(),
             copies: 1,
             window: 0,
             ..Default::default()

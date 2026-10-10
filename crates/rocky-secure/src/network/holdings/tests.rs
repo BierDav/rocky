@@ -142,7 +142,7 @@ fn requests(
         .into(),
         HorizonMessage::HorizonAck {
             scope,
-            ack: rocky_credentials::HorizonAck::sign([0; 32], node).unwrap(),
+            ack: rocky_credentials::HorizonAck::sign([0; 32], node, credentials.clone()).unwrap(),
         }
         .into(),
         CommandMessage::Execute {
@@ -677,4 +677,37 @@ async fn acknowledgments_cannot_probe_unserved_frame_ids() {
         member.frontier(f.scope("customers", 1)).await.unwrap(),
         writer.frontier(f.scope("customers", 1)).await.unwrap()
     );
+}
+
+#[tokio::test]
+async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_session() {
+    let f = Fixture::new(1);
+    let root = tempfile::tempdir().unwrap();
+    let server = open(&f, root.path(), "resolver", &[Right::Read]).await;
+    let (node, credentials) = {
+        let inner = server.inner.lock().await;
+        (inner.config.node.clone(), inner.config.credentials.clone())
+    };
+    for expected in [node.public_key(), PrivateKey::new().public_key()] {
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (resolved, accepted) = tokio::join!(
+            NativeSession::resolve_peer(
+                Box::new(client_stream),
+                rocky_credentials::PeerId::of(expected)
+            ),
+            NativeSession::accept_or_resolve(
+                server_stream,
+                &server,
+                node.clone(),
+                credentials.clone(),
+                MAX_SECURE_BYTES
+            )
+        );
+        assert!(accepted.unwrap().is_none());
+        if expected == node.public_key() {
+            assert_eq!(resolved.unwrap(), expected);
+        } else {
+            assert!(resolved.is_err());
+        }
+    }
 }

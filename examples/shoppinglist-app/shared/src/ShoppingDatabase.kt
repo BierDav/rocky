@@ -51,39 +51,6 @@ data class ShoppingItem(
     @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
 )
 
-/** What a trusted device recorded about an enrolled device: its [name] and [kind], see [NodeKind]. */
-@Entity(tableName = "devices", indices = [Index(value = ["id"], unique = true, name = "devices_identity")])
-data class DeviceRow(
-    @PrimaryKey val node: String,
-    val name: String,
-    val kind: String,
-    val id: Long,
-    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
-)
-
-/**
- * The former carrier of list envelopes, which sync now delivers to each recipient alone: nothing writes or reads it.
- * The table and its grants stay until the roster goes (`docs/features_07/20-shopping-without-a-roster.md`).
- */
-@Entity(tableName = "keys", primaryKeys = ["recipient", "list"], indices = [Index(value = ["id"], unique = true, name = "keys_identity")])
-class ListKey(
-    val recipient: String,
-    val list: Long,
-    val epoch: String,
-    val envelope: ByteArray,
-    val id: Long,
-    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
-)
-
-/** The command identity [node] reported for itself, so a trusted device can register it with the coordinator. */
-@Entity(tableName = "identities", indices = [Index(value = ["id"], unique = true, name = "identities_identity")])
-data class IdentityRow(
-    @PrimaryKey val node: String,
-    val identity: String,
-    val id: Long,
-    @ColumnInfo(name = "row_kind") val rowKind: Long = 0,
-)
-
 /** A confirmed request; only [AskApproval] writes it. [requester] is the asking device's command node. */
 @Entity(tableName = "requests", indices = [Index(value = ["id"], unique = true, name = "requests_identity")])
 data class RequestRow(
@@ -176,56 +143,6 @@ interface ShoppingDao {
     suspend fun delete(list: Long, id: Long): Int
 }
 
-@Dao
-interface DeviceDao {
-    @Query("SELECT * FROM devices ORDER BY name, node")
-    fun observe(): Flow<List<DeviceRow>>
-
-    @Insert suspend fun insert(device: DeviceRow)
-
-    @SkipQueryVerification
-    @Query("SELECT rocky_next_id('devices')")
-    suspend fun nextId(): Long
-
-    @Query("UPDATE devices SET name = :name, kind = :kind WHERE node = :node")
-    suspend fun update(node: String, name: String, kind: String): Int
-
-    @Query("DELETE FROM devices WHERE node = :node")
-    suspend fun delete(node: String): Int
-
-    @Query("DELETE FROM identities WHERE node = :node")
-    suspend fun deleteIdentity(node: String): Int
-
-    /** Removes the device's record and its identity in one commit. */
-    @Transaction suspend fun forget(node: String) {
-        delete(node)
-        deleteIdentity(node)
-    }
-
-    @Transaction suspend fun record(node: String, name: String, kind: String) {
-        if (update(node, name, kind) == 0) insert(DeviceRow(node, name, kind, nextId()))
-    }
-}
-
-@Dao
-interface IdentityDao {
-    @Query("SELECT * FROM identities")
-    fun observe(): Flow<List<IdentityRow>>
-
-    @Insert suspend fun insert(row: IdentityRow)
-
-    @SkipQueryVerification
-    @Query("SELECT rocky_next_id('identities')")
-    suspend fun nextId(): Long
-
-    @Query("UPDATE identities SET identity = :identity WHERE node = :node")
-    suspend fun update(node: String, identity: String): Int
-
-    @Transaction suspend fun publish(node: String, identity: String) {
-        if (update(node, identity) == 0) insert(IdentityRow(node, identity, nextId()))
-    }
-}
-
 /** Confirmed rows: these DAOs only read, since SQL refuses every write to a command-controlled table. */
 @Dao
 interface ApprovalDao {
@@ -238,14 +155,14 @@ interface ApprovalDao {
 
 /**
  * Room on Rocky's file: the version is the replicated schema's, [ShoppingSchema], and Room never migrates it. The
- * trusted-only tables are not Room's: a member's database does not show them at all; see [TrustedRows].
+ * trusted-only tables are not Room's: members have no grant on them; see [TrustedRows].
  */
 @Database(
     entities = [
-        ShoppingList::class, Category::class, ShoppingItem::class, DeviceRow::class, ListKey::class, IdentityRow::class,
+        ShoppingList::class, Category::class, ShoppingItem::class,
         RequestRow::class, DecisionRow::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 @ConstructedBy(ShoppingDatabaseConstructor::class)
@@ -253,8 +170,6 @@ abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun lists(): ListDao
     abstract fun categories(): CategoryDao
     abstract fun items(): ShoppingDao
-    abstract fun devices(): DeviceDao
-    abstract fun identities(): IdentityDao
     abstract fun approvals(): ApprovalDao
 }
 

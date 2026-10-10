@@ -64,3 +64,6 @@ process-host transport, and checks that each mismatched typed command in
 `./kotlin check` runs both, the packaged consumer and every module's tests. Android
 apps depend on `rocky-runtime-android`, whose native libraries a small
 [Gradle build](android-runtime/README.md) publishes first.
+`android-discovery-check` is the small Android app that
+[`qualify-android-discovery`](qualify-android-discovery) installs on an emulator to show the Wi-Fi
+multicast lock held while [local discovery](../../docs/runtime/discovery.md#lifecycle-and-platforms) is on.

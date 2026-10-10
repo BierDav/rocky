@@ -46,6 +46,9 @@ filter = '''
 # in docs/features_07/01-test-tiers-evidence.md. Name a test here only with its
 # measured time; a test that is only slow should be made faster instead.
 # Phase 10 evidence records the owned QUIC shutdown tests at 2.7/2.6 s.
+# Phase 15: the mDNS run waits 2 s to show that another topic stays silent
+# (3.0 s); the two-process discovery runs enroll three devices and start a
+# second process (4.1 s each). See docs/features_07/15-discovery-evidence.md.
 [e2e]
 suite = "15m"
 filter = '''
@@ -85,6 +88,13 @@ filter = '''
     ))
     | (binary_id(rocky-sdk::composition) & (
           test(=a_closing_service_cancels_work_that_outlasts_its_drain)
+    ))
+    | (binary_id(rocky-iroh::discovery) & (
+          test(=members_of_a_topic_find_each_other_over_mdns_and_others_do_not)
+    ))
+    | (binary_id(rocky-sdk::discovery) & (
+          test(=two_processes_find_each_other_over_mdns_and_converge)
+        | test(=two_processes_find_each_other_through_the_rendezvous_record_and_converge)
     ))
     | (binary_id(rocky-sdk::driver) & (
           test(=bundle_limits_and_the_lease_fail_the_transaction_without_splitting_it)

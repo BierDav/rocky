@@ -171,7 +171,8 @@ pub struct NativeEndpoint {
 impl NativeEndpoint {
     /// Binds an endpoint whose identity is `secret` (32 bytes the
     /// application keeps) and routes `protocols` next to Rocky's.
-    /// `options` are the starter's: `relay`, `discovery` and `bind`.
+    /// `options` are the starter's: `relay`, `lookup`, `topic`, `local`
+    /// and `bind`.
     #[uniffi::constructor]
     pub fn bind(
         options: String,
@@ -200,7 +201,9 @@ impl NativeEndpoint {
         let (endpoint, attachment, router) = runtime
             .block_on(async {
                 let endpoint = options.bind(secret).await?;
-                let attachment = Attachment::new(endpoint.clone());
+                // Discovery only as the options ask; the endpoint's own lookup
+                // services stay as bound.
+                let attachment = Attachment::discovering(endpoint.clone(), options.discover());
                 let mut router = attachment.register(Router::builder(endpoint.clone()));
                 for protocol in protocols {
                     let app = App {

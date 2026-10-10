@@ -290,7 +290,7 @@ impl Contact {
         Ok(contact)
     }
     /// Replaces the routes of the kinds `routes` name and keeps the others.
-    fn learn(&mut self, routes: Vec<Route>) {
+    pub(crate) fn learn(&mut self, routes: Vec<Route>) {
         for route in routes {
             self.routes
                 .retain(|known| known.transport != route.transport);

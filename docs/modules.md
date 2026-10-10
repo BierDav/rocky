@@ -196,8 +196,11 @@ Implements the network port on iroh. `Attachment` registers Rocky's ALPN
 handlers on a router the application owns and dials with its endpoint, without
 ever closing either; `Options` is the starter that binds, routes and shuts
 down its own. `Attachment::serving` answers another protocol set, such as a
-coordinator voter's. It re-exports the iroh version it attaches to. See
-[iroh networking](runtime/sdk-transports.md#iroh).
+coordinator voter's. Its `discovery` module finds members of a topic over
+mDNS and a rendezvous record, beside the endpoint and only when asked. It
+re-exports the iroh version it attaches to. See
+[iroh networking](runtime/sdk-transports.md#iroh) and
+[discovery](runtime/discovery.md).
 
 Depends on `rocky-core` only, never on a runtime, a database or `rocky-sdk`.
 

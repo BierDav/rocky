@@ -36,7 +36,9 @@ impl ProtocolHandler for Echo {
 fn local() -> Options {
     Options {
         relay: Some("disabled".into()),
-        discovery: false,
+        lookup: Some("disabled".into()),
+        topic: false,
+        local: false,
         bind: Some("127.0.0.1:0".into()),
     }
 }
@@ -70,7 +72,9 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     // The member uses the starter, which owns its endpoint.
     let starter = Network::Owned(Arc::new(TransportOptions::Iroh {
         relay: Some("disabled".into()),
-        discovery: false,
+        lookup: Some("disabled".into()),
+        topic: false,
+        local: false,
         bind: Some("127.0.0.1:0".into()),
     }));
     let b = Device::join(&root.path().join("b"), &a.invite().await, starter)?;

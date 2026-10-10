@@ -49,7 +49,7 @@ fun main(args: Array<String>) {
     require(options.keys.all { it in setOf("--create", "--join", "--invite") } && ("--join" !in options || options["--join"] != null)) { USAGE }
     val directory = File(System.getenv("ROCKY_MARKET_DATA") ?: File(System.getProperty("user.home"), ".rocky-market").path)
     val bundle = File(System.getenv("ROCKY_MARKET_BUNDLE") ?: error("set ROCKY_MARKET_BUNDLE to the service's bundle.json")).readText()
-    val transport = if (System.getenv("ROCKY_MARKET_LOOPBACK") == "1") PeerTransport.Iroh("disabled", discovery = false, bind = "127.0.0.1:0") else PeerTransport.Iroh()
+    val transport = if (System.getenv("ROCKY_MARKET_LOOPBACK") == "1") PeerTransport.Iroh.isolated(bind = "127.0.0.1:0") else PeerTransport.Iroh()
     val random = SecureRandom()
     val platform = MarketPlatform(
         trustBundle = bundle,

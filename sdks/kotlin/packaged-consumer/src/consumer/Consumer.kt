@@ -185,7 +185,7 @@ fun main(args: Array<String>) = runBlocking {
     check(calls == 1)
     b.commands.submit(add, 9L, handle(3))
     check(b.commands.cancel(add, handle(3)).state == TicketState.Cancelled)
-    val endpoint = RockyEndpoint.bind(ByteArray(32) { 42 }, relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+    val endpoint = RockyEndpoint.bind(ByteArray(32) { 42 }, relay = "disabled", lookup = "disabled", bind = "127.0.0.1:0")
     val attached = db.attach(PeerTransport.Endpoint(endpoint))
     check(db.network().attached && !db.network().owned)
     attached.close()

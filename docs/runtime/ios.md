@@ -77,6 +77,9 @@ a network or an endpoint.
 `enterBackground()` cancels automatic sync, including a stalled dial, within
 one second. Local reads and writes remain available and committed writes remain
 durable. There are no background tasks, push wakeups or background sync.
+`enterBackground()` also stops [local-network discovery](discovery.md#lifecycle-and-platforms),
+which runs on the simulator alone: a device build reports the path
+unavailable with the missing multicast entitlement as its reason.
 `enterForeground()` refreshes the starter's sockets and resumes an immediate
 sync pass when automatic sync was enabled at open. A dead starter endpoint is
 rebound with the original transport key, retaining its node ID. Live starter iroh

@@ -1,6 +1,8 @@
 # 15. Discovery
 
-Status: not started.
+Status: implemented and qualified on one host on 2026-10-10; see
+[acceptance evidence](15-discovery-evidence.md). The hosted CI run and a
+physical iOS device were not exercised.
 Owner: `rocky_core::net` transport port; `rocky-iroh`; `rocky-sdk` transport
 options; `sdks/native`; Kotlin `PeerTransport` and `RockyEndpoint`. Depends on
 [phase 14](14-contacts-and-partner-choice.md) and, for the iOS simulator

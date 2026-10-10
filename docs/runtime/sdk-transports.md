@@ -4,7 +4,8 @@ The port (`Transport`, `Connector`, `Protocol`, stream type) is in
 `rocky_core::net`; iroh is in `rocky-iroh`; TCP, the in-process hub and the
 chunk adapter are in `rocky-sdk`. See [enrollment](sdk-enrollment.md) for what
 travels over a transport and [composition](sdk-composition.md#attach-a-network)
-for attaching one. Qualified on loopback only.
+for attaching one, and [discovery](discovery.md) for finding peers without a
+contact. Qualified on one host only.
 
 ## What a transport does
 
@@ -42,7 +43,7 @@ Native options carry the starter's choice as `transport`; an application's
 endpoint or transport goes to its own constructor instead.
 
 ```json
-{"kind": "iroh", "relay": "default", "discovery": true, "bind": null}
+{"kind": "iroh", "relay": "default", "lookup": "default", "topic": true, "local": true, "bind": null}
 {"kind": "tcp", "listen": "127.0.0.1:47470", "advertised": null}
 ```
 
@@ -166,14 +167,35 @@ device's stored transport key, so its address is stable.
 
 - `relay`: `default` and `staging` use n0's public relays, `disabled` none,
   anything else is a relay URL.
-- `discovery`: publishes and resolves addresses through n0's DNS service.
-- `bind`: a local socket address. Without relay and discovery, peers know only
-  addresses in invitations and contacts: use a fixed port.
+- `lookup`: `default` publishes and resolves endpoint addresses through n0's
+  DNS service, `disabled` nowhere, anything else is a pkarr relay URL.
+- `topic`, `local`: the two [discovery](#discovery) paths.
+- `bind`: a local socket address. Without relay and lookup, peers know only
+  addresses in invitations, contacts and local announcements: use a fixed port.
 
-With the defaults, n0's DNS and relays and any path observer learn which
-endpoints talk, when and how much. Rows and commands stay encrypted and
-sessions authenticated; credential chains cross a session in the clear to its
-peer. Disable both options or name your own relay to depend on no public service.
+`PeerTransport.Iroh.isolated()` / `Options::isolated` turns all of it off.
+Name your own relay and lookup service to depend on no public one.
+
+## Discovery
+
+An optional capability of a transport, next to `connectivity`: it announces
+the device under the domain's topic and reports the contacts it finds. iroh
+has two paths, `local` (mDNS) and `topic` (a sealed rendezvous record on the
+lookup service); TCP, custom transports and the hub's default have none. An
+attached endpoint has it only when asked. [Discovery](discovery.md) covers
+options, status, lifecycle and bounds.
+
+Rows and commands stay encrypted and sessions authenticated on every path;
+credential chains cross a session in the clear to its peer. Beyond that:
+
+| Party | From sync through a relay or directly | From the `local` path | From the `topic` path |
+| --- | --- | --- | --- |
+| LAN observer | Which IP addresses exchange QUIC, when and how much | Each announcing endpoint's ID, IP addresses and port; a service tag shared by the domain's members until a revocation changes it; an opaque sealed value. Not the node key, the domain or the topic | The device's requests to the lookup service, under TLS |
+| Lookup service | With `lookup` on: each endpoint's ID and relay URL, and who resolves whom, from which address | Nothing | An opaque record under an opaque key, its size and write times, and the addresses that read and write it, so which addresses belong to one domain. Not the contacts, node keys or topic |
+| Relay | Which endpoint IDs exchange traffic, from which addresses, when and how much | Nothing | Nothing; a found contact may name the relay it is reached through |
+
+Each party learns what an announcement or lookup shows it, whether or not a
+session follows.
 
 ## Bounds
 
@@ -192,6 +214,7 @@ peer. Disable both options or name your own relay to depend on no public service
 | Peers met without a contact that `peers` lists | 64, the least recent dropped |
 | Unconfigured peers with horizon credentials or frontiers per replica | 256, the least recently served since open losing theirs; contacts, issuers and full nodes are kept |
 | Closing a network service | 5 s drain, then cancellation |
+| Discovery | [its own bounds](discovery.md#bounds) |
 
 A peer attempt tries routes in order until one connects, each with its own
 deadline. A pass reconciles at most four peers at once, so a stalled route
@@ -215,14 +238,33 @@ in back-off. Disabling that worker cancels its attempts within one second.
 - `cargo test -p rocky-iroh` and `-p rocky-sdk --test iroh`: Rocky's handlers
   and an echo protocol share an application router; Rocky's ALPNs refuse before
   a service listens and after it closes while echo keeps working; the same
-  attachment serves a reopened database; the starter closes its endpoint.
+  attachment serves a reopened database; the starter closes its endpoint. A
+  borrowed endpoint dials on its own runtime, so it closes at once after the
+  database that used it.
 - `cargo test -p rocky-sdk --no-default-features` and
   `cargo check --manifest-path sdks/native/Cargo.toml --no-default-features`.
 - `./examples/shoppinglist-app/check`: a Kotlin transport and a Kotlin protocol
   on a `RockyEndpoint`.
 
-All loopback with relays and discovery disabled: nothing about NAT traversal,
-relays or address lookup is qualified.
+- `cargo test -p rocky-iroh --test discovery`: members of a topic find each
+  other over mDNS and through the rendezvous record on a local lookup server,
+  another topic finds nobody, the record names no member in the clear, and an
+  attached endpoint keeps its lookup services.
+- `./scripts/check --e2e` runs `rocky-sdk`'s `discovery` suite: two processes
+  on one host with no trusted node reachable and discovery as their only
+  source of contacts converge, once over mDNS and once through the record.
+  `./scripts/check` runs its relay case: two endpoints without an IP transport
+  converge through a relay started from iroh's test utilities.
+- The SDK's `node::sync_tests::discovery` tests use the hub's deterministic
+  capability: a revoked device and a device of another domain find no peer
+  once the 24-hour window ends, no replica table holds a found route, and a
+  transport without the capability reports each path unavailable.
+- `./sdks/native/qualify-ios-discovery`: a simulator and a host process find
+  each other over mDNS, and the path stops in the background.
+
+One host: a relay and the two discovery paths work, each once. NAT traversal,
+public relays and lookup services, multicast across real networks and phones
+are not qualified ([phase 22](../features_07/22-qualification.md)).
 
 ## Design rationale
 

@@ -9,6 +9,7 @@ modules:
   - examples/shoppinglist-app/qualification
   - examples/shoppinglist-app/requiredSchema
   - examples/shoppinglist-app/shared
+  - sdks/kotlin/android-discovery-check
   - sdks/kotlin/inventory-qualification
   - sdks/kotlin/packaged-consumer
   - sdks/kotlin/platform-test

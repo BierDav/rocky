@@ -27,7 +27,7 @@ class ShoppingIntegrationTest {
     private fun directory(): File = Files.createTempDirectory("rocky-room-test").toFile()
 
     /** Loopback iroh: no relay and no address lookup, so tests need no network. */
-    private fun local(): PeerTransport = PeerTransport.Iroh(relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+    private fun local(): PeerTransport = PeerTransport.Iroh.isolated()
     private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
     private val items get() = ItemsSchema.table("items")
     private val writer = GrantProfile.Writer(setOf("items"))
@@ -108,7 +108,7 @@ class ShoppingIntegrationTest {
         val endpoint = RockyEndpoint.bind(
             secret(),
             relay = "disabled",
-            discovery = false,
+            lookup = "disabled",
             bind = "127.0.0.1:0",
             protocols = mapOf(
                 "example/echo/1" to { _, stream ->
@@ -121,7 +121,7 @@ class ShoppingIntegrationTest {
                 },
             ),
         )
-        val caller = RockyEndpoint.bind(secret(), relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+        val caller = RockyEndpoint.bind(secret(), relay = "disabled", lookup = "disabled", bind = "127.0.0.1:0")
         suspend fun echo(): String {
             val stream = caller.connect(endpoint.address(), "example/echo/1")
             try {
@@ -156,6 +156,7 @@ class ShoppingIntegrationTest {
             // The same endpoint, and so the same address, serves the database again.
             a = RockyDatabase.resume(File(root, "a"), ItemsSchema, PeerTransport.Endpoint(endpoint), automaticSync = false)
             a.add("Eggs")
+            // The application signals renewed reachability; an explicit sync respects back-off.
             b.setOnline(true) // The reattached endpoint is a connectivity change; clear its back-off.
             assertEquals(ConnectionState.Connected, b.syncOnce().state)
             assertEquals(listOf("Eggs", "Milk"), b.titles())

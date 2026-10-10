@@ -21,7 +21,7 @@ fn iroh() -> Value {
 }
 /// Loopback only: no relay, no address lookup.
 fn iroh_at(port: u16) -> Value {
-    json!({"kind": "iroh", "relay": "disabled", "discovery": false, "bind": format!("127.0.0.1:{port}")})
+    json!({"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": format!("127.0.0.1:{port}")})
 }
 /// A port free now, so a restarted creator listens where members look.
 fn free_port() -> u16 {

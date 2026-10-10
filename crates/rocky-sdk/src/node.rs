@@ -3,6 +3,7 @@
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
 mod command_mesh;
 mod delivery;
+mod discovery;
 mod horizon;
 mod mesh;
 mod partition;
@@ -178,6 +179,9 @@ struct Link {
     stage: watch::Sender<Stage>,
     server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     synchronizer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// What the transport finds peers with, and the worker announcing on it.
+    discovery: Option<Arc<dyn crate::transport::Discovery>>,
+    discoverer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Inbound streams being served, served so far and dropped over budget.
     active: Arc<Semaphore>,
     served: AtomicU64,
@@ -252,6 +256,13 @@ pub(crate) struct Node {
     learned: AtomicBool,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
+    /// Signals that the discovery topics may have changed.
+    topics: watch::Sender<u64>,
+    /// Whether this device announces under a topic now.
+    announcing: AtomicBool,
+    /// Moves the discovery clock forward, for the topic window.
+    #[cfg(test)]
+    pub(crate) discovery_skew: AtomicU64,
     /// The application's coordinator, when it composed strong commands.
     coordinator: Option<Arc<dyn Coordinator>>,
     /// Takes an unassigned domain of a coordination service for this
@@ -308,6 +319,10 @@ impl Node {
             learned: AtomicBool::new(false),
             handover: std::sync::Mutex::new(Default::default()),
             choices: std::sync::Mutex::new(BTreeMap::new()),
+            topics: watch::channel(0).0,
+            announcing: AtomicBool::new(false),
+            #[cfg(test)]
+            discovery_skew: AtomicU64::new(0),
             coordinator,
             acquire,
             service: None,
@@ -426,11 +441,13 @@ impl Node {
     ) -> u64 {
         let link = Arc::new(Link {
             id: self.links.fetch_add(1, Ordering::Relaxed),
-            transport,
             owned,
             stage: watch::channel(Stage::Open).0,
             server: std::sync::Mutex::new(None),
             synchronizer: std::sync::Mutex::new(None),
+            discovery: transport.discovery(),
+            transport,
+            discoverer: std::sync::Mutex::new(None),
             active: Arc::new(Semaphore::new(INBOUND)),
             served: AtomicU64::new(0),
             refused: AtomicU64::new(0),
@@ -443,6 +460,14 @@ impl Node {
             .unwrap_or_else(PoisonError::into_inner) = Some(synchronizer);
         let server = tokio::task::spawn_local(self.clone().accept(link.clone()));
         *link.server.lock().unwrap_or_else(PoisonError::into_inner) = Some(server);
+        if let Some(discovery) = link.discovery.clone() {
+            let discoverer =
+                tokio::task::spawn_local(self.clone().discover(link.clone(), discovery));
+            *link
+                .discoverer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(discoverer);
+        }
         let id = link.id;
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(link.clone());
         *slot = Some(link);
@@ -506,6 +531,14 @@ impl Node {
             .take();
         if let Some(synchronizer) = synchronizer {
             let _ = synchronizer.await;
+        }
+        let discoverer = link
+            .discoverer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(discoverer) = discoverer {
+            let _ = discoverer.await;
         }
         if link.owned {
             link.transport.close().await;
@@ -719,8 +752,13 @@ impl Node {
                         .await
                         .map_err(|error| ServiceError::Unreachable(error.to_string()))?;
                 }
+                self.discovery_foreground(true).await;
                 self.reset_retry(None);
                 self.wake_sync();
+                Ok(json!({}))
+            }
+            "network_background" => {
+                self.discovery_foreground(false).await;
                 Ok(json!({}))
             }
             "network" => Ok(self.network_status().await),
@@ -761,6 +799,7 @@ impl Node {
             }
             "peers" => Ok(json!({
                 "peers": self.peers().await,
+                "discovery": self.discovery_status(),
                 "issuer_contact": self.settings.lock().await.issuer_contact(),
             })),
             "enrollment_route" => Ok(json!({"uri": crate::route_enrollment(
@@ -1086,6 +1125,7 @@ impl Node {
                     "node": node.to_hex(),
                     "issuer": settings.issuers.contains(&node),
                     "configured": contact.is_some(),
+                    "local": settings.contact_meta.get(&node).is_some_and(|meta| meta.local),
                     "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else { "session" }, |meta| meta.source.as_str()),
                     "choice": self.choices.lock().unwrap_or_else(PoisonError::into_inner).get(&node).copied().unwrap_or("not_considered"),
                     "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
@@ -1100,7 +1140,7 @@ impl Node {
     async fn network_status(&self) -> Value {
         let peers = self.peers().await;
         let Some(link) = self.current() else {
-            return json!({"attached": false, "peers": peers});
+            return json!({"attached": false, "peers": peers, "discovery": self.discovery_status()});
         };
         json!({
             "attached": true,
@@ -1109,6 +1149,7 @@ impl Node {
             "online": self.online.load(Ordering::SeqCst),
             "sync": self.sync_status.borrow().clone(),
             "draining": *link.stage.borrow() != Stage::Open,
+            "discovery": self.discovery_status(),
             "inbound": {
                 "limit": INBOUND,
                 "active": INBOUND - link.active.available_permits(),
@@ -1350,7 +1391,7 @@ impl Node {
             },
             "key_epochs": settings.keys.iter().map(|(collection, epochs)| json!({"collection":collection,"epochs":epochs,"current":epochs.iter().max()})).collect::<Vec<_>>(),
             "tickets": tickets,
-            "network": {"attached": self.current().is_some()},
+            "network": {"attached": self.current().is_some(), "discovery": self.discovery_status()},
         });
         let token = HEXLOWER
             .encode(&commitment("rocky.sdk.status.v1", status.to_string().as_bytes())[..16]);
@@ -1890,6 +1931,7 @@ impl Node {
                     } => result,
                 };
                 drop(running);
+                self.topics_changed();
                 let status = match result {
                     Ok((mut status, retry)) => {
                         status["retry"] = json!(retry);
@@ -1933,7 +1975,9 @@ impl Node {
     /// Syncs with every configured peer. One reachable peer is enough;
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
-        self.sync_pass(transport, false, false).await
+        let result = self.sync_pass(transport, false, false).await;
+        self.topics_changed();
+        result
     }
     async fn sync_pass(
         &self,
@@ -2492,6 +2536,7 @@ impl Node {
                 )
                 .await;
                 let absorbed = self.absorb_revocations(served.as_ref().err()).await;
+                self.topics_changed();
                 served?;
                 absorbed
             }

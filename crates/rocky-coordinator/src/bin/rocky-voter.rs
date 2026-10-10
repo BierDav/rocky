@@ -139,7 +139,10 @@ async fn serve_clients(
 ) -> Result<(), Failure> {
     let options = rocky_iroh::Options {
         relay: lane.relay,
-        discovery: lane.discovery,
+        // A voter is dialed at its address: it announces under no topic.
+        lookup: (!lane.discovery).then(|| "disabled".into()),
+        topic: false,
+        local: false,
         bind: lane.bind,
     };
     let attachment = options

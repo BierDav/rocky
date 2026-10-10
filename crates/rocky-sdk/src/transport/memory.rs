@@ -1,7 +1,10 @@
 //! An in-process transport for tests and deterministic faults: named
 //! nodes on a hub joined by bounded pipes. The hub counts what is asked of
 //! it and injects stalls, disconnects and backpressure.
-use super::{BoxFuture, Connector, Failure, Protocol, Stream, Transport};
+use super::{
+    BoxFuture, Connector, Discovery, Failure, Found, LOCAL_PATH, PathState, Protocol, Stream,
+    TOPIC_PATH, Transport,
+};
 use std::{
     collections::{HashMap, HashSet},
     pin::Pin,
@@ -44,6 +47,15 @@ pub struct Hub {
     connectivity: tokio::sync::watch::Sender<()>,
     /// What every stream of a recorded node carried, both ways.
     transcripts: Mutex<HashMap<String, Tap>>,
+    /// Whether nodes started from now on can discover.
+    pub discovery: AtomicBool,
+    /// Who announces under which topics, and where each node hears of it.
+    announced: Mutex<HashMap<String, Announcement>>,
+}
+struct Announcement {
+    node: [u8; 32],
+    topics: Vec<[u8; 32]>,
+    found: mpsc::Sender<Found>,
 }
 type Tap = Arc<Mutex<Vec<u8>>>;
 impl Default for Hub {
@@ -64,6 +76,8 @@ impl Default for Hub {
             hold_cut: AtomicBool::new(false),
             connectivity: tokio::sync::watch::channel(()).0,
             transcripts: Mutex::default(),
+            discovery: AtomicBool::new(false),
+            announced: Mutex::default(),
         }
     }
 }
@@ -100,6 +114,39 @@ impl Hub {
         ends.iter()
             .filter_map(|end| transcripts.get(*end).cloned())
             .collect()
+    }
+    /// The topics `name` announces under, the current one first.
+    pub fn topics(&self, name: &str) -> Vec<[u8; 32]> {
+        self.announced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .map(|announcement| announcement.topics.clone())
+            .unwrap_or_default()
+    }
+    /// The nodes that announce under a topic `name` announces under: whom
+    /// it finds, and who finds it.
+    pub fn discoverable(&self, name: &str) -> Vec<String> {
+        let announced = self
+            .announced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(own) = announced.get(name) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = announced
+            .iter()
+            .filter(|(other, announcement)| {
+                *other != name
+                    && announcement
+                        .topics
+                        .iter()
+                        .any(|topic| own.topics.contains(topic))
+            })
+            .map(|(other, _)| other.clone())
+            .collect();
+        names.sort();
+        names
     }
     /// Holds dials to just this address; does not signal connectivity.
     pub fn stall_peer(&self, address: &str, stalled: bool) {
@@ -251,6 +298,69 @@ struct Node {
     name: String,
     inbound: tokio::sync::Mutex<mpsc::Receiver<Inbound>>,
     listening: Arc<AtomicBool>,
+    finder: Option<Arc<Finder>>,
+}
+/// The hub's discovery: every node announcing under a shared topic is
+/// found at once, as on a local network.
+struct Finder {
+    hub: Arc<Hub>,
+    name: String,
+    sender: mpsc::Sender<Found>,
+    found: tokio::sync::Mutex<mpsc::Receiver<Found>>,
+}
+impl Discovery for Finder {
+    fn announce<'a>(
+        &'a self,
+        node: [u8; 32],
+        topics: &'a [[u8; 32]],
+    ) -> BoxFuture<'a, Result<(), Failure>> {
+        Box::pin(async move {
+            let mut announced = self.hub.announced.lock().map_err(|_| "hub poisoned")?;
+            if announced
+                .get(&self.name)
+                .is_some_and(|held| held.node == node && held.topics == topics)
+            {
+                return Ok(());
+            }
+            announced.remove(&self.name);
+            if topics.is_empty() {
+                return Ok(());
+            }
+            let hint = |node, name: &str| Found {
+                node,
+                address: name.to_owned(),
+                path: LOCAL_PATH.into(),
+                local: true,
+            };
+            for (name, other) in announced.iter() {
+                if other.topics.iter().any(|topic| topics.contains(topic)) {
+                    let _ = self.sender.try_send(hint(other.node, name));
+                    let _ = other.found.try_send(hint(node, &self.name));
+                }
+            }
+            announced.insert(
+                self.name.clone(),
+                Announcement {
+                    node,
+                    topics: topics.to_vec(),
+                    found: self.sender.clone(),
+                },
+            );
+            Ok(())
+        })
+    }
+    fn found(&self) -> BoxFuture<'_, Option<Found>> {
+        Box::pin(async { self.found.lock().await.recv().await })
+    }
+    fn paths(&self) -> Vec<(String, PathState)> {
+        vec![
+            (LOCAL_PATH.into(), PathState::On),
+            (
+                TOPIC_PATH.into(),
+                PathState::Unavailable("the hub has no lookup service".into()),
+            ),
+        ]
+    }
 }
 impl Connector for Memory {
     fn start(
@@ -267,11 +377,21 @@ impl Connector for Memory {
                 .lock()
                 .map_err(|_| "hub poisoned")?
                 .insert(self.name.clone(), (sender, listening.clone()));
+            let finder = self.hub.discovery.load(Ordering::SeqCst).then(|| {
+                let (sender, found) = mpsc::channel(64);
+                Arc::new(Finder {
+                    hub: self.hub.clone(),
+                    name: self.name.clone(),
+                    sender,
+                    found: tokio::sync::Mutex::new(found),
+                })
+            });
             Ok(Arc::new(Node {
                 hub: self.hub.clone(),
                 name: self.name.clone(),
                 inbound: tokio::sync::Mutex::new(receiver),
                 listening,
+                finder,
             }) as Arc<dyn Transport>)
         })
     }
@@ -279,6 +399,10 @@ impl Connector for Memory {
 impl Transport for Node {
     fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
         Some(self.hub.connectivity.subscribe())
+    }
+    fn discovery(&self) -> Option<Arc<dyn Discovery>> {
+        let finder: Arc<dyn Discovery> = self.finder.clone()?;
+        Some(finder)
     }
     fn kind(&self) -> &str {
         "memory"
@@ -346,6 +470,9 @@ impl Transport for Node {
             self.hub.closes.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut listeners) = self.hub.listeners.lock() {
                 listeners.remove(&self.name);
+            }
+            if let Ok(mut announced) = self.hub.announced.lock() {
+                announced.remove(&self.name);
             }
             self.inbound.lock().await.close();
         })

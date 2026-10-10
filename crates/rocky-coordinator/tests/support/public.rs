@@ -266,7 +266,9 @@ impl Drop for PublicCluster {
 pub async fn transport() -> Arc<dyn Transport> {
     let options = rocky_iroh::Options {
         relay: Some("disabled".into()),
-        discovery: false,
+        lookup: Some("disabled".into()),
+        topic: false,
+        local: false,
         bind: Some("127.0.0.1:0".into()),
     };
     let endpoint = options.bind(*PrivateKey::new().as_bytes()).await.unwrap();

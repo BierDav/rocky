@@ -80,8 +80,24 @@ sealed interface GrantProfile {
  * and a domain is bound to none: a device may come back on another one and learn new routes.
  */
 sealed interface PeerTransport {
-    /** The starter's own iroh endpoint. `relay` is `default`, `staging`, `disabled` or a relay URL. */
-    data class Iroh(val relay: String = "default", val discovery: Boolean = true, val bind: String? = null) : PeerTransport
+    /**
+     * The starter's own iroh endpoint. `relay` is `default`, `staging`, `disabled` or a relay URL. `lookup` is where
+     * endpoint addresses are published and resolved: `default` (n0's DNS service), `disabled` or a pkarr relay URL.
+     * `topic` finds domain members through a rendezvous record on the lookup service, `local` on the local network
+     * over mDNS. See `docs/runtime/sdk-transports.md#discovery`.
+     */
+    data class Iroh(
+        val relay: String = "default",
+        val lookup: String = "default",
+        val topic: Boolean = true,
+        val local: Boolean = true,
+        val bind: String? = null,
+    ) : PeerTransport {
+        companion object {
+            /** No relay, lookup service or discovery: peers are reached at their contacts' addresses only. */
+            fun isolated(bind: String = "127.0.0.1:0") = Iroh("disabled", "disabled", topic = false, local = false, bind = bind)
+        }
+    }
 
     /** Plain TCP. A device listens on `listen`; without it an issuer listens on an ephemeral loopback port and a member only dials. */
     data class Tcp(val listen: String? = null, val advertised: String? = null) : PeerTransport
@@ -142,6 +158,8 @@ data class Peer(
     val source: String,
     val choice: String,
     val routes: List<Route>,
+    /** Found on the local network by discovery; such peers are tried first. */
+    val isLocal: Boolean = false,
     val state: String,
     val checkedAtEpochSeconds: Long?,
     val error: String?,
@@ -150,8 +168,29 @@ data class Peer(
 /** A `rocky://peer/…` URI naming this device and its current route. It grants nothing. */
 data class Contact(val uri: String, val node: String, val routes: List<Route>)
 
+enum class DiscoveryPathState { On, Off, Unavailable }
+
+/** One way of finding peers: whether it runs and, when it cannot, why. */
+data class DiscoveryPath(val state: DiscoveryPathState, val reason: String? = null)
+
+/**
+ * How this device finds domain members it has no contact for: on the [local] network and through the [topic]'s
+ * rendezvous record. [announcing] is false until an admitted session handed over the domain's discovery root.
+ */
+data class DiscoveryStatus(val announcing: Boolean, val local: DiscoveryPath, val topic: DiscoveryPath)
+
 /** The network service, reported whatever the state of the database. */
-data class NetworkStatus(val attached: Boolean, val kind: String?, val owned: Boolean, val inboundActive: Int, val inboundLimit: Int, val inboundServed: Long, val inboundRefused: Long, val peers: List<Peer>)
+data class NetworkStatus(
+    val attached: Boolean,
+    val kind: String?,
+    val owned: Boolean,
+    val inboundActive: Int,
+    val inboundLimit: Int,
+    val inboundServed: Long,
+    val inboundRefused: Long,
+    val peers: List<Peer>,
+    val discovery: DiscoveryStatus,
+)
 
 /** Platform storage for an installation's keys, such as a keychain. Names use only `[a-z0-9._-]`. */
 interface SecretStore {
@@ -197,6 +236,7 @@ data class Readiness(
     val networkAttached: Boolean,
     /** False on a member that can reach no issuer to renew its credentials. */
     val issuerContact: Boolean = true,
+    val discovery: DiscoveryStatus = DiscoveryStatus(false, DiscoveryPath(DiscoveryPathState.Off), DiscoveryPath(DiscoveryPathState.Off)),
 )
 
 /** The last sync: its state, its error, how many [peers] it reached and when it ended. */

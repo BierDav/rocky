@@ -128,7 +128,7 @@ private class DeviceProcess {
 
     private suspend fun open(request: JsonObject, opening: Opening): JsonElement {
         val directory = File(request.text("directory"))
-        val transport = PeerTransport.Iroh("disabled", discovery = false, bind = request.text("listen"))
+        val transport = PeerTransport.Iroh.isolated(bind = request.text("listen"))
         val calls = Calls(File(directory, "calls.log"))
         val random = SecureRandom()
         val platform = MarketPlatform(

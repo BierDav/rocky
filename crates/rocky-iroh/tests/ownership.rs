@@ -27,11 +27,7 @@ impl ProtocolHandler for Echo {
     }
 }
 fn local() -> Options {
-    Options {
-        relay: Some("disabled".into()),
-        discovery: false,
-        bind: Some("127.0.0.1:0".into()),
-    }
+    Options::isolated("127.0.0.1:0")
 }
 async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
     let connection = from.connect(to, ECHO).await?;

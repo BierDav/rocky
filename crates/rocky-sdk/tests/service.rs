@@ -53,7 +53,9 @@ impl CommandHandler for Counter {
 fn starter() -> TransportOptions {
     TransportOptions::Iroh {
         relay: Some("disabled".into()),
-        discovery: false,
+        lookup: Some("disabled".into()),
+        topic: false,
+        local: false,
         bind: Some("127.0.0.1:0".into()),
     }
 }
@@ -123,7 +125,9 @@ async fn service(dir: &std::path::Path) -> Result<(TrustBundle, NetworkCoordinat
         .await?;
         let lane = rocky_sdk::iroh::Options {
             relay: Some("disabled".into()),
-            discovery: false,
+            lookup: Some("disabled".into()),
+            topic: false,
+            local: false,
             bind: Some(binds[index].clone()),
         }
         .start_serving(secrets[index], vec![Protocol::Coordinate])
@@ -235,7 +239,7 @@ async fn devices_run_typed_commands_through_a_registered_service_domain() -> Res
         "directory": root.path().join("b"),
         "mode": "join",
         "invitation": invite,
-        "transport": {"kind": "iroh", "relay": "disabled", "discovery": false, "bind": "127.0.0.1:0"},
+        "transport": {"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": "127.0.0.1:0"},
         "coordinator": bundle,
     })
     .to_string();

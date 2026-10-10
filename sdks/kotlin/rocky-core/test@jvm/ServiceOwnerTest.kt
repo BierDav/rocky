@@ -58,7 +58,7 @@ class ServiceOwnerTest {
                 commands = CommandSet(listOf(probe))
             }
             val runtime = CommandRuntime(ServiceCoordinator(File(service, "service/bundle.json").readText()))
-            val network = PeerTransport.Iroh(relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+            val network = PeerTransport.Iroh.isolated()
             suspend fun create(name: String): RockyDatabase = RockyDatabase.create(
                 File(directory, name),
                 definition,

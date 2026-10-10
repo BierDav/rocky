@@ -53,6 +53,7 @@ Select the guide for your task rather than reading every document.
 | Join from a checkpoint, catch up after pruning and configure SDK retention | [SDK bootstrapping](runtime/sdk-bootstrapping.md) |
 | Select iroh or TCP for SDK devices, or supply a transport in Rust or Kotlin | [SDK transports](runtime/sdk-transports.md) |
 | Serve Rocky on your own iroh endpoint next to your protocols, or use the starter | [iroh networking](runtime/sdk-transports.md#iroh) |
+| Find domain members on the local network or through the topic, and read the status of each path | [Discovery](runtime/discovery.md) |
 | Open a secure database without a network, share it between sessions or attach your own transport | [SDK composition](runtime/sdk-composition.md) |
 | Inspect scaling/observer measurements and Kotlin qualification limits | [Phase 6 evidence](runtime/scaling-limits.md#measured-limits) |
 | Run sustained scale qualification and collect hardware evidence | [Scale qualification](runtime/scaling-limits.md#scale-qualification) |

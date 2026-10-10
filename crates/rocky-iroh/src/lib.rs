@@ -1,7 +1,7 @@
 //! Rocky's network port on iroh. `Attachment` serves Rocky's protocols on
 //! an endpoint and router the application owns; `Options` is the starter
 //! that binds and owns its own. See `docs/runtime/sdk-transports.md`.
-use rocky_core::net::{BoxFuture, Connector, Failure, Protocol, Stream, Transport};
+use rocky_core::net::{BoxFuture, Connector, Discovery, Failure, Protocol, Stream, Transport};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -16,6 +16,14 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, Join, ReadBuf},
     sync::{Mutex, Semaphore, mpsc, watch},
+};
+
+mod discovery;
+#[cfg(feature = "test-utils")]
+pub mod testing;
+pub use discovery::{
+    DEFAULT_RENDEZVOUS, Discover, RENDEZVOUS_AGE, RENDEZVOUS_BYTES, RENDEZVOUS_CONTACTS,
+    RENDEZVOUS_INTERVAL, Topic, local_unavailable, rendezvous_key, service_name,
 };
 
 /// The iroh version these handlers attach to; build the endpoint with it.
@@ -100,6 +108,13 @@ struct Shared {
     relays: bool,
     /// The protocols this attachment answers.
     protocols: Vec<Protocol>,
+    /// Present only when the attachment was asked to find peers.
+    finder: Option<discovery::Finder>,
+    /// The runtime the attachment was made on, normally the endpoint's. A
+    /// connection's driver runs where it was dialed: dialed on a database's
+    /// runtime it would end with the database and leave the endpoint
+    /// waiting for it at close.
+    home: Option<tokio::runtime::Handle>,
 }
 
 /// Rocky's protocols on one endpoint. Register `handler` on the router
@@ -113,17 +128,32 @@ impl Attachment {
     /// Uses `endpoint` to dial. Nothing is accepted until the handler is
     /// registered on a router.
     pub fn new(endpoint: Endpoint) -> Self {
-        Self::build(endpoint, false, Protocol::ALL.to_vec())
+        Self::build(endpoint, false, Protocol::ALL.to_vec(), Discover::default())
+    }
+    /// Like `new`, and finds peers as `discover` asks. Rocky announces
+    /// beside the endpoint: its own lookup services stay as they are.
+    pub fn discovering(endpoint: Endpoint, discover: Discover) -> Self {
+        Self::build(endpoint, false, Protocol::ALL.to_vec(), discover)
     }
     /// Answers `protocols` instead of a database's, such as a coordinator
     /// voter's `Protocol::Coordinate`. Dialing is unrestricted.
     pub fn serving(endpoint: Endpoint, protocols: Vec<Protocol>) -> Self {
-        Self::build(endpoint, false, protocols)
+        Self::build(endpoint, false, protocols, Discover::default())
     }
-    fn build(endpoint: Endpoint, relays: bool, protocols: Vec<Protocol>) -> Self {
+    fn build(
+        endpoint: Endpoint,
+        relays: bool,
+        protocols: Vec<Protocol>,
+        discover: Discover,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel(PENDING);
+        let endpoint = watch::channel(endpoint).0;
+        let finder = (discover != Discover::default())
+            .then(|| discovery::Finder::new(endpoint.subscribe(), discover));
         Self(Arc::new(Shared {
-            endpoint: watch::channel(endpoint).0,
+            home: tokio::runtime::Handle::try_current().ok(),
+            finder,
+            endpoint,
             restart: Mutex::new(None),
             sender,
             incoming: Mutex::new(receiver),
@@ -259,6 +289,10 @@ impl Transport for Attachment {
         Some(receiver)
     }
 
+    fn discovery(&self) -> Option<Arc<dyn Discovery>> {
+        let finder = self.0.finder.clone()?;
+        Some(Arc::new(finder))
+    }
     fn kind(&self) -> &str {
         KIND
     }
@@ -290,9 +324,21 @@ impl Transport for Attachment {
             {
                 return Ok(stream(connection, pair));
             }
-            let connection =
-                tokio::time::timeout(TIMEOUT, self.endpoint().connect(address, protocol.name()))
-                    .await??;
+            let dial = |address: EndpointAddr| {
+                let endpoint = self.endpoint();
+                async move {
+                    tokio::time::timeout(TIMEOUT, endpoint.connect(address, protocol.name())).await
+                }
+            };
+            let dialed = match &self.0.home {
+                Some(home) => home.spawn(dial(address.clone())).await.ok(),
+                None => None,
+            };
+            // Without a home runtime, or once it ended, the caller's drives the dial.
+            let connection = match dialed {
+                Some(dialed) => dialed,
+                None => dial(address).await,
+            }??;
             let pair = tokio::time::timeout(TIMEOUT, connection.open_bi()).await??;
             let mut connections = self.0.connections.lock().await;
             connections.retain(|_, connection| connection.close_reason().is_none());
@@ -371,6 +417,9 @@ impl Transport for Attachment {
         Box::pin(async {
             let _restart = self.0.restart.lock().await;
             self.0.closed.send_replace(true);
+            if let Some(finder) = &self.0.finder {
+                finder.close();
+            }
             self.0.incoming.lock().await.close();
             for (_, connection) in self.0.connections.lock().await.drain() {
                 connection.close(CLOSED.into(), b"closed");
@@ -395,9 +444,17 @@ pub struct Options {
     /// `default`, `staging`, `disabled` or a relay URL.
     #[serde(default)]
     pub relay: Option<String>,
-    /// Publish and resolve endpoint addresses through n0's DNS service.
+    /// Where endpoint addresses are published and resolved: `default` for
+    /// n0's DNS service, `disabled`, or the URL of a pkarr relay.
+    #[serde(default)]
+    pub lookup: Option<String>,
+    /// Find domain members through the topic's rendezvous record on the
+    /// lookup service.
     #[serde(default = "enabled")]
-    pub discovery: bool,
+    pub topic: bool,
+    /// Find domain members on the local network over mDNS.
+    #[serde(default = "enabled")]
+    pub local: bool,
     /// A local socket address to bind, such as a fixed port.
     #[serde(default)]
     pub bind: Option<String>,
@@ -409,12 +466,40 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             relay: None,
-            discovery: true,
+            lookup: None,
+            topic: true,
+            local: true,
             bind: None,
         }
     }
 }
 impl Options {
+    /// Loopback and contacts only: no relay, lookup service or discovery.
+    pub fn isolated(bind: &str) -> Self {
+        Self {
+            relay: Some("disabled".into()),
+            lookup: Some("disabled".into()),
+            topic: false,
+            local: false,
+            bind: Some(bind.into()),
+        }
+    }
+    /// What these options ask an attachment to find peers with, for
+    /// `Attachment::discovering` on an endpoint bound from them.
+    pub fn discover(&self) -> Discover {
+        let topic = match (self.topic, self.lookup.as_deref().unwrap_or("default")) {
+            (false, _) => Topic::Off,
+            (true, "disabled") => {
+                Topic::Unavailable("the topic needs the lookup service, which is disabled".into())
+            }
+            (true, "default") => Topic::On(DEFAULT_RENDEZVOUS.into()),
+            (true, url) => Topic::On(url.into()),
+        };
+        Discover {
+            topic,
+            local: self.local,
+        }
+    }
     fn relays(&self) -> bool {
         self.relay.as_deref() != Some("disabled")
     }
@@ -430,11 +515,19 @@ impl Options {
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&secret))
             .relay_mode(relay_mode);
-        if self.discovery {
-            builder = builder
-                .address_lookup(PkarrPublisher::n0_dns())
-                .address_lookup(PkarrResolver::n0_dns())
-                .address_lookup(DnsAddressLookup::n0_dns());
+        match self.lookup.as_deref().unwrap_or("default") {
+            "disabled" => {}
+            "default" => {
+                builder = builder
+                    .address_lookup(PkarrPublisher::n0_dns())
+                    .address_lookup(PkarrResolver::n0_dns())
+                    .address_lookup(DnsAddressLookup::n0_dns());
+            }
+            url => {
+                builder = builder
+                    .address_lookup(PkarrPublisher::builder(url.parse()?))
+                    .address_lookup(PkarrResolver::builder(url.parse()?));
+            }
         }
         if let Some(bind) = &self.bind {
             builder = builder.clear_ip_transports().bind_addr(bind.as_str())?;
@@ -453,7 +546,8 @@ impl Options {
         protocols: Vec<Protocol>,
     ) -> Result<Attachment, Failure> {
         let endpoint = self.bind(secret).await?;
-        let attachment = Attachment::build(endpoint.clone(), self.relays(), protocols);
+        let attachment =
+            Attachment::build(endpoint.clone(), self.relays(), protocols, self.discover());
         *attachment.0.restart.lock().await = Some((self.clone(), secret));
         let router = attachment.register(Router::builder(endpoint)).spawn();
         *attachment

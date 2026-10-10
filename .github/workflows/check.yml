@@ -658,6 +658,20 @@ jobs:
           ./sdks/kotlin/package-ios 2>&1 | tee local/phase18-evidence/package.log
           ./sdks/native/qualify-ios-package 2>&1 | tee local/phase18-evidence/consumer.log
 
+      - name: Qualify iOS simulator discovery
+        working-directory: source
+        run: |
+          set -euo pipefail
+          mkdir -p local/phase15-evidence
+          ./sdks/native/qualify-ios-discovery 2>&1 | tee local/phase15-evidence/discovery.log
+
+      - name: Save Phase 15 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase15-ios-evidence
+          path: source/local/phase15-evidence
+
       - name: Save Phase 18 evidence
         if: always()
         uses: actions/upload-artifact@v4

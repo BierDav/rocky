@@ -402,6 +402,7 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
 
 mod admission;
 mod change_driven;
+mod discovery;
 mod mesh;
 
 /// A renewal holds the settings while it teaches the replica. A Room write

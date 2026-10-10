@@ -47,13 +47,14 @@ class RockyDatabase private constructor(
 
     /**
      * For a process the platform may freeze or kill: cancels the native automatic pass promptly, so none
-     * runs after this returns. The file, sessions, attached network and its endpoint stay open, and reads and
-     * writes continue; acknowledged writes are already durable.
+     * runs after this returns, and stops local-network discovery. The file, sessions, attached network and its
+     * endpoint stay open, and reads and writes continue; acknowledged writes are already durable.
      */
     suspend fun enterBackground() = lifecycle.withLock {
         setAutomaticSync(false)
         synchronizing?.cancelAndJoin()
         synchronizing = null
+        client.call(request("network_background"))
     }
 
     /** Resumes automatic sync, starting with an immediate pass, if the database was opened with it. */
@@ -279,7 +280,9 @@ private fun network(peers: PeerTransport): NativeNetwork = when (peers) {
                 is PeerTransport.Iroh -> {
                     put("kind", "iroh")
                     put("relay", peers.relay)
-                    put("discovery", peers.discovery)
+                    put("lookup", peers.lookup)
+                    put("topic", peers.topic)
+                    put("local", peers.local)
                     peers.bind?.let { put("bind", it) }
                 }
 

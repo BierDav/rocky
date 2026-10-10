@@ -163,6 +163,15 @@ request, refusal and custody scenarios run in integration. The `mesh` and
 records measurements and the acceptance coverage.
 
 
+Phase 15's record, sealing and merge checks in `rocky-iroh` run in unit. Its
+transport tests (`rocky-iroh` `discovery`), the hub scenarios
+(`rocky-sdk` `node::sync_tests::discovery`), the relay run and the
+attached-endpoint check (`rocky-sdk` `discovery`) run in integration through
+the existing filters. The mDNS transport run and the two two-process
+acceptance runs are named in e2e with their measured times; no exception is
+added. The simulator and emulator gates are scripts, as for phases 17 and 18.
+See the [phase 15 evidence](features_07/15-discovery-evidence.md).
+
 Phase 16's forwarding-slot and carrier-signature tests run in unit, explicitly
 excluded from the SDK's integration module filter. Mesh routing and replay tests exercise
 SQLite and real authenticated carriers and run in integration through
@@ -214,6 +223,8 @@ records the toolchain, dependency repair, threading contract and evidence.
 Phase 18 adds `./sdks/kotlin/package-ios` and
 `./sdks/native/qualify-ios-package` for the independent packaged consumer, and
 `./sdks/native/qualify-ios-lifecycle` for Keychain, suspension and crash probes.
+Phase 15 adds `./sdks/native/qualify-ios-discovery`: local discovery follows
+the lifecycle, and a simulator and a host process find each other over mDNS.
 The new Rust endpoint ownership/rebind tests are integration tests through
 `kind(test)` in `.config/test-tiers.toml`, with the same 2 s budget. The iOS
 acceptance tests run in the macOS job; they are platform integration gates,
@@ -230,6 +241,10 @@ It needs the Android SDK and NDK and rustup, which it provisions under `local/` 
 none is on `PATH`. `./kotlin do packageAndroid -m rocky-runtime-android` then writes the
 SDK's AAR and jars as a local Maven repository for Gradle consumers.
 This is not part of `./scripts/check`. See [Android](runtime/android.md).
+`./sdks/kotlin/qualify-android-discovery` installs a small check app on a
+booted emulator, or boots the AVD named by `ROCKY_ANDROID_AVD`, and shows that
+the Wi-Fi multicast lock is held while local discovery is on and released in
+the background.
 
 ## CI
 

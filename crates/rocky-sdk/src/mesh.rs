@@ -183,6 +183,77 @@ impl Settings {
         );
         Ok(true)
     }
+    /// Whether a found route or local mark is news, so that repeated
+    /// announcements cost no write.
+    pub(crate) fn would_learn(
+        &self,
+        node: PublicKey,
+        kind: &str,
+        address: &str,
+        local: bool,
+    ) -> bool {
+        if self.revocations.revokes(&node) {
+            return false;
+        }
+        let meta = self.contact_meta.get(&node);
+        let marked = !local || meta.is_some_and(|meta| meta.local);
+        let known = self.peers.get(&node).is_some_and(|contact| {
+            meta.is_some_and(|meta| meta.source == "application")
+                || contact
+                    .routes
+                    .iter()
+                    .any(|route| route.transport == kind && route.address == address)
+        });
+        !(known && marked)
+    }
+    /// Keeps a contact discovery found. A known contact gains the route
+    /// and, found locally, its mark; one the application added keeps its
+    /// routes.
+    pub(crate) fn learn_found(
+        &mut self,
+        vault: &Vault,
+        node: PublicKey,
+        kind: &str,
+        address: String,
+        local: bool,
+        time: u64,
+    ) -> Result<bool, Failure> {
+        let hint = ContactHint {
+            node,
+            routes: vec![(kind.to_owned(), address.clone())],
+            trusted: false,
+        };
+        hint.validate()?;
+        if !self.would_learn(node, kind, &address, local)
+            || node == PrivateKey::from_bytes(&vault.get("node")?).public_key()
+        {
+            return Ok(false);
+        }
+        let Some(contact) = self.peers.get_mut(&node) else {
+            let learned = self.learn_contact(vault, hint, "discovery", time)?;
+            if let Some(meta) = self.contact_meta.get_mut(&node).filter(|_| learned) {
+                meta.local = local;
+            }
+            return Ok(learned);
+        };
+        let meta = self
+            .contact_meta
+            .entry(node)
+            .or_insert_with(|| ContactMeta {
+                source: "enrollment".into(),
+                learned: time,
+                trusted: false,
+                local: false,
+            });
+        meta.local |= local;
+        if meta.source != "application" {
+            contact.learn(vec![Route {
+                transport: kind.to_owned(),
+                address,
+            }]);
+        }
+        Ok(true)
+    }
     pub(crate) fn contact_hint(&self, node: PublicKey) -> Option<ContactHint> {
         if self.revocations.revokes(&node) {
             return None;
@@ -271,6 +342,7 @@ impl Settings {
         time: u64,
     ) -> Result<(Commitment, Option<Commitment>), Failure> {
         let mut state = Discovery::load(vault)?;
+        let loaded = state.clone();
         let root = state
             .root
             .as_ref()
@@ -308,7 +380,9 @@ impl Settings {
             state.current = Some(topic);
         }
         state.previous = state.previous.filter(|(_, until)| time < *until);
-        state.save(vault)?;
+        if state != loaded {
+            state.save(vault)?;
+        }
         Ok((topic, state.previous.map(|(topic, _)| topic)))
     }
 }

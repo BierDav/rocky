@@ -80,6 +80,11 @@ pub trait Transport: Send + Sync {
     fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
         None
     }
+    /// Finds peers whose address this node does not know. Transports
+    /// without it work from contacts.
+    fn discovery(&self) -> Option<Arc<dyn Discovery>> {
+        None
+    }
     /// Drops what the transport keeps for reaching `address`, such as a
     /// cached connection, after an exchange over it failed.
     fn forget(&self, _address: &str) {}
@@ -95,6 +100,55 @@ pub trait Transport: Send + Sync {
     }
     /// Releases what the transport itself started. Its owner calls this.
     fn close(&self) -> BoxFuture<'_, ()>;
+}
+
+/// The discovery path of the local network, as `Discovery::paths` names it.
+pub const LOCAL_PATH: &str = "local";
+/// The discovery path of the wider network: the topic's rendezvous record.
+pub const TOPIC_PATH: &str = "topic";
+
+/// A contact a transport found: a hint, never a grant. The session
+/// authenticates whoever answers at `address`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    /// The node key the announcer claimed.
+    pub node: [u8; 32],
+    /// Where the transport reaches it, in the transport kind's format.
+    pub address: String,
+    /// The path that found it, as `Discovery::paths` names it.
+    pub path: String,
+    /// Found on the local network; ranked first by partner choice.
+    pub local: bool,
+}
+
+/// Whether one discovery path runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathState {
+    On,
+    /// Not asked for, or stopped while the application is in the background.
+    Off,
+    /// Asked for but impossible here, with the reason.
+    Unavailable(String),
+}
+
+/// A transport's optional way to find admitted peers under a topic that
+/// only they derive. See `docs/decisions/0057-discovery.md`.
+pub trait Discovery: Send + Sync {
+    /// Announces `node` under `topics`, the current one first, and looks
+    /// for others announcing under them. Replaces the earlier topics; an
+    /// empty list withdraws.
+    fn announce<'a>(
+        &'a self,
+        node: [u8; 32],
+        topics: &'a [[u8; 32]],
+    ) -> BoxFuture<'a, Result<(), Failure>>;
+    /// The next contact found, or `None` once the transport closed.
+    fn found(&self) -> BoxFuture<'_, Option<Found>>;
+    /// Every path this transport has, by name, and whether it runs.
+    fn paths(&self) -> Vec<(String, PathState)>;
+    /// Paths that may run only while the application is in the foreground
+    /// stop with `false` and resume with `true`.
+    fn foreground(&self, _foreground: bool) {}
 }
 
 /// Starts a transport that its caller then owns and closes.

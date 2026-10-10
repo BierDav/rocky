@@ -55,7 +55,7 @@ class MarketApplication : Application() {
         }
         if (!bundle.isFile) return state.emit(AppState.Waiting("No coordination service bundle"))
         // Relays and discovery off: the voters and peers are reached at the bundle's and contacts' addresses.
-        val transport = if (loopback.isFile) PeerTransport.Iroh("disabled", discovery = false, bind = "0.0.0.0:0") else PeerTransport.Iroh()
+        val transport = if (loopback.isFile) PeerTransport.Iroh.isolated(bind = "0.0.0.0:0") else PeerTransport.Iroh()
         val secrets = KeystoreSecretStore(this)
         val random = SecureRandom()
         val platform = MarketPlatform(

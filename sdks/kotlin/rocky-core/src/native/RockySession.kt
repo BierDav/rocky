@@ -38,6 +38,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             profile(authority.getValue("profile").jsonObject),
             status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean,
             authority["issuer_contact"]?.jsonPrimitive?.boolean ?: true,
+            discovery(status.getValue("network").jsonObject.getValue("discovery").jsonObject),
         )
     }
 
@@ -208,6 +209,9 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     /** Every peer met or kept as a contact; [Peer.isConfigured] tells them apart. */
     suspend fun peers(): List<Peer> = client.call(request("peers")).getValue("peers").jsonArray.map { peer(it.jsonObject) }
 
+    /** Each discovery path as on, off or unavailable with its reason; a found peer appears in [peers] with source `discovery`. */
+    suspend fun discovery(): DiscoveryStatus = discovery(client.call(request("peers")).getValue("discovery").jsonObject)
+
     /** The network service's state and bounds, independent of the database's. */
     suspend fun network(): NetworkStatus = client.call(request("network")).let { status ->
         val inbound = status["inbound"]?.jsonObject
@@ -220,6 +224,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             inbound?.text("served")?.toLong() ?: 0,
             inbound?.text("refused")?.toLong() ?: 0,
             status.getValue("peers").jsonArray.map { peer(it.jsonObject) },
+            discovery(status.getValue("discovery").jsonObject),
         )
     }
 
@@ -351,10 +356,17 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             value.text("source"),
             value.text("choice"),
             routes(value),
+            value.getValue("local").jsonPrimitive.boolean,
             value.text("state"),
             value.getValue("checked").jsonPrimitive.contentOrNull?.toLong(),
             value.getValue("error").jsonPrimitive.contentOrNull,
         )
+        private fun discovery(value: JsonObject): DiscoveryStatus {
+            fun path(name: String) = value.getValue("paths").jsonObject.getValue(name).jsonObject.let {
+                DiscoveryPath(DiscoveryPathState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)), it["reason"]?.jsonPrimitive?.contentOrNull)
+            }
+            return DiscoveryStatus(value.getValue("announcing").jsonPrimitive.boolean, path("local"), path("topic"))
+        }
         private fun routes(value: JsonObject) = value.getValue("routes").jsonArray.map { it.jsonObject }.map { Route(it.text("transport"), it.text("address")) }
         private fun JsonObject.text(name: String): String = getValue(name).jsonPrimitive.content
         internal fun GrantProfile.json(): JsonObject = buildJsonObject {

@@ -238,7 +238,9 @@ internal class Custody(private val root: File, private val binary: File, invitat
                     buildJsonObject {
                         put("kind", "iroh")
                         put("relay", "disabled")
-                        put("discovery", false)
+                        put("lookup", "disabled")
+                        put("topic", false)
+                        put("local", false)
                         put("bind", "127.0.0.1:${freeUdpPort()}")
                     },
                 )

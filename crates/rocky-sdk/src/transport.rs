@@ -4,7 +4,8 @@
 //! their own authentication and encryption; a transport only connects
 //! peers. See `docs/runtime/sdk-transports.md`.
 pub use rocky_core::net::{
-    BoxFuture, Connector, Failure, Protocol, SessionStream, Stream, Transport,
+    BoxFuture, Connector, Discovery, Failure, Found, LOCAL_PATH, PathState, Protocol,
+    SessionStream, Stream, TOPIC_PATH, Transport,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -31,9 +32,16 @@ pub enum TransportOptions {
         /// `default`, `staging`, `disabled` or a relay URL.
         #[serde(default)]
         relay: Option<String>,
-        /// Publish and resolve endpoint addresses through n0's DNS service.
+        /// Where endpoint addresses are published and resolved: `default`
+        /// for n0's DNS service, `disabled`, or the URL of a pkarr relay.
+        #[serde(default)]
+        lookup: Option<String>,
+        /// Find domain members through the topic's rendezvous record.
         #[serde(default = "enabled")]
-        discovery: bool,
+        topic: bool,
+        /// Find domain members on the local network over mDNS.
+        #[serde(default = "enabled")]
+        local: bool,
         /// A local socket address to bind, such as a fixed port.
         #[serde(default)]
         bind: Option<String>,
@@ -46,8 +54,23 @@ impl Default for TransportOptions {
     fn default() -> Self {
         Self::Iroh {
             relay: None,
-            discovery: true,
+            lookup: None,
+            topic: true,
+            local: true,
             bind: None,
+        }
+    }
+}
+impl TransportOptions {
+    /// iroh on `bind` with no relay, lookup service or discovery: peers
+    /// are reached at their contacts' addresses only.
+    pub fn isolated_iroh(bind: &str) -> Self {
+        Self::Iroh {
+            relay: Some("disabled".into()),
+            lookup: Some("disabled".into()),
+            topic: false,
+            local: false,
+            bind: Some(bind.into()),
         }
     }
 }
@@ -70,12 +93,16 @@ impl Connector for TransportOptions {
                 #[cfg(feature = "iroh")]
                 Self::Iroh {
                     relay,
-                    discovery,
+                    lookup,
+                    topic,
+                    local,
                     bind,
                 } => {
                     let options = rocky_iroh::Options {
                         relay: relay.clone(),
-                        discovery: *discovery,
+                        lookup: lookup.clone(),
+                        topic: *topic,
+                        local: *local,
                         bind: bind.clone(),
                     };
                     Ok(options.start(secret).await?.transport())

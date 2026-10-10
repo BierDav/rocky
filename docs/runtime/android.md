@@ -57,6 +57,11 @@ What remains is not syncing while nobody looks:
 - `RockyDatabase.enterBackground()` stops automatic sync. It cancels the native pass and returns within
   one second, so none runs after it returns. Sessions, reads and writes continue; the file, the attached network
   service and an owned or borrowed endpoint stay open, so the device keeps its address.
+- `enterBackground()` also stops [local-network discovery](discovery.md#lifecycle-and-platforms) and
+  `enterForeground()` resumes it. While the path is on, `RockyLifecycle` holds the Wi-Fi multicast lock for
+  each followed database, without which the radio filters other devices' announcements; it releases the
+  lock in the background and when the database is no longer followed. The SDK's manifest declares
+  `CHANGE_WIFI_MULTICAST_STATE`.
 - `enterForeground()` restarts automatic sync with an immediate pass, if the database was opened with
   it. A database opened without automatic sync is left to the application's own `syncOnce` calls.
 - `rocky.android.RockyLifecycle.register(application)` in `Application.onCreate` counts started

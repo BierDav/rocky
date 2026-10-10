@@ -77,7 +77,7 @@ class KeychainTest {
             }
         }
         try {
-            val network = PeerTransport.Iroh(relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+            val network = PeerTransport.Iroh.isolated()
             val owner = RockyDatabase.create("$root/owner", definition, network, automaticSync = false)
             val db = try {
                 RockyDatabase.join("$root/member", definition, owner.pairing(GrantProfile.Issuer).uri, network, secrets = secrets, automaticSync = false)

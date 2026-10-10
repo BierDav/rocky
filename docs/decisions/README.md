@@ -32,6 +32,7 @@ naturally holds.
 | [0054](0054-envelope-delivery.md) | Envelope delivery to the recipient alone, directly or through a mailbox |
 | [0055](0055-relayed-horizon.md) | Relayed horizon statements and acknowledgments |
 | 0056 | [Contact exchange and discovery secrets](0056-contact-exchange-and-discovery-secrets.md) |
+| 0057 | [Discovery capability and topic](0057-discovery.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 

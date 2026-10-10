@@ -71,6 +71,8 @@ fun packageAndroid(
             |<?xml version="1.0" encoding="utf-8"?>
             |<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="rocky.android">
             |    <uses-sdk android:minSdkVersion="${Android.MIN_SDK}"/>
+            |    <!-- Local-network discovery holds the Wi-Fi multicast lock while it runs. -->
+            |    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
             |</manifest>
             |
             """.trimMargin().toByteArray(),

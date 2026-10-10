@@ -244,7 +244,7 @@ every request.
   report a member left without issuer contact.
 - Sessions pass on at most 16 recently reached contacts and filter revoked
   nodes. Learned routes have a source (`handover`, `request`, `enrollment`, or
-  phase 15's `discovery`) and learning time. They age after 30 days and the
+  `discovery`) and learning time. They age after 30 days and the
   oldest eligible learned contact is evicted at capacity. They never overwrite
   or evict an `application` contact. The forwarding upstream is retained.
 - `requestContact(nodeId)` / native `contact_request` asks admitted peers for
@@ -252,7 +252,9 @@ every request.
   Each session allows eight requests. Unknown and revoked nodes both return
   null. A returned node key must hash to the requested ID; the next session
   authenticates that key before serving anything.
-- Nothing is announced or looked up on a network in phase 14. Custody forwarding of enrollment
+- On iroh, [discovery](discovery.md) announces the device under the domain's
+  topic and adds what it finds, marked `local` when found on the local
+  network. Custody forwarding of enrollment
   ([issuer availability](always-on-peer.md#issuer-availability)) never
   substitutes custody routes for issuer row-sync routes.
 
@@ -333,7 +335,7 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `connection` with `online`, `sync` | `offline`, or `connected` with the number of `peers` reached |
-| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; contacts and peers met with `issuer`, `configured`, routes, `source`, `choice`, `state`, `checked`, `error`, and `issuer_contact` |
+| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; contacts and peers met with `issuer`, `configured`, routes, `source`, `local`, `choice`, `state`, `checked`, `error`, `issuer_contact`, and the [discovery status](discovery.md#status) |
 | `contact_request` with hexadecimal `id` | Learned `node` key, or null |
 | `network` | See [network status](sdk-composition.md#network-status) |
 | `mutate`, `mutation_progress` | A durable create, set or delete by handle |

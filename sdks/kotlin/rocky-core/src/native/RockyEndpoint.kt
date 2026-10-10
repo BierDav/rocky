@@ -51,13 +51,17 @@ class RockyEndpoint private constructor(internal val native: NativeEndpoint) : A
         suspend fun bind(
             secret: ByteArray,
             relay: String = "default",
-            discovery: Boolean = true,
+            lookup: String = "default",
+            topic: Boolean = false,
+            local: Boolean = false,
             bind: String? = null,
             protocols: Map<String, suspend (remote: String, stream: ByteStream) -> Unit> = emptyMap(),
         ): RockyEndpoint = withContext(Dispatchers.IO) {
             val options = buildJsonObject {
                 put("relay", relay)
-                put("discovery", discovery)
+                put("lookup", lookup)
+                put("topic", topic)
+                put("local", local)
                 bind?.let { put("bind", it) }
             }
             val handlers = protocols.map { (name, handler) ->

@@ -15,7 +15,7 @@ class EndpointAndCommandTest {
             val endpoint = RockyEndpoint.bind(
                 ByteArray(32) { 17 },
                 relay = "disabled",
-                discovery = false,
+                lookup = "disabled",
                 bind = "127.0.0.1:0",
                 protocols = mapOf(
                     alpn to { _, stream ->
@@ -25,7 +25,7 @@ class EndpointAndCommandTest {
                     },
                 ),
             )
-            val caller = RockyEndpoint.bind(ByteArray(32) { 18 }, relay = "disabled", discovery = false, bind = "127.0.0.1:0")
+            val caller = RockyEndpoint.bind(ByteArray(32) { 18 }, relay = "disabled", lookup = "disabled", bind = "127.0.0.1:0")
             val root = NSTemporaryDirectory() + "rocky-endpoint-" + NSUUID().UUIDString
             val definition = schema("endpoint", 1) {
                 table("items") {

@@ -1,6 +1,7 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod mesh;
 mod partition;
 mod registry;
 use crate::{
@@ -203,6 +204,7 @@ struct Reached {
     error: Option<String>,
     /// Scopes the last successful sync with the peer did not exchange.
     refused: Vec<ResourceScope>,
+    held: Vec<ResourceScope>,
     /// Why the last successful sync's results pass failed, if it did.
     results: Option<String>,
 }
@@ -244,6 +246,8 @@ pub(crate) struct Node {
     /// A session brought statements since the last renewal. Rotated keys
     /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
+    handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
+    choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
     /// The application's coordinator, when it composed strong commands.
     coordinator: Option<Arc<dyn Coordinator>>,
     /// Takes an unassigned domain of a coordination service for this
@@ -295,6 +299,8 @@ impl Node {
             reached: std::sync::Mutex::new(BTreeMap::new()),
             met: std::sync::Mutex::new(BTreeMap::new()),
             learned: AtomicBool::new(false),
+            handover: std::sync::Mutex::new(Default::default()),
+            choices: std::sync::Mutex::new(BTreeMap::new()),
             coordinator,
             acquire,
             service: None,
@@ -720,6 +726,31 @@ impl Node {
             "grant" | "delegate" => self.grant(request).await,
             kind if kind.starts_with("pseudonym_") => self.pseudonym(kind, request).await,
             "install" => self.install_supplied(client, request).await,
+            "contact_request" => {
+                let encoded = request["id"]
+                    .as_str()
+                    .ok_or_else(|| refused("id must be a 16-byte node ID"))?;
+                let id: [u8; 16] = HEXLOWER
+                    .decode(encoded.as_bytes())?
+                    .try_into()
+                    .map_err(|_| refused("id must be a 16-byte node ID"))?;
+                let network = self.network.read().await;
+                self.request_contact(
+                    &*network
+                        .as_ref()
+                        .ok_or_else(|| refused("no network attached"))?
+                        .transport,
+                    rocky_core::NodeId(id),
+                )
+                .await
+            }
+            "discovery_topics" => {
+                let settings = self.settings.lock().await;
+                let (current, previous) = settings.discovery_topics(&self.vault, now()?)?;
+                Ok(
+                    json!({"current": HEXLOWER.encode(&current), "previous": previous.map(|topic| HEXLOWER.encode(&topic))}),
+                )
+            }
             "peers" => Ok(json!({
                 "peers": self.peers().await,
                 "issuer_contact": self.settings.lock().await.issuer_contact(),
@@ -1047,6 +1078,8 @@ impl Node {
                     "node": node.to_hex(),
                     "issuer": settings.issuers.contains(&node),
                     "configured": contact.is_some(),
+                    "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else { "session" }, |meta| meta.source.as_str()),
+                    "choice": self.choices.lock().unwrap_or_else(PoisonError::into_inner).get(&node).copied().unwrap_or("not_considered"),
                     "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
                     "state": state,
                     "checked": checked.map(|at| at.to_string()),
@@ -1966,6 +1999,7 @@ impl Node {
                 after = next;
             }
         }
+        let has_contacts = !targets.is_empty();
         let targets: Vec<_> = {
             let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
             retries.retain(|peer, _| targets.iter().any(|(node, _)| node == peer));
@@ -1976,69 +2010,126 @@ impl Node {
                         pending: has_frames,
                         ..PeerRetry::default()
                     });
-                    (!automatic || (state.retry.ready() && (!retry_only || state.pending)))
+                    (state.retry.ready() && (!automatic || !retry_only || state.pending))
                         .then_some((peer, contact, state.generation))
                 })
                 .collect()
         };
+        if !automatic && has_contacts && targets.is_empty() {
+            return Err(
+                ServiceError::Unreachable("all selected contacts are in backoff".into()).into(),
+            );
+        }
         if automatic && targets.is_empty() {
             return Ok((
                 self.sync_status.borrow().clone(),
                 self.retry_deadline().is_some(),
             ));
         }
+        let handed = self
+            .handover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let needed: Vec<_> = self
+            .scopes()
+            .into_iter()
+            .filter(|scope| !self.domain.partitioned_table(scope))
+            .collect();
+        let mut covered = std::collections::BTreeSet::new();
         let mut targets = targets;
         let mut results = Vec::new();
         for round in 0..2 {
-            let attempts = stream::iter(targets)
-                .map(|(peer, contact, generation)| async move {
-                    let mut result = self.reconcile(transport, peer, &contact).await;
-                    let settings = self.settings.lock().await.clone();
-                    if settings.issuer()
-                        && settings.issuers.contains(&peer)
-                        && !result
-                            .as_ref()
-                            .is_err_and(|error| error.is::<ServiceError>())
-                    {
-                        let before = serde_json::to_vec(&settings);
-                        match self.renew(Some(transport), true, Some(peer), true).await {
-                            Ok(()) => {
-                                let after = serde_json::to_vec(&*self.settings.lock().await);
-                                match (before, after) {
-                                    (Ok(before), Ok(after)) if before != after => {
-                                        result = self.reconcile(transport, peer, &contact).await;
-                                    }
-                                    (Err(error), _) | (_, Err(error)) => result = Err(error.into()),
-                                    _ => {}
-                                }
-                            }
-                            Err(error) => self.activity.record_changed(
-                                "epoch_delivery_failed",
-                                json!({"peer": peer.to_hex(), "error": error.to_string()}),
-                            ),
-                        }
+            let local_first = targets.first().is_some_and(|(peer, _, _)| {
+                settings
+                    .contact_meta
+                    .get(peer)
+                    .is_some_and(|meta| meta.local)
+            });
+            let mut remaining = targets.into_iter();
+            let mut first_batch = true;
+            loop {
+                let width = if local_first && first_batch { 1 } else { 4 };
+                first_batch = false;
+                let batch: Vec<_> = remaining.by_ref().take(width).collect();
+                if batch.is_empty() {
+                    break;
+                }
+                if !needed.is_empty() && needed.iter().all(|scope| covered.contains(scope)) {
+                    let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (peer, _, _) in batch.into_iter().chain(remaining) {
+                        choices.insert(peer, "covered");
                     }
-                    (peer, contact, generation, result)
-                })
-                .buffer_unordered(4);
-            tokio::pin!(attempts);
-            while let Some((peer, contact, generation, result)) = attempts.next().await {
-                let error = result.as_ref().err().map(ToString::to_string);
-                let (refused, received) = match &result {
-                    Ok((_, _, transfer)) => (transfer.refused.clone(), transfer.results.clone()),
-                    Err(_) => (Vec::new(), None),
-                };
-                let before = self.reached()?.insert(
-                    peer,
-                    Reached {
-                        at: now()?,
-                        error,
-                        refused,
-                        results: received,
-                    },
-                );
-                self.record_reach(peer, before, &result);
-                results.push((peer, contact, generation, result));
+                    break;
+                }
+                let attempts = stream::iter(batch)
+                    .map(|(peer, contact, generation)| async move {
+                        let mut result = self.reconcile(transport, peer, &contact).await;
+                        let settings = self.settings.lock().await.clone();
+                        if settings.issuer()
+                            && settings.issuers.contains(&peer)
+                            && !result
+                                .as_ref()
+                                .is_err_and(|error| error.is::<ServiceError>())
+                        {
+                            let before = serde_json::to_vec(&settings);
+                            match self.renew(Some(transport), true, Some(peer), true).await {
+                                Ok(()) => {
+                                    let after = serde_json::to_vec(&*self.settings.lock().await);
+                                    match (before, after) {
+                                        (Ok(before), Ok(after)) if before != after => {
+                                            result =
+                                                self.reconcile(transport, peer, &contact).await;
+                                        }
+                                        (Err(error), _) | (_, Err(error)) => {
+                                            result = Err(error.into())
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Err(error) => self.activity.record_changed(
+                                    "epoch_delivery_failed",
+                                    json!({"peer": peer.to_hex(), "error": error.to_string()}),
+                                ),
+                            }
+                        }
+                        (peer, contact, generation, result)
+                    })
+                    .buffer_unordered(4);
+                tokio::pin!(attempts);
+                while let Some((peer, contact, generation, result)) = attempts.next().await {
+                    let error = result.as_ref().err().map(ToString::to_string);
+                    let (refused, received) = match &result {
+                        Ok((_, _, transfer)) => {
+                            (transfer.refused.clone(), transfer.results.clone())
+                        }
+                        Err(_) => (Vec::new(), None),
+                    };
+                    let before = self.reached()?.insert(
+                        peer,
+                        Reached {
+                            at: now()?,
+                            error,
+                            refused,
+                            held: result
+                                .as_ref()
+                                .map(|(_, _, transfer)| transfer.held.clone())
+                                .unwrap_or_default(),
+                            results: received,
+                        },
+                    );
+                    if let Ok((_, _, transfer)) = &result {
+                        covered.extend(transfer.held.iter().copied());
+                    }
+                    if result.is_ok() {
+                        self.handover
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(peer);
+                    }
+                    self.record_reach(peer, before, &result);
+                    results.push((peer, contact, generation, result));
+                }
             }
             // A peer told this device of its own revocation.
             if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
@@ -2121,6 +2212,12 @@ impl Node {
                 }
             }
         }
+        if connected > 0 {
+            let mut handover = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
+            for node in handed {
+                handover.remove(&node);
+            }
+        }
         retry |= first.is_some();
         match first {
             Some(error) if connected == 0 => Err(error),
@@ -2132,17 +2229,49 @@ impl Node {
             _ => Ok((json!({"state": "connected", "peers": connected}), retry)),
         }
     }
-    /// The contacts one pass dials: issuers first, then the least recently
-    /// attempted, at most `MAX_DIALED`.
+    /// Local routes, observed holdings and trusted contacts, with backed-off peers last.
     fn dialed(&self, settings: &Settings) -> Vec<(PublicKey, Contact)> {
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
+        let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+        let needed: Vec<_> = self
+            .scopes()
+            .into_iter()
+            .filter(|scope| !self.domain.partitioned_table(scope))
+            .collect();
         let mut targets = settings.targets();
         targets.sort_by_key(|(node, _)| {
+            let meta = settings.contact_meta.get(node);
             (
-                !settings.issuers.contains(node),
-                reached.get(node).map(|reached| reached.at),
+                retries.get(node).is_some_and(|state| !state.retry.ready()),
+                !meta.is_some_and(|meta| meta.local),
+                !reached.get(node).is_some_and(|last| {
+                    last.error.is_none() && needed.iter().any(|scope| last.held.contains(scope))
+                }),
+                !(settings.issuers.contains(node) || meta.is_some_and(|meta| meta.trusted)),
+                reached.get(node).map(|last| last.at),
             )
         });
+        let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
+        choices.clear();
+        for (index, (node, _)) in targets.iter().enumerate() {
+            let meta = settings.contact_meta.get(node);
+            let reason = if retries.get(node).is_some_and(|state| !state.retry.ready()) {
+                "backoff"
+            } else if index >= crate::enrollment::MAX_DIALED {
+                "pass_limit"
+            } else if meta.is_some_and(|meta| meta.local) {
+                "selected_local"
+            } else if reached.get(node).is_some_and(|last| {
+                last.error.is_none() && needed.iter().any(|scope| last.held.contains(scope))
+            }) {
+                "selected_holding"
+            } else if settings.issuers.contains(node) || meta.is_some_and(|meta| meta.trusted) {
+                "selected_trusted"
+            } else {
+                "selected_probe"
+            };
+            choices.insert(*node, reason);
+        }
         targets.truncate(crate::enrollment::MAX_DIALED);
         targets
     }
@@ -2192,6 +2321,10 @@ impl Node {
         let result = self.exchange(transport, peer, contact).await;
         let absorbed = self.absorb_revocations(result.as_ref().err()).await;
         let transfer = result?;
+        self.handover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(peer);
         absorbed?;
         Ok(transfer)
     }
@@ -2220,6 +2353,7 @@ impl Node {
             peer,
             node: PrivateKey::from_bytes(&self.vault.get("node")?),
             credentials,
+            contacts: Some(self),
             renew_from: match renewable {
                 true => Some(self.replica.revocation_digest().await?),
                 false => None,
@@ -2331,13 +2465,14 @@ impl Node {
                 let settings = self.settings.lock().await.clone();
                 self.replica.configure_peers(settings.kept()).await;
                 let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-                let served = sync::serve(
+                let served = sync::serve_contacts(
                     stream,
                     &self.replica,
                     node,
                     settings.credentials,
                     self.coordinator.as_deref(),
                     |peer| self.inbound_sync(peer),
+                    self,
                 )
                 .await;
                 let absorbed = self.absorb_revocations(served.as_ref().err()).await;

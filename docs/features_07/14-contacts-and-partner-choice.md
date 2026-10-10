@@ -1,6 +1,7 @@
 # 14. Contacts and partner choice
 
-Status: not started.
+Status: implemented and qualified on 2026-10-10; see
+[acceptance evidence](14-contacts-and-partner-choice-evidence.md).
 Owner: `rocky-sdk` contacts, sync targets and the sync worker; `rocky-secure`
 session; Kotlin `peers()`. Depends on [phase 2](02-change-driven-sync.md) and
 [phase 9](09-roster-free-admission.md); lands last on the session, after

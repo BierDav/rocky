@@ -94,6 +94,8 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     a.database
         .attach(Network::Borrowed(attachment.transport()))
         .await?;
+    // The application signals renewed reachability; explicit passes respect backoff.
+    b.ok(json!({"type": "connection", "online": true})).await;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b.titles().await, ["Eggs", "Jam", "Milk"]);
 

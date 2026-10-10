@@ -235,7 +235,7 @@ async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
             hub.wait_dials("d", dials + 1).await;
             settled(&a).await;
             assert_eq!(rows(d).await?, ["1", "2"]);
-            // The explicit request ignores every peer deadline.
+            // After inbound success resets its deadline, an explicit pass reaches every ready peer.
             hub.stall_peer("d", true);
             hub.network_changed();
             hub.wait_dials("d", dials + 2).await;

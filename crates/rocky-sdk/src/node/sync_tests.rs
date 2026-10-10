@@ -41,9 +41,43 @@ async fn enrolled(
     name: &str,
     issuer: Option<(&Arc<Node>, Profile)>,
 ) -> Result<Arc<Node>, Failure> {
+    enrolled_schema(root, hub, name, issuer, &Schema::parse(SCHEMA)?).await
+}
+#[derive(Default)]
+struct TestSecrets(std::sync::Mutex<BTreeMap<String, Vec<u8>>>);
+impl crate::SecretStore for TestSecrets {
+    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, Failure> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| "secret store poisoned")?
+            .get(name)
+            .cloned())
+    }
+    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+        self.0
+            .lock()
+            .map_err(|_| "secret store poisoned")?
+            .insert(name.into(), bytes.to_vec());
+        Ok(())
+    }
+    fn delete(&self, name: &str) -> Result<(), Failure> {
+        self.0
+            .lock()
+            .map_err(|_| "secret store poisoned")?
+            .remove(name);
+        Ok(())
+    }
+}
+async fn enrolled_schema(
+    root: &std::path::Path,
+    hub: &Arc<Hub>,
+    name: &str,
+    issuer: Option<(&Arc<Node>, Profile)>,
+    schema: &Schema,
+) -> Result<Arc<Node>, Failure> {
     std::fs::create_dir_all(root)?;
-    let schema = Schema::parse(SCHEMA)?;
-    let store: Arc<dyn crate::SecretStore> = Arc::new(FileSecretStore::new(root.join("secrets")));
+    let store: Arc<dyn crate::SecretStore> = Arc::new(TestSecrets::default());
     let path = root.join("identity.json");
     if let Some((issuer, profile)) = issuer {
         let link = issuer.network.read().await;
@@ -65,11 +99,11 @@ async fn enrolled(
             .connector(name)
             .start(false, Settings::transport_key(&joining.vault)?)
             .await?;
-        let settings = joining.enroll(&path, &schema, &*transport).await?;
+        let settings = joining.enroll(&path, schema, &*transport).await?;
         let vault = settings.vault(&store);
         node(root, settings, vault, transport).await
     } else {
-        let settings = Settings::create(&schema, &store, crate::enrollment::DEFAULT_TTL)?;
+        let settings = Settings::create(schema, &store, crate::enrollment::DEFAULT_TTL)?;
         settings.save(&path)?;
         let vault = settings.vault(&store);
         let transport = hub
@@ -368,6 +402,7 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
 
 mod admission;
 mod change_driven;
+mod mesh;
 
 /// A renewal holds the settings while it teaches the replica. A Room write
 /// that holds the replica must not wait for the settings: that cycle lasted

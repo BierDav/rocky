@@ -218,7 +218,7 @@ pub fn open_enrollment(
 /// The secret half of a one-time X25519 exchange.
 pub struct Exchange([u8; 32]);
 impl Exchange {
-    fn new() -> (Self, [u8; 32]) {
+    pub fn new() -> (Self, [u8; 32]) {
         let mut secret = [0; 32];
         rand::rngs::OsRng.fill_bytes(&mut secret);
         (
@@ -226,7 +226,7 @@ impl Exchange {
             MontgomeryPoint::mul_base_clamped(secret).to_bytes(),
         )
     }
-    fn shared(&self, peer: &[u8; 32]) -> Result<[u8; 32], Error> {
+    pub fn shared(&self, peer: &[u8; 32]) -> Result<[u8; 32], Error> {
         let shared = MontgomeryPoint(*peer).mul_clamped(self.0).to_bytes();
         if shared == [0; 32] {
             return Err(denied("invalid key exchange"));

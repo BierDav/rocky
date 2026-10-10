@@ -32,6 +32,7 @@ pub struct Upstream<'a> {
     pub credentials: CredentialChain,
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
+    pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
     pub renew_from: Option<rocky_core::Commitment>,
 }
 
@@ -76,6 +77,7 @@ pub(crate) struct Transfer {
     /// Scopes the peer and this device did not exchange: one side's
     /// credentials, as the other sees them, grant no whole-scope access.
     pub refused: Vec<ResourceScope>,
+    pub held: Vec<ResourceScope>,
     /// Why the confirmed results pass failed; rows still synced.
     pub results: Option<String>,
 }
@@ -85,6 +87,11 @@ impl Transfer {
             self.add(scope, moved);
         }
         self.refuse(&other.refused);
+        for scope in other.held {
+            if !self.held.contains(&scope) {
+                self.held.push(scope);
+            }
+        }
         if other.results.is_some() {
             self.results = other.results;
         }
@@ -214,7 +221,7 @@ pub(crate) async fn session(
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
     let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
-    let session = NativeSession::authenticate(
+    let mut session = NativeSession::authenticate(
         stream,
         replica,
         upstream.node.clone(),
@@ -223,6 +230,9 @@ pub(crate) async fn session(
         MAX_SECURE_BYTES,
     )
     .await?;
+    if let Some(handler) = upstream.contacts {
+        crate::mesh::exchange(&mut session, handler).await?;
+    }
     if let Some(digest) = upstream.renew_from
         && replica.revocation_digest().await? != digest
     {
@@ -244,6 +254,11 @@ async fn rows(
         let mut exhausted = false;
         let exchange = session.changed_scopes(replica, scopes).await?;
         transfer.refuse(&exchange.refused);
+        for scope in scopes {
+            if !exchange.refused.contains(scope) && !transfer.held.contains(scope) {
+                transfer.held.push(*scope);
+            }
+        }
         for scope in &exchange.changed {
             // Restore the peer's retained base before publishing local edits.
             let mut pulled = session.catch_up(replica, *scope, QUOTA).await?;
@@ -358,9 +373,13 @@ async fn results(
                 incomplete.push(*scope);
             }
         }
-        if incomplete.is_empty() {
+        let repairing = !incomplete.is_empty();
+        if !repairing && (unavailable || head == 0) {
             return Ok(unavailable);
         }
+        // A checkpoint can supply the head before results are pulled; the
+        // executor still needs the reader's applied acknowledgment.
+
         let mut session = session(replica, upstream).await?;
         for scope in incomplete {
             session.bootstrap_scope(replica, scope, QUOTA).await?;
@@ -371,7 +390,7 @@ async fn results(
                 .await?;
         }
         session.close().await?;
-        return Ok(true);
+        return Ok(unavailable || repairing);
     }
     let mut retry = unavailable || missing.len() == RESULTS;
     let mut session = session(replica, upstream).await?;
@@ -405,21 +424,19 @@ async fn results(
     Ok(retry)
 }
 
-/// Serves one peer's session until it ends: any peer whose chain verifies
-/// for this domain and that no held or exchanged statement revokes.
-pub async fn serve(
+pub(crate) async fn serve_contacts(
     stream: Stream,
     replica: &EncryptedReplica<TypedCommands>,
     node: PrivateKey,
     credentials: CredentialChain,
     coordinator: Option<&dyn Coordinator>,
     admitted_peer: impl FnOnce(PublicKey),
+    handler: &dyn rocky_secure::network::ContactHandler,
 ) -> Result<(), Failure> {
     let mut session =
         NativeSession::accept(stream, replica, node, credentials, MAX_SECURE_BYTES).await?;
     admitted_peer(session.peer());
-    match coordinator {
-        Some(coordinator) => Ok(session.serve_with_commands(replica, coordinator).await?),
-        None => Ok(session.serve(replica).await?),
-    }
+    Ok(session
+        .serve_with_contacts(replica, coordinator, handler)
+        .await?)
 }

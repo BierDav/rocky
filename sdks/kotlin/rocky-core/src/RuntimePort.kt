@@ -132,13 +132,15 @@ interface StreamTransport {
 data class Route(val transport: String, val address: String)
 
 /**
- * A peer met or kept as a contact: whether it renews credentials, whether it is a configured contact, its routes and what
+ * A peer met or kept as a contact: its source, last selection reason, issuer/contact flags, routes and what
  * the last sync with it did: `connected`, `unreachable` or `unknown`. A peer met only through its own session has no routes.
  */
 data class Peer(
     val node: String,
     val isIssuer: Boolean,
     val isConfigured: Boolean,
+    val source: String,
+    val choice: String,
     val routes: List<Route>,
     val state: String,
     val checkedAtEpochSeconds: Long?,

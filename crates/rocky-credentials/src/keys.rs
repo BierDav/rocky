@@ -101,6 +101,18 @@ impl Vault {
     fn name(&self, role: &str) -> String {
         format!("rocky.{}.{role}", self.installation)
     }
+    /// Loads a bounded structured secret managed by the caller.
+    pub fn load_bytes(&self, role: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.provider
+            .load(&self.name(role))
+            .map_err(Error::Provider)
+    }
+    /// Stores a structured secret in the same provider as key material.
+    pub fn store_bytes(&self, role: &str, bytes: &[u8]) -> Result<(), Error> {
+        self.provider
+            .store(&self.name(role), bytes)
+            .map_err(Error::Provider)
+    }
     /// The secret of `role`, or `None` when the provider holds none.
     pub fn find(&self, role: &str) -> Result<Option<[u8; 32]>, Error> {
         match self

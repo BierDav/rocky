@@ -236,7 +236,7 @@ impl NativeSession {
         Ok(())
     }
 
-    async fn answer_command<A: rocky_core::RowCommandApplication>(
+    pub(super) async fn answer_command<A: rocky_core::RowCommandApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
         coordinator: &dyn rocky_core::Coordinator,

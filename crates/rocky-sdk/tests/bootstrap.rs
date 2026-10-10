@@ -570,6 +570,10 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     a.ok(json!({"type": "revoke", "node": c.node().await}))
         .await;
     member.ok(json!({"type": "renew"})).await;
+    // Retry after restoring authority explicitly signals connectivity again.
+    member
+        .ok(json!({"type": "connection", "online": true}))
+        .await;
     member.sync().await.expect("fresh intent under epoch 2");
     assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
     assert_eq!(member.titles().await, ["base"]);

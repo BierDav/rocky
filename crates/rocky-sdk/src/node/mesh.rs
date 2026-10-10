@@ -1,0 +1,128 @@
+use super::*;
+use rocky_secure::network::{
+    ContactFuture, ContactHandler, ContactRequest, ContactResponse, NativeSession,
+};
+
+impl ContactHandler for Node {
+    fn answer(&self, _peer: PublicKey, request: ContactRequest) -> ContactFuture<'_> {
+        Box::pin(async move {
+            self.answer_contacts(request)
+                .await
+                .map_err(rocky_secure::Error::Application)
+        })
+    }
+}
+impl Node {
+    async fn answer_contacts(&self, request: ContactRequest) -> Result<ContactResponse, Failure> {
+        let held = self.replica.revocations().await;
+        let mut settings = self.settings.lock().await;
+        let revocations = settings.revocations.clone();
+        let contacts = settings.peers.len();
+        settings.learn_revocations(&held)?;
+        settings.forget_revoked();
+        let mut changed = settings.revocations != revocations || settings.peers.len() != contacts;
+        let response = match request {
+            ContactRequest::Handover { contacts } => {
+                for contact in contacts {
+                    changed |= settings.learn_contact(&self.vault, contact, "handover", now()?)?;
+                }
+                let pending = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut bytes = 0;
+                let contacts = pending
+                    .iter()
+                    .filter_map(|node| settings.contact_hint(*node))
+                    .filter(|contact| {
+                        let size = contact
+                            .routes
+                            .iter()
+                            .map(|(kind, route)| kind.len() + route.len())
+                            .sum::<usize>()
+                            + 256;
+                        if bytes + size > 96 * 1024 {
+                            return false;
+                        }
+                        bytes += size;
+                        true
+                    })
+                    .take(16)
+                    .collect();
+                ContactResponse::Handover { contacts }
+            }
+            ContactRequest::Request { node } => {
+                let contact = settings
+                    .peers
+                    .keys()
+                    .find(|key| secure_node_id(**key) == node)
+                    .and_then(|key| settings.contact_hint(*key));
+                ContactResponse::Contact { contact }
+            }
+            ContactRequest::Discovery {
+                root,
+                values,
+                after,
+            } => settings.discovery_exchange(&self.vault, root, values, after)?,
+        };
+        if changed {
+            settings.save(&self.path)?;
+        }
+        Ok(response)
+    }
+    /// Asks admitted peers for a route; the later session still proves its key.
+    pub(super) async fn request_contact(
+        &self,
+        transport: &dyn Transport,
+        id: rocky_core::NodeId,
+    ) -> Result<Value, Failure> {
+        let settings = self.settings.lock().await.clone();
+        for (peer, contact) in self.dialed(&settings) {
+            if self
+                .retries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&peer)
+                .is_some_and(|state| !state.retry.ready())
+            {
+                continue;
+            }
+            let addresses = contact.addresses(transport.kind());
+            if addresses.is_empty() {
+                continue;
+            }
+            let stream = match crate::enrollment::dial(transport, &addresses, Protocol::Sync).await
+            {
+                Ok(stream) => stream,
+                Err(_) => continue,
+            };
+            let mut session = match NativeSession::authenticate(
+                stream,
+                &self.replica,
+                PrivateKey::from_bytes(&self.vault.get("node")?),
+                settings.credentials.clone(),
+                peer,
+                rocky_secure::MAX_SECURE_BYTES,
+            )
+            .await
+            {
+                Ok(session) => session,
+                Err(_) => continue,
+            };
+            let response = session
+                .exchange_contacts(ContactRequest::Request { node: id })
+                .await?;
+            session.close().await?;
+            if let ContactResponse::Contact {
+                contact: Some(contact),
+            } = response
+            {
+                let node = contact.node;
+                self.configure(|settings| {
+                    settings.learn_contact(&self.vault, contact, "request", now()?)
+                })
+                .await?;
+                self.wake_sync();
+                return Ok(json!({"node": node.to_hex()}));
+            }
+        }
+        Ok(json!({"node": null}))
+    }
+}

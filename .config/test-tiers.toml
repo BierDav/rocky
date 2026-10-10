@@ -1,4 +1,4 @@
-# Test tiers and their budgets; see docs/development.md#test-tiers and
+# Test tiers and their budgets; see docs/development.md#test-budgets and
 # docs/decisions/0060-test-tiers-and-budgets.md. `scripts/test-tiers` enforces them.
 #
 # A test belongs to the first tier whose filter matches it (nextest filterset
@@ -22,10 +22,10 @@ suite = "5m"
 filter = '''
     kind(test)
     | (package(rocky-secure) & test(/^tests::/))
-    | (package(rocky-secure) & test(/^network::holdings::tests::/))
+    | (package(rocky-secure) & test(/^network::(holdings|contacts)::tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
-    | (package(rocky-sdk) & test(/^(commands|database|enrollment|node)::/))
+    | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
     | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))

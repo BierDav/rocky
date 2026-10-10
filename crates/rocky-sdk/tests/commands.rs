@@ -405,7 +405,8 @@ async fn competing_callers_get_one_acceptance_over_the_network() -> Result<(), F
         custody
             .as_array()
             .is_some_and(|acks| acks.len() == 2 && acks.iter().all(|ack| ack["applied"] == true)),
-        "{custody}"
+        "{custody}; activity: {}",
+        b.ok(json!({"type": "activity"})).await
     );
     assert_eq!(pair.handler.calls.load(Ordering::SeqCst), 3);
     assert_eq!(pair.sequence(), 3);

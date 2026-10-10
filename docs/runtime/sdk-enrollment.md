@@ -85,7 +85,7 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 11 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
+| `identity.json` | 13 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes and local source/age metadata, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
@@ -223,7 +223,7 @@ the dialing side needs a contact:
 ```kotlin
 val contact = phone.contact()          // rocky://peer/…, any channel
 laptop.addPeer(contact.uri)            // the laptop now dials the phone
-laptop.peers()                         // node, routes, issuer, configured, last sync state
+laptop.peers()                         // source, choice, routes and last sync state
 ```
 
 A contact is not secret and grants nothing. A route is a hint: whoever answers
@@ -235,21 +235,41 @@ every request.
   sessions, each with `configured`; a peer met that way has no routes.
 - A device refuses a contact a held statement revokes; an issuer also one its
   registry tombstoned.
-- Limits: 64 contacts, 16 dialed per sync pass (issuers first, then the least
-  recently attempted), 64 peers met listed, 8 issuers, 4 routes per contact,
+- Limits: 64 contacts, 16 selected per sync pass, 64 peers met listed,
+  8 issuers, 4 routes per contact,
   2,048-byte addresses. The replica keeps horizon credentials and frontiers of
   at most 256 unconfigured peers ([transport bounds](sdk-transports.md#bounds)).
 - Any contact can be removed, the last issuer included; it is no longer dialed
   and is still served. `peers` and readiness (`authority.issuer_contact`)
   report a member left without issuer contact.
-- Nothing is discovered or elected. Custody forwarding of enrollment
+- Sessions pass on at most 16 recently reached contacts and filter revoked
+  nodes. Learned routes have a source (`handover`, `request`, `enrollment`, or
+  phase 15's `discovery`) and learning time. They age after 30 days and the
+  oldest eligible learned contact is evicted at capacity. They never overwrite
+  or evict an `application` contact. The forwarding upstream is retained.
+- `requestContact(nodeId)` / native `contact_request` asks admitted peers for
+  the contact of a 16-byte node ID, encoded as 32 hexadecimal characters.
+  Each session allows eight requests. Unknown and revoked nodes both return
+  null. A returned node key must hash to the requested ID; the next session
+  authenticates that key before serving anything.
+- Nothing is announced or looked up on a network in phase 14. Custody forwarding of enrollment
   ([issuer availability](always-on-peer.md#issuer-availability)) never
   substitutes custody routes for issuer row-sync routes.
 
 ## Sync
 
+A sync ranks local contacts first, then peers whose last proof-bound frontier
+replies held needed scopes, then trusted contacts, then other probes. Backed-off
+peers come last and are not dialed. A leading local peer is tried alone;
+remaining attempts run in groups of at most four. Between groups, the pass
+stops adding peers once successful frontier replies covered every needed
+concrete scope. Holdings are not persisted. Renewal still dials an issuer.
+`peers().source` names how the contact was learned; `peers().choice` explains
+`selected_local`, `selected_holding`, `selected_trusted`, `selected_probe`,
+`covered`, `backoff`, `pass_limit`, or `not_considered` for the last pass.
+
 An explicit sync opens authenticated native sessions with the contacts it
-dials, reconciling at most four peers concurrently,
+dials,
 pushes what the peer lacks and pulls what this device lacks for the granted
 collections, in bounded frames. It succeeds when one peer was reached; `peers`
 shows each. Members keep syncing while every issuer is offline, until their
@@ -263,8 +283,10 @@ reports `revoked` and stops syncing. Checkpoints and catch-up are in
 Kotlin `create`/`join`/`resume` default to `automaticSync = true`, enabling and
 observing the native [change-driven worker](always-on-peer.md#change-driven-sync)
 while foregrounded. `syncContinuously()` enables the same worker and observes
-its status. Automatic passes respect per-peer back-off; `syncOnce` and native
-`sync` ignore it and retain their response shape. `enterBackground` cancels
+its status. Both automatic and explicit passes respect per-peer back-off. An explicit pass
+with only backed-off contacts reports `unreachable` without dialing. Connectivity
+changes and an explicit worker restart reset it. The sync response shape is
+unchanged. `enterBackground` cancels
 the automatic pass within one second; `enterForeground` starts one immediately.
 
 A session that brought revocation statements or refused credentials triggers
@@ -274,13 +296,21 @@ issuer the rows still sync and the new keys wait. Successful old handshakes and 
 failures are then checked again against the refreshed authority, still at most
 four at a time. Unavailable routes keep their retry deadline.
 
-Change-driven delivery needs a configured route back to each recipient.
+Change-driven delivery needs a route back to each recipient.
 Pairing learns the joining device's authenticated return route when it supplies
-one and the issuer has room in its peer set. Supplied credentials and custom
-transports without an address still require contacts to be exchanged explicitly.
-An idle recipient with only a one-way route needs a connectivity signal or
-`syncOnce` to pull later remote writes. General contact exchange is in
-[phase 14](../features_07/14-contacts-and-partner-choice.md).
+one and the issuer has room in its peer set. Sessions hand over recently reached contacts; applications can still add them
+explicitly. An idle recipient with only a one-way route needs a connectivity
+signal or `syncOnce` to pull later remote writes.
+
+The creator mints a discovery root, and every revocation mints a signed value
+bound to its statement ID. Only admitted sessions exchange them, after merging
+and checking revocations. Contact-family messages are encrypted even on TCP.
+The root and values are structured secret-store bytes, never identity or
+replicated rows, and are absent from enrollment and renewal answers. Equal
+live statement sets and values derive equal topics; a missing value differs.
+The internal `discovery_topics` call reports current and previous topics, with
+24-hour previous-topic expiry. Phase 15 uses these for network discovery; see
+[decision 0056](../decisions/0056-contact-exchange-and-discovery-secrets.md).
 
 ## Native calls
 
@@ -303,7 +333,8 @@ An idle recipient with only a one-way route needs a connectivity signal or
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `connection` with `online`, `sync` | `offline`, or `connected` with the number of `peers` reached |
-| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; contacts and peers met with `issuer`, `configured`, routes, `state`, `checked`, `error`, and `issuer_contact` |
+| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; contacts and peers met with `issuer`, `configured`, routes, `source`, `choice`, `state`, `checked`, `error`, and `issuer_contact` |
+| `contact_request` with hexadecimal `id` | Learned `node` key, or null |
 | `network` | See [network status](sdk-composition.md#network-status) |
 | `mutate`, `mutation_progress` | A durable create, set or delete by handle |
 | `read`, `subscribe`, `next`, `unsubscribe` | Pages of a `SELECT` over the collections |
@@ -356,7 +387,7 @@ Identity 11 replaces its policy epoch with the
 [revocation set](../decisions/0049-mergeable-revocation-set.md); its `peers`
 are contacts, 64 of them, since
 [roster-free admission](../decisions/0051-roster-free-admission.md).
-Identity 11, invitation 4 and contact 2 each have one reader; other versions
+Identity 13, invitation 4 and contact 2 each have one reader; other versions
 require reinstall.
 
 - Identity is transport-independent: a domain is its definition identity and
@@ -370,6 +401,7 @@ require reinstall.
   enrollment-only flags that keep renewal routes separate from row sync.
 - A member keeps a deny list, not an allow list: any device of the domain
   whose chain and the revocation set admit it is served, so no device needs
-  a roster of the others. Contacts only say whom to dial; nothing is
-  discovered, elected or relayed for others
+  a roster of the others. Contacts only say whom to dial; admitted sessions now exchange hints and
+  secrets under [0056](../decisions/0056-contact-exchange-and-discovery-secrets.md).
+  No node is elected and rows are not forwarded for others
   ([0051](../decisions/0051-roster-free-admission.md)).

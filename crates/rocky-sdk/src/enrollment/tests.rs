@@ -479,9 +479,9 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     let bv = b.vault(&store);
     for role in a.roles() {
         if !matches!(role.as_str(), "node" | "user")
-            && let Some(key) = av.find(&role)?
+            && let Some(key) = av.load_bytes(&role)?
         {
-            bv.put(&role, &key)?;
+            bv.store_bytes(&role, &key)?;
         }
     }
     bv.create("node")?;

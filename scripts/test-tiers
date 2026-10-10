@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs one test tier and enforces its budgets; see docs/development.md#test-tiers.
+"""Runs one test tier and enforces its budgets; see docs/development.md#test-budgets.
 
   scripts/test-tiers TIER [--list] [--cranelift] [--build=ARGS]... [--archive FILE]...
 

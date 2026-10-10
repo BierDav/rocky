@@ -128,6 +128,13 @@ in e2e: their real QUIC shutdown cycles exceed 2 s after fixture optimization.
 The deterministic revocation recovery sweep remains in integration, separated
 by secret, table and commit boundaries with the same twenty fault stops.
 
+Phase 14's secret-store topic/eviction tests and in-process contact, ranking,
+request, refusal and custody scenarios run in integration. The `mesh` and
+`network::contacts::tests` modules are included explicitly in
+`.config/test-tiers.toml`; no exception is added.
+[Phase 14 evidence](features_07/14-contacts-and-partner-choice-evidence.md)
+records measurements and the acceptance coverage.
+
 ## Kotlin desktop integration
 
 The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.

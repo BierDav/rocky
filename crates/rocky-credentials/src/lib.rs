@@ -4,6 +4,7 @@
 //! what these verify. See `docs/runtime/credentials.md`.
 mod author_binding;
 mod coordination;
+mod discovery;
 mod enroll;
 mod group;
 mod horizon;
@@ -20,6 +21,7 @@ pub use coordination::{
     CoordinationGrant, MAX_APPLICATION_NAME, SignedCoordinationGrant, SignedTenantAdmission,
     TenantAdmission,
 };
+pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{
     Admission, Exchange, Invitation, PairRequest, RenewRequest, Renewal, open_enrollment,
     seal_enrollment,

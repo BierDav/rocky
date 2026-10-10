@@ -191,6 +191,9 @@ open class RockySession internal constructor(internal val client: RockyClient, o
         },
     ).text("uri")
 
+    /** Asks admitted contacts for a 16-byte node ID; a hint grants no access. */
+    suspend fun requestContact(nodeId: String): String? = client.call(request("contact_request") { put("id", nodeId) }).getValue("node").jsonPrimitive.contentOrNull
+
     /**
      * Keeps the device a contact names as a contact to sync with, or learns its new routes. A contact grants
      * nothing: any device of the domain whose credentials and the revocation set admit it is served.
@@ -345,6 +348,8 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             value.text("node"),
             value.getValue("issuer").jsonPrimitive.boolean,
             value.getValue("configured").jsonPrimitive.boolean,
+            value.text("source"),
+            value.text("choice"),
             routes(value),
             value.text("state"),
             value.getValue("checked").jsonPrimitive.contentOrNull?.toLong(),

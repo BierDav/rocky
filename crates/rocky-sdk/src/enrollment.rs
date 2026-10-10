@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements.
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -128,6 +128,7 @@ pub struct Settings {
     /// for each. A contact is a route that grants nothing: any admitted
     /// peer is served, and sync dials contacts.
     pub peers: BTreeMap<PublicKey, Contact>,
+    pub contact_meta: BTreeMap<PublicKey, crate::mesh::ContactMeta>,
     pub enrollment_routes: BTreeMap<PublicKey, Contact>,
     pub logged_out: bool,
     /// The generations the domain left, oldest first. Empty until its
@@ -527,7 +528,7 @@ pub struct Renewed {
 pub fn now() -> Result<u64, Failure> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
-fn random<const N: usize>() -> [u8; N] {
+pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes
@@ -715,6 +716,17 @@ impl Settings {
             .chain(settings.enrollment_routes.values())
         {
             Contact::checked(contact.routes.clone())?;
+        }
+        if settings.contact_meta.len() > MAX_CONTACTS
+            || settings.contact_meta.iter().any(|(node, meta)| {
+                !settings.peers.contains_key(node)
+                    || !matches!(
+                        meta.source.as_str(),
+                        "application" | "enrollment" | "handover" | "request" | "discovery"
+                    )
+            })
+        {
+            return Err("invalid contact metadata".into());
         }
         if settings.peers.len() > MAX_CONTACTS
             || settings.issuers.len() > MAX_ISSUERS
@@ -927,6 +939,15 @@ impl Settings {
             }
             self.issuers.push(record.node);
         }
+        self.contact_meta.insert(
+            record.node,
+            crate::mesh::ContactMeta {
+                source: "application".into(),
+                learned: now()?,
+                trusted: record.issuer,
+                local: false,
+            },
+        );
         self.peers.entry(record.node).or_default();
         if record.enrollment_only {
             self.enrollment_routes
@@ -945,6 +966,7 @@ impl Settings {
     /// and a member left without issuer contact reports it.
     pub fn remove_peer(&mut self, node: PublicKey) -> Result<(), Failure> {
         self.peers.remove(&node).ok_or("unknown peer")?;
+        self.contact_meta.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
         self.enrollment_routes.remove(&node);
         Ok(())
@@ -985,6 +1007,7 @@ impl Settings {
             "publisher",
             "invitation",
             "author-issuer",
+            "discovery",
         ]
         .into_iter()
         .map(String::from)
@@ -1076,6 +1099,7 @@ impl Settings {
         vault.create("transport")?;
         let (mesh, domain) = (MeshId(random()), DomainId(random()));
         let bound = Domain::new(schema, *publisher.public_key().as_bytes(), mesh, domain)?;
+        crate::mesh::create_root(&vault, &publisher, bound.scope)?;
         // The registry's key is made like any collection's.
         let mut keys = BTreeMap::new();
         for (name, _) in bound.scopes() {
@@ -1101,6 +1125,7 @@ impl Settings {
             authority: Some(Issuing::default()),
             issuers: Vec::new(),
             enrollment_upstream: None,
+            contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
@@ -2248,8 +2273,10 @@ impl Settings {
             if record.issuer
                 && !self.peers.contains_key(&record.node)
                 && !self.revoked(&record.node)
+                && self.add_peer(vault, uri).is_ok()
+                && let Some(meta) = self.contact_meta.get_mut(&record.node)
             {
-                let _ = self.add_peer(vault, uri);
+                meta.source = "enrollment".into();
             }
         }
     }
@@ -2290,6 +2317,7 @@ impl Settings {
             .collect();
         for node in gone {
             self.peers.remove(&node);
+            self.contact_meta.remove(&node);
             self.issuers.retain(|issuer| *issuer != node);
             self.enrollment_routes.remove(&node);
         }
@@ -2357,6 +2385,7 @@ impl Settings {
             authority: None,
             issuers: Vec::new(),
             enrollment_upstream: None,
+            contact_meta: BTreeMap::new(),
             peers: BTreeMap::new(),
             enrollment_routes: BTreeMap::new(),
             logged_out: false,
@@ -2523,6 +2552,7 @@ impl Joining {
             authority: None,
             issuers: vec![enrollment.issuer],
             enrollment_upstream: None,
+            contact_meta: BTreeMap::new(),
             peers: BTreeMap::from([(
                 enrollment.issuer,
                 if invite.via_custody {
@@ -3447,6 +3477,13 @@ impl Settings {
         else {
             return Ok(None);
         };
+        crate::mesh::mint_value(
+            vault,
+            self.publisher,
+            self.domain()?.scope,
+            &self.revocations,
+            &statement,
+        )?;
         fault::check(fault::Stage::Begun)?;
         let mut keys = Vec::new();
         for (name, epoch) in targets {

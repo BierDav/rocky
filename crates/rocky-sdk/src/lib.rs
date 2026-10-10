@@ -10,6 +10,7 @@ mod engine;
 mod enrollment;
 mod generation;
 mod groups;
+mod mesh;
 mod node;
 mod owner;
 mod registry;

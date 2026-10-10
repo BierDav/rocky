@@ -28,6 +28,7 @@ naturally holds.
 | [0050](0050-concurrent-key-epochs.md) | Sibling key epochs and exposure rotation converge |
 | [0051](0051-roster-free-admission.md) | Roster-free admission and the revocation exchange in the native session |
 | [0052](0052-holding-proofs.md) | Session-bound partition holding proofs |
+| 0056 | [Contact exchange and discovery secrets](0056-contact-exchange-and-discovery-secrets.md) |
 | [0058](0058-kotlin-native-binding.md) | Kotlin/Native binding over the pinned UniFFI ABI |
 | [0060](0060-test-tiers-and-budgets.md) | Three test tiers with enforced budgets |
 

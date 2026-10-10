@@ -18,6 +18,8 @@ use tokio::{
 };
 
 mod checkpoints;
+mod contacts;
+pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
 mod commands;
 mod existence;
 mod frontiers;
@@ -27,6 +29,7 @@ mod revocations;
 mod rows;
 use checkpoints::CheckpointMessage;
 use commands::CommandMessage;
+use contacts::ContactMessage;
 use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
@@ -67,6 +70,7 @@ struct Hello {
     node: PublicKey,
     challenge: [u8; 32],
     credentials: CredentialChain,
+    exchange: [u8; 32],
 }
 /// The label both sides sign the two hellos under.
 fn session_label(version: u32) -> String {
@@ -141,6 +145,7 @@ enum Message {
     Commands(CommandMessage),
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
+    Contacts(ContactMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -169,6 +174,7 @@ families!(
     Commands(CommandMessage),
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
+    Contacts(ContactMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -191,6 +197,10 @@ pub struct NativeSession {
     proved: std::collections::BTreeSet<ResourceScope>,
     offered: std::collections::BTreeSet<ResourceScope>,
     served_frames: std::collections::BTreeMap<Hash, ResourceScope>,
+    contact_requests: usize,
+    contact_handed: usize,
+    contact_received: usize,
+    contact_key: Commitment,
     sent: u64,
     received: u64,
     remaining: usize,
@@ -259,11 +269,13 @@ impl NativeSession {
         let own = local.public_key();
         let mut challenge = [0; 32];
         OsRng.fill_bytes(&mut challenge);
+        let (exchange_secret, exchange) = rocky_credentials::Exchange::new();
         let hello = Hello {
             version,
             node: own,
             challenge,
             credentials,
+            exchange,
         };
         let local_bytes = encode(&hello)?;
         let peer_bytes = match side {
@@ -298,6 +310,11 @@ impl NativeSession {
         if side == Side::Initiator {
             replica.admit_chain(peer.node, &peer.credentials).await?;
         }
+        let shared = exchange_secret.shared(&peer.exchange).map_err(credential)?;
+        let contact_key = rocky_core::commitment(
+            "rocky.discovery-session-key.v1",
+            &encode(&(shared, &binding))?,
+        );
         let mut session = Self {
             stream,
             local,
@@ -308,6 +325,10 @@ impl NativeSession {
             proved: Default::default(),
             offered: Default::default(),
             served_frames: Default::default(),
+            contact_requests: 0,
+            contact_handed: 0,
+            contact_received: 0,
+            contact_key,
             sent: 0,
             received: 0,
             remaining: byte_budget,

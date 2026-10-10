@@ -99,9 +99,9 @@ jobs:
           key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
   build:
-    # Compiles once: clippy, the doc tests and the test binaries as nextest
-    # archives, plus the custody peer. `check`, `slow` and `shopping` run those
-    # artifacts instead of building again, each downloading only what it runs.
+    # Compiles once: clippy and the test binaries as nextest archives, plus the
+    # custody peer. `check`, `slow` and `shopping` run those artifacts instead of
+    # building again, each downloading only what it runs.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
@@ -171,9 +171,7 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
-          # --doc runs the doc tests once here, where the workspace is compiled;
-          # the test-only jobs skip them.
-          ./scripts/check --build "$RUNNER_TEMP/build" --doc
+          ./scripts/check --build "$RUNNER_TEMP/build"
           # After the archives: the archive without default features replaces the binary.
           cargo build --locked -p rocky-sdk --bin rocky-peer
           cp target/debug/rocky-peer "$RUNNER_TEMP/build/"

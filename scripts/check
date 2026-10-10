@@ -3,10 +3,11 @@
 #
 #   scripts/check                   formatting, clippy and every test
 #   scripts/check --slow            only the ignored `soak_` tests
-#   scripts/check --build DIR       clippy, then archive the test binaries in DIR
+#   scripts/check --build DIR       clippy, the doc tests, then archive the
+#                                   test binaries in DIR
 #   scripts/check [--slow] --from DIR
 #                                   the same checks with DIR's test binaries,
-#                                   without clippy, which --build ran
+#                                   without clippy or doc tests, which --build ran
 #   scripts/check --no-clippy       every test, without clippy, when --build
 #                                   already ran clippy but its archives are gone
 #
@@ -16,7 +17,7 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 mode=all
 archives=
@@ -77,6 +78,9 @@ slow)
     ;;
 build)
     cargo clippy --workspace --all-targets --locked -- -D warnings
+    # nextest cannot archive doc tests, so the one compiling job runs them here
+    # while the workspace is built; --from below then needs no compile.
+    cargo test --workspace --doc --locked
     mkdir -p "$archives"
     for name in workspace sdk-without-defaults; do
         # shellcheck disable=SC2046
@@ -90,8 +94,8 @@ esac
 cargo fmt --all -- --check
 [ -n "$archives" ] || ! $clippy || cargo clippy --workspace --all-targets --locked -- -D warnings
 run_tests workspace
-# nextest does not run doc tests.
-if $nextest; then
+# nextest does not run doc tests; the archives omit them, so --build ran them.
+if $nextest && [ -z "$archives" ]; then
     cargo test --workspace --doc --locked
 fi
 # The database, sessions and other transports must not need iroh.

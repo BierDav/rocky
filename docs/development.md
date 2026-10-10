@@ -132,20 +132,25 @@ and `shopping` jobs also run on Linux, so CI never builds on the macOS host.
 On GitHub they use `ubuntu-latest`; on Gitea they use `ubuntu-24.04-arm`, since
 they exchange architecture-specific nextest archives and custody peer, while
 `lint` uses `ubuntu-latest-any-arch`.
-The `build` job downloads an archive of the exact
-event revision and runs `scripts/check --build`: strict workspace Clippy, then
-the test binaries as nextest archives, uploaded with the custody peer binary.
+The `build` job is the only job that compiles the workspace. It downloads an
+archive of the exact event revision and runs `scripts/check --build`: strict
+workspace Clippy, the doc tests nextest cannot archive, and the test binaries as
+nextest archives; it then builds the custody peer binary. It uploads three
+independent artifacts -- `nextest-workspace`, `nextest-sdk` and `rocky-peer` --
+so a failure to finalize one cannot also lose the others, and each consumer
+fetches only what it runs.
 Every job installs the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
-`check` runs `scripts/check --from` those archives: `cargo fmt --all -- --check`,
-the tests and doc tests, without compiling the test binaries again. `slow`,
-`shopping` and `android` also start after `build`; the first two run its
-archives and peer binary. The upload is best-effort: Gitea's artifact service
-sometimes fails to finalize it, and `check` then runs `scripts/check
---no-clippy` so it rebuilds the test binaries from the dependency cache instead
-of repeating the Clippy the `build` job already ran.
+`check` downloads both test archives and runs `scripts/check --from` them:
+`cargo fmt --all -- --check` and the tests, without compiling. `slow` downloads
+only `nextest-workspace` for its soak tests; `shopping` downloads only
+`rocky-peer`; `android` needs no Rust artifact and keeps its own Gradle and
+native caches. The downloads are best-effort: Gitea's artifact service sometimes
+fails to finalize an artifact, and a job that finds one missing rebuilds the
+test binaries from the dependency cache (`check` runs `scripts/check --no-clippy`
+so it does not repeat the Clippy the `build` job already ran).
 It needs no version-control CLI or repository history, and never invokes Git.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
 lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,

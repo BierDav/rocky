@@ -99,12 +99,13 @@ jobs:
           key: baseline-lint-${{ runner.os }}-${{ steps.source.outputs.tree }}
 
   build:
-    # Compiles once: clippy, the test binaries as nextest archives and the custody
-    # peer, which `check`, `slow` and `shopping` run instead of building again.
+    # Compiles once: clippy, the doc tests and the test binaries as nextest
+    # archives, plus the custody peer. `check`, `slow` and `shopping` run those
+    # artifacts instead of building again, each downloading only what it runs.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Download the exact source revision
         id: source
@@ -175,16 +176,39 @@ jobs:
           cargo build --locked -p rocky-sdk --bin rocky-peer
           cp target/debug/rocky-peer "$RUNNER_TEMP/build/"
 
-      # Gitea's artifact service intermittently fails to finalize an artifact
-      # this large; `check`, `slow` and `shopping` rebuild when it is missing.
-      - uses: actions/upload-artifact@v4
+      # One artifact per consumer so a failure to finalize the large shared
+      # archive cannot also lose the small ones, and `slow` and `shopping`
+      # download only what they run. Gitea's artifact service intermittently
+      # fails on the large upload; a consumer rebuilds when its artifact is gone.
+      - name: Upload the workspace test archive
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
-          name: build
-          path: ${{ runner.temp }}/build
+          name: nextest-workspace
+          path: ${{ runner.temp }}/build/workspace.tar.zst
           retention-days: 1
           # The archives are already compressed.
+          compression-level: 0
+
+      - name: Upload the SDK test archive
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-sdk
+          path: ${{ runner.temp }}/build/sdk-without-defaults.tar.zst
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload the custody peer
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocky-peer
+          path: ${{ runner.temp }}/build/rocky-peer
+          retention-days: 1
           compression-level: 0
 
   check:
@@ -231,7 +255,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Doc tests still compile the workspace libraries.
+      # The build job compiles; only a fallback rebuild (a missing archive) does
+      # here.
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
         with:
@@ -251,23 +276,34 @@ jobs:
         working-directory: source
         run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
-      # Missing when `build` found this tree's checks passed; the job then
-      # builds what it runs.
-      - uses: actions/download-artifact@v4
+      # Both are missing when `build` found this tree's checks passed or failed
+      # to upload one; the job then builds what it runs.
+      - name: Download the workspace test archive
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
+        uses: actions/download-artifact@v4
         with:
-          name: build
+          name: nextest-workspace
+          path: ${{ runner.temp }}/build
+
+      - name: Download the SDK test archive
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-sdk
           path: ${{ runner.temp }}/build
 
       - name: Run shared checks
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
-          if [ -d "$RUNNER_TEMP/build" ]; then
+          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ] \
+              && [ -f "$RUNNER_TEMP/build/sdk-without-defaults.tar.zst" ]; then
             ./scripts/check --from "$RUNNER_TEMP/build"
           else
-            # The build job already ran clippy; only its archives are missing.
+            # The build job already ran clippy and the doc tests; only its
+            # archives are missing, so rebuild the test binaries without clippy.
             ./scripts/check --no-clippy
           fi
 
@@ -346,20 +382,21 @@ jobs:
         working-directory: source
         run: ./scripts/ci/install-nextest "$RUNNER_TEMP/nextest"
 
-      # Missing when `build` found this tree's checks passed; the job then
-      # builds what it runs.
-      - uses: actions/download-artifact@v4
+      # Missing when `build` found this tree's checks passed or failed to upload
+      # it; the job then builds what it runs.
+      - name: Download the workspace test archive
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
+        uses: actions/download-artifact@v4
         with:
-          name: build
+          name: nextest-workspace
           path: ${{ runner.temp }}/build
 
       - name: Run soak tests
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: |
-          if [ -d "$RUNNER_TEMP/build" ]; then
+          if [ -f "$RUNNER_TEMP/build/workspace.tar.zst" ]; then
             ./scripts/check --slow --from "$RUNNER_TEMP/build"
           else
             ./scripts/check --slow
@@ -429,13 +466,14 @@ jobs:
           shared-key: check
           save-if: false
 
-      # Missing when `build` found this tree's checks passed; the job then
-      # builds what it runs.
-      - uses: actions/download-artifact@v4
+      # Missing when `build` found this tree's checks passed or failed to upload
+      # it; the qualification then builds the peer itself.
+      - name: Download the custody peer
         if: steps.passed.outputs.cache-hit != 'true'
         continue-on-error: true
+        uses: actions/download-artifact@v4
         with:
-          name: build
+          name: rocky-peer
           path: ${{ runner.temp }}/build
 
       - name: Run the shopping qualification

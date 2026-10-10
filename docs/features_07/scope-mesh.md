@@ -58,6 +58,9 @@ name, kind and node key, and which device received which list.
   scope is exposed to those devices, and that window is stated.
 - **Precision.** Revoking any device rotates only the collections and group
   partitions its registry record could read, whichever issuer revokes.
+  An unrecorded device rotates all collection keys and known partition
+  secrets the issuer holds; non-issuer delegation remains unrecorded
+  ([phase 7's chosen contract](07-registry-revocation.md#contract-revision-on-2026-10-10)).
 
 ### 2. Admission without a roster
 

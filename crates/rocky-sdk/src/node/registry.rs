@@ -215,6 +215,25 @@ impl Node {
         self.commit(changes).await
     }
 
+    /// The tombstone is the durable completion marker; a stale intent replays safely.
+    pub(crate) async fn complete_revocation(&self) -> Result<(), Failure> {
+        let pending = self
+            .settings
+            .lock()
+            .await
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.rotation.as_ref().map(|rotation| rotation.node));
+        let Some(node) = pending else {
+            return Ok(());
+        };
+        self.record_revocation(node).await?;
+        crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
+        let registry = self.registry().await?;
+        self.configure(|settings| settings.complete_revocation(&registry))
+            .await
+    }
+
     /// Every other device's record, on an issuer.
     pub(super) async fn devices(&self) -> Result<Value, Failure> {
         let settings = self.settings.lock().await.clone();

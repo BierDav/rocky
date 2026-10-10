@@ -70,9 +70,11 @@ any issuer, and a renewal or grant records the new capability.
   from the record and saves them as its intent. It rotates the
   collections the record's profile reads and the group partitions it reads or
   holds grants for, revokes its user, capability and pseudonyms, and rotates
-  everything when the registry holds no profile. A device recorded only by
-  partition grants has no profile. Precision for another issuer's devices is
-  [phase 7](../features_07/07-registry-revocation.md).
+  every held collection key and every known partition secret held here when
+  there is no record. A device recorded only by partition grants selects
+  only those grants. It needs no previous contact with this issuer.
+  The tombstone transaction completes revocation; the JSON redo intent is
+  discarded only afterwards, and interrupted completion resumes on open.
 
 ## Calls
 
@@ -94,5 +96,8 @@ issuer.
   the same user and node.
 - A non-issuer assigning author numbers from a delegated range keeps no record:
   a retried request keeps its number only by presenting its previous chain.
+- Non-issuer delegations remain unrecorded. Their recipients use full rotation
+  when revoked by node key; no delegator, user or pseudonym is inferred.
+  [Durable provenance](../ideas/delegation_provenance.md) is a future idea.
 - Not covered: rotating pseudonyms (the `closed` field is stored, never set)
   and showing any registry field to a member.

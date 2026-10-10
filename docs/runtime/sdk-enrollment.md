@@ -154,7 +154,14 @@ device could read, and a new secret for every group partition it could read or
 was granted ([group secrets](partitioned-scopes.md#group-secrets)), and signs a
 statement revoking its node, its user, its capability and its pseudonyms. The
 intent is saved first; an interruption completes at the next open with the
-same statement and keys. Any issuer revokes while others do: their statements
+same statement and keys. Selection comes from the replicated record, whoever
+enrolled the device: a profile selects collections and group partitions;
+a partition-only record selects only its grants. An unrecorded device,
+including a non-issuer's delegate, rotates all held collection keys and known
+partition secrets held here; only its node can be named without a record.
+The tombstone commits before intent cleanup and before success is returned.
+Open completes interrupted cleanup before serving sessions. Any issuer
+revokes while others do: their statements
 merge. Others learn it on their next sync, which a differing revocation set
 turns into a renewal; the revoked device is refused sync and renewal and keeps
 only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk),

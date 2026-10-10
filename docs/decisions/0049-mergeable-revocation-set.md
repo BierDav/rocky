@@ -89,8 +89,11 @@ another digest as `revocation set differs`; the SDK reports it as
 record (node, user, capability and pseudonym keys) and saves an intent holding
 the unsigned statement and the key epoch of each collection and group
 partition it rotates, chosen by the record's profile and partition grants, then makes the
-keys, signs the statement, renews the issuer's own chain and clears the
-intent. Any stop completes at the next open with the same statement ID and
+keys, signs the statement and renews the issuer's own chain. Phase 7 retains
+that intent until the registry tombstone transaction commits; discarding the
+JSON redo intent follows the commit. The existing tombstone is the completion
+marker, so a stop between those writes replays the same keys and statement
+and keeps one tombstone. No cross-file atomic write is claimed. Any stop completes at the next open with the same statement ID and
 keys. Renewal answers (`rocky.credentials.renewal.v3`, transport name
 `rocky/sdk-renew/2`), enrollments, supplied credentials and the
 `rocky.sdk.policy.v1` answer carry the whole set; receivers merge it.

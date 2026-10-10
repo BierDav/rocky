@@ -75,7 +75,7 @@ statements in the session instead.
 `revoke(node)` on an issuer builds the statement and each scope's target key
 epoch from the device's [registry](issuer-registry.md) record and saves them as
 the intent, then makes the keys, signs the statement, renews its own chain,
-clears the intent and writes the record's tombstone
+commits the record's tombstone and then discards the redo intent
 ([key rotation](credentials.md#revocation-in-the-sdk)). It refuses with
 `revocation_set_full` at 1,024 live statements, before anything is saved.
 
@@ -97,7 +97,9 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
   where the second key arrives. Concurrent revocations of devices reading
   disjoint scopes merge.
 - An issuer rotates only the group partitions whose secret it holds.
-- Revoking a device another issuer enrolled rotates every collection
+- Recorded access selects scopes precisely at any issuer. Unrecorded devices
+  rotate all collection keys and known partition secrets held here; only
+  their node is named. Non-issuer delegation provenance remains unrecorded
   ([phase 7](../features_07/07-registry-revocation.md)).
 - Until phase 9 a member learns statements only from an issuer's renewal; two
   members with different sets refuse each other until one renews.
@@ -130,3 +132,12 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
   `revoke`, the 1,025th live statement and tombstones at every issuer.
 - `cargo test -p rocky-sdk --test revocations`: two partitioned issuers each
   revoke a device, joined in both orders, on the in-process hub.
+
+- `cargo test -p rocky-sdk --test registry_revocation`: phase 7 on the hub,
+  including another issuer revoking with the enroller stopped, partition-only
+  selection, unrecorded-delegate full rotation, issuer registry-key rotation
+  and two statements for one non-reader with one tombstone.
+- `cargo test -p rocky-sdk --lib node::revocation_tests`: twelve interruptions,
+  including each generated key, rollback before tombstone commit and a stop
+  after commit; the real database open finishes with the same statement and
+  keys and exactly one tombstone.

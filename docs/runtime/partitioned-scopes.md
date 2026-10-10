@@ -119,11 +119,16 @@ partition is shared and installed, the next sync exchanges it
 **Revocation.** One saved intent rotates: each group partition the device could
 read gets one new secret, so its members advance to one epoch together, also
 after an interruption. Affected are partitions whose members its enrollment
-profile reads or a recorded grant selects; every known partition when the
-issuer never enrolled the device. Its user subject is revoked with it, so a
-fresh node key cannot renew. Earlier epochs remain for retained history; share
+profile reads or a recorded grant selects, whichever issuer enrolled it.
+A partition-only record selects only its grants. An absent record, including
+an unrecorded delegate, rotates every known partition whose secret the
+revoking issuer holds. A recorded user subject is revoked with its device,
+so a fresh node key under that user cannot renew. Earlier epochs remain for retained history; share
 the new epoch to remaining readers. A grant delegated on a non-issuer is not
-recorded and is covered only by that conservative rotation.
+recorded and uses that conservative rotation when its recipient is revoked;
+no delegator is inferred. Revoking a delegator does not enumerate its
+descendants or rotate extra scopes on their behalf, but shared chain ancestors
+can end their credentials. Durable provenance is [deferred](../ideas/delegation_provenance.md).
 
 **Holding rule.** A group partition is held whole unless the application leaves
 a table out by name, for example attachments on a phone. Leaving out a table

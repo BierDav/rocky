@@ -217,7 +217,7 @@ pub struct Rotation {
 struct Revoking {
     user: Option<PublicKey>,
     capability: Option<Commitment>,
-    /// Absent when the device may have read anything.
+    /// Absent on a device recorded only by partition grants.
     profile: Option<Profile>,
     partitions: Vec<rocky_credentials::PartitionGrant>,
     pseudonyms: Vec<PublicKey>,
@@ -1401,6 +1401,9 @@ impl Settings {
         let ttl = terms.ttl(self.ttl)?;
         if profile.issues() {
             return Err("the publisher key travels only in an issuer invitation".into());
+        }
+        if self.tombstoned(&device.node) || self.tombstoned(&device.user) {
+            return Err("device was revoked".into());
         }
         let domain = self.domain()?;
         let grants = profile.grants(&domain.resources())?;
@@ -2828,48 +2831,44 @@ impl Settings {
                 .flat_map(|record| record.pseudonyms.iter().copied())
                 .collect(),
         };
-        // A device without a recorded profile may have read anything.
+        // Only an absent record uses the full-rotation fallback.
         let readable = record.as_ref().and_then(|record| record.profile.clone());
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
-            if readable
-                .as_ref()
-                .is_some_and(|profile| !profile.reads(name))
-            {
+            if record.is_some() && !readable.as_ref().is_some_and(|profile| profile.reads(name)) {
                 continue;
             }
             if epochs.len() >= MAX_EPOCHS {
                 return Err("key epoch capacity reached".into());
             }
             let held = epochs.iter().max().copied().unwrap_or(0);
-            keys.insert(name.clone(), held + 1);
+            keys.insert(
+                name.clone(),
+                held.checked_add(1).ok_or("key epoch overflow")?,
+            );
         }
         // The group secret is the unit: one new secret per group partition
         // the device could read, so every member table advances together.
         // Its profile's tables and its recorded partition grants count; a
-        // device enrolled elsewhere may have read any known partition. A
+        // node absent from the registry may have read any known partition. A
         // partition whose secret this issuer never held has no epoch to
         // follow, and is left to an issuer that holds it.
         let mut groups = BTreeMap::new();
         for partition in self.partitions(&domain)? {
-            let read = match &readable {
-                None => true,
-                Some(profile) => {
+            let read = record.is_none()
+                || readable.as_ref().is_some_and(|profile| {
                     partition
                         .members
                         .iter()
                         .any(|member| profile.reads(&member.table))
-                        || record
-                            .as_ref()
-                            .is_some_and(|record| record.selects(&partition))
-                }
-            };
+                })
+                || record
+                    .as_ref()
+                    .is_some_and(|record| record.selects(&partition));
             if let (true, Some(held)) = (read, partition.record.current()) {
-                partition.record.admit(held + 1)?;
-                groups.insert(
-                    crate::groups::record_key(&partition.record.address),
-                    held + 1,
-                );
+                let target = held.checked_add(1).ok_or("group secret epoch overflow")?;
+                partition.record.admit(target)?;
+                groups.insert(crate::groups::record_key(&partition.record.address), target);
             }
         }
         // Refused here, before anything is saved, when it is too large.
@@ -2886,11 +2885,12 @@ impl Settings {
         });
         Ok(())
     }
-    /// Completes a begun revocation: a fresh key epoch for every collection
+    /// Prepares a begun revocation: a fresh key epoch for every collection
     /// and group partition it names, the signed statement joins the set and
     /// the issuer renews its own chain. Earlier keys stay; history is not sealed
     /// again. Repeating it after an interruption makes the same keys and
-    /// statement. Returns the new keys, or nothing when no revocation was
+    /// statement. The intent stays until `complete_revocation` observes the
+    /// committed tombstone. Returns the new keys, or nothing when no revocation was
     /// begun.
     pub fn rotate(&mut self, vault: &Vault) -> Result<Option<Vec<NewKey>>, Failure> {
         let Some(Rotation {
@@ -2951,9 +2951,20 @@ impl Settings {
         self.peers.remove(&node);
         self.issuers.retain(|issuer| *issuer != node);
         self.enrollment_routes.remove(&node);
-        fault::check(fault::Stage::Clearing)?;
-        self.issuing("revokes devices")?.rotation = None;
+        // Keep the redo intent until the registry commits its tombstone.
         Ok(Some(keys))
+    }
+    /// Discards the redo intent only after the completion transaction committed.
+    pub(crate) fn complete_revocation(&mut self, registry: &Registry) -> Result<(), Failure> {
+        let authority = self.issuing("revokes devices")?;
+        if let Some(rotation) = &authority.rotation {
+            if !registry.revoked(&rotation.node) {
+                return Err("revocation tombstone is not committed".into());
+            }
+            fault::check(fault::Stage::Clearing)?;
+            authority.rotation = None;
+        }
+        Ok(())
     }
 }
 
@@ -2969,6 +2980,8 @@ pub(crate) mod fault {
         Key,
         Signed,
         Renewed,
+        Tombstone,
+        Committed,
         Clearing,
     }
     #[cfg(test)]

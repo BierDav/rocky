@@ -243,7 +243,6 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         (Stage::Key, 2),
         (Stage::Signed, 0),
         (Stage::Renewed, 0),
-        (Stage::Clearing, 0),
     ];
     for stop in stops {
         let directory = tempfile::tempdir()?;
@@ -276,6 +275,13 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
             .collect::<Result<_, _>>()?;
         let mut reopened = Settings::load(&path)?;
         let keys = reopened.rotate(&vault)?.ok_or("the intent was lost")?;
+        // No completion before the registry transaction has committed.
+        assert!(reopened.complete_revocation(&Registry::default()).is_err());
+        let mut rows = BTreeMap::new();
+        let mut changes = registry::Changes::default();
+        changes.revoked(&node)?;
+        let completed = Registry::merged(&mut rows, &changes)?;
+        reopened.complete_revocation(&completed)?;
         reopened.save(&path)?;
         assert_eq!(reopened.revocations.len(), 1, "{stop:?}");
         assert!(
@@ -388,6 +394,9 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     a.rotate(&vault)?;
     // B learns the statement as a renewal answer brings it.
     b.learn_revocations(&a.revocations)?;
+    let mut changes = registry::Changes::default();
+    changes.revoked(&revoked_node)?;
+    registry = Registry::merged(&mut rows, &changes)?;
     // The statement leaves both sets, as it does a year after it was made.
     let later = now()? + 2 * rocky_credentials::MAX_CHAIN_LIFETIME;
     for issuer in [&mut a, &mut b] {

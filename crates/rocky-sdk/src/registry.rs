@@ -428,6 +428,9 @@ pub async fn write(
                 }
             }
         }
+        if changes.0.iter().any(|change| change.entry == "revoked") {
+            crate::enrollment::fault::check(crate::enrollment::fault::Stage::Tombstone)?;
+        }
         sql.run("COMMIT", Vec::new()).await?;
         Ok::<_, Failure>(())
     }

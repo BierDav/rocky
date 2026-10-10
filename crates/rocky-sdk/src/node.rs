@@ -1408,7 +1408,7 @@ impl Node {
         drop(settings);
         self.forget_readers().await;
         // Rotated first: the statement refuses the device even if this fails.
-        Box::pin(self.record_revocation(node)).await?;
+        Box::pin(self.complete_revocation()).await?;
         Ok(json!({
             "statement": HEXLOWER.encode(&rotation.statement.id()?),
             "revocations": status,
@@ -3041,5 +3041,7 @@ fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bo
     }
 }
 
+#[cfg(test)]
+mod revocation_tests;
 #[cfg(test)]
 mod sync_tests;

@@ -146,23 +146,40 @@ An issuer's `revoke(node)` saves the intent in `identity.json` first: the
 its capability and its pseudonym keys, and the key epoch each collection and
 group partition the device could read rotates to, the scope's held maximum
 plus one. Both come from the device's [registry](issuer-registry.md) record;
-without a recorded profile every collection rotates. Then it:
+a partition-only record rotates only the group partitions its grants select.
+Without a record every held collection key and every known group partition
+secret this issuer holds rotates, including an unrecorded delegate. Then it:
 
 1. creates each of those key epochs;
 2. signs the statement under the publisher key, co-signed by its own node key,
    and adds it to its set, which ends the device's chains and no other;
-3. renews its own chain, clears the intent, saves the identity and teaches the
-   replica;
-4. writes the tombstone into the device's [registry](issuer-registry.md)
-   record.
+3. renews its own chain, saves the identity with its intent still present,
+   and teaches the replica;
+4. commits the tombstone into the device's [registry](issuer-registry.md)
+   record, then clears and saves the intent before returning success.
+
+The tombstone transaction is the durable completion marker. `identity.json`
+and SQLite are separate stores, so clearing the JSON redo intent is cleanup
+after that commit, not an atomic write across both files. A stop before commit
+leaves an intent to finish; a stop after commit leaves an intent that replays
+the same statement and keys and keeps the existing tombstone. Database open
+finishes this cleanup before admitting sessions or attaching its network.
+
+Non-issuer delegation stores no recipient relationship. Revoking an
+unrecorded delegate names only its node and rotates broadly; it cannot name
+an unknown user or pseudonym, identify the delegator, or prevent a fresh node
+being delegated to again. A non-issuer that learned the statement refuses
+a new delegation to the named node or user before returning reader keys. Revoking the recorded delegator does not enumerate
+its delegates, although shared chain ancestors can end their credentials.
+[Durable delegation provenance](../ideas/delegation_provenance.md) is deferred.
 
 An interruption anywhere completes at the next open with the same statement
 ID and the same keys. Other devices learn the statement and receive the new
 epochs, for the collections their grants read, with their next renewal from
 an issuer that holds them; a sync refused for a differing revocation set
 renews at once. The revoked device is refused renewal by every issuer, for
-good, and never receives the new key, so ciphertext written after the
-rotation stays sealed from it even when obtained elsewhere. `revoke` refuses
+good when its node or recorded user is revoked, and never receives the new
+key, so ciphertext written after the rotation stays sealed from it even when obtained elsewhere. `revoke` refuses
 with `revocation_set_full` once 1,024 live statements are held, and "another
 revocation is unfinished" while this issuer's previous one is; other issuers
 revoke at the same time.

@@ -58,7 +58,7 @@ budget, not a schedule.
 | 4 | [Small fixes](04-small-fixes.md) | none | | S | The coordinator and strong-command defects the market application meets |
 | 5 | [Replicated issuer registry](05-issuer-registry.md) | none | | L | Every issuer reads every device's record; renewal at any issuer; no last issuer |
 | 6 | [Revocation set](06-revocation-set.md) | none | | L | A grow-only signed revocation set replaces the policy epoch; concurrent revocations merge |
-| 7 | [Revocation from the registry](07-registry-revocation.md) | 5, 6 | | M | Any issuer revokes any device, rotating only what its record could read |
+| 7 | [Revocation from the registry](07-registry-revocation.md) | 5, 6 | | M | Any issuer revokes recorded access precisely; unrecorded devices rotate all held scopes |
 | 8 | [Concurrent rotation](08-concurrent-rotation.md) | 7 | | L | Two rotations of one scope both readable; writers converge on one |
 | 9 | [Roster-free admission](09-roster-free-admission.md) | 6 | | L | A peer is admitted by its chain and the revocation set, which travels with the handshake |
 | 10 | [Holdings after authentication](10-holdings-after-authentication.md) | 8, 9 | | M | A peer learns of a partition only by proving it holds that partition |

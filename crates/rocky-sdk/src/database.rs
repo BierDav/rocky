@@ -893,6 +893,12 @@ async fn run(
         )
         .with_service(service),
     );
+    if let Err(error) = node.complete_revocation().await {
+        if let Some((transport, true)) = &link {
+            transport.close().await;
+        }
+        return Err(error);
+    }
     let network = match link {
         Some((transport, owned)) => Some(node.link(transport, owned).await),
         None => None,

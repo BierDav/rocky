@@ -1,6 +1,8 @@
 # 7. Revocation from the registry
 
-Status: not started.
+Status: implemented on 2026-10-10 under the revised unrecorded-device
+contract below; the hub acceptance and twelve-point fault sweep pass.
+[Qualification evidence](#qualification-evidence) records the checks and limits.
 Owner: `rocky-sdk` revocation and rotation; Kotlin `revoke` and `devices`.
 Depends on [phase 5](05-issuer-registry.md) and
 [phase 6](06-revocation-set.md). Changes no format and takes no decision
@@ -15,13 +17,12 @@ Read [equal issuers](scope-mesh.md#1-equal-issuers), the
 revocation paragraph of
 [group secrets](../runtime/partitioned-scopes.md#group-secrets), and
 `begin_revocation`, `rotate` and `revoked_device` in
-`crates/rocky-sdk/src/enrollment.rs` with `Holder::selects` in `groups.rs`.
+`crates/rocky-sdk/src/enrollment.rs` with `Revoking::selects` in `enrollment.rs`.
 
 After phases 5 and 6 an issuer signs a mergeable statement and reads device
-records from the registry, but `rotate` still treats a device this issuer did
-not enroll as one that "may have read anything" and rotates every collection
-and every known group partition. Make any issuer revoke any device with the
-precision of the enrolling one.
+records from the registry, and selects scopes from those records. Complete
+precise revocation at any issuer, including partition-only records and durable tombstone completion.
+Keep full rotation for unrecorded devices.
 
 ## Settled
 
@@ -29,19 +30,26 @@ precision of the enrolling one.
   profile reads and every group partition whose members the profile reads or
   a recorded partition grant selects.
 - Delegated grants made on a non-issuer stay unrecorded. Revoking a node with
-  no registry record rotates everything, as today. Revoking a recorded device
-  also rotates what its delegator's record selects, when its chain shows one.
+  no registry record rotates every held collection key and every known group
+  partition whose secret this issuer holds. No delegator is inferred or
+  revoked. A recorded device without a profile selects only its recorded
+  partition grants, not every collection.
 - A recorded grant with a delegation depth above zero means the device may
-  have delegated. Its delegates have no record and are reached only by the
-  rule above when they are revoked themselves; revoking the delegator does
-  not revoke them. The guide states this limit.
+  have delegated. Its unrecorded delegates use the full-rotation fallback
+  when revoked individually. Delegator revocation does not enumerate their devices or
+  rotate additional scopes on their behalf; shared chain ancestors may still
+  end their credentials. The guide states this limit.
 - The statement names the node, the user, the latest capability ID and every
   pseudonym key the record lists, whichever issuer assigned them.
 - Revoking an issuer rotates the registry key like any reader key, because
   its profile reads the registry.
-- The tombstone is written to the registry in the same local transaction that
-  completes the revocation. It is what refuses renewal once the statement
-  has left the set.
+- The registry tombstone transaction is the durable completion marker.
+  The existing JSON intent is a redo record and is discarded only after that
+  transaction commits, before returning success. Open resumes either side
+  of the commit with the same statement and keys. The two stores have no
+  cross-file atomic write; a committed tombstone makes a stale intent
+  cleanup, not another revocation. The tombstone refuses renewal once the
+  statement has left the set.
 - A device already tombstoned, or already named by a held statement, is
   "device is already revoked"; two issuers that revoke one device at once
   both succeed and leave two statements and one tombstone.
@@ -51,13 +59,14 @@ precision of the enrolling one.
 1. `rotate` selects scopes from the registry record instead of this issuer's
    own knowledge. Remove the "never saw it" branch for recorded devices and
    keep it, named as such, for a node with no record.
-2. The delegator rule: resolve the revoked device's chain to the recorded
-   device that delegated to it and add what that record selects.
+2. Distinguish a partition-only record from an absent record. Only the latter
+   uses full rotation, including an unrecorded delegate.
 3. The statement's subjects come from the record: user, capability ID and
    pseudonym keys across every table and every assigning issuer.
 4. The tombstone and the intent: the saved intent names the statement and
-   each scope's target epoch as in phase 6; completion sets the tombstone
-   and clears the intent together.
+   each scope's target epoch as in phase 6; the tombstone commits completion
+   before the redo intent is discarded. Open completes this boundary before
+   sessions or the network can serve work.
 5. Kotlin and native `revoke` accept any node the registry lists; `devices()`
    shows the tombstone on every issuer after one sync.
 6. Guides: credentials, enrollment and partitioned scopes describe the
@@ -75,8 +84,8 @@ precision of the enrolling one.
   that group partition and no other.
 - Revoking a node absent from the registry rotates every collection and
   every known group partition, and the test names that as the fallback.
-- A device delegated to by a recorded member is revoked: the delegator's
-  selected partitions rotate, the delegator is not revoked.
+- An unrecorded delegate of a recorded member uses the full-rotation
+  fallback; the recorded member remains authorized.
 - A pseudonym that issuer A assigned is in the statement B signs, and frames
   under it are refused by a device that learned the statement.
 - Revoking an issuer gives the registry a new key epoch, which the revoked
@@ -99,9 +108,52 @@ precision of the enrolling one.
 - Two issuers rotating one scope at once
   ([phase 8](08-concurrent-rotation.md)). Tests here revoke from one issuer
   at a time per scope.
-- Delivering the new key to remaining readers other than by renewal
-  ([phase 12](12-direct-key-delivery.md)).
+- Adding automatic delivery of new keys to remaining readers
+  ([phase 12](12-direct-key-delivery.md)); existing group-secret share/install
+  remains the manual delivery path.
 - Refusing the revoked device's session
   ([phase 9](09-roster-free-admission.md)).
 - Device management screens in shopping
   ([phase 20](20-shopping-without-a-roster.md)).
+
+## Contract revision on 2026-10-10
+
+The user chose full rotation for unrecorded devices after verification of
+landed phases 5 and 6 showed that `revoke(node)` has no credential chain and
+the fixed registry has no delegation provenance. Non-issuer delegation
+returns a chain but stores no recipient relationship. Phase 7 therefore
+requires no ancestry lookup: recorded devices select their recorded access;
+unrecorded devices use the explicit full-rotation fallback. Durable provenance
+is deferred to [an idea](../ideas/delegation_provenance.md).
+
+## Qualification evidence
+
+`cargo test -p rocky-sdk --test registry_revocation` passes five hub scenarios:
+precise revocation with the enroller stopped, partition-only selection,
+unrecorded-delegate full rotation with its delegator still able to renew
+but refusing fresh delegation to the revoked node,
+issuer registry-key rotation and concurrent statements for one non-reader.
+The cross-issuer scenario checks A's pseudonym in B's signed statement and
+refusal by the incoming-frame credential verifier. After A returns, the
+existing share/install calls supply its rotated group secret before one sync
+learns the tombstone; collection keys arrive through renewal.
+
+`cargo test -p rocky-sdk --lib node::revocation_tests` passes the twelve-point
+fault sweep through each collection key and group secret, statement signing,
+self-renewal, rollback before tombstone commit, committed tombstone before
+cleanup and intent clearing. Every real database reopen has the same statement
+ID and keys, exactly one tombstone and no remaining intent; a second reopen
+adds no epoch. Enrollment tests prune statements beyond the cutoff and still
+refuse revoked-user renewal at both issuers. The existing eight group-secret
+tests pass with the partition-only precision expectation updated.
+
+`./scripts/check` passes formatting, strict workspace Clippy, all 714
+workspace tests (15 skipped), three doc tests and all 165 SDK tests without
+default features (4 skipped). The final delegation-refusal assertion also
+passes under default features, with a fresh strict SDK Clippy check.
+Native ABI checks (including two tests and the configuration without default
+features) and Kotlin `rocky-core` builds for JVM and Android pass.
+`./scripts/lint` and `./scripts/commitlint --jj` pass. Hosted CI, ignored soaks
+and iOS/device
+qualification have not been run here. Concurrent rotations of one scope and
+automatic group-key delivery remain phases 8 and 12.

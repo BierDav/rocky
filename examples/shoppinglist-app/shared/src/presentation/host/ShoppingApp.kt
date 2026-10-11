@@ -7,13 +7,13 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
-import androidx.navigation3.runtime.rememberNavBackStack
 import dev.zacsweers.metrox.viewmodel.LocalMetroViewModelFactory
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import org.example.examples.shopping.di.ShoppingGraph
 import org.example.examples.shopping.presentation.navigation.AppNavHost
 import org.example.examples.shopping.presentation.navigation.destination
-import org.example.examples.shopping.presentation.navigation.navigationSavedStateConfig
+import org.example.examples.shopping.presentation.navigation.rememberNavigator
+import org.example.examples.shopping.presentation.navigation.tabs
 import org.example.examples.shopping.presentation.theme.ShoppingTheme
 import org.example.examples.shopping.util.permissions.NetworkPermissions
 
@@ -46,23 +46,13 @@ fun ShoppingApp(graph: ShoppingGraph) {
 @Composable
 private fun AppHost(model: AppViewModel = metroViewModel()) {
     val state by model.state.collectAsState()
-    // The session decides the root: entering a household, being revoked or a reset replaces the whole stack.
-    val backStack = rememberNavBackStack(navigationSavedStateConfig, state.destination)
-    LaunchedEffect(backStack, state.destination) {
-        if (backStack.firstOrNull() != state.destination) {
-            backStack.clear()
-            backStack.add(state.destination)
-        }
-    }
+    val navigator = rememberNavigator(remember { tabs.map { it.key } }, state.destination)
+    // The session decides the root: entering a household, being revoked or a reset replaces what shows.
+    LaunchedEffect(navigator, state.destination) { navigator.showRoot(state.destination) }
     // A deep link opens above the current screen, replacing one opened before it.
-    LaunchedEffect(backStack) {
-        model.deepLinks.collect { destination ->
-            backStack.removeAll { it::class == destination::class }
-            backStack.add(destination)
-        }
-    }
+    LaunchedEffect(navigator) { model.deepLinks.collect(navigator::navigate) }
     Box(Modifier.fillMaxSize()) {
-        AppNavHost(backStack)
+        AppNavHost(navigator)
         LaunchScreen(model.splashVisible.collectAsState().value)
     }
     // The splash lifts once the settled root screen has been composed and drawn.

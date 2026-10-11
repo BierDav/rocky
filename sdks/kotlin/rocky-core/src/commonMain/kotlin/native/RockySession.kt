@@ -105,6 +105,9 @@ open class RockySession internal constructor(internal val client: RockyClient, o
         return PairingInvitation(result.text("uri"), result.text("expires").toLong(), profile(result.getValue("profile").jsonObject), result.text("sequence").toLong())
     }
 
+    /** Whether this issuer's persisted invitation can still enroll a new device, also after reopening. */
+    suspend fun invitationOpen(uri: String): Boolean = client.call(request("invitation_open") { put("uri", uri) }).getValue("open").jsonPrimitive.boolean
+
     /**
      * Starter pairing of another device of this user. By default it becomes an issuer too, with its own keys and author
      * numbers, so losing either device locks nobody out; `issuing = false` pairs a writer of every table instead.

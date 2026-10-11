@@ -222,6 +222,7 @@ class Credentials internal constructor(private val session: RockySession) {
     suspend fun status(): SessionStatus = session.session()
     suspend fun renew(): SessionStatus = session.renew()
     suspend fun pairing(profile: GrantProfile): PairingInvitation = session.pairing(profile)
+    suspend fun invitationOpen(uri: String): Boolean = session.invitationOpen(uri)
 
     /** Another device of this user, an issuer unless `issuing = false`; see `RockySession.pairDevice`. */
     suspend fun pairDevice(issuing: Boolean = true): PairingInvitation = session.pairDevice(issuing)

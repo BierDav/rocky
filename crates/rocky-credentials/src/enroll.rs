@@ -71,6 +71,14 @@ pub enum Admission {
     Retry,
 }
 impl Invitation {
+    /// Whether this token can enroll a new device without changing the invitation.
+    pub fn is_open(&self, token: &[u8; 32], time: u64) -> bool {
+        self.consumed.is_none()
+            && self.attempts < MAX_ATTEMPTS
+            && time <= self.expires
+            && commitment("rocky.credentials.invitation.v1", token) == self.digest
+    }
+
     pub fn open(token: &[u8; 32], profile: Profile, expires: u64) -> Self {
         Self {
             digest: commitment("rocky.credentials.invitation.v1", token),

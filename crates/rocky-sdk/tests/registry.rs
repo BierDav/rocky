@@ -112,6 +112,50 @@ fn registry_rows(directory: &Path, entry: &str) -> Result<i64, Failure> {
 }
 
 #[tokio::test]
+async fn invitation_availability_survives_reopen_and_tracks_replacement_and_use()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let path = root.path().join("issuer");
+    let a = create(&path, memory(&hub, "issuer"))?;
+    let first = a.invite().await;
+    assert_eq!(
+        a.ok(json!({"type":"invitation_open", "uri":first})).await["open"],
+        true
+    );
+    let second = a.invite().await;
+    assert_eq!(
+        a.ok(json!({"type":"invitation_open", "uri":first})).await["open"],
+        false
+    );
+    a.close().await;
+    let a = Device::new(Database::open(open(&path, Some(memory(&hub, "issuer"))))?)?;
+    assert_eq!(
+        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        true
+    );
+    let b = join(&root.path().join("member"), memory(&hub, "member"), &second)?;
+    assert_eq!(
+        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        false
+    );
+    assert!(
+        b.call(json!({"type":"invitation_open", "uri":second}))
+            .await
+            .is_err()
+    );
+    a.close().await;
+    let a = Device::new(Database::open(open(&path, None))?)?;
+    assert_eq!(
+        a.ok(json!({"type":"invitation_open", "uri":second})).await["open"],
+        false
+    );
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -> Result<(), Failure>
 {
     let root = tempfile::tempdir()?;

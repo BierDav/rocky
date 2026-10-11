@@ -6,7 +6,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.staticCompositionLocalOf
 import kotlinx.coroutines.flow.Flow
 
-/** The snackbar of the surrounding screen, such as home's, where a nested screen reports its messages. */
+/** The app's snackbar, provided to every screen by the snackbar scene decorator. */
 val LocalSnackbarHostState = staticCompositionLocalOf { SnackbarHostState() }
 
 /** Shows each of [messages] in [LocalSnackbarHostState] while this screen is visible. */

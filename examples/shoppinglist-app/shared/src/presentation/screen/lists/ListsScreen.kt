@@ -275,7 +275,7 @@ private fun AddItem(category: String?, onAdd: (String) -> Unit) {
         }
         Unit
     }
-    Surface(tonalElevation = 3.dp) {
+    Surface(color = MaterialTheme.colorScheme.background) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
                 text,

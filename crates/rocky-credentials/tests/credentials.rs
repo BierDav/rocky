@@ -431,6 +431,10 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
     };
     let mut invitation = Invitation::open(&token, profile.clone(), NOW + 600);
     assert_eq!(invitation.profile, profile);
+    assert!(invitation.is_open(&token, NOW));
+    assert!(invitation.is_open(&token, NOW + 600));
+    assert!(!invitation.is_open(&token, NOW + 601));
+    assert!(!invitation.is_open(&[6; 32], NOW));
     let request = |token: &[u8; 32], nonce: u8| {
         PairRequest::new(
             token,
@@ -451,6 +455,7 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
         Admission::First
     );
     invitation.claim(&first);
+    assert!(!invitation.is_open(&token, NOW));
     assert_eq!(
         invitation.admit(&token, &first, NOW).expect("retry"),
         Admission::Retry
@@ -476,6 +481,7 @@ fn an_invitation_binds_its_profile_counts_wrong_tokens_and_keeps_its_retry_ident
         );
     }
     assert!(locked.admit(&token, &first, NOW).is_err());
+    assert!(!locked.is_open(&token, NOW));
 }
 
 #[test]

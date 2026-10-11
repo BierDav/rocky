@@ -679,6 +679,12 @@ impl Node {
                 }))
             }
             "session" => self.status(client).await,
+            "invitation_open" => {
+                let uri = request["uri"]
+                    .as_str()
+                    .ok_or_else(|| refused("uri must be an invitation"))?;
+                Ok(json!({"open": self.settings.lock().await.invitation_open(uri)?}))
+            }
             "generation" => self.generation().await,
             "retention" => self.retention(request).await,
             "horizon" => self.horizon(request).await,

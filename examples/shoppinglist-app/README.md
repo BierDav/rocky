@@ -42,7 +42,9 @@ it in the app, or paste the code. The code is a `rocky-shopping://pair?…` link
 Android opens it in the app, which asks before joining. Each trusted device has
 one open invitation, which works once for ten minutes; a new code replaces it.
 **Devices → Open invitations** lists every trusted device's open code; only
-trusted devices can read them. A trusted device chooses:
+trusted devices can read them. The issuer removes consumed codes using persisted
+SDK state, retries failed removal and resumes cleanup after reopening; other
+trusted devices see the removal after sync. A trusted device chooses:
 
 | Kind | What it does |
 | --- | --- |
@@ -76,6 +78,10 @@ enrolled elsewhere. The trusted-only `devices` table records name and kind;
 the same two fields form the opaque registry label, available before that table
 syncs. **Clear name** clears a revoked device's application description; its
 registry tombstone and signed revocation remain. No roster horizon is declared.
+
+Copy and paste use Klip's system clipboard; iOS may request paste consent.
+Credential dates use kotlinx-datetime in the device's time zone, displayed as
+`yyyy-MM-dd HH:mm`. SHA-256 and secure random bytes use KotlinCrypto on every target.
 
 ## Approvals
 
@@ -150,10 +156,10 @@ The [Room entities](shared/src/data/db/entity) and
 [Kotlin schema](shared/src/data/db/ShoppingSchema.kt) describe the same tables.
 `shared/src` follows one package layout: `data` holds the database (`data/db`),
 household, coordination and session; `di` the Metro graph; `util` platform
-helpers, links and permissions. `presentation` holds the app host, the
-navigation3 hosts (the root follows the session state; home nests its tabs),
-reusable components (including QR pairing) and one package per screen with its
-ViewModel.
+helpers, links and permissions. `presentation` holds the app host, one navigation3
+host whose root follows the session state and whose scene decorators add the
+tabs' bar or rail and the snackbar, reusable components (including QR pairing)
+and one package per screen with its ViewModel.
 
 ```kotlin
 val platform = ShoppingPlatform(directory.absolutePath, "Desktop",

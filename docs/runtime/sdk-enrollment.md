@@ -34,6 +34,14 @@ reader keys or publishing authority), or issuer. An issuer enrolls, renews
 and revokes; no issuer needs to serve every sync. Issuers share one record per
 device in the replicated [issuer registry](issuer-registry.md).
 
+An issuer's `invitationOpen(uri)` checks persisted invitation state without
+network I/O or an enrollment attempt. It returns false for consumed, replaced,
+expired or locked invitations, including after reopening. The native
+`invitation_open` request takes `uri` and returns the boolean `open`;
+non-issuers and malformed or unsupported invitation formats return errors.
+Applications can reconcile their invitation lists from this state instead of
+depending on the bounded, in-memory enrollment activity feed.
+
 ## Author installation
 
 Kotlin `RockyDatabase.create` and `join` install the current author pseudonym

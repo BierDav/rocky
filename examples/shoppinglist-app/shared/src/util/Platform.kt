@@ -8,10 +8,26 @@ import io.github.vinceglb.filekit.isRegularFile
 import io.github.vinceglb.filekit.readString
 import io.github.vinceglb.filekit.writeString
 import kotlinx.coroutines.CancellationException
+import kotlinx.datetime.LocalDate
+import kotlinx.datetime.LocalDateTime
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.format.char
+import kotlinx.datetime.toLocalDateTime
+import org.kotlincrypto.hash.sha2.SHA256
+import org.kotlincrypto.random.CryptoRand
+import kotlin.time.Instant
 
 internal fun epochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
-internal expect fun randomBytes(size: Int): ByteArray
-internal expect fun formatDate(epochSeconds: Long): String
+internal fun randomBytes(size: Int): ByteArray = CryptoRand.Default.nextBytes(ByteArray(size))
+internal fun formatDate(epochSeconds: Long, timeZone: TimeZone = TimeZone.currentSystemDefault()): String = dateFormat.format(Instant.fromEpochSeconds(epochSeconds).toLocalDateTime(timeZone))
+
+private val dateFormat = LocalDateTime.Format {
+    date(LocalDate.Formats.ISO)
+    char(' ')
+    hour()
+    char(':')
+    minute()
+}
 
 internal suspend fun moveDirectory(source: String, target: String): Boolean = try {
     PlatformFile(source).atomicMove(PlatformFile(target))
@@ -44,5 +60,5 @@ internal suspend fun replaceText(path: String, text: String) {
     }
 }
 
-internal expect fun sha256(bytes: ByteArray): ByteArray
+internal fun sha256(bytes: ByteArray): ByteArray = SHA256().digest(bytes)
 internal fun ByteArray.hex(): String = joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }

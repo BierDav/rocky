@@ -6,6 +6,10 @@ apply:
 dependencies:
   - rocky:rocky-room:0.1.0: exported
   - io.github.vinceglb:filekit-core:0.16.0
+  - org.kotlincrypto.hash:sha2:0.8.0
+  - org.kotlincrypto.random:crypto-rand:0.6.0
+  - org.jetbrains.kotlinx:kotlinx-datetime:0.8.0
+  - tz.co.asoft:klip-system:3.3.13
   - $compose.runtime
   - $compose.foundation
   - $compose.material3
@@ -46,5 +50,4 @@ settings:
         room.schemaLocation: ./schemas
 
 aliases:
-  - jna: [jvm, android]
   - mobile: [android, iosArm64, iosSimulatorArm64]

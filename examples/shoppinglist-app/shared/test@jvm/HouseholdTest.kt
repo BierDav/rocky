@@ -77,6 +77,44 @@ class HouseholdTest {
         }
     }
 
+    @Test fun `consumed invitations disappear after restarting without enrollment events`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-invitation-restart").toFile()
+        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val path = File(root, "issuer")
+        var issuer = RockyDatabase.create(path, ShoppingSchema, transport(), automaticSync = false)
+        var room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
+        var household = Household(room.room, issuer, issuer.session().node)
+        var member: RockyDatabase? = null
+        var nextMember: RockyDatabase? = null
+        var recording: Job? = null
+        try {
+            val code = household.invite(NodeKind.Full, "Laptop")
+            member = RockyDatabase.join(File(root, "member"), ShoppingSchema, code.invitation, transport(), automaticSync = false)
+            assertEquals(code.toString(), household.invitations().first().single().code)
+            room.close()
+            issuer.close()
+            issuer = RockyDatabase.resume(path, ShoppingSchema, transport(), automaticSync = false)
+            room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
+            household = Household(room.room, issuer, issuer.session().node)
+            recording = launch { household.run() }
+            withTimeout(30_000) { household.invitations().first { it.isEmpty() } }
+            val next = household.invite(NodeKind.Partial, "Next")
+            assertTrue(issuer.invitationOpen(next.invitation))
+            assertEquals(next.toString(), household.invitations().first().single().code)
+            nextMember = RockyDatabase.join(File(root, "next"), ShoppingSchema, next.invitation, transport(), automaticSync = false)
+            withTimeout(30_000) { household.invitations().first { it.isEmpty() } }
+        } finally {
+            withContext(NonCancellable) {
+                recording?.cancelAndJoin()
+                member?.close()
+                nextMember?.close()
+                room.close()
+                issuer.close()
+            }
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun `revocation keeps the new list keys away from the removed device and reaches remaining devices`() = runBlocking {
         val root = Files.createTempDirectory("rocky-revocation").toFile()
         val opened = mutableListOf<ShoppingNode>()

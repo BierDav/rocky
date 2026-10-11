@@ -106,7 +106,7 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     }
 
     /** On a trusted device: each trusted device's open invitation, expired ones included. */
-    fun invitations(): Flow<List<InvitationRow>> = if (!rocky.isIssuer) flowOf(emptyList()) else trusted.invitations()
+    fun invitations(): Flow<List<InvitationRow>> = if (!rocky.isIssuer) flowOf(emptyList()) else trusted.invitations().settledOnRocky()
     suspend fun record(node: String, name: String, kind: NodeKind) {
         check(rocky.isIssuer)
         val label = label(name, kind)
@@ -146,24 +146,37 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     suspend fun run() = coroutineScope {
         if (rocky.isIssuer) {
             launch { recordEnrollments() }
+            launch { closeUsedInvitations() }
             launch { deliverEveryList() }
         }
     }
 
     private suspend fun recordEnrollments() {
         rocky.activity().filterIsInstance<RockyEvent.DeviceEnrolled>().collect { enrolled ->
-            val known = trusted.devices().first().any { it.node == enrolled.node }
+            val known = trusted.devices().settledOnRocky().first().any { it.node == enrolled.node }
+            if (known) return@collect
             val choice = invitationsLock.withLock {
                 val sequence = pending.keys.filter { it < enrolled.sequence }.maxOrNull()
-                sequence?.let { pending.remove(it) }?.also { code ->
-                    attempt("close the invitation") { trusted.closeInvitation(self, code.toString()) }
-                }
+                sequence?.let { pending.remove(it) }
             }
-            if (known) return@collect
             val (kind, name) = choice?.let { it.kind to it.name }
                 ?: (if (enrolled.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial) to "Device ${enrolled.node.take(6)}"
             while (attempt("record $name") { record(enrolled.node, name, kind) } == null) delay(15_000)
             notes.tryEmit("Enrolled $name as ${kind.label.lowercase()}")
+        }
+    }
+
+    private suspend fun closeUsedInvitations() {
+        while (true) {
+            attempt("close the invitation") {
+                invitationsLock.withLock {
+                    val row = trusted.invitations().first().firstOrNull { it.issuer == self }
+                    if (row != null && !rocky.invitationOpen(PairingCode.parse(row.code).invitation)) {
+                        trusted.closeInvitation(self, row.code)
+                    }
+                }
+            }
+            delay(500)
         }
     }
 

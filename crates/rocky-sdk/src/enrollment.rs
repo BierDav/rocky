@@ -1456,6 +1456,25 @@ impl Settings {
         Ok((uri, expires))
     }
 
+    /// Checks this issuer's persisted invitation without attempting enrollment.
+    pub fn invitation_open(&self, uri: &str) -> Result<bool, Failure> {
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or("only an issuer checks invitations")?;
+        let invite = Invite::parse(uri)?;
+        let token: [u8; 32] = HEXLOWER
+            .decode(invite.token.as_bytes())?
+            .try_into()
+            .map_err(|_| "invalid invitation token")?;
+        let time = now()?;
+        Ok(invite.publisher == self.publisher
+            && authority
+                .invitation
+                .as_ref()
+                .is_some_and(|invitation| invitation.is_open(&token, time)))
+    }
+
     /// Answers one pairing request with the sealed enrollment and the
     /// registry rows to commit before it leaves. Save the identity first,
     /// even on failure: it counts the invitation's attempts.

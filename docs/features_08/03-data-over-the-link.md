@@ -1,6 +1,7 @@
 # 3. Data over the link
 
-Status: not started.
+Status: in progress. Slice 1 records the request-channel and live-push design;
+implementation and completion gates are pending.
 Owner: `rocky-secure` native session messages; `rocky-sdk` `sync.rs`,
 `delivery.rs`, `mesh.rs` and the sync worker. Depends on
 [phase 2](02-link-session-and-signals.md). Follow the

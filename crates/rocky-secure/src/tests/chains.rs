@@ -420,6 +420,42 @@ async fn commanded(grants: usize) -> Commanded {
 }
 
 #[tokio::test]
+async fn an_installed_checkpoint_is_not_imported_again() {
+    let c = commanded(20).await;
+    let (mut server, mut client) = sessions(
+        (&c.source_key, &c.source, &c.source_chain),
+        (&c.target_key, &c.target, &c.target_chain),
+    )
+    .await;
+    let (served, revisions) = tokio::join!(server.serve(&c.source), async {
+        let mut revisions = Vec::new();
+        for _ in 0..2 {
+            let sync = client
+                .bootstrap_scope(&c.target, c.f.private, MAX_SECURE_FRAME / 2)
+                .await
+                .unwrap()
+                .unwrap();
+            revisions.push((
+                sync.rebootstrap.is_some(),
+                *c.target.observe_revision().borrow(),
+            ));
+        }
+        client.close().await.unwrap();
+        revisions
+    });
+    served.unwrap();
+    assert!(revisions[0].0 && !revisions[1].0);
+    assert_eq!(revisions[0].1, revisions[1].1);
+    // The checkpoint brought the strong base, so its head is known.
+    let domain = c.f.private.domain;
+    assert_eq!(c.target.known_result_head(domain).await.unwrap(), 1);
+    assert_eq!(
+        c.target.result_scopes(domain).await.unwrap(),
+        BTreeSet::from([c.f.public, c.f.private])
+    );
+}
+
+#[tokio::test]
 async fn a_command_table_bootstraps_by_checkpoint_under_20_and_40_grant_chains() {
     for grants in [20, 40] {
         let c = commanded(grants).await;

@@ -403,6 +403,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .filter(|(_, signed)| signed.signer() != peer)
             .map(|(_, signed)| signed))
     }
+    /// Whether `signed` is the verified checkpoint this replica last switched to.
+    pub(crate) async fn checkpoint_installed(
+        &self,
+        signed: &SignedCheckpoint,
+    ) -> Result<bool, Error> {
+        let inner = self.inner.lock().await;
+        let Some(id) = inner.find_scope_id(signed.statement.scope).await? else {
+            return Ok(false);
+        };
+        let installed = inner
+            .checkpoint_record(id, true)
+            .await?
+            .and_then(|record| record.signed);
+        Ok(match installed {
+            Some(installed) => installed.id()? == signed.id()?,
+            None => false,
+        })
+    }
     pub(crate) async fn owns_checkpoint_signer(&self, signed: &SignedCheckpoint) -> bool {
         let inner = self.inner.lock().await;
         let signer = signed.signer();

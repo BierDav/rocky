@@ -307,6 +307,36 @@ async fn results_sync_with_unrelated_partition_selectors() -> Result<(), Failure
     Ok(())
 }
 
+/// Without a coordinator head, a peer holding no later result means there
+/// is none: the reader neither re-imports checkpoints nor commits anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_head_leaves_an_idle_reader_unchanged() -> Result<(), Failure> {
+    let pair = Pair::new(None).await?;
+    pair.restock(1, 2).await;
+    pair.restock(2, 1).await;
+    pair.b.ok(json!({"type": "sync"})).await;
+    assert_eq!(pair.b.rows("stock").await["rows"][0][1], integer(3));
+    pair.coordinator.set_available(false)?;
+    // A pass without a head asks to retry; going online again resets that back-off.
+    let sync = async || {
+        pair.b
+            .ok(json!({"type": "connection", "online": true}))
+            .await;
+        pair.b.ok(json!({"type": "sync"})).await;
+    };
+    sync().await;
+    let before = pair.b.ok(json!({"type": "status"})).await["revision"].clone();
+    for _ in 0..3 {
+        sync().await;
+    }
+    assert_eq!(
+        pair.b.ok(json!({"type": "status"})).await["revision"],
+        before
+    );
+    assert_eq!(pair.b.rows("stock").await["rows"][0][1], integer(3));
+    Ok(())
+}
+
 /// An executor acknowledging before another device syncs leaves that
 /// device a result it still verifies: nothing surfaces as a failed pass.
 #[tokio::test(flavor = "multi_thread")]

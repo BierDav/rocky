@@ -41,66 +41,45 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         limit: usize,
     ) -> Result<Vec<u64>, Error> {
         let inner = self.inner.lock().await;
-        let retained: BTreeSet<u64> = collect_rows(
-            inner
-                .conn
-                .query(
-                    "SELECT sequence FROM secure_results WHERE domain=?",
-                    [encode(&domain)?],
-                )
-                .await?,
-        )
-        .await?
-        .iter()
-        .filter_map(|row| match row.as_slice() {
-            [SqlValue::Integer(sequence)] => Some(*sequence as u64),
-            _ => None,
-        })
-        .collect();
-        let mut needed_scopes = BTreeSet::new();
-        for record in collect_rows(
-            inner
-                .conn
-                .query(
-                    "SELECT result FROM secure_results WHERE domain=? ORDER BY sequence DESC",
-                    [encode(&domain)?],
-                )
-                .await?,
-        )
-        .await?
-        {
-            if let [SqlValue::Blob(bytes)] = record.as_slice() {
-                let request = decode::<ConfirmedCommand>(bytes)?.strong_package()?.request;
-                needed_scopes.extend(resources(&inner, &request)?);
-            }
-        }
-        let grants = inner.local_grants(now()?)?;
-        let mut start = head;
-        let mut found = false;
-        for record in rows(&inner.conn, "SELECT scope FROM secure_command_rows").await? {
-            if let [SqlValue::Blob(bytes)] = record.as_slice() {
-                let scope: ResourceScope = decode(bytes)?;
-                if scope.domain == domain {
-                    found = true;
-                    start = start.min(inner.strong_base(scope).await?.sequence());
-                }
-            }
-        }
-        for scope in needed_scopes {
-            if inner.can_read_key(scope, &grants)
-                && inner.config.keys.iter().any(|key| key.scope == scope)
-            {
-                found = true;
-                start = start.min(inner.strong_base(scope).await?.sequence());
-            }
-        }
-        if !found {
-            start = 0;
+        let held = held_results(&inner, domain).await?;
+        let mut start = if held.bases.is_empty() { 0 } else { head };
+        for scope in &held.bases {
+            start = start.min(inner.strong_base(*scope).await?.sequence());
         }
         Ok((start.saturating_add(1)..=head)
-            .filter(|sequence| !retained.contains(sequence))
+            .filter(|sequence| !held.retained.contains(sequence))
             .take(limit)
             .collect())
+    }
+    /// The highest sequence this replica knows `domain` confirmed: its
+    /// latest retained result or strong base. It stands in for the head
+    /// while the coordinator does not answer.
+    pub async fn known_result_head(&self, domain: Scope) -> Result<u64, Error> {
+        let inner = self.inner.lock().await;
+        let held = held_results(&inner, domain).await?;
+        let mut head = held.retained.last().copied().unwrap_or(0);
+        for scope in &held.bases {
+            head = head.max(inner.strong_base(*scope).await?.sequence());
+        }
+        Ok(head)
+    }
+    /// The scopes a checkpoint can bring `domain`'s strong base for: those
+    /// bounding its results and every command's resources read with a key.
+    pub async fn result_scopes(&self, domain: Scope) -> Result<BTreeSet<ResourceScope>, Error> {
+        let inner = self.inner.lock().await;
+        let mut scopes = held_results(&inner, domain).await?.bases;
+        let grants = inner.local_grants(now()?)?;
+        for method in &inner.definition.methods {
+            let resources = inner
+                .app
+                .command_resources(domain, &method.name)
+                .map_err(|message| denied(&message))?;
+            scopes.extend(resources.into_iter().filter(|scope| {
+                inner.can_read_key(*scope, &grants)
+                    && inner.config.keys.iter().any(|key| key.scope == *scope)
+            }));
+        }
+        Ok(scopes)
     }
     pub(crate) async fn authorize_command_transfer(
         &self,
@@ -111,6 +90,50 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         authorize_transfer(&inner, peer, credentials, scopes)
     }
+}
+/// Retained result sequences and the scopes whose strong bases bound them.
+struct HeldResults {
+    retained: BTreeSet<u64>,
+    bases: BTreeSet<ResourceScope>,
+}
+async fn held_results<A: RowCommandApplication>(
+    inner: &Inner<A>,
+    domain: Scope,
+) -> Result<HeldResults, Error> {
+    let mut retained = BTreeSet::new();
+    let mut needed_scopes = BTreeSet::new();
+    for record in collect_rows(
+        inner
+            .conn
+            .query(
+                "SELECT sequence,result FROM secure_results WHERE domain=?",
+                [encode(&domain)?],
+            )
+            .await?,
+    )
+    .await?
+    {
+        if let [SqlValue::Integer(sequence), SqlValue::Blob(bytes)] = record.as_slice() {
+            retained.insert(*sequence as u64);
+            let request = decode::<ConfirmedCommand>(bytes)?.strong_package()?.request;
+            needed_scopes.extend(resources(inner, &request)?);
+        }
+    }
+    let grants = inner.local_grants(now()?)?;
+    let mut bases = BTreeSet::new();
+    for record in rows(&inner.conn, "SELECT scope FROM secure_command_rows").await? {
+        if let [SqlValue::Blob(bytes)] = record.as_slice() {
+            let scope: ResourceScope = decode(bytes)?;
+            if scope.domain == domain {
+                bases.insert(scope);
+            }
+        }
+    }
+    bases.extend(needed_scopes.into_iter().filter(|scope| {
+        inner.can_read_key(*scope, &grants)
+            && inner.config.keys.iter().any(|key| key.scope == *scope)
+    }));
+    Ok(HeldResults { retained, bases })
 }
 fn authorize_transfer<A: RowCommandApplication>(
     inner: &Inner<A>,

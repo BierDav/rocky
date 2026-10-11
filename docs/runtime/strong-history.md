@@ -50,9 +50,13 @@ a node credential with whole-scope read and write authority; a partitioned
 checkpoint must carry and verify its concrete tuple.
 
 `missing_results` starts above the local base. When the source cannot supply a
-missing prefix, SDK result sync uses [checkpoint bootstrap](sdk-bootstrapping.md);
-it also bootstraps a readable scope whose held ciphertext cannot complete its
-rows. The signed checkpoint's `strong.base` binds confirmed rows at its head;
+missing prefix, SDK result sync uses [checkpoint bootstrap](sdk-bootstrapping.md)
+for the scopes `result_scopes` names: those bounding the results and every
+command's declared resources read with a key. It also bootstraps a readable scope
+whose held ciphertext cannot complete its rows. Without a coordinator head, a
+device pulls forward until the peer holds no later result; a sequence above
+`known_result_head` that the peer lacks ends the pull and is not a gap. A
+checkpoint equal to the one a scope last switched to is not imported again. The signed checkpoint's `strong.base` binds confirmed rows at its head;
 result, command and preparation summaries cover only the suffix above it
 (unsettled requests and unknown outcomes stay bound; observations are bound
 separately). The encrypted page carries those rows and the latest result under

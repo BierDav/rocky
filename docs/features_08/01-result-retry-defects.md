@@ -1,6 +1,7 @@
 # 1. Result retry defects
 
-Status: in progress.
+Status: implemented 2026-10-11; the gate's tests pass. Not yet qualified on
+the shopping desktops that showed the defect.
 Owner: `rocky-sdk` result pulling in `sync.rs`; `rocky-secure` checkpoint
 import in `network/checkpoints.rs` and `replica/checkpoint/transfer.rs`.
 No dependency. Follow the [execution contract](README.md#agent-execution-contract).
@@ -27,12 +28,13 @@ the same loop on every signal, so this phase lands first.
 
 ## Settled
 
-- An unknown head bounds nothing. With no head, a device pulls only
-  sequences below the highest one it already knows to be confirmed: the
-  highest retained result or strong base. If it knows none, it pulls none.
-- An absent result bootstraps only the scopes the result can touch: the
-  scopes of retained results and of command-controlled tables that this
-  device holds with a key. It never bootstraps the whole holding.
+- With no head, a device still pulls forward, so peers can bring results
+  the coordinator would have announced. A sequence above `known_result_head`
+  (the highest retained result or strong base) that the peer lacks ends the
+  pull: it may not exist and is not a gap.
+- A real gap bootstraps only `result_scopes`: the scopes bounding the
+  results and every command's declared resources read with a key. It never
+  bootstraps the whole holding.
 - Importing a checkpoint whose signed statement equals the verified one
   already installed for the scope is a no-op. It stages nothing, switches
   nothing and leaves the revision unchanged.
@@ -43,7 +45,10 @@ the same loop on every signal, so this phase lands first.
 ## Completion gate
 
 - With an unreachable coordinator and an idle peer, repeated passes leave the
-  revision and the projected tables unchanged.
-- With the head unknown and one result missing at the peer, only the result's
-  scopes are offered a checkpoint, and an identical checkpoint changes nothing.
+  revision and the projected tables unchanged
+  (`an_unknown_head_leaves_an_idle_reader_unchanged` in `rocky-sdk`; without
+  the fix, the revision rose from 4 to 10 over three passes).
+- Bootstrapping a scope twice from the same checkpoint imports it once and
+  leaves the revision unchanged (`an_installed_checkpoint_is_not_imported_again`
+  in `rocky-secure`).
 - The existing results, bootstrap and checkpoint tests pass.

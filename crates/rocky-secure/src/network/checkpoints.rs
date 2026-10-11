@@ -348,8 +348,13 @@ impl NativeSession {
         if signed.statement.finalized.is_none() && replica.owns_checkpoint_signer(&signed).await {
             return Ok(None);
         }
-        let rebootstrap = self.import_within(replica, signed, CHECKPOINT_PAGE).await?;
-        let catch_up = if rebootstrap.is_some() {
+        // Switching to the installed checkpoint again would only rewrite its rows.
+        let installed = replica.checkpoint_installed(&signed).await?;
+        let rebootstrap = match installed {
+            true => None,
+            false => self.import_within(replica, signed, CHECKPOINT_PAGE).await?,
+        };
+        let catch_up = if installed || rebootstrap.is_some() {
             self.catch_up(replica, scope, quota).await?
         } else {
             CatchUp {

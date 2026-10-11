@@ -408,6 +408,11 @@ async fn results(
         return Ok(unavailable || repairing);
     }
     let mut retry = unavailable || missing.len() == RESULTS;
+    // Without a head, a sequence past every one known confirmed may not exist.
+    let known = match unavailable {
+        true => replica.known_result_head(domain).await?,
+        false => head,
+    };
     let mut session = session(replica, upstream).await?;
     for sequence in missing {
         let pulled = session
@@ -415,9 +420,13 @@ async fn results(
             .await?;
         // The peer holds no later result either.
         if !pulled {
+            if sequence > known {
+                break;
+            }
             // A source may have pruned this prefix or sealed it under an older key.
             // Existing checkpoint bootstrap carries the current strong base.
-            for scope in scopes {
+            let bases = replica.result_scopes(domain).await?;
+            for scope in scopes.iter().filter(|scope| bases.contains(scope)) {
                 if session
                     .bootstrap_scope(replica, *scope, QUOTA)
                     .await?

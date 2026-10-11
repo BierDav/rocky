@@ -9,8 +9,8 @@ on:
   # other long-lived branches or pull requests.
   push:
     branches: [main]
-  # The release workflow gates every release on these checks, without `e2e`
-  # and `shopping`. Its build and checks are skipped for a tree that passed.
+  # Releases call only `build` and `check`; auxiliary jobs run on pushes.
+  # The build and checks are skipped for a tree that passed.
   workflow_call:
     inputs:
       release:
@@ -36,6 +36,7 @@ env:
 
 jobs:
   lint:
+    if: ${{ !inputs.release }}
     # Formatting and static lint checks need no build, so they fail fast; see docs/linting.md.
     # Any architecture.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest-any-arch' }}
@@ -417,6 +418,7 @@ jobs:
           tree: ${{ steps.source.outputs.tree }}
 
   android:
+    if: ${{ !inputs.release }}
     # Runs the release workflow's Android build steps to keep its caches warm:
     # Gradle's files, and the Cargo registry with the
     # native target directory. The release restores both and saves them again,
@@ -526,6 +528,7 @@ jobs:
           key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
 
   ios:
+    if: ${{ !inputs.release }}
     needs: build
     runs-on: macos-latest
     timeout-minutes: 45

@@ -64,11 +64,11 @@ dependencies { implementation("rocky:rocky-core-jvm:0.1.0-alpha.1") }
 
 ## Pipeline
 
-1. Version: decides whether to release and computes the version and notes. It waits for the
-   commit's push checks still running, so the release reuses them, and refuses a commit
-   whose latest completed `shopping` qualification in the baseline workflow failed.
-2. The [baseline workflow](development.md#ci) without the soak tests and the shopping
-   qualification; it skips a tree whose checks already passed. Both images are built for amd64
+1. Version: decides whether to release, waits for the latest push run's `check`
+   job for the same commit to succeed, and computes the version and notes.
+   Auxiliary baseline jobs, including iOS and shopping, do not gate versioning.
+2. The [baseline workflow](development.md#ci) runs only `build` and `check`;
+   it skips a tree whose checks already passed. Both images are built for amd64
    and arm64 after it, then merged and tagged at the release version.
 3. In parallel with them: the JVM SDK packaged and qualified per platform, and the Android
    variants and runtime published to a staging repository at the release version

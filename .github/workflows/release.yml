@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      # Waiting and the shopping gate read the check runs of this commit.
+      # Waiting reads the core check job of this commit.
       actions: read
     outputs:
       release: ${{ steps.changes.outputs.release }}
@@ -80,8 +80,7 @@ jobs:
           fi
           echo "release=${release}" >> "$GITHUB_OUTPUT"
 
-      # Wait only for the required baseline jobs. Auxiliary jobs may keep
-      # running, but never gate a release.
+      # Only the core check job gates versioning; auxiliary jobs may keep running.
       - name: Wait for the checks of this commit
         if: steps.changes.outputs.release == 'true'
         run: |
@@ -93,25 +92,25 @@ jobs:
               "${GH_API_URL}/repos/${GITHUB_REPOSITORY}/$1"
           }
           while :; do
-            runs="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
-              | jq -r '.workflow_runs[] | select((.path | test("(^|/)check\\.yml(@|$)")) and .event == "push") | .id')"
-            pending=false
-            for run in ${runs}; do
+            run="$(api "actions/runs?head_sha=${GITHUB_SHA}&per_page=50" \
+              | jq -r --arg sha "${GITHUB_SHA}" '
+                [.workflow_runs[] | select(.head_sha == $sha and
+                  (.path | test("(^|/)check\\.yml(@|$)")) and .event == "push")]
+                | max_by(.id) | .id // ""')"
+            state=pending
+            if [ -n "${run}" ]; then
               state="$(api "actions/runs/${run}/jobs?per_page=100" | jq -r '
-                [.jobs[] | select(.name == "lint" or .name == "build" or .name == "check")] as $required |
-                if any($required[]; .status == "completed" and .conclusion != "success") then "failed"
-                elif ($required | length) < 3 or any($required[]; .status != "completed") then "pending"
-                else "passed" end')"
-              if [ "${state}" = failed ]; then
-                echo "::error::A required check failed for ${GITHUB_SHA} in run ${run}."
-                exit 1
-              fi
-              if [ "${state}" = pending ]; then
-                pending=true
-              fi
-            done
-            [ "${pending}" = true ] || break
-            echo "Waiting for required checks of ${GITHUB_SHA}"
+                [.jobs[] | select(.name == "check")] | max_by(.id) |
+                if . == null or .status != "completed" then "pending"
+                elif .conclusion == "success" then "passed"
+                else "failed" end')"
+            fi
+            if [ "${state}" = failed ]; then
+              echo "::error::The check job failed for ${GITHUB_SHA} in run ${run}."
+              exit 1
+            fi
+            [ "${state}" = passed ] && break
+            echo "Waiting for the check job of ${GITHUB_SHA}"
             sleep 30
           done
 

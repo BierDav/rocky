@@ -347,13 +347,14 @@ runtime, and runs the exhaustive phase-2 byte-offset cancellation gate in the re
 profile. This job uses an x64 runner for the Android NDK and has not run on a
 hosted runner yet. Releases skip it and do not wait for its result.
 
-A release calls the baseline workflow. Before it starts, it waits only for the
-push run's `lint`, `build` and `check` jobs for that commit; a failure in any of
-them fails the release. The `e2e`, `shopping` and baseline `android` jobs do
-not gate it. When `check` passed for the tree, the release's `build` and `check`
-skip. A job whose build artifact is missing, for example after its one-day
-retention, builds what it runs itself; a release of an unchecked tree runs the
-build and checks.
+A release waits for the latest push run's `check` job for that exact commit.
+It proceeds as soon as that job succeeds, even while auxiliary jobs run or
+fail. A missing or unfinished `check` keeps it waiting; a failed, cancelled or
+skipped `check` fails the release gate. The release then calls only `build`
+and `check` in the baseline workflow; `lint`, `e2e`, `shopping`, baseline
+`android` and baseline `ios` do not gate it. When `check` passed for the tree,
+the release's `build` and `check` skip. A job whose build artifact is missing,
+for example after its one-day retention, builds what it runs itself.
 
 Only the release workflow builds and publishes the container images, so the
 Actions sidebar lists just the baseline, commit-message and release workflows.

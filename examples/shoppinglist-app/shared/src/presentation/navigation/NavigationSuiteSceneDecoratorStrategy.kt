@@ -26,8 +26,7 @@ class NavigationSuiteSceneDecoratorStrategy<T : Any>(
     private val navigator: Navigator,
     private val railWidth: Dp = 600.dp,
 ) : SceneDecoratorStrategy<T> {
-    override fun SceneDecoratorStrategyScope<T>.decorateScene(scene: Scene<T>): Scene<T> =
-        if (scene.metadata[NAVIGATION_SUITE] == true) NavigationSuiteScene(scene, this@NavigationSuiteSceneDecoratorStrategy) else scene
+    override fun SceneDecoratorStrategyScope<T>.decorateScene(scene: Scene<T>): Scene<T> = if (scene.metadata[NAVIGATION_SUITE] == true) NavigationSuiteScene(scene, this@NavigationSuiteSceneDecoratorStrategy) else scene
 
     @Composable
     internal fun Chrome(content: @Composable () -> Unit) {

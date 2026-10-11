@@ -71,7 +71,8 @@ fun AppNavHost(navigator: Navigator) {
         entry<PairingOfferKey>(metadata = DialogSceneStrategy.dialog()) { key ->
             PairingOfferScreen(
                 key,
-                onDone = { navigator.remove(key) })
+                onDone = { navigator.remove(key) },
+            )
         }
     }
     // One decorated entry list per stack keeps every tab's entries, and so their ViewModels, alive while hidden.
@@ -81,7 +82,9 @@ fun AppNavHost(navigator: Navigator) {
     val selected = navigator.tabs.indexOf(navigator.tab)
     val entries = when {
         !navigator.inTabs -> root
+
         selected == 0 -> tabEntries.first()
+
         // The start tab stays below another tab, so Back and predictive back reveal it.
         else -> tabEntries.first() + tabEntries[selected]
     }
@@ -89,7 +92,7 @@ fun AppNavHost(navigator: Navigator) {
     val decorators = remember(navigator, snackbar) {
         listOf(
             SnackbarSceneDecoratorStrategy<NavKey>(snackbar),
-            NavigationSuiteSceneDecoratorStrategy(tabs, navigator)
+            NavigationSuiteSceneDecoratorStrategy(tabs, navigator),
         )
     }
     CompositionLocalProvider(LocalNavigator provides navigator) {

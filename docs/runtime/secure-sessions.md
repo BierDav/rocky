@@ -104,7 +104,7 @@ to later calls. Bytes already returned cannot be taken back.
 
 ## Native peer sessions
 
-Authenticated network sessions use version 11; any other is refused in the
+Authenticated network sessions use version 14; any other is refused in the
 handshake. A frame's signed header names its author's credential chain by
 digest. The session carries each distinct chain once, in a message of its own
 before the first page whose frames name it; later pages of the session send
@@ -125,6 +125,10 @@ scope, before row, checkpoint, horizon or command result state is inspected.
 Scope enumeration includes only proved partitions and granted unpartitioned
 scopes. Proof memory is local to that native session; the application
 `SecureSession` transaction and invalidation rules above are unchanged.
+
+The [live link](live-links.md) reuses this admission and proof exchange with
+a distinct handshake identity and carries only signals during phase 2.
+Authority changes also notify the link owner without polling.
 
 ## Qualification
 

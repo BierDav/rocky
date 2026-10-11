@@ -1,6 +1,6 @@
 # 0063: Live link sessions and signals
 
-Status: in progress.
+Status: accepted.
 Date: 2026-10-12.
 
 ## Decision
@@ -9,7 +9,10 @@ Date: 2026-10-12.
 signs under `rocky.link.v1`, preventing confusion with native sync sessions.
 It reuses credential admission, mutual challenge signatures, the revocation
 exchange and session-bound holding proofs. Both ends exchange holdings in
-handshake order before sending signals. No other version is accepted.
+handshake order before sending signals, including granted whole scopes that
+hold no rows yet. They then exchange a committed state token for each proved
+scope, so a write between reconciliation and link registration is signalled.
+No other version is accepted.
 
 Every subsequent signed frame carries the request channel and direction.
 Channel 0 carries Ping, Pong and Close; channel 1 carries Changed. The direction
@@ -26,13 +29,17 @@ service, which also owns a separate inbound link budget.
 
 Signals name only handshake-proved holdings. The worker flushes committed
 state before publication and compares scope frontiers to coalesce changes.
-Tokens are opaque commitments to those frontiers; duplicate signals are ignored.
+Tokens are opaque commitments to receipt frontiers, existence, result heads and
+horizons; duplicate signals are ignored. Taking a pending batch clears it so
+later changed scopes cannot be hidden by an earlier batch.
 Receiving a new token makes only that peer pending and resets its back-off.
 Data continues through native sync sessions during this phase.
 
 Idle links ping every 15 seconds. Three consecutive unanswered pings end the
-link and schedule a reconnect through per-peer back-off. Authority changes,
-offline mode, disabling the worker and detach close the service's links.
+link and schedule a reconnect through per-peer back-off. Link retry deadlines
+are independent of data-pass retries, so busy links retain working native sync.
+Authority changes, offline mode, disabling the worker and detach close the
+service's links.
 Borrowed application transports and endpoints remain owned by the application.
 
 ## Evidence

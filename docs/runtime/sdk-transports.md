@@ -10,14 +10,14 @@ contact. Qualified on one host only.
 ## What a transport does
 
 A transport connects two devices with a reliable ordered byte stream and
-carries the protocol name: pairing, sync, renewal or commands. It adds no
+carries the protocol name: pairing, sync, live links, renewal or commands. It adds no
 security the SDK relies on. Pairing answers are sealed under the invitation
 token, renewals are signed, and sync runs
 [mutually authenticated native sessions](permissions-and-sync.md) carrying
 encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/11`,
+Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/14`, `rocky/link/1`,
 `rocky/sdk-renew/2`, `rocky/command/2`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream.
@@ -65,7 +65,12 @@ bounded pipes, counts starts, dials and closes, and injects faults: `stalled`
 holds every dial, `stall_peer(address, true)` holds just one peer,
 `dials_to(address)` counts its attempts, `cut_after(bytes)` breaks streams,
 `hold_cut` pauses at the cut for cancellation tests, `capacity` sets the pipe
-buffer and `network_changed()` signals connectivity.
+buffer and `network_changed()` signals connectivity. `mute(node, protocol, true)` drops
+writes on that node's existing streams for deterministic missing-pong tests;
+`protocol_dials(from, to, protocol)` counts its successful stream openings.
+
+[Live links](live-links.md) reuse these streams for committed-change signals
+and application ping/pong liveness. A link has a separate inbound service budget.
 
 ## Sync wakeups
 
@@ -203,9 +208,11 @@ session follows.
 
 | Resource | Bound |
 | --- | --- |
+| Inbound live links per network service | 32, separate from transient streams |
 | Inbound streams served at once per network service | 32; further ones are dropped and counted (`network.inbound.refused`) |
 | Inbound streams queued, only while a service is attached | iroh 32, TCP 32, hub 8 |
 | Inbound iroh connections with Rocky ALPNs; streams in flight each | 64; 4 |
+| Inbound iroh link connections; streams in flight each | 64 separately; 4 |
 | Cached outbound iroh connections | 64 |
 | `RockyEndpoint` inbound streams per application protocol | 64 |
 | Dial and stream open | iroh and SDK dial 15 s each; TCP connect and preamble 10 s |

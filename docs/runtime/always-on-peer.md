@@ -84,6 +84,12 @@ adapters may supply `Transport::connectivity`. On TCP or a foreign adapter,
 call `setOnline(true)` / `{"type":"connection","online":true}` when the
 application learns connectivity returned. Offline mode suspends attempts.
 
+With the worker enabled, admitted peers keep an authenticated
+[live link](live-links.md). Committed changes signal the peer over that link;
+only the receiving peer opens a data pass. Peers without a link retain the
+ordinary change-driven path. Links close on authority changes, offline mode,
+disabling the worker and detach. Idle links run only their 15-second ping.
+
 A pass reconciles at most four peers concurrently. Each peer has its own
 back-off: 1, 2, 4, 8, 16, 32 and then 60 seconds. A local write wakes the
 worker but leaves a failed peer's deadline intact. Connectivity and
@@ -91,9 +97,11 @@ worker but leaves a failed peer's deadline intact. Connectivity and
 authenticated inbound session resets that peer alone. Reachability is recorded
 as each peer answers; the pass status follows once all dialed peers finish.
 
-Retry timers run only for pending changes, requested metadata refresh or bounded
-continuation;
-an idle failed peer waits for a signal, as does a successful idle peer.
+Data-pass retry timers run only for pending changes, requested metadata refresh
+or bounded continuation; an idle failed data peer waits for a signal, as does a
+successful idle peer. Link reconnection has a separate back-off deadline, so a
+busy link slot does not postpone a ready data pass. A queued commit wakeup still
+runs the first pass to an unattempted peer.
 Disabling with `sync_start` cancels the active automatic pass and acknowledges
 its cancellation within one second. Committed frames stay whole and the next
 pass repeats interrupted work. Enabling starts a pass immediately, resetting

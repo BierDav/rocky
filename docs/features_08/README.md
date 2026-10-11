@@ -1,7 +1,8 @@
 # features_08: live links
 
-Status: proposed (2026-10-11). Phase 1 is in progress; no other phase has started.
-This is the next-work authority once accepted. Each brief states the questions
+Status: accepted execution roadmap (2026-10-12). Phases 1 and 2 are implemented;
+see their briefs for evidence. Phases 3–6 have not started.
+This is the current next-work authority. Each brief states the questions
 it owns under "Settled" and records its own status.
 
 ## Destination

@@ -124,6 +124,9 @@ SQLite error code instead of writing silently
 - `SET n = n + 1` publishes the computed value, not an increment.
 - An open write transaction holds the replica for at most 5 s by default,
   then fails with code 4 until Room rolls back. Readers never delay it.
+- A commit answers before the device flush
+  ([durability](sql-driver.md#durability)); [local latency](local-latency.md)
+  measures a DAO write and its observer.
 
 ## Observation
 

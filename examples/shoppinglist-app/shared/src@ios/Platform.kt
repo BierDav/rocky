@@ -14,7 +14,6 @@ import platform.Foundation.NSDateFormatterShortStyle
 import platform.Foundation.dateWithTimeIntervalSince1970
 import platform.Security.SecRandomCopyBytes
 import platform.Security.kSecRandomDefault
-import platform.posix.memcpy
 
 internal actual fun randomBytes(size: Int): ByteArray = ByteArray(size).also { bytes ->
     if (size > 0) bytes.usePinned { check(SecRandomCopyBytes(kSecRandomDefault, size.toULong(), it.addressOf(0)) == 0) { "Secure random source failed" } }

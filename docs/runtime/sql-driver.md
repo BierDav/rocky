@@ -70,6 +70,17 @@ transaction publishes nothing. Under the `changed`
 [update policy](sql-sessions.md#what-a-commit-publishes) an update publishes
 only the columns whose values differ, so writing a whole entity is safe.
 
+## Durability
+
+A writer's commit is [buffered](secure-sql.md#leases-and-limits): it answers
+once the engine committed, without waiting for the device, as a stock SQLite
+file in WAL mode with `synchronous=NORMAL` does. The database flushes on a
+blocking thread right after and then runs the commit's maintenance step, so a
+statement never waits for either. Every call that hands data to a peer, the
+coordinator or a backup still flushes first. A process crash loses nothing;
+power loss can drop the last commits that nothing outside the device saw.
+[Local latency](local-latency.md) has the measurements.
+
 ## Row ids
 
 Every typed table has Rocky's `id` and `row_kind` columns
@@ -132,7 +143,7 @@ writes them; another version needs a new profile and fixture.
 
 | Room sends | Answer |
 | --- | --- |
-| `PRAGMA journal_mode = …`, `synchronous = NORMAL\|FULL`, `temp_store = MEMORY`, `recursive_triggers = 1`, `foreign_keys = ON` | Accepted: the file is always in WAL mode and every commit flushes |
+| `PRAGMA journal_mode = …`, `synchronous = NORMAL\|FULL`, `temp_store = MEMORY`, `recursive_triggers = 1`, `foreign_keys = ON` | Accepted: the file is always in WAL mode and Rocky decides when it flushes ([durability](#durability)) |
 | `PRAGMA busy_timeout [= n]` | The transaction timeout in milliseconds; setting it changes nothing |
 | `PRAGMA user_version` | The installed schema's version, which Room's import makes Room's database version |
 | `PRAGMA user_version = n` | Accepted when it is that version; otherwise an error naming both |

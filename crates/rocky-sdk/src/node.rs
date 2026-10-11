@@ -216,6 +216,11 @@ struct Reached {
     results: Option<String>,
 }
 
+/// How long the sync worker lets a committed change settle before its pass:
+/// local observers read first on the shared reactor, and a burst of commits
+/// becomes one pass.
+const LOCAL_SETTLE: std::time::Duration = std::time::Duration::from_millis(20);
+
 pub(crate) struct Node {
     pub replica: EncryptedReplica<TypedCommands>,
     pub domain: Domain,
@@ -1978,8 +1983,8 @@ impl Node {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
                 _ = control.changed() => {},
                 changed = events.changed() => { if changed.is_err() { break; } self.pending_sync(); }
-                changed = frames.changed() => { if changed.is_err() { break; } self.pending_sync(); }
-                changed = revisions.changed() => { if changed.is_err() { break; } self.pending_sync(); }
+                changed = frames.changed() => { if changed.is_err() { break; } self.pending_sync(); tokio::time::sleep(LOCAL_SETTLE).await; }
+                changed = revisions.changed() => { if changed.is_err() { break; } self.pending_sync(); tokio::time::sleep(LOCAL_SETTLE).await; }
                 () = async {
                     match &mut connectivity {
                         Some(events) => { if events.changed().await.is_err() { connectivity = None; } },

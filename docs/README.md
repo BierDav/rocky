@@ -63,6 +63,7 @@ Select the guide for your task rather than reading every document.
 | Run full replica nodes, subscribe a device to some scopes, evict one or read remotely | [Full and partial replicas](runtime/replica-roles.md) |
 | Find throughput, read and retention limits and the measured options | [Scaling limits](runtime/scaling-limits.md) |
 | Group writes, receive pages, wait for queue space and read writer counters | [Write concurrency](runtime/write-concurrency.md) |
+| Measure what a local change costs until its observer shows it | [Local latency](runtime/local-latency.md) |
 | See what the earlier engine cost at 5,000,000 rows and 2,000 tables | [Engine at target size](../benchmarks/engine-scale/RESULTS.md) |
 | Inspect coordinator storage plateau and expiry evidence | [Retention qualification](runtime/coordinator-evidence.md#retention-probe) |
 | Inspect three-process coordination and crash evidence | [Coordination qualification](runtime/coordinator-evidence.md#coordination-and-crash-boundaries) |

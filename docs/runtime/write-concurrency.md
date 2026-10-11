@@ -83,7 +83,11 @@ waits until a flush covers the domain. Forwarding the envelope from
 `durable` watermark; a flush is one `sync_all` of the `-wal` file. `author`,
 `receive` and `receive_all` flush before answering; `author_buffered` returns a
 `Buffered<Hash>` without the frame, and `receive_buffered` must not be
-acknowledged before `flush` or `durable_commit` covers it. Calls that hand data
+acknowledged before `flush` or `durable_commit` covers it. A
+[secure SQL](secure-sql.md#leases-and-limits) commit flushes unless its session
+acknowledges `Buffered`, as the SDK's [driver connections](sql-driver.md#durability)
+do. `EncryptedReplica::flush` reads the commit count under the replica lock and
+flushes on a blocking thread without it. Calls that hand data
 out flush first: `transfer_page`, `acknowledge`, `receipt_status`, the
 `*_encrypted` command calls, result acknowledgments, effect begin/finish/dispatch
 and recovery export and retention. A reopened replica treats existing commits

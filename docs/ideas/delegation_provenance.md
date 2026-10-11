@@ -1,5 +1,7 @@
 # Durable delegation provenance
 
+Prerequisite: [one identity](../one_identity.md)
+
 Status: idea, not implemented or scheduled. Phase 7 uses precise registry
 selection for recorded devices and full rotation for unrecorded devices;
 see [the phase brief](../features_07/07-registry-revocation.md).

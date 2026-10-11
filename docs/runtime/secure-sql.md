@@ -138,9 +138,16 @@ identity foreign keys are in
 A transaction holds the replica until it commits, rolls back, is cancelled,
 times out or its session is dropped. Every other call of the replica waits,
 receipt and reads outside the transaction included. `SqlOptions` bounds it as
-in [SQL sessions](sql-sessions.md#limits); `acknowledge` is ignored because a
-commit always flushes before it answers. A caller that awaits another call of
+in [SQL sessions](sql-sessions.md#limits). A caller that awaits another call of
 the same replica inside its own transaction waits for its timeout.
+
+`acknowledge` decides what a commit waits for. `Flushed`, the default, flushes
+the device and runs the scope's maintenance step before it answers, so its
+frames may be sent anywhere. `Buffered` answers once the engine committed: the
+frames must not leave the device except through a call that flushes first,
+such as a transfer page, and `EncryptedReplica::flush` and `maintain` finish
+the commit afterwards. Power loss can drop a buffered commit that nothing
+exposed ([durability](write-concurrency.md#durability-and-exposure)).
 
 A policy change or credential renewal waits for an open transaction. That
 transaction commits under the authority it began with; later statements are

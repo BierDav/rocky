@@ -91,7 +91,7 @@ impl Housekeeping {
             [name, "=", _] if lower(name) == "journal_mode" => {
                 one("journal_mode", SqlValue::Text("wal".into()))
             }
-            // Durability belongs to Rocky: every commit flushes.
+            // Durability belongs to Rocky: it flushes before data leaves.
             [name, "=", "NORMAL" | "FULL"] if lower(name) == "synchronous" => none(),
             [name] if lower(name) == "busy_timeout" => {
                 one("timeout", SqlValue::Integer(context.busy_timeout))

@@ -315,6 +315,12 @@ other refs.
 
 The `e2e` job runs `./scripts/check --e2e` on pushes to `main`; releases do not
 wait for it.
+Linux shopping checks publish only the common metadata, JVM and Android
+artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
+iOS builds while assembling that metadata. The macOS job publishes and tests
+the iOS artifacts; its host needs full Xcode selected with `xcode-select`, an
+installed iOS simulator runtime and an available iPhone simulator. It installs
+Java 21 for the Kotlin checks.
 The tier budgets apply in CI as they do locally, scaled by the runner's load;
 no hosted run has measured them yet. CI retries a failing nextest test once
 (`NEXTEST_RETRIES`).

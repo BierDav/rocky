@@ -109,7 +109,7 @@ jobs:
     # reuses the x64 peer, while Gitea builds its own.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
     steps:
       - name: Download the exact source revision
@@ -408,7 +408,9 @@ jobs:
             export ROCKY_PEER="$RUNNER_TEMP/build/rocky-peer"
           fi
           # The application resolves Rocky from Maven local.
-          sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal
+          sdks/kotlin/gradlew -p sdks/kotlin publishKotlinMultiplatformPublicationToMavenLocal \
+            publishJvmPublicationToMavenLocal publishAndroidPublicationToMavenLocal \
+            :rocky-runtime-android:publishReleasePublicationToMavenLocal
           ./examples/shoppinglist-app/qualify
           sdks/kotlin/gradlew -p sdks/kotlin check
           ./examples/shoppinglist-app/check
@@ -561,6 +563,11 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
           rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
           xcrun --sdk iphonesimulator --show-sdk-path
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.TestExecutable
 import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTest
+import org.jetbrains.kotlin.konan.target.HostManager
 
 // One Kotlin API over the native runtime: JNA on the JVM and Android, cinterop on iOS.
 plugins {
@@ -50,7 +51,8 @@ kotlin {
         }
         tasks.named(compilations.getByName("main").cinterops.getByName("rocky").interopProcessingTaskName) {
             inputs.dir(bindings.flatMap { it.headers })
-            inputs.dir(library.flatMap { it.library })
+            // Disabled native targets must not pull a Rust cross-build into host metadata publication.
+            if (HostManager().isEnabled(konanTarget)) inputs.dir(library.flatMap { it.library })
         }
         if (name == "iosSimulatorArm64") {
             // Standalone simulator executables need an app identity for Keychain access.

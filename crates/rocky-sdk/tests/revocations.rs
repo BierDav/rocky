@@ -175,9 +175,9 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     m.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(revocations(&m).await, both);
     assert_eq!(revocations(&n).await, both);
-    assert_eq!(m.peer(&n.node().await).await["error"], Value::Null);
     n.sync().await.map_err(|error| error.to_string())?;
     m.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(m.peer(&n.node().await).await["error"], Value::Null);
     for (name, device) in [("m", &m), ("n", &n)] {
         assert_eq!(
             identity(root, name)?["keys"],

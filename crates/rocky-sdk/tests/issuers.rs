@@ -3,7 +3,7 @@
 use common::{Device, Failure};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 mod common;
 
@@ -30,11 +30,25 @@ fn identity(root: &Path, name: &str) -> Result<Value, Failure> {
         root.join(name).join("identity.json"),
     )?)?)
 }
-/// The issuers a device renews from, by node key.
-fn issuers(root: &Path, name: &str) -> Result<Vec<String>, Failure> {
-    Ok(serde_json::from_value(
-        identity(root, name)?["issuers"].clone(),
-    )?)
+fn peer_id(node: &str) -> Result<String, Failure> {
+    Ok(rocky_credentials::PeerId::of(node.parse()?).to_hex())
+}
+/// Persisted renewal contacts are indexed by opaque peer references.
+fn assert_issuers(root: &Path, name: &str, nodes: &[&str]) -> Result<(), Failure> {
+    let saved = identity(root, name)?;
+    let actual: BTreeSet<_> = saved["contact_refs"]
+        .as_object()
+        .ok_or("contacts")?
+        .iter()
+        .filter(|(_, entry)| entry["issuer"] == true)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let expected = nodes
+        .iter()
+        .map(|node| peer_id(node))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    assert_eq!(actual, expected, "{name}");
+    Ok(())
 }
 fn range(root: &Path, name: &str) -> Result<(u64, u64), Failure> {
     let range = &identity(root, name)?["minting"]["range"];
@@ -73,10 +87,10 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     let (a_node, b_node) = (a.node().await, b.node().await);
     // Each issuer knows the other's routes; no keys or author numbers are
     // shared beyond the publisher key.
-    assert_eq!(issuers(root, "a")?, [b_node.as_str()]);
-    assert_eq!(issuers(root, "b")?, [a_node.as_str()]);
+    assert_issuers(root, "a", &[&b_node])?;
+    assert_issuers(root, "b", &[&a_node])?;
     assert_eq!(
-        identity(root, "a")?["peers"][&b_node]["routes"][0]["address"],
+        identity(root, "a")?["contact_refs"][peer_id(&b_node)?]["contact"]["routes"][0]["address"],
         "b"
     );
     assert_ne!(
@@ -90,15 +104,15 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
 
     // Devices enrolled or renewed after the pairing learn the second issuer.
     let late = join(root, &hub, "late", &a.invite().await)?;
-    assert_eq!(issuers(root, "late")?, [a_node.clone(), b_node.clone()]);
-    assert_eq!(issuers(root, "early")?, [a_node.as_str()]);
+    assert_issuers(root, "late", &[&a_node, &b_node])?;
+    assert_issuers(root, "early", &[&a_node])?;
     early.ok(json!({"type": "renew"})).await;
-    assert_eq!(issuers(root, "early")?, [a_node.clone(), b_node.clone()]);
+    assert_issuers(root, "early", &[&a_node, &b_node])?;
     // The second issuer serves a device it never saw: its chain admits it.
     synced(&late).await?;
     assert_eq!(b.peer(&late.node().await).await["state"], "connected");
     assert_eq!(
-        identity(root, "late")?["peers"]
+        identity(root, "late")?["contact_refs"]
             .as_object()
             .map(|peers| peers.len()),
         Some(2)
@@ -118,8 +132,12 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     assert_eq!(error["code"], "rejected", "{error}");
     let revoked = b.ok(json!({"type": "revoke", "node": a_node})).await;
     assert_eq!(revoked["revocations"]["statements"], 1);
-    assert!(issuers(root, "b")?.is_empty());
-    assert!(identity(root, "b")?["peers"].get(&a_node).is_none());
+    assert_issuers(root, "b", &[])?;
+    assert!(
+        identity(root, "b")?["contact_refs"]
+            .get(peer_id(&a_node)?)
+            .is_none()
+    );
 
     // The second issuer invites a third device, which syncs with it.
     let c = join(root, &hub, "c", &b.invite().await)?;
@@ -135,8 +153,12 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     let after = session(&early).await;
     assert_eq!(after["revocations"]["statements"], 1);
     assert!(after["expires"].as_str() >= before["expires"].as_str());
-    assert_eq!(issuers(root, "early")?, [b_node.as_str()]);
-    assert!(identity(root, "early")?["peers"].get(&a_node).is_none());
+    assert_issuers(root, "early", &[&b_node])?;
+    assert!(
+        identity(root, "early")?["contact_refs"]
+            .get(peer_id(&a_node)?)
+            .is_none()
+    );
     early.add(2, "Eggs").await;
     synced(&early).await?;
     synced(&c).await?;
@@ -146,7 +168,7 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     // revocation; its earlier chain stays current.
     synced(&late).await?;
     assert_eq!(session(&late).await["revocations"]["statements"], 1);
-    assert_eq!(issuers(root, "late")?, [b_node.as_str()]);
+    assert_issuers(root, "late", &[&b_node])?;
     late.add(3, "Bread").await;
     synced(&late).await?;
     synced(&c).await?;

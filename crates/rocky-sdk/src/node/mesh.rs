@@ -14,13 +14,10 @@ impl ContactHandler for Node {
 }
 impl Node {
     async fn answer_contacts(&self, request: ContactRequest) -> Result<ContactResponse, Failure> {
-        let held = self.replica.revocations().await;
+        // Contact exchange must preserve the pending epoch refresh from the handshake.
+        self.absorb_revocations(None).await?;
         let mut settings = self.settings.lock().await;
-        let revocations = settings.revocations.clone();
-        let contacts = settings.peers.len();
-        settings.learn_revocations(&held)?;
-        settings.forget_revoked();
-        let mut changed = settings.revocations != revocations || settings.peers.len() != contacts;
+        let mut changed = false;
         let response = match request {
             ContactRequest::Handover { contacts } => {
                 for contact in contacts {

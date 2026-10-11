@@ -48,6 +48,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     let mut failed = 0;
     // Cuts during the handshake, the push and the pull.
     for bytes in [0, 300, 3_000, 9_000, 20_000, 45_000] {
+        b.ok(json!({"type": "connection", "online": true})).await;
         hub.cut_after(Some(bytes));
         failed += usize::from(b.sync().await.is_err());
         hub.cut_after(None);
@@ -67,6 +68,7 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     );
 
     // The interrupted sync repeats safely, and a duplicate changes nothing.
+    b.ok(json!({"type": "connection", "online": true})).await;
     for _ in 0..2 {
         b.sync().await.map_err(|error| error.to_string())?;
         assert_eq!(b.items().await, union());
@@ -140,6 +142,7 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
 
     drop(held);
     until(&a, "active", 0).await?;
+    b.ok(json!({"type": "connection", "online": true})).await;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(a.items().await, union());
     stranger.close().await;

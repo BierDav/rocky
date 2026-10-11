@@ -85,7 +85,7 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 13 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, issuers, peers with routes and local source/age metadata, `enrollment_routes` and optional custody `enrollment_upstream`; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
+| `identity.json` | 16 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, pending deliveries, and `contact_refs` indexed by opaque peer references with routes, issuer flags and local metadata; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
@@ -163,7 +163,9 @@ The tombstone commits before intent cleanup and before success is returned.
 Open completes interrupted cleanup before serving sessions. Any issuer
 revokes while others do: their statements
 merge. Others learn it on their next sync, which a differing revocation set
-turns into a renewal; the revoked device is refused sync and renewal and keeps
+turns into a renewal. Contact exchange preserves the pending key refresh when
+it saves statements learned by the handshake; members fetch the new epochs
+before completing recovery. The revoked device is refused sync and renewal and keeps
 only what it already decrypted. See [key rotation](credentials.md#revocation-in-the-sdk),
 [revocations](revocations.md) and [limits](credentials.md#limits).
 

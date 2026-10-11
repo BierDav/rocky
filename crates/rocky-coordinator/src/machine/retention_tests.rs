@@ -27,7 +27,7 @@ impl Mesh {
         let owner = PrincipalId([9; 16]);
         let time = 1_900_000_000;
         let scopes: Vec<_> = (1..=domains).map(scope).collect();
-        let mut mesh = Self {
+        Self {
             genesis: CertifiedGenesis::sign(
                 Genesis {
                     mesh: scopes[0].mesh,
@@ -56,8 +56,8 @@ impl Mesh {
                                 ],
                                 schema: 1,
                                 handler: 1,
-                                not_before: 0,
-                                expires: 366 * DAY,
+                                not_before: time - DAY,
+                                expires: time + 300 * DAY,
                             },
                             &authority,
                         )
@@ -82,10 +82,7 @@ impl Mesh {
             owner,
             scopes,
             time,
-        };
-        mesh.genesis.genesis.directory = Some(mesh.control(mesh.scopes[0], 1));
-        mesh.genesis = CertifiedGenesis::sign(mesh.genesis.genesis.clone(), &root).unwrap();
-        mesh
+        }
     }
     fn control(&self, scope: Scope, revision: u64) -> ControlCertificate {
         ControlCertificate::sign(
@@ -199,7 +196,12 @@ impl Mesh {
     }
 }
 fn nonce() -> Commitment {
-    *PrivateKey::new().public_key().as_bytes()
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    commitment(
+        "test.retention-nonce",
+        &NEXT.fetch_add(1, Ordering::Relaxed).to_le_bytes(),
+    )
 }
 fn at(time: u64, n: u64) -> u64 {
     (time << ISSUE_SHIFT) + n

@@ -167,11 +167,10 @@ def alone(suite, name):
 
 
 def judge(config, tier, timed, factor, confirmed):
-    """Returns the tests over budget: clear cases at once, the rest re-run alone.
+    """Returns tests still over budget when re-run alone, scaled by host load.
 
-    factor is the load factor of the run. A test competes with the tier's other
-    tests as well, which the load before the run does not show, so only a test
-    over ten times its budget after scaling fails without a re-run.
+    A test's first run competes with other tests and can include scheduler
+    stalls of any size. Confirm even a large spike before rejecting it.
 
     confirmed maps a test to (alone, in the run) from its last passing re-run.
     A test is not re-run while that alone time, grown as much as its time in
@@ -187,22 +186,17 @@ def judge(config, tier, timed, factor, confirmed):
             alone_before, took_before = confirmed[key]
             if alone_before * max(1.0, took / took_before) <= 0.75 * limit:
                 continue
-        best, rerun_factor = took / factor, factor
-        if best <= 10 * limit:
-            best = math.inf
-            for _ in range(RERUNS):
-                scaled, rerun_factor = alone(suite, name)
-                if scaled is None:
-                    break
-                best = min(best, scaled)
-                # Stop once it is clearly in or clearly out.
-                if best <= limit or best > 3 * limit:
-                    break
-            how = "alone"
+        best, rerun_factor = math.inf, factor
+        for _ in range(RERUNS):
+            scaled, rerun_factor = alone(suite, name)
+            if scaled is None:
+                break
+            best = min(best, scaled)
             if best <= limit:
-                confirmed[key] = (best, took)
-        else:
-            how = "scaled, not re-run"
+                break
+        how = "alone"
+        if best <= limit:
+            confirmed[key] = (best, took)
         verdict = "ok" if best <= limit else "OVER"
         print(f"  {verdict:4} {key}: {show(took)} in the run, {show(best)} {how} "
               f"(load x{rerun_factor:.1f}), budget {show(limit)}", flush=True)

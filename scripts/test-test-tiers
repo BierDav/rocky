@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Regression tests for budget confirmation; run by scripts/lint."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+loader = importlib.machinery.SourceFileLoader("test_tiers", str(Path(__file__).with_name("test-tiers")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+tiers = importlib.util.module_from_spec(spec)
+loader.exec_module(tiers)
+
+
+class BudgetConfirmation(unittest.TestCase):
+    def judge(self, reruns, confirmed=None):
+        config = SimpleNamespace(per_test=lambda tier, key: 0.01)
+        suite = {"binary-id": "unit"}
+        confirmed = {} if confirmed is None else confirmed
+        with patch.object(tiers, "alone", side_effect=reruns) as alone, contextlib.redirect_stdout(io.StringIO()):
+            over = tiers.judge(config, "unit", [(None, suite, "example", 0.5)], 1.0, confirmed)
+        return over, confirmed, alone.call_count
+
+    def test_large_scheduler_spike_is_confirmed(self):
+        over, confirmed, calls = self.judge([(0.001, 1.0)])
+        self.assertEqual(over, [])
+        self.assertIn("unit example", confirmed)
+        self.assertEqual(calls, 1)
+
+    def test_a_spike_during_confirmation_can_recover(self):
+        over, _, calls = self.judge([(0.4, 1.0), (0.001, 1.0)])
+        self.assertEqual(over, [])
+        self.assertEqual(calls, 2)
+
+    def test_a_real_budget_failure_remains_a_failure(self):
+        over, confirmed, calls = self.judge([(0.02, 1.0)] * tiers.RERUNS)
+        self.assertEqual(len(over), 1)
+        self.assertEqual(confirmed, {})
+        self.assertEqual(calls, tiers.RERUNS)
+
+    def test_a_failed_confirmation_cannot_pass(self):
+        over, confirmed, calls = self.judge([(None, 1.0)])
+        self.assertEqual(len(over), 1)
+        self.assertEqual(confirmed, {})
+        self.assertEqual(calls, 1)
+
+    def test_a_recent_confirmation_is_reused(self):
+        over, _, calls = self.judge([], {"unit example": (0.001, 0.5)})
+        self.assertEqual(over, [])
+        self.assertEqual(calls, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

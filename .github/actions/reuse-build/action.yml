@@ -117,4 +117,26 @@ runs:
         workspaces: source -> target
         shared-key: check
         cache-workspace-crates: true
-        save-if: false
+        save-if: ${{ inputs.job == 'shopping' && github.ref == 'refs/heads/main' }}
+
+    - name: Restore compiled workspace crates when rebuilding
+      if: >-
+        steps.passed.outputs.cache-hit != 'true' && inputs.job != 'shopping' && (inputs.dependencies == 'always'
+        || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
+        || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
+        || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
+      uses: actions/cache/restore@v4
+      with:
+        path: source/target
+        key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
+        restore-keys: |
+          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
+
+    - name: Restore and save the shopping job's x64 compiled crates
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.job == 'shopping'
+      uses: actions/cache@v4
+      with:
+        path: source/target
+        key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
+        restore-keys: |
+          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-

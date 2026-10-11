@@ -76,6 +76,10 @@ if [ -n "$build" ]; then
         # shellcheck disable=SC2046 # the build arguments are words
         cargo nextest archive --locked $(archive_args "$name") \
             --archive-file "$archives/$name.tar.zst"
+        if [ "$name" = workspace ]; then
+            # nextest built the peer for integration tests; the next feature build replaces it.
+            cp "${CARGO_TARGET_DIR:-target}/debug/rocky-peer" "$archives/rocky-peer"
+        fi
     done
     exit
 fi

@@ -150,9 +150,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Workspace crates, not just dependencies, are reused across runs; cargo's
-      # fingerprints still decide what a source change rebuilds. This matters
-      # most here, the only job that compiles.
+      # Cargo downloads use the dependency key; compiled workspace artifacts
+      # use a new key per tree so rebuilt crates are saved for the next run.
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
         with:
@@ -160,6 +159,15 @@ jobs:
           shared-key: check
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Restore and save compiled workspace crates
+        if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: source/target
+          key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ steps.source.outputs.tree }}
+          restore-keys: |
+            rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
 
       - uses: taiki-e/install-action@v2
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
@@ -180,9 +188,6 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/check --build "$RUNNER_TEMP/build"
-          # After the archives: the archive without default features replaces the binary.
-          cargo build --locked -p rocky-sdk --bin rocky-peer
-          cp target/debug/rocky-peer "$RUNNER_TEMP/build/"
 
       # One artifact per consumer so a failure to finalize the large shared
       # archive cannot also lose the small ones, and `shopping`
@@ -406,6 +411,7 @@ jobs:
           sdks/kotlin/gradlew -p sdks/kotlin publishKotlinMultiplatformPublicationToMavenLocal \
             publishJvmPublicationToMavenLocal publishAndroidPublicationToMavenLocal \
             :rocky-runtime-android:publishReleasePublicationToMavenLocal
+          ./scripts/ci/local-maven
           ./examples/shoppinglist-app/qualify
           sdks/kotlin/gradlew -p sdks/kotlin check
           ./examples/shoppinglist-app/check

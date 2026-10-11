@@ -80,14 +80,19 @@ fn a_held_table_keeps_the_in_group_tables_it_references() {
 #[test]
 fn group_epochs_are_bounded_before_a_secret_is_stored() {
     let mut record = group().record;
-    for epoch in 1..=MAX_GROUP_EPOCHS as u64 {
-        record
-            .hold(rocky_core::KeyEpoch::new(
+    let mut epochs: Vec<_> = (1..=MAX_GROUP_EPOCHS as u64)
+        .map(|epoch| {
+            rocky_core::KeyEpoch::new(
                 1,
                 &rocky_core::commitment("test.sibling", &epoch.to_be_bytes()),
-            ))
-            .unwrap();
-    }
+            )
+        })
+        .collect();
+    epochs.sort_unstable();
+    let last = epochs.pop().unwrap();
+    record.epochs = epochs;
+    record.hold(last).unwrap();
+    assert_eq!(record.epochs.len(), MAX_GROUP_EPOCHS);
     assert!(
         record
             .admit(rocky_core::KeyEpoch::new(
@@ -101,5 +106,13 @@ fn group_epochs_are_bounded_before_a_secret_is_stored() {
             .admit(rocky_core::KeyEpoch::new(1, &[255; 32]))
             .is_err()
     );
+    let held = record.epochs.clone();
+    record.hold(last).unwrap();
+    assert!(
+        record
+            .hold(rocky_core::KeyEpoch::new(1, &[255; 32]))
+            .is_err()
+    );
+    assert_eq!(record.epochs, held);
     assert_eq!(record.current(), record.epochs.iter().max().copied());
 }

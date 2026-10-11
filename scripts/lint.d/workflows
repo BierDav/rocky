@@ -1,6 +1,6 @@
 # shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
 # GitHub/Gitea workflows, including their embedded scripts.
-tools='actionlint shellcheck'
+tools='actionlint shellcheck python3'
 
 # Explicit paths: CI checks out an archive without .git, where bare actionlint
 # finds no project.
@@ -10,4 +10,5 @@ check() {
         [ ! -e "$workflow" ] || set -- "$@" "$workflow"
     done
     actionlint "$@"
+    scripts/test-test-tiers
 }

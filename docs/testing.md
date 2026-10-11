@@ -35,8 +35,8 @@ measurements.
   libtest itself. Integration and e2e tests run under nextest and are timed
   from its JUnit report.
 - A test over budget is re-run alone up to three times; its best time, divided
-  by the host's load factor, decides. A test over ten times its budget fails at
-  once.
+  by the host's load factor, decides. Even a large initial spike is confirmed
+  alone: scheduler stalls in a busy CI run must not be mistaken for slow tests.
 - Locally, a test already confirmed alone is not re-run while that time,
   grown as much as its time in the run has, stays within three quarters of
   its budget (`target/test-tiers/confirmed-<tier>.json`). CI re-runs them all.

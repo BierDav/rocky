@@ -279,8 +279,9 @@ On GitHub they use `ubuntu-latest`; on Gitea `build`, `check` and `e2e` use
 its own custody peer on Gitea; `lint` uses `ubuntu-latest-any-arch`.
 The `build` job compiles the baseline workspace. It downloads an archive of
 the exact event revision and runs `scripts/check --build`: strict workspace
-Clippy and the test binaries as nextest archives; it then builds the custody
-peer. It uploads three independent artifacts -- `nextest-workspace`,
+Clippy and the test binaries as nextest archives. The workspace test build
+already compiles the custody peer; it copies that binary before the SDK build
+without default features can replace it, avoiding a separate peer compilation. It uploads three independent artifacts -- `nextest-workspace`,
 `nextest-sdk` and `rocky-peer` -- so a failure to finalize one cannot also lose
 the others, and each consumer fetches only what it runs.
 Linux jobs install the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
@@ -309,15 +310,23 @@ of the same tree, such as a redescribed or rebased commit with unchanged content
 or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
 When `build` finds `check` already passed for the tree it builds nothing, and
-the jobs after it build what they still run themselves. The Rust cache keeps
-both dependencies and workspace crates; it is saved from `main` and restored on
-other refs.
+the jobs after it build what they still run themselves. The Rust action restores dependencies and a fallback `target` directory. A
+separate compiled `target` cache then overlays it and has a separate cache key per source tree, OS, architecture and pinned
+build configuration, with a compatible prefix for restoring the previous tree.
+This saves newly rebuilt workspace crates instead of repeatedly restoring an
+immutable dependency key's original artifacts. The build job saves it; test
+consumers restore it when an artifact is missing. Shopping also saves its x64
+build and dependency caches, since Gitea's ARM baseline cannot warm them. Gitea's Kubernetes runners
+must share persistent cache storage so another runner or a restarted pod can
+reuse it.
 
 The `e2e` job runs `./scripts/check --e2e` on pushes to `main`; releases do not
 wait for it.
 Linux shopping checks publish only the common metadata, JVM and Android
 artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
-iOS builds while assembling that metadata. The macOS job publishes and tests
+iOS builds while assembling that metadata. `scripts/ci/local-maven` removes
+references to unpublished native variants from the local SDK metadata: Amper
+resolves those references even for JVM qualification. The macOS job publishes and tests
 the iOS artifacts; its host needs full Xcode selected with `xcode-select`, an
 installed iOS simulator runtime and an available iPhone simulator. It installs
 Java 21 for the Kotlin checks.

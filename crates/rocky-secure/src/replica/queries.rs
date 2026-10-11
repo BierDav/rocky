@@ -56,6 +56,7 @@ impl<A: RowApplication> Inner<A> {
     /// refused, and every observer is told readability may differ.
     pub(super) fn bump_authority(&mut self) {
         self.authority += 1;
+        self.authority_events.send_replace(self.authority);
         self.queries
             .authority
             .store(self.authority, Ordering::SeqCst);

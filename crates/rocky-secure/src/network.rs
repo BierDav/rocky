@@ -20,6 +20,7 @@ use tokio::{
 mod chains;
 mod checkpoints;
 mod contacts;
+pub mod link;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
 mod commands;
 mod delivery;
@@ -81,7 +82,11 @@ struct Hello {
 }
 /// The label both sides sign the two hellos under.
 fn session_label(version: u32) -> String {
-    format!("rocky.native-session.v{version}")
+    if version == link::HANDSHAKE_VERSION {
+        "rocky.link.v1".into()
+    } else {
+        format!("rocky.native-session.v{version}")
+    }
 }
 /// What a session signs of each message is
 /// `signing_bytes("rocky.native-frame.v1", &(binding, sequence, bytes))`.
@@ -156,6 +161,7 @@ enum Message {
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
+    LinkState(Vec<(ResourceScope, Commitment)>),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -391,6 +397,7 @@ impl NativeSession {
             Side::Acceptor => read_frame(&mut stream).await?,
         };
         if side == Side::Acceptor
+            && version == NATIVE_SESSION_VERSION
             && let Some(proof) = Self::peer_resolution_reply(&peer_bytes, &local)?
         {
             write_frame(&mut stream, &proof).await?;

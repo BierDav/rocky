@@ -204,6 +204,7 @@ pub(super) struct Inner<A> {
     /// Grows whenever policy, credentials or keys change; sessions opened
     /// under an earlier value are refused.
     pub(super) authority: u64,
+    pub(super) authority_events: watch::Sender<u64>,
     /// Installed typed tables that stored rows project into.
     typed: Option<Arc<typed::Typed>>,
     /// The shadow tables of a pending projection plan, which rows also
@@ -578,6 +579,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             definition: manifest,
             revision: 0,
             authority: 1,
+            authority_events: watch::channel(1).0,
             typed: None,
             shadow: None,
             previous: Vec::new(),
@@ -703,6 +705,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Duplicate incoming frames do not wake it; exports still require a flush.
     pub async fn observe_frames(&self) -> watch::Receiver<()> {
         self.inner.lock().await.frames.subscribe()
+    }
+    /// Ends authority-bound network links without polling.
+    pub async fn observe_authority(&self) -> watch::Receiver<u64> {
+        self.inner.lock().await.authority_events.subscribe()
     }
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()

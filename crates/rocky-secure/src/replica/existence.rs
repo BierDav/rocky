@@ -513,7 +513,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// The highest contiguous position of every signer's log of `scope`.
-    pub(super) async fn existence_frontier(
+    pub(crate) async fn existence_frontier(
         &self,
         scope: ResourceScope,
     ) -> Result<BTreeMap<PublicKey, u64>, Error> {

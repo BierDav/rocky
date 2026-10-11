@@ -28,6 +28,8 @@ pub enum Protocol {
     Pair,
     /// An authenticated native session of the secure runtime.
     Sync,
+    /// An authenticated, symmetric live link.
+    Link,
     /// Renewal of an enrolled device's credentials.
     Renew,
     /// One signed command invocation and its executor's answer.
@@ -38,13 +40,20 @@ pub enum Protocol {
 }
 impl Protocol {
     /// The protocols a database serves.
-    pub const ALL: [Self; 4] = [Self::Pair, Self::Sync, Self::Renew, Self::Command];
+    pub const ALL: [Self; 5] = [
+        Self::Pair,
+        Self::Sync,
+        Self::Link,
+        Self::Renew,
+        Self::Command,
+    ];
     /// The protocol's versioned name: an ALPN for QUIC, a preamble or a
     /// label elsewhere. A changed wire format takes a new name.
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
             Self::Sync => NATIVE_SESSION.as_bytes(),
+            Self::Link => b"rocky/link/1",
             Self::Renew => b"rocky/sdk-renew/2",
             Self::Command => b"rocky/command/2",
             Self::Coordinate => b"rocky/coordinator/1",

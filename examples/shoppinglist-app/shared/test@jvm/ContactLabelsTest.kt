@@ -12,9 +12,9 @@ class ContactLabelsTest {
         try {
             val file = directory.resolve("contact-labels.json")
             val node = "ab".repeat(32)
-            ContactLabels(file.path).name(node, "Kitchen phone")
+            ContactLabels.open(file.path).name(node, "Kitchen phone")
             assertFalse(file.readText().contains(node))
-            assertEquals("Kitchen phone", ContactLabels(file.path).label(node))
+            assertEquals("Kitchen phone", ContactLabels.open(file.path).label(node))
             assertEquals(listOf("contact-labels.json"), directory.list()!!.toList())
         } finally {
             directory.deleteRecursively()

@@ -5,6 +5,7 @@ apply:
   - //project.module-template.yaml
 dependencies:
   - rocky:rocky-room:0.1.0: exported
+  - io.github.vinceglb:filekit-core:0.16.0
   - $compose.runtime
   - $compose.foundation
   - $compose.material3

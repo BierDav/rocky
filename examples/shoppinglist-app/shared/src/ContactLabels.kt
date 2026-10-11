@@ -8,16 +8,8 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /** Peer names chosen here; this file is never replicated. */
 @OptIn(ExperimentalAtomicApi::class)
-class ContactLabels(private val path: String) {
-    private val names = AtomicReference(
-        readText(path)?.let { text ->
-            val saved = Json.parseToJsonElement(text).jsonObject
-            require(saved["version"]?.jsonPrimitive?.int == 1) { "Unsupported local contact label format" }
-            saved.getValue("names").jsonObject.also { labels ->
-                require(labels.keys.all { it.length == 64 && it.all { char -> char in "0123456789abcdef" } })
-            }
-        } ?: JsonObject(emptyMap()),
-    )
+class ContactLabels private constructor(private val path: String, initialNames: JsonObject) {
+    private val names = AtomicReference(initialNames)
     private val saving = Mutex()
 
     private fun reference(node: String): String = sha256("rocky.shopping.contact-label.v1:$node".encodeToByteArray()).hex()
@@ -35,5 +27,18 @@ class ContactLabels(private val path: String) {
             }.toString(),
         )
         names.store(updated)
+    }
+
+    companion object {
+        suspend fun open(path: String): ContactLabels {
+            val names = readText(path)?.let { text ->
+                val saved = Json.parseToJsonElement(text).jsonObject
+                require(saved["version"]?.jsonPrimitive?.int == 1) { "Unsupported local contact label format" }
+                saved.getValue("names").jsonObject.also { labels ->
+                    require(labels.keys.all { it.length == 64 && it.all { char -> char in "0123456789abcdef" } })
+                }
+            } ?: JsonObject(emptyMap())
+            return ContactLabels(path, names)
+        }
     }
 }

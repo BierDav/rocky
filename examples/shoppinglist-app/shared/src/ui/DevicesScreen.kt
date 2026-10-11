@@ -17,11 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import org.example.examples.pairing.InvitationCode
 import org.example.examples.pairing.QrCode
 import org.example.examples.shopping.NodeKind
 import org.example.examples.shopping.PairingCode
@@ -134,7 +133,7 @@ fun DevicesScreen(model: DevicesViewModel) {
             { showing = null },
             confirmButton = { TextButton({ showing = null }) { Text("Done") } },
             title = { Text("Scan on ${code.name}") },
-            text = { Column(Modifier.verticalScroll(rememberScrollState())) { InvitationCode(code) } },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) { PairingCodeContent(code) } },
         )
     }
     if (adding) {
@@ -351,31 +350,20 @@ private fun AddDeviceDialog(invitation: PairingCode?, onInvite: (NodeKind, Strin
                         }
                     }
                 } else {
-                    InvitationCode(invitation)
+                    PairingCodeContent(invitation)
                 }
             }
         },
     )
 }
 
-/** The QR code of [invitation], with what it does and a way to copy it. */
 @Composable
-private fun ColumnScope.InvitationCode(invitation: PairingCode) {
-    @Suppress("DEPRECATION") // LocalClipboard needs a platform ClipEntry.
-    val clipboard = LocalClipboardManager.current
-    val code = invitation.toString()
-    QrCode(code, Modifier.size(280.dp).align(Alignment.CenterHorizontally))
-    Text(
-        "A ${invitation.kind.label.lowercase()} device. The code works once, for 10 minutes; it reaches the inviting device over iroh, also from a cellular network. " +
+private fun PairingCodeContent(code: PairingCode) {
+    InvitationCode(
+        code.toString(),
+        "A ${code.kind.label.lowercase()} device. The code works once, for 10 minutes; it reaches the inviting device over iroh, also from a cellular network. " +
             "A phone's camera app opens it in Shopping.",
-        style = MaterialTheme.typography.bodySmall,
     )
-    SelectionContainer { Text(code.take(48) + "…", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace) }
-    TextButton({ clipboard.setText(AnnotatedString(code)) }) {
-        Icon(Icons.Filled.ContentCopy, null)
-        Spacer(Modifier.width(6.dp))
-        Text("Copy code")
-    }
 }
 
 @Composable

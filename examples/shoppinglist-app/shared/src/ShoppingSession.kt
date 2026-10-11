@@ -90,8 +90,11 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
     /** After a failed setup: removes what it left, so another code can be used. */
     fun startOver() {
         if (state.value !is SessionState.Failed || RockyDatabase.exists(platform.directory)) return
-        removeDirectory(platform.directory)
-        mutableState.value = SessionState.Setup
+        scope.launch {
+            if (state.value !is SessionState.Failed || RockyDatabase.exists(platform.directory)) return@launch
+            removeDirectory(platform.directory)
+            mutableState.value = SessionState.Setup
+        }
     }
 
     private fun start(open: suspend () -> ShoppingNode) {

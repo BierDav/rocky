@@ -37,15 +37,16 @@ class ShoppingNode private constructor(
     foreground: Flow<Boolean>,
     val contacts: ContactLabels,
     private val kindPath: String,
+    initialKind: NodeKind?,
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
     val approvals = Approvals(room.room, rocky, household, self, commands != null)
     val isTrusted: Boolean get() = rocky.isIssuer
-    var kind: NodeKind? = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
+    var kind: NodeKind? = initialKind
         private set
 
-    private fun rememberKind(kind: NodeKind) {
+    private suspend fun rememberKind(kind: NodeKind) {
         replaceText(kindPath, kind.name)
         this.kind = kind
     }
@@ -115,8 +116,10 @@ class ShoppingNode private constructor(
                         val self = rocky.session().node
                         // Room keeps only a lock file next to Rocky's.
                         val room = platform.room("${platform.directory}/shopping").buildOnRocky(rocky)
-                        val contacts = ContactLabels("${platform.directory}/contact-labels.json")
-                        ShoppingNode(rocky, room, self, commands, platform.foreground, contacts, "${platform.directory}/device-kind").also { opened = it }
+                        val contacts = ContactLabels.open("${platform.directory}/contact-labels.json")
+                        val kindPath = "${platform.directory}/device-kind"
+                        val kind = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
+                        ShoppingNode(rocky, room, self, commands, platform.foreground, contacts, kindPath, kind).also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) { rocky.close() }
                         throw error

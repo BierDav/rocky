@@ -7,6 +7,9 @@ import kotlinx.atomicfu.locks.ReentrantLock
 import kotlinx.atomicfu.locks.withLock
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.session.ShoppingNode
+import org.example.examples.shopping.data.session.ShoppingPlatform
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
@@ -33,7 +36,7 @@ class IosShoppingTest {
             root,
             "Simulator",
             room = { Room.databaseBuilder<ShoppingDatabase>(name = it) },
-            secrets = secrets,
+            secrets = { secrets },
             transport = { PeerTransport.Tcp("127.0.0.1:0") },
         )
         var node = ShoppingNode.create(platform)

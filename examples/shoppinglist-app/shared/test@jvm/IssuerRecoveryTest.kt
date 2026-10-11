@@ -1,6 +1,10 @@
 package org.example.examples.shopping
 
 import kotlinx.coroutines.*
+import org.example.examples.shopping.data.ShoppingRepository
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.ShoppingSchema
+import org.example.examples.shopping.data.household.NodeKind
 import rocky.*
 import java.io.File
 import java.nio.file.Files

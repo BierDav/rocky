@@ -1,7 +1,7 @@
 package org.example.examples.shopping.qualification
 
 import kotlinx.serialization.json.*
-import org.example.examples.shopping.ShoppingSchema
+import org.example.examples.shopping.data.db.ShoppingSchema
 import java.io.File
 import java.lang.management.ManagementFactory
 import java.net.ServerSocket

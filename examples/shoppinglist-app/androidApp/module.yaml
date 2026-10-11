@@ -5,6 +5,7 @@ apply:
 dependencies:
   - ../shared
   - androidx.activity:activity-compose:1.13.0
+  - androidx.core:core-splashscreen:1.2.0
   - $compose.material3
   - $compose.preview
   - $compose.uiTooling

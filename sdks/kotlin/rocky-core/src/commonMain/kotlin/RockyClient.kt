@@ -3,6 +3,8 @@ package rocky
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 
 class RockyException(val code: String, val retryable: Boolean, message: String) : Exception(message)
@@ -31,6 +33,11 @@ fun text(value: String): JsonObject = buildJsonObject {
 }
 
 class RockyClient(private val transport: Transport) {
+    private val closing = Mutex()
+    private val observations = Mutex()
+    private val collectors = mutableSetOf<Job>()
+    private var closed = false
+
     suspend fun call(request: JsonObject): JsonObject = transport.call(request)
 
     /** Requires an open SQL transaction and an installed table pseudonym. */
@@ -70,7 +77,7 @@ class RockyClient(private val transport: Transport) {
     )
     suspend fun recoverMutation(handle: JsonArray): JsonObject = call(request("mutation_progress") { put("handle", handle) })
     suspend fun recoverCommand(handle: JsonArray): JsonObject = call(request("command_progress") { put("handle", handle) })
-    fun observe(query: JsonObject): Flow<JsonObject> = flow {
+    fun observe(query: JsonObject): Flow<JsonObject> = observation {
         // NonCancellable ensures cancellation during registration still releases its token.
         val subscription = withContext(NonCancellable) { call(request("subscribe") { put("query", query) }).getValue("subscription") }
         try {
@@ -87,7 +94,7 @@ class RockyClient(private val transport: Transport) {
     fun observe(queries: Flow<JsonObject>): Flow<JsonObject> = queries.distinctUntilChanged().flatMapLatest { observe(it) }
 
     /** Committed revision, generation progress and current authority; cancellation releases only this wait. */
-    fun readiness(): Flow<JsonObject> = flow {
+    fun readiness(): Flow<JsonObject> = observation {
         var value = call(request("status"))
         while (true) {
             emit(value)
@@ -95,5 +102,32 @@ class RockyClient(private val transport: Transport) {
             value = call(request("status_next") { put("after", token) })
         }
     }.buffer(Channel.CONFLATED)
-    suspend fun close() = transport.close()
+    internal fun <T> observation(block: suspend FlowCollector<T>.() -> Unit): Flow<T> = flow {
+        coroutineScope {
+            val collector = currentCoroutineContext().job
+            observations.withLock {
+                if (closed) throw CancellationException("Rocky client closed")
+                collectors.add(collector)
+            }
+            try {
+                block(this@flow)
+            } finally {
+                withContext(NonCancellable) { observations.withLock { collectors.remove(collector) } }
+            }
+        }
+    }
+
+    /** Cancels observations and waits for subscription cleanup before closing the transport. */
+    suspend fun close() = withContext(NonCancellable) {
+        closing.withLock {
+            val active = observations.withLock {
+                if (closed) return@withContext
+                closed = true
+                collectors.toList()
+            }
+            active.forEach { it.cancel() }
+            active.joinAll()
+            transport.close()
+        }
+    }
 }

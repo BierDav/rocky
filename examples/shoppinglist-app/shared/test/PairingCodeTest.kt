@@ -1,5 +1,8 @@
 package org.example.examples.shopping
 
+import org.example.examples.shopping.data.household.NodeKind
+import org.example.examples.shopping.data.household.PairingCode
+import org.example.examples.shopping.util.link.AppLink
 import rocky.GrantProfile
 import rocky.ReplicaRole
 import kotlin.test.*

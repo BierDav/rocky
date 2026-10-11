@@ -4,6 +4,13 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.*
+import org.example.examples.shopping.data.ShoppingRepository
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.ShoppingSchema
+import org.example.examples.shopping.data.db.ShoppingTables
+import org.example.examples.shopping.data.db.list
+import org.example.examples.shopping.data.db.shoppingRoomOverlay
+import org.example.examples.shopping.data.household.NodeKind
 import rocky.*
 import rocky.room.followRocky
 import java.io.File
@@ -271,7 +278,7 @@ class ShoppingIntegrationTest {
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
     @Test fun `the hand-declared schema is the Room export's`() {
-        val export = File(checkout, "shared/schemas/org.example.examples.shopping.ShoppingDatabase/6.json").readText()
+        val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/6.json").readText()
         assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
     }

@@ -3,7 +3,6 @@ package rocky
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
-import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.*
 
 /**
@@ -216,7 +215,7 @@ data class ScopeName(val table: String?, val partition: String?) {
 data class ScopeTransfer(val scope: ScopeName, val pulled: Int, val pushed: Int, val bytes: Long)
 
 /** The kept events, then each new one; cancelling stops only this observer. */
-internal fun RockyClient.activity(): Flow<RockyEvent> = flow {
+internal fun RockyClient.activity(): Flow<RockyEvent> = observation {
     var page = call(request("activity"))
     while (true) {
         page.getValue("events").jsonArray.forEach { emit(RockyEvent.of(it.jsonObject)) }

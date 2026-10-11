@@ -86,8 +86,8 @@ orders both, so the first decision stands everywhere: when two trusted devices
 decide at once, the second gets a typed rejection naming the standing decision.
 Members hold `Invoke` on `requests` only, so they cannot decide. The
 command-controlled `requests` and `decisions` tables change only through
-confirmed results; see [Approvals](shared/src/Approvals.kt) and
-[Coordination](shared/src/Coordination.kt).
+confirmed results; see [Approvals](shared/src/data/coordination/ApprovalCommands.kt) and
+[Coordination](shared/src/data/coordination/Coordination.kt).
 
 The founding device creates the household's coordination tenant key in the
 `coordination` table, which only trusted devices read. Trusted devices keep the
@@ -138,17 +138,22 @@ shows **Retry** and preserves its data.
 
 ## Code and SDK usage
 
-Start at [ShoppingNode](shared/src/ShoppingNode.kt) for platform composition,
-[ShoppingGraph](shared/src/ShoppingGraph.kt) for Metro,
-[ShoppingSession](shared/src/ShoppingSession.kt) for app lifetime,
-[ShoppingRepository](shared/src/ShoppingRepository.kt) for DAO calls and
-[Household](shared/src/Household.kt) for device enrollment and key delivery,
-[TrustedRows](shared/src/TrustedRows.kt) for the tables only trusted devices
+Start at [ShoppingNode](shared/src/data/session/ShoppingNode.kt) for platform composition,
+[ShoppingGraph](shared/src/di/ShoppingGraph.kt) for Metro,
+[ShoppingSession](shared/src/data/session/ShoppingSession.kt) for app lifetime,
+[ShoppingRepository](shared/src/data/ShoppingRepository.kt) for DAO calls and
+[Household](shared/src/data/household/Household.kt) for device enrollment and key delivery,
+[TrustedRows](shared/src/data/db/TrustedRows.kt) for the tables only trusted devices
 read, which Room does not declare, and
-[ShoppingLinks](shared/src@android/ShoppingLinks.kt) for Android links.
-The [Room entities](shared/src/ShoppingDatabase.kt) and
-[Kotlin schema](shared/src/ShoppingSchema.kt) describe the same tables.
-Screens and their ViewModels are under `shared/src/ui`.
+[DeepLinks](shared/src/presentation/navigation/DeepLinks.kt) for app links.
+The [Room entities](shared/src/data/db/entity) and
+[Kotlin schema](shared/src/data/db/ShoppingSchema.kt) describe the same tables.
+`shared/src` follows one package layout: `data` holds the database (`data/db`),
+household, coordination and session; `di` the Metro graph; `util` platform
+helpers, links and permissions. `presentation` holds the app host, the
+navigation3 hosts (the root follows the session state; home nests its tabs),
+reusable components (including QR pairing) and one package per screen with its
+ViewModel.
 
 ```kotlin
 val platform = ShoppingPlatform(directory.absolutePath, "Desktop",
@@ -192,17 +197,16 @@ Android device qualification is documented in
 ## iOS
 
 `shared` builds unchanged screens and logic for `iosArm64` and
-`iosSimulatorArm64`; `iosApp/shoppingIos` supplies the Compose host, Room path,
-Keychain store and lifecycle observer. Build and test both examples with
+`iosSimulatorArm64`; `iosApp` supplies the Compose host and scene lifecycle,
+and `shared` binds the Room path and Keychain store. Build and test both examples with
 `./examples/shoppinglist-app/check-ios`. Pair by scanning with camera permission
-on a device, or paste on a simulator. External `rocky-shopping://pair` links
-remain offers requiring confirmation. Debug-only drive links reuse the Android
-qualification actions; release builds ignore them.
+on a device, or paste on a simulator.
 See [the device procedure](../../docs/runtime/shopping-devices.md#ios-procedure)
 and [evidence and signing limits](../../docs/features_07/21-ios-applications-evidence.md).
 
-On Android and iOS, **Reset Shopping** asks for confirmation, then closes this device's
-session and returns to **Start a household** / **Join a household**. It removes
+On every platform, **Reset Shopping** on the Sync and setup screens asks for
+confirmation, then closes this device's session and returns to **Start a
+household** / **Join a household**. It removes
 local lists and household setup, including unsynced changes, and selects a
 fresh secret namespace. Other devices keep their copies. **Cancel** keeps
 the current household open.

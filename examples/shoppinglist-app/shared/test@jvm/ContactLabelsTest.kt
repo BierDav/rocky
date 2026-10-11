@@ -1,6 +1,8 @@
 package org.example.examples.shopping
 
 import kotlinx.coroutines.runBlocking
+import org.example.examples.shopping.data.db.list
+import org.example.examples.shopping.data.household.ContactLabels
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals

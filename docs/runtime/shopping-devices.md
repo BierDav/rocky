@@ -16,10 +16,14 @@ The custody procedure below is a separate qualification topology. The
 interactive app needs no custody peer; devices exchange edits whenever they
 are online together. Pairing codes are `rocky-shopping://pair?…` links, so a
 phone's camera app opens a scanned code in the app, which asks before joining.
-Debug builds also accept `rocky-shopping://drive?…` links, implemented in
-[ShoppingLinks](../../examples/shoppinglist-app/shared/src@android/ShoppingLinks.kt);
-they accept raw invitations for the qualification harness. Browsers cannot open
-drive links, and release builds ignore them.
+Android, iOS and desktop hand every opened link to the shared
+[DeepLinks](../../examples/shoppinglist-app/shared/src/presentation/navigation/DeepLinks.kt),
+which opens it as a navigation destination; desktop takes the link as its only
+argument or from the system's open-URI event.
+
+The debug `rocky-shopping://drive?…` links were removed. The two-phone
+procedure, `qualify-ios` and `qualify-ios-pair` below still send them and need
+a new driver before they run again.
 
 Invitation choices are matched by the native invitation/enrollment event order,
 so a delayed enrollment keeps its chosen name and kind. Closing that invitation

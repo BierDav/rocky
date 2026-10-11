@@ -372,10 +372,11 @@ market-shaped and compound-key scalar fixtures and DAO value tests. The SDK supp
 native behavior. The walkthrough and household tests cover direct device pairing, full/partial
 key delivery and immediate received-list reads after reopen. See [Room on Rocky's file](runtime/room-integration.md).
 
-`examples/shoppinglist-app/pairing-ui` owns the QR display and platform camera scanner used by
-the Compose example. QRose displays codes on all targets; EasyQRScan supplies
-the shared Android/iOS scanner under `src@mobile`. iOS asks for camera access
-only; camera-less simulators and desktop use the common paste fields.
+The example's `shared` module owns the QR display and platform camera scanner
+under `presentation/component/pairing`. QRose displays codes on all targets;
+EasyQRScan supplies the shared Android/iOS scanner under `src@mobile`. iOS asks
+for camera access only; camera-less simulators and desktop use the common paste
+fields.
 
 ## Finding details
 

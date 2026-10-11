@@ -5,7 +5,12 @@ import androidx.room.useReaderConnection
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
-import org.example.examples.shopping.*
+import org.example.examples.shopping.data.ShoppingRepository
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.ShoppingSchema
+import org.example.examples.shopping.data.db.list
+import org.example.examples.shopping.data.household.Household
+import org.example.examples.shopping.data.household.NodeKind
 import rocky.*
 import rocky.room.setRockyDatabase
 import java.io.File
@@ -209,10 +214,10 @@ private class DeviceProcess {
                 }
             }
 
-            "lists" -> JsonArray(room!!.lists().observe().first().map { JsonPrimitive("${it.id}:${it.title}") })
+            "lists" -> JsonArray(room!!.lists().observeAll().first().map { JsonPrimitive("${it.id}:${it.title}") })
 
             "items" -> JsonArray(
-                room!!.items().observe(list()).first().sortedBy { it.title }.map { item ->
+                room!!.items().observeAll(list()).first().sortedBy { it.title }.map { item ->
                     buildJsonObject {
                         put("id", item.id)
                         put("title", item.title)

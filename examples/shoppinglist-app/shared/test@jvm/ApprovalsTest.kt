@@ -3,6 +3,15 @@ package org.example.examples.shopping
 import androidx.room.Room
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import org.example.examples.shopping.data.coordination.ApprovalHandlers
+import org.example.examples.shopping.data.coordination.Approvals
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.ShoppingSchema
+import org.example.examples.shopping.data.household.Household
+import org.example.examples.shopping.data.household.NodeKind
+import org.example.examples.shopping.data.household.commandIdentity
+import org.example.examples.shopping.data.session.ShoppingNode
+import org.example.examples.shopping.data.session.ShoppingPlatform
 import rocky.*
 import java.io.File
 import java.nio.file.Files

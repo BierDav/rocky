@@ -23,7 +23,8 @@
         <activity
                 android:exported="true"
                 android:launchMode="singleTop"
-                android:name=".MainActivity">
+                android:name=".MainActivity"
+                android:theme="@style/Theme.App.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
 
@@ -35,12 +36,6 @@
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:scheme="rocky-shopping" android:host="pair"/>
-            </intent-filter>
-            <!-- Qualification drives debug builds over adb; browsers cannot open these. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <data android:scheme="rocky-shopping" android:host="drive"/>
             </intent-filter>
         </activity>
     </application>

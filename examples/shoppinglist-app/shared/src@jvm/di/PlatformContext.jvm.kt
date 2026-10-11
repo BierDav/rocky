@@ -1,0 +1,10 @@
+package org.example.examples.shopping.di
+
+import java.io.File
+import java.net.InetAddress
+
+/** Desktop: the household lives in `ROCKY_SHOPPING_DATA`, else `~/.rocky-shopping`, and is named after the host. */
+actual class PlatformContext(
+    val directory: File = File(System.getenv("ROCKY_SHOPPING_DATA") ?: File(System.getProperty("user.home"), ".rocky-shopping").path),
+    val deviceName: String = runCatching { InetAddress.getLocalHost().hostName.substringBefore('.') }.getOrDefault("Desktop"),
+)

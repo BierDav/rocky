@@ -71,7 +71,7 @@ Every entity carries Rocky's identity as two non-null integer fields:
 A `@ForeignKey` names the parent's identity: `parentColumns = ["id"]`, or a
 partitioned parent's partition columns then `id`, such as `["list", "id"]`
 with `childColumns = ["list", "category"]` in the
-[shopping example](../../examples/shoppinglist-app/shared/src/ShoppingDatabase.kt).
+[shopping example](../../examples/shoppinglist-app/shared/src/data/db/entity/Category.kt).
 
 `autoGenerate = true` is refused: Room never assigns a row id. Importing the
 export refuses an entity without both fields, with `autoGenerate`, or with a
@@ -148,7 +148,7 @@ transient read failures and lets other errors end the flow. Retrying a rolled-ba
 read queries committed rows again; it never resumes the expired transaction.
 A virtual-clock qualification injects that timeout and a permanent storage
 failure, checking recovery and error propagation. The
-[shopping example](../../examples/shoppinglist-app/shared/src/ShoppingRepository.kt)
+[shopping example](../../examples/shoppinglist-app/shared/src/data/ShoppingRepository.kt)
 uses this retry for its observations.
 
 ## Schema and migrations

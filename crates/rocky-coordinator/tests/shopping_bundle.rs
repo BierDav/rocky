@@ -3,7 +3,9 @@ use rocky_coordinator::certified::TrustBundle;
 
 #[test]
 fn shopping_and_its_public_guide_pin_the_same_valid_service() {
-    let source = include_str!("../../../examples/shoppinglist-app/shared/src/PublicCoordinator.kt");
+    let source = include_str!(
+        "../../../examples/shoppinglist-app/shared/src/data/coordination/PublicCoordinator.kt"
+    );
     let json = source.split("\"\"\"").nth(1).unwrap();
     let bundle = TrustBundle::from_json(json).unwrap();
     let genesis = bundle.genesis().unwrap();

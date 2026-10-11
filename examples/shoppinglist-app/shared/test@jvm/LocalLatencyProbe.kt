@@ -4,6 +4,11 @@ import androidx.room.Room
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.entity.ShoppingItem
+import org.example.examples.shopping.data.household.NodeKind
+import org.example.examples.shopping.data.session.ShoppingNode
+import org.example.examples.shopping.data.session.ShoppingPlatform
 import rocky.PeerTransport
 import java.io.File
 import java.nio.file.Files

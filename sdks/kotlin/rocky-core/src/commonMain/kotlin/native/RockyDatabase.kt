@@ -83,11 +83,14 @@ class RockyDatabase private constructor(
                 closed = true
                 lifetime.cancel()
                 try {
-                    nativeCall { native.shutdown() }
                     super.close()
                 } finally {
-                    openedNetwork?.destroy()
-                    native.destroy()
+                    try {
+                        nativeCall { native.shutdown() }
+                    } finally {
+                        openedNetwork?.destroy()
+                        native.destroy()
+                    }
                 }
             }
         }

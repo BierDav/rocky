@@ -2,9 +2,19 @@ package org.example.examples.shopping
 
 import androidx.room.Room
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onStart
+import org.example.examples.shopping.data.db.ShoppingDatabase
+import org.example.examples.shopping.data.db.ShoppingSchema
+import org.example.examples.shopping.data.db.list
+import org.example.examples.shopping.data.household.Household
+import org.example.examples.shopping.data.household.NodeKind
+import org.example.examples.shopping.data.session.SessionState
+import org.example.examples.shopping.data.session.ShoppingNode
+import org.example.examples.shopping.data.session.ShoppingPlatform
+import org.example.examples.shopping.data.session.ShoppingSession
 import rocky.ConnectionState
 import rocky.DeliveryState
 import rocky.PeerTransport
@@ -155,6 +165,54 @@ class HouseholdTest {
                 session.close()
                 original.close()
             }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a reset closes the household and removes it, then setup can start a new one`() = runBlocking {
+        val root = Files.createTempDirectory("rocky-reset").toFile()
+        val closed = mutableListOf<RockyDatabase>()
+        var erased = 0
+        val platform = ShoppingPlatform(
+            File(root, "desk").absolutePath,
+            "desk",
+            room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
+            transport = { PeerTransport.Tcp("127.0.0.1:0") },
+            closed = { closed += it },
+            erase = { erased++ },
+        )
+        val session = ShoppingSession(platform)
+        try {
+            assertEquals(SessionState.Setup, session.state.value)
+            session.create()
+            val open = withTimeout(30_000) { session.state.first { it is SessionState.Open } } as SessionState.Open
+            open.node.repository.createList("Weekly")
+            val snapshot = CompletableDeferred<Unit>()
+            val readiness = CompletableDeferred<Unit>()
+            // Screen collectors may outlive reset's database close until navigation disposes them.
+            val observers = listOf(
+                launch { open.node.rocky.observe(rocky.query("SELECT id FROM lists")).collect { snapshot.complete(Unit) } },
+                launch { open.node.rocky.observeReadiness().collect { readiness.complete(Unit) } },
+                launch(start = CoroutineStart.UNDISPATCHED) { open.node.rocky.activity().collect() },
+            )
+            withTimeout(2_000) {
+                snapshot.await()
+                readiness.await()
+            }
+            session.reset()
+            assertEquals(SessionState.Setup, withTimeout(30_000) { session.state.first { it is SessionState.Setup || it is SessionState.Failed } })
+            withTimeout(2_000) { observers.joinAll() }
+            assertTrue(observers.all { it.isCancelled })
+            currentCoroutineContext().ensureActive()
+            assertEquals(listOf(open.node.rocky), closed)
+            assertEquals(1, erased)
+            assertFalse(RockyDatabase.exists(platform.directory))
+            session.create()
+            val fresh = withTimeout(30_000) { session.state.first { it is SessionState.Open } } as SessionState.Open
+            assertNotEquals(open.node.self, fresh.node.self)
+            assertEquals(emptyList(), fresh.node.repository.lists().first())
+        } finally {
+            withContext(NonCancellable) { session.close() }
             root.deleteRecursively()
         }
     }

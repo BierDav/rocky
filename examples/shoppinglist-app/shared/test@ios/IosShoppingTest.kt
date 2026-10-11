@@ -12,24 +12,22 @@ import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
 import rocky.PeerTransport
 import rocky.SecretStore
-import rocky.ios.KeychainSecretStore
 import kotlin.test.*
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
-/** Application integration: real Room on Rocky's file and platform Keychain secrets. */
+/** Application integration: real Room on Rocky's file through background and reopen. */
 class IosShoppingTest {
     @Test fun offlineWriteSurvivesBackgroundAndReopen() = runBlocking<Unit> {
         val began = TimeSource.Monotonic.markNow()
         val root = NSTemporaryDirectory() + "shopping-ios-" + NSUUID().UUIDString
-        val keychain = KeychainSecretStore("org.example.shopping.test." + NSUUID().UUIDString)
+        // A standalone test executable has no app identity for the Keychain, which Rocky's own tests cover.
         val lock = ReentrantLock()
-        val names = mutableSetOf<String>()
-        val secrets = object : SecretStore by keychain {
-            override fun store(name: String, secret: ByteArray) = lock.withLock {
-                names += name
-                keychain.store(name, secret)
-            }
+        val stored = mutableMapOf<String, ByteArray>()
+        val secrets = object : SecretStore {
+            override fun load(name: String) = lock.withLock { stored[name] }
+            override fun store(name: String, secret: ByteArray) = lock.withLock { stored[name] = secret }
+            override fun delete(name: String) = lock.withLock<Unit> { stored -= name }
         }
         val platform = ShoppingPlatform(
             root,
@@ -52,7 +50,6 @@ class IosShoppingTest {
             assertEquals("Milk", node.repository.observe(list).first().single().title)
         } finally {
             node.close()
-            lock.withLock { names.forEach(keychain::delete) }
             NSFileManager.defaultManager.removeItemAtPath(root, null)
         }
         val elapsed = began.elapsedNow()

@@ -143,9 +143,8 @@ jobs:
             echo
             echo "- \`${registry}/bierdav/rocky-db-coordinator:${version}\`"
             echo "- \`${registry}/bierdav/rocky-db-peer:${version}\`"
-            echo "- Maven \`${maven}\`: \`rocky:rocky-core-jvm\`,"
-            echo "  \`rocky:rocky-core-android\`, \`rocky:rocky-sqlite\`, \`rocky:rocky-room\` and"
-            echo "  \`rocky:rocky-runtime-android\`, version \`${version}\`"
+            echo "- Maven \`${maven}\`: \`rocky:rocky-core\`, \`rocky:rocky-sqlite\` and"
+            echo "  \`rocky:rocky-room\` for the JVM, Android and iOS, version \`${version}\`"
           } > "$RUNNER_TEMP/notes/notes.md"
           { echo "## v${version}"; echo; cat "$RUNNER_TEMP/notes/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
 
@@ -393,15 +392,17 @@ jobs:
 
       - name: Package and qualify the SDK
         working-directory: source
-        run: ./kotlin check packaged -m packaged-consumer
+        run: sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:check
 
       - name: Collect the package
         working-directory: source
         run: |
           set -euo pipefail
           mkdir dist
-          cp local/packaged-sdk/lib/rocky-core-jvm.jar dist/
-          tar -czf "dist/rocky-kotlin-sdk-${VERSION}-${{ matrix.platform }}.tar.gz" -C local packaged-sdk
+          # The host's native library, which the published JVM jar gathers from every platform.
+          cp -R sdks/kotlin/rocky-core/build/generated/bindings/host dist/natives
+          tar -czf "dist/rocky-kotlin-sdk-${VERSION}-${{ matrix.platform }}.tar.gz" \
+            -C sdks/kotlin/qualification/packaged-jvm/build packaged-sdk
 
       - uses: actions/upload-artifact@v4
         with:
@@ -440,8 +441,7 @@ jobs:
         with:
           path: |
             ~/.gradle
-            ~/.cache/JetBrains/Kotlin
-          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}
           restore-keys: |
             android-tooling-${{ runner.os }}-
 
@@ -452,7 +452,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
 
@@ -498,23 +498,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Maven local keeps the development version the toolchain verifies; the
-      # staging repository holds the release version.
-      - name: Build the Android runtime
+      # The Android variants of the libraries and their native runtime; the iOS
+      # job publishes the modules that name them.
+      - name: Publish the Android SDK to the staging repository
         working-directory: source
         run: |
-          set -euo pipefail
-          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
-          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime \
-            -ProckyVersion="${VERSION}" publishReleasePublicationToStagingRepository
-
-      - name: Package the Android SDK
-        working-directory: source
-        env:
-          ROCKY_VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          # shellcheck disable=SC1010 # `do` is the toolchain's command
-          ./kotlin do packageAndroid -m rocky-runtime-android
+          sdks/kotlin/gradlew -p sdks/kotlin -ProckyVersion="${VERSION}" \
+            publishAndroidPublicationToStagingRepository \
+            :rocky-runtime-android:publishReleasePublicationToStagingRepository
 
       # Saved on success only; the keys must stay identical to the restore
       # steps above and to the baseline `android` job.
@@ -523,8 +514,7 @@ jobs:
         with:
           path: |
             ~/.gradle
-            ~/.cache/JetBrains/Kotlin
-          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}
 
       - name: Save the Android native cache
         uses: actions/cache/save@v4
@@ -533,18 +523,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: android
-          path: |
-            source/local/release-maven
-            source/local/packaged-android/maven
+          path: source/sdks/kotlin/build/release-maven
 
   ios:
-    name: iOS SDK
-    needs: [version, check]
+    name: iOS and JVM SDK
+    # After `jvm`: the JVM jar carries every platform's native library.
+    needs: [version, check, jvm]
     runs-on: macos-latest
     timeout-minutes: 45
     env:
@@ -579,20 +568,28 @@ jobs:
           workspaces: source/sdks/native -> target
           shared-key: ios
 
-      - name: Package and qualify the versioned iOS SDK
+      # The Linux native library for the JVM jar; this job builds the macOS one.
+      - uses: actions/download-artifact@v4
+        with:
+          name: jvm-linux-x86-64
+          path: ${{ runner.temp }}/jvm-linux
+
+      - name: Package and qualify the versioned iOS SDK, then publish the JVM libraries
         working-directory: source
         run: |
           set -euo pipefail
-          ./sdks/kotlin/package-ios
-          ./sdks/native/qualify-ios-package
+          gradle() { sdks/kotlin/gradlew -p sdks/kotlin -ProckyVersion="${ROCKY_VERSION}" "$@"; }
+          gradle packageIos qualifyIosPackage
           mkdir -p dist
-          tar -czf "dist/rocky-kotlin-sdk-${ROCKY_VERSION}-ios.tar.gz" -C local packaged-ios
+          tar -czf "dist/rocky-kotlin-sdk-${ROCKY_VERSION}-ios.tar.gz" -C sdks/kotlin/build packaged-ios
+          # After the iOS package, whose repository holds only the iOS publications.
+          gradle -Procky.jvmNatives="$RUNNER_TEMP/jvm-linux/natives" publishJvmPublicationToStagingRepository
 
       - uses: actions/upload-artifact@v4
         with:
           name: ios
           path: |
-            source/local/packaged-ios/maven
+            source/sdks/kotlin/build/release-maven
             source/dist/rocky-kotlin-sdk-*-ios.tar.gz
 
   publish:
@@ -684,10 +681,7 @@ jobs:
           else
             export MAVEN_URL="${GITHUB_SERVER_URL}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven"
           fi
-          source/scripts/release/jvm-maven "${VERSION}" dist/maven-jvm \
-            dist/jvm-darwin-aarch64/rocky-core-jvm.jar dist/jvm-linux-x86-64/rocky-core-jvm.jar
-          source/scripts/release/maven-deploy dist/maven-jvm \
-            dist/android/release-maven dist/android/packaged-android/maven dist/ios/local/packaged-ios/maven
+          source/scripts/release/maven-deploy dist/android dist/ios/sdks/kotlin/build/release-maven
 
       - name: Create the GitHub release
         if: github.server_url == 'https://github.com'

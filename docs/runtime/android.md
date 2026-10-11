@@ -6,9 +6,8 @@ toolchain, Cargo, Python or NDK. Qualified on emulators and one phone ([qualific
 
 ## The packaged artifact
 
-Contributors publish the [Android runtime](../../sdks/kotlin/android-runtime/README.md), then run
-`./kotlin do packageAndroid -m rocky-runtime-android`. It writes a Maven repository to
-`local/packaged-android/maven` with a SHA-256 inventory beside it:
+Contributors run `sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal`, which publishes the Android
+variants of the libraries to Maven local:
 
 | Coordinate | Content |
 | --- | --- |
@@ -23,11 +22,10 @@ The runtime is a stripped release build with 16 KiB page alignment, linked by ND
 
 Building the runtime needs the Android SDK with platform `android-35` and NDK `28.2.13676358`
 (`ANDROID_HOME`, `ANDROID_NDK_HOME`), and rustup. Without rustup on `PATH`, the build provisions a
-checksum-pinned rustup under `local/android-rust`; `rust-toolchain.toml` selects the compiler and the
+checksum-pinned rustup under `sdks/kotlin/build/android-tools`; `rust-toolchain.toml` selects the compiler and the
 build adds the two Android targets. [Releases](../releasing.md) publish these coordinates, and the
-runtime, to GitHub Packages at the release version; locally built ones stay `0.1.0`. An Android app built from the
-toolchain modules instead depends on the `rocky-runtime-android` module, which brings the same runtime
-and JNA's dispatch library.
+runtime, to GitHub Packages at the release version; locally built ones stay `0.1.0`. `rocky-core`'s Android variant depends on
+`rocky-runtime-android`, so apps get the same runtime and JNA's dispatch library transitively.
 
 ## Consume it with Gradle
 
@@ -36,7 +34,7 @@ and JNA's dispatch library.
 dependencyResolutionManagement {
     repositories {
         google(); mavenCentral()
-        maven { url = uri("/path/to/packaged-android/maven") }
+        mavenLocal()
     }
 }
 // app/build.gradle.kts
@@ -135,4 +133,4 @@ Notes for consumers:
 - Two issuing apps on one device collide on the default `127.0.0.1:47470`; give each a `listen` address.
 - An app targeting API 37 must hold `ACCESS_LOCAL_NETWORK` before opening, or LAN TCP times out.
 - The shopping example's [Compose app](../../examples/shoppinglist-app/README.md) builds from the Kotlin
-  toolchain modules instead of the AAR and gets the runtime from `rocky-runtime-android`.
+  toolchain modules instead of the AAR and gets the runtime transitively through `rocky-room`.

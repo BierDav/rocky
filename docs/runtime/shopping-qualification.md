@@ -11,8 +11,8 @@ market scenario on devices are [outstanding](#outstanding). This is not an Inter
 | --- | --- |
 | `./examples/shoppinglist-app/qualify` | Builds the packaged `rocky-peer`, then the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt): every device is a JVM running the app's Room repository; evidence in `local/shopping-qualification/evidence.json` |
 | `cargo test -p rocky-sdk --test shopping_release` | The native gate and checkpoint join run in the e2e tier; custody restart is integration |
-| `./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
-| `./kotlin check qualify -m schema-qualification` | Hand/Room equivalence and every partitioned refusal |
+| `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
+| `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and every partitioned refusal |
 | `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
 
 `ROCKY_SCENARIOS=gate,relink` selects harness scenarios. The application
@@ -64,7 +64,7 @@ contention, loss, takeover and voter faults are qualified by the
 
 | # | Evidence |
 | --- | --- |
-| 1 | `./kotlin run -m requiredSchema` passes |
+| 1 | `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema` passes |
 | 2 | `partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen`; harness `gate` |
 | 3 | `partition_frames_keys_custody_sql_and_checkpoints_are_isolated`; harness `exclusion-revocation` |
 | 4 | `group_references_hold_cascade_and_null_only_category_per_partition`, `group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step`; harness `gate` |
@@ -90,7 +90,7 @@ process. Phone runs are outstanding.
 Each shape under [not requested](../features_06/scope-partitioned-constraints.md#not-requested)
 and every reference between groups is refused natively and in Kotlin:
 
-| Shape | Native | Kotlin (`schema-qualification`) |
+| Shape | Native | Kotlin (`qualification/schema`) |
 | --- | --- | --- |
 | Uniqueness across partitions | `partitioned_tables_refuse_incomplete_indexes_references_and_command_control` | `must include every partition column` |
 | `RESTRICT` | `partitioned_foreign_keys_refuse_restrict` | Room `onDelete RESTRICT` |

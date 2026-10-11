@@ -60,7 +60,7 @@ kotlin_target_version = "2.4.20"
     std::fs::write(out.join("RockyTypes.kt"), bindings.common)?;
     std::fs::write(
         out.join("RockyNative.kt"),
-        bindings.native.context("missing native binding")?,
+        inherit_throws(&bindings.native.context("missing native binding")?),
     )?;
     let jna_dir = out.join("jna");
     uniffi_bindgen::bindings::generate(uniffi_bindgen::bindings::GenerateOptions {
@@ -74,4 +74,21 @@ kotlin_target_version = "2.4.20"
     })?;
     jna::adapt(&jna_dir.join("rocky/internal/native/rocky_uniffi.kt"), ci)?;
     Ok(())
+}
+
+// An override inherits its interface's `@Throws`; repeating it fails the shared iOS metadata
+// compilation, which resolves the common filter's classes differently.
+fn inherit_throws(source: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        if line.contains("actual override ")
+            && lines
+                .last()
+                .is_some_and(|previous| previous.trim_start().starts_with("@Throws("))
+        {
+            lines.pop();
+        }
+        lines.push(line);
+    }
+    lines.join("\n") + "\n"
 }

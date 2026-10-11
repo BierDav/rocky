@@ -97,7 +97,7 @@ The full check, Clippy and CI use LLVM. The second target directory takes about
 
 ## Kotlin tests
 
-The JVM tests are not tiered by the checker yet; `./kotlin check` and the
+The JVM tests are not tiered by the checker yet; `sdks/kotlin/gradlew -p sdks/kotlin check` and the
 shopping check run them with their phase 1 budgets. Their classification, for
 when they are:
 
@@ -105,8 +105,8 @@ when they are:
 | --- | --- | --- | --- |
 | `sdks/kotlin/rocky-core` | 5 | unit and integration | value mapping without the native library is unit; anything that loads it is integration |
 | `sdks/kotlin/rocky-sqlite` | 2 | integration | opens SQLite files through the driver |
-| `sdks/kotlin/room-qualification` | 13 | integration | Room on Rocky's file; `RoomGateTest` binds TCP ports and needs the free-port fix in [fix later](fix_later/README.md) before it runs in parallel |
-| `sdks/kotlin/schema-qualification` | 2 | integration | about 55 s in phase 1, so over budget until made faster |
+| `sdks/kotlin/qualification/room` | 13 | integration | Room on Rocky's file; `RoomGateTest` binds TCP ports and needs the free-port fix in [fix later](fix_later/README.md) before it runs in parallel |
+| `sdks/kotlin/qualification/schema` | 2 | integration | about 55 s in phase 1, so over budget until made faster |
 | `examples/shoppinglist-app/shared` | 28 | integration | devices in temporary directories, six at a time |
 | `examples/market-app/marketShared` | 6 | integration | devices in temporary directories; each under 1.7 s alone, the native library loaded once per class |
 | shopping and market qualification, packaged consumer | | e2e | several JVMs, voters and the custody peer; CI only |

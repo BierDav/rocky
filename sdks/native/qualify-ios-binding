@@ -24,4 +24,5 @@ staticLibraries = librocky_uniffi.a
 libraryPaths = $repo_root/sdks/native/target/aarch64-apple-ios-sim/debug
 linkerOpts = -framework CoreFoundation -liconv
 DEFINITION
-./kotlin test --project-dir "$work" -p iosSimulatorArm64
+# The spike is a Kotlin toolchain module; the shopping-list app carries the wrapper.
+examples/shoppinglist-app/kotlin test --project-dir "$work" -p iosSimulatorArm64

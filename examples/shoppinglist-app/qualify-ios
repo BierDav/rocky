@@ -8,7 +8,8 @@ import time
 import uuid
 from urllib.parse import urlencode
 
-ROOT = Path(__file__).resolve().parents[2]
+APP = Path(__file__).resolve().parent
+ROOT = APP.parents[1]
 EVIDENCE = ROOT / "local/phase21-evidence"
 
 
@@ -71,7 +72,7 @@ def main():
         expectations.append({"name": name, "text": text, "at_seconds": time.monotonic() - started})
 
     def install(title, identifier):
-        apps = list((ROOT / "build").rglob(f"{title}.app"))
+        apps = list((APP / "build").rglob(f"{title}.app"))
         apps = [p for p in apps if "iphonesimulator" in str(p).lower()]
         if len(apps) != 1:
             raise RuntimeError(f"expected one simulator {title}.app, found {apps}")

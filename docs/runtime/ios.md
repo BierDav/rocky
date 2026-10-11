@@ -7,28 +7,26 @@ The [binding guide](kotlin-native-binding.md) covers callbacks and threading.
 
 ## Package and consume
 
-Contributors run `./sdks/kotlin/package-ios`. It writes
-`local/packaged-ios`, containing:
+Contributors run `sdks/kotlin/gradlew -p sdks/kotlin packageIos`. It writes
+`sdks/kotlin/build/packaged-ios`, containing:
 
 - `RockyRuntime.xcframework`: device and simulator static archives and the
   generated UniFFI header.
-- `maven/`: `rocky:rocky-core-ios`, `rocky:rocky-sqlite-ios` and
-  `rocky:rocky-room-ios`, with common metadata, target klibs, cinterop klibs
+- `maven/`: `rocky:rocky-core`, `rocky:rocky-sqlite` and
+  `rocky:rocky-room` (their `-iosarm64` and `-iossimulatorarm64` target modules), with common metadata, target klibs, cinterop klibs
   and dependency metadata. The cinterop klibs embed their target's static
   archive; Kotlin consumers need no additional link configuration.
 - `BUILD.json`: version, minimum iOS (13.0), Kotlin (2.4.20), Xcode version
   and native build profile. These artifacts currently use the debug runtime.
 - `SHA256.json`: every other distributed file and its SHA-256 digest.
 
-`ROCKY_VERSION` selects the publication version (default `0.1.0`).
+`-ProckyVersion` selects the publication version (default `0.1.0`).
 [Releases](../releasing.md) publish the Maven repository and a tarball of the
-whole package. Local packages can be consumed as an isolated Maven local
-repository by setting `KOTLIN_CLI_JAVA_OPTIONS=-Dmaven.repo.local=/path/to/maven`
-and declaring `url: mavenLocal`. The
-[independent consumer](../../sdks/kotlin/packaged-ios-consumer/module.yaml)
-depends only on these coordinates. `./sdks/native/qualify-ios-package` copies
-it outside the source project, verifies the full inventory, builds for the
-device and runs it on the simulator with Rust tools absent from `PATH`.
+whole package. Local packages can be consumed from the `maven/` directory as a
+Gradle repository (`maven { url = uri("/path/to/packaged-ios/maven") }`). The
+[independent consumer](../../sdks/kotlin/qualification/packaged-ios/build.gradle.kts)
+depends only on these coordinates. `sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage`
+verifies the full inventory, then builds and runs the consumer on the simulator with Rust tools absent from `PATH`.
 
 ## Keychain secret store
 
@@ -111,9 +109,9 @@ when reconciliation says it did not commit.
 
 ## Qualification
 
-Run `./sdks/native/check-ios`, `./sdks/native/qualify-ios-sdk`,
-`./sdks/native/qualify-ios-lifecycle`, `./sdks/kotlin/package-ios`, then
-`./sdks/native/qualify-ios-package` on macOS/Xcode. CI owns these simulator and
+Run `./sdks/native/check-ios`, `sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test`,
+`./sdks/native/qualify-ios-lifecycle`, `sdks/kotlin/gradlew -p sdks/kotlin packageIos`, then
+`sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage` on macOS/Xcode. CI owns these simulator and
 artifact gates. The lifecycle gate checks Keychain persistence, byte-searches
 for secrets, deletion and purge, notifications, the stalled-dial pause, automatic
 sync after injected socket closure and subprocess death at commit boundaries.

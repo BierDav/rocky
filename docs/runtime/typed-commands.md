@@ -302,8 +302,8 @@ cargo test -p rocky-secure typed_commands
 cargo test -p rocky-sdk --test commands
 cargo test -p rocky-runtime typed_reservation
 ./sdks/native/check                 # read-handle lifetime and supported features
-./kotlin test -m rocky-core         # keyed-read codecs
-./kotlin check qualify -m inventory-qualification  # compile-fail fixtures
+sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest         # keyed-read codecs
+sdks/kotlin/gradlew -p sdks/kotlin :qualification:inventory:check  # compile-fail fixtures
 ./examples/market-app/check         # Kotlin keyed reads through the native runtime
 ./examples/market-app/qualify       # JVM processes against three voters
 ```

@@ -4,11 +4,11 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 export IPHONEOS_DEPLOYMENT_TARGET=13.0
-./kotlin test -p iosSimulatorArm64 -m rocky-core \
-    --include-classes rocky.KeychainTest --include-classes 'rocky.Ios*Test'
-binary=$(find "$repo_root/build" -type f -name '*.kexe' -path '*rocky-core*' -path '*Test*' ! -path '*.dSYM/*' | head -n 1)
-[ -n "$binary" ] || { echo 'cannot find rocky-core simulator test executable' >&2; exit 1; }
-# Kotlin shuts down its simulator after tests; boot one for the subprocess probes.
+sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true :rocky-core:iosSimulatorArm64Test \
+    --tests rocky.KeychainTest --tests 'rocky.Ios*Test'
+binary="$repo_root/sdks/kotlin/rocky-core/build/bin/iosSimulatorArm64/debugTest/test.kexe"
+[ -x "$binary" ] || { echo 'cannot find rocky-core simulator test executable' >&2; exit 1; }
+# Gradle shuts down its simulator after tests; boot one for the subprocess probes.
 selection=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
 devices = [d for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["isAvailable"] and "iPhone" in d["name"]]

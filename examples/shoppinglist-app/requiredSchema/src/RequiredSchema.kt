@@ -13,7 +13,7 @@ import java.nio.file.Files
  */
 fun main() = runBlocking {
     val checkout = generateSequence(File(System.getProperty("user.dir")).absoluteFile) { it.parentFile }.first { File(it, "project.yaml").isFile }
-    val export = File(checkout, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/6.json").readText()
+    val export = File(checkout, "shared/schemas/org.example.examples.shopping.ShoppingDatabase/6.json").readText()
     val required = ShoppingSchema
     val imported = schemaFromRoom("shopping", export, shoppingRoomOverlay)
     val definition = required.definitionJson("09".repeat(32))

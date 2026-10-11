@@ -1,4 +1,4 @@
-# Phase 16's required definition; ./kotlin run -m requiredSchema is the preflight.
+# The required definition; ./kotlin run -m requiredSchema is the preflight.
 product: jvm/app
 apply:
   - //project.module-template.yaml

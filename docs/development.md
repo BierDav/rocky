@@ -101,7 +101,7 @@ faster.
 | The e2e tier: 15 min | `./scripts/check --e2e`, the CI `e2e` job | 55 tests in 272 s locally; CI not measured |
 | `./scripts/check` with a warm build: 6 min | `./scripts/check` | 249 s |
 | The edit loop after touching `rocky-core`: no budget | `./scripts/check --unit` | 11 s on Cranelift, 33 to 38 s on LLVM |
-| `./kotlin check` with a warm build: 4 min | `./kotlin check` | 95 s |
+| `sdks/kotlin/gradlew -p sdks/kotlin check` with a warm build: 4 min | that command | 95 s |
 | `./examples/shoppinglist-app/check` with a warm build: 3 min | that command | 60 s |
 | `./sdks/native/check` with a warm build: 30 s | that command | 6 s |
 | `./scripts/lint`: 30 s | `./scripts/lint` | 25 s beside a full check |
@@ -195,30 +195,31 @@ member-directory byte audit remains inside the full `gate` scenario. See
 
 ## Kotlin desktop integration
 
-The checksum-pinned `./kotlin` wrapper builds the root `project.yaml` workspace.
-The Amper modules configure JVM desktop targets. Android is packaged and
-qualified separately; see [below](#android). The SDK's build, packaging and
-qualification steps are [toolchain plugins](../sdks/kotlin/README.md#build-tooling);
-`./kotlin check` runs every check and test.
+The SDK is a Gradle build under `sdks/kotlin`. `sdks/kotlin/gradlew -p sdks/kotlin check`
+runs every SDK check and test. Android is packaged and qualified separately; see
+[below](#android). The SDK's build, packaging and qualification tasks are
+[Gradle convention plugins and task types](../sdks/kotlin/README.md#build).
+The shopping-list application is a standalone Kotlin toolchain project: its
+`project.yaml` workspace has Amper modules that configure JVM desktop targets.
 Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
 and desktop compilation, `./examples/shoppinglist-app/qualify` for the
 multi-process [shopping qualification](runtime/shopping-qualification.md),
 `./examples/market-app/check` and `./examples/market-app/qualify` for the
 [market](runtime/market-qualification.md) and its six scenarios against three
-voters, and `./kotlin check qualify -m inventory-qualification`
+voters, and `sdks/kotlin/gradlew -p sdks/kotlin :qualification:inventory:check`
 for the existing SDK contract qualification. Run `./sdks/native/check` for the
-excluded UniFFI ABI crate. Run `./kotlin check packaged -m packaged-consumer` for an
-artifact-only JVM consumer, or `./kotlin do packageSdk -m packaged-consumer` to
-produce the standalone library/resources and example in `local/packaged-sdk`.
+excluded UniFFI ABI crate. Run `sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:qualifyPackage`
+for an artifact-only JVM consumer, or `:qualification:packaged-jvm:packageSdk` to
+produce the standalone library/resources and example in `sdks/kotlin/qualification/packaged-jvm/build/packaged-sdk`.
 [Packaging](runtime/sdk-packaging.md) documents no-build-tools consumption.
-Run `./kotlin test -m rocky-sqlite` and `./kotlin test -m room-qualification` for the
+Run `sdks/kotlin/gradlew -p sdks/kotlin :rocky-sqlite:jvmTest :qualification:room:jvmTest` for the
 [SQL driver](runtime/sql-driver.md) and its pinned Room fixture. The Room gate
 uses the standalone `sqlite3` CLI with JSON output for read-only inspection of
 the live file; install it before running that gate.
-Run `./kotlin check qualify -m schema-qualification` for hand/Room definition
-equivalence and native installation, and `./kotlin test -m schema-qualification` to
+Run `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` for hand/Room definition
+equivalence and native installation, and `:qualification:schema:jvmTest` to
 regenerate the pinned Room exports and check compound-key scalar DAOs.
-`./kotlin check` runs the Kotlin Toolchain checks and tests; it is not a
+`sdks/kotlin/gradlew -p sdks/kotlin check` runs the SDK's Gradle checks and tests; it is not a
 formatter or linter. Kotlin formatting and lint run in `./scripts/lint`.
 Every build prepares SDK-owned native bindings/resources with Cargo, so it needs
 the pinned Rust toolchain. These are separate from the Rust `./scripts/check` gate.
@@ -228,13 +229,13 @@ See [Room on Rocky's file](runtime/room-integration.md).
 
 On macOS/Xcode, run `./sdks/native/check-ios` for both arm64 runtime targets
 with and without iroh. `./sdks/native/qualify-ios-binding` generates and tests
-the isolated no-iroh callbacks on the simulator. `./sdks/native/qualify-ios-sdk`
+the isolated no-iroh callbacks on the simulator. `sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test`
 runs the common SDK/driver/Room tests and the endpoint, command, cancellation
 and lifetime gates with iroh. [The binding guide](runtime/kotlin-native-binding.md)
 records the toolchain, dependency repair, threading contract and evidence.
 
-Phase 18 adds `./sdks/kotlin/package-ios` and
-`./sdks/native/qualify-ios-package` for the independent packaged consumer, and
+Phase 18 adds `sdks/kotlin/gradlew -p sdks/kotlin packageIos` and
+`... qualifyIosPackage` for the independent packaged consumer, and
 `./sdks/native/qualify-ios-lifecycle` for Keychain, suspension and crash probes.
 Phase 15 adds `./sdks/native/qualify-ios-discovery`: local discovery follows
 the lifecycle, and a simulator and a host process find each other over mDNS.
@@ -256,15 +257,14 @@ The macOS CI job runs both gates. See [Phase 21 evidence](features_07/21-ios-app
 
 ## Android
 
-The [Android runtime](../sdks/kotlin/android-runtime/README.md) is a small Gradle build
-that publishes Rocky's native libraries to Maven local; Android apps depend on the
-`rocky-runtime-android` module, which checks that the published runtime is current.
-It needs the Android SDK and NDK and rustup, which it provisions under `local/` when
-none is on `PATH`. `./kotlin do packageAndroid -m rocky-runtime-android` then writes the
-SDK's AAR and jars as a local Maven repository for Gradle consumers.
+The [Android runtime](runtime/android.md) is the `rocky-runtime-android` library of the
+SDK Gradle build; its Cargo task builds the native libraries, and `rocky-core`'s Android
+variant depends on it. It needs the Android SDK and NDK and rustup, which it provisions
+when none is on `PATH`. `sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal` publishes
+the Android variants for Gradle consumers.
 This is not part of `./scripts/check`. See [Android](runtime/android.md).
-`./sdks/kotlin/qualify-android-discovery` installs a small check app on a
-booted emulator, or boots the AVD named by `ROCKY_ANDROID_AVD`, and shows that
+`sdks/kotlin/gradlew -p sdks/kotlin :qualification:android-discovery:qualify` installs a small check app on a
+booted emulator, or boots the AVD named by `-Procky.android.avd=<name>`, and shows that
 the Wi-Fi multicast lock is held while local discovery is on and released in
 the background.
 
@@ -335,8 +335,8 @@ Required status checks are a hosting setting; the workflow file does not configu
 branch protection. No remotely hosted CI run has been verified by this baseline.
 
 The `shopping` job runs `./examples/shoppinglist-app/qualify` beside the
-baseline. It also builds the Android runtime prerequisite for `./kotlin check`
-and runs the exhaustive phase-2 byte-offset cancellation gate in the release
+baseline. It also runs `sdks/kotlin/gradlew -p sdks/kotlin check`, which builds the Android
+runtime, and runs the exhaustive phase-2 byte-offset cancellation gate in the release
 profile. This job uses an x64 runner for the Android NDK and has not run on a
 hosted runner yet. Releases skip it and do not wait for its result.
 

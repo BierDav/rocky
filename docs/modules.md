@@ -344,30 +344,30 @@ Signed generation lineage, backup archives and packaged resources are covered in
 [SDK packaging](runtime/sdk-packaging.md) and [generations](runtime/generations.md). `sdks/kotlin/rocky-sqlite` is the `androidx.sqlite` driver on Rocky's file, with no Room
 dependency ([SQL driver](runtime/sql-driver.md)). `sdks/kotlin/rocky-room` binds Room to
 it: the pinned Room profile and invalidation from table events.
-Neither depends on shopping-list rules or Compose. The Kotlin toolchain modules build
-JVM desktop, Android and arm64 iOS device/simulator. In `rocky-core`, `src`
-is common code, including the runtime adapter under `src/native`; generated
-JNA/cinterop implementations supply the same contract. `src@jna` contains
-Java platform calls and `File` overloads; `src@ios` supplies Foundation and
+Neither depends on shopping-list rules or Compose. The Gradle build compiles
+JVM desktop, Android and arm64 iOS device/simulator. In `rocky-core`, `src/commonMain/kotlin`
+is common code, including the runtime adapter under `src/commonMain/kotlin/native`; generated
+JNA/cinterop implementations supply the same contract. `src/jnaMain/kotlin` contains
+Java platform calls and `File` overloads; `src/iosMain/kotlin` supplies Foundation and
 Security calls, the device-only Keychain store and notification lifecycle
-([iOS](runtime/ios.md)). `sdks/kotlin/package-ios` stages iOS publications and
-the independent packaged consumer; `rocky-iroh` refreshes or rebinds starter
-sockets on foreground. The test-only `platform-test` module supplies file fixtures.
-`src@android` adds the Android Keystore store
-and lifecycle binding. The `rocky-android` plugin ships the same sources as an AAR for
-[Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` brings Android apps the native
-runtime that the [`android-runtime`](../sdks/kotlin/android-runtime/README.md) Gradle build
-publishes. `sdks/kotlin/tooling` holds the toolchain plugins that
-build, package and qualify the SDK ([build tooling](../sdks/kotlin/README.md#build-tooling)).
+([iOS](runtime/ios.md)). `sdks/kotlin/gradlew -p sdks/kotlin packageIos` stages iOS publications;
+`sdks/kotlin/qualification/packaged-ios` is the independent packaged consumer; `rocky-iroh` refreshes or rebinds starter
+sockets on foreground. The test-only `platform-test` module (`sdks/kotlin/qualification/platform-test`) supplies file fixtures.
+`src/androidMain/kotlin` adds the Android Keystore store
+and lifecycle binding. The Android variant of `rocky-core` ships the same sources as an AAR for
+[Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` is the Android library whose Cargo
+task builds the native runtime; `rocky-core`'s Android variant depends on it. `sdks/kotlin/build-logic`
+holds the Gradle convention plugins and task types that
+build, package and qualify the SDK ([build](../sdks/kotlin/README.md#build)).
 
 `examples/shoppinglist-app` is a Kotlin-only Compose Multiplatform consumer whose typed Room entities
 and DAOs run on Rocky's file, with a DAO repository, Metro graph, screen ViewModels, QR pairing and visible
 [background activity](runtime/activity.md);
 `androidApp` and `shoppingIos` are its platform hosts, and `qualification` the multi-process
 [shopping qualification](runtime/shopping-qualification.md) harness. Its exported Room
-schema qualifies Kotlin import. `sdks/kotlin/room-qualification` records Room 2.8.4's statements as the
+schema qualifies Kotlin import. `sdks/kotlin/qualification/room` records Room 2.8.4's statements as the
 driver's pinned acceptance fixture and runs the same DAOs on Rocky's file.
-`sdks/kotlin/schema-qualification` supplies Room-generated
+`sdks/kotlin/qualification/schema` supplies Room-generated
 market-shaped and compound-key scalar fixtures and DAO value tests. The SDK supplies all
 native behavior. The walkthrough and household tests cover direct device pairing, full/partial
 key delivery and immediate received-list reads after reopen. See [Room on Rocky's file](runtime/room-integration.md).
@@ -381,7 +381,7 @@ and the one screen, with no platform file API; `marketDesktop` and
 [market qualification](runtime/market-qualification.md) harness against three
 voters.
 
-`examples/pairing-ui` owns the QR display and platform camera scanner used by
+`examples/shoppinglist-app/pairing-ui` owns the QR display and platform camera scanner used by
 both Compose examples. QRose displays codes on all targets; EasyQRScan supplies
 the shared Android/iOS scanner under `src@mobile`. iOS asks for camera access
 only; camera-less simulators and desktop use the common paste fields.

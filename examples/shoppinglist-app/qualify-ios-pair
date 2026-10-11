@@ -13,7 +13,8 @@ import time
 from urllib.parse import urlencode
 import uuid
 
-ROOT = Path(__file__).resolve().parents[2]
+APP = Path(__file__).resolve().parent
+ROOT = APP.parents[1]
 OUT = ROOT / "local/phase21-evidence/pair"
 
 
@@ -140,7 +141,7 @@ class Mobile:
 
 class Host:
     def __init__(self):
-        self.process = subprocess.Popen([str(ROOT / "kotlin"), "run", "-m", "qualification", "--main-class", "org.example.examples.shopping.qualification.DeviceKt"], cwd=ROOT, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=(OUT / "host.log").open("w"), bufsize=1)
+        self.process = subprocess.Popen([str(APP / "kotlin"), "run", "-m", "qualification", "--main-class", "org.example.examples.shopping.qualification.DeviceKt"], cwd=APP, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=(OUT / "host.log").open("w"), bufsize=1)
 
         self.lines = queue.Queue()
         def reader():

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
-repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-cd "$repo_root"
+app=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+cd "$app"
 # The scope's required definition installs by hand and from Room before anything else runs.
 ./kotlin run -m requiredSchema
 ./kotlin test -p jvm -p android -m shared

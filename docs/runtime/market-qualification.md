@@ -70,7 +70,7 @@ against three voters on the host, listed and restocked a lamp and completed one
 accepted reservation through the screen (`Accepted: 0 left`). Procedure:
 
 ```sh
-sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
+sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal
 ./kotlin build -m marketAndroid
 ./examples/market-app/emulator-service local/market-emulator
 adb install -r build/tasks/_marketAndroid_buildAndroidDebug/gradle-project-debug.apk

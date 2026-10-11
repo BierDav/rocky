@@ -14,10 +14,10 @@ both `aarch64-apple-ios` and `aarch64-apple-ios-sim` standard libraries:
 ```sh
 ./sdks/native/check-ios
 ./sdks/native/qualify-ios-binding
-./sdks/native/qualify-ios-sdk
-./kotlin test -p jvm -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification
-./kotlin check packaged -m packaged-consumer
-./kotlin build -p android -m rocky-core -m rocky-sqlite -m rocky-room
+sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test
+sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest :rocky-sqlite:jvmTest :rocky-room:jvmTest :qualification:room:jvmTest
+sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:qualifyPackage
+sdks/kotlin/gradlew -p sdks/kotlin publishAndroidPublicationToMavenLocal
 ```
 
 The matrix builds the bundled-SQLite static runtime on both targets, with and
@@ -28,11 +28,11 @@ The SDK check runs the common core, SQLite and Room qualification tests with
 iroh, plus public SecretStore/custom transport enrollment, endpoint, command,
 cancellation and lifetime tests on the simulator. The public callback fixture
 also checks zero binding handles after both databases and transports close.
-The repository `kotlin` launcher supplies the absolute source fixture directory
+The SDK Gradle build supplies the absolute source fixture directory
 through `ROCKY_TEST_ROOT` and `SIMCTL_CHILD_ROCKY_TEST_ROOT`, including for plain
-`./kotlin check`; no arbitrary sleep synchronizes a new test.
+`sdks/kotlin/gradlew -p sdks/kotlin check`; no arbitrary sleep synchronizes a new test.
 
-The `rocky-native` plugin's single `bindings` task emits common records,
+The `generateBindings` task of `rocky-core` emits common records,
 callback contracts and expect objects, UniFFI's JNA implementation for the
 JVM/Android, and Rocky's cinterop implementation for iOS. It adapts JNA's
 platform declarations to the common contract without replacing JNA's ABI
@@ -41,8 +41,8 @@ Per-target tasks build the static archive before cinterop. Generated artifacts
 remain under ignored `build/` or `local/` directories.
 
 The host native library is a generated `@jna` resource, so JVM tests and
-Android unit tests running on the host JVM can both load it. Android consumer
-packaging uses the per-ABI libraries from `rocky-runtime-android` instead.
+Android unit tests running on the host JVM can both load it. Android variants
+use the per-ABI libraries from `rocky-runtime-android` instead.
 
 The locked iroh dependencies need missing iOS Darwin network declarations.
 [The dependency overlay](../../vendor/README.md) preserves upstream netdev,
@@ -135,7 +135,7 @@ oracle checks the portable rounding against the original implementation.
 | `ConfirmedRowsTest` | Java `File`/`ServerSocket` fixtures and raw native metadata-file inspection |
 
 Those tests are retained and still run on the JVM. Test-only Foundation/Java
-file adapters live in `platform-test` on all SDK targets; they are not a new product filesystem
+file adapters live in `qualification/platform-test` on all SDK targets; they are not a new product filesystem
 surface. Public database/credential openers take `String`; JVM/Android callers
 retain `File` overloads. Common randomness uses the platform CSPRNG and time
 uses Kotlin's clock. SQLite numeric rendering retains exact binary-double

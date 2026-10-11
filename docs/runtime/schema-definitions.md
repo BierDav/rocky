@@ -142,14 +142,14 @@ so none exist.
 
 ## Qualification
 
-- `./kotlin check qualify -m schema-qualification`: compiles the importer
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check`: compiles the importer
   with `-Werror`; hand-built and imported shopping, market, scalar,
   partitioned, grouped, `ConstraintDatabase` and three-table shopping fixtures have equal canonical bytes and
   fingerprints; named refusals (`autoGenerate`, a missing identity field, a
   missing or misnamed identity index); each partitioned constraint shape that
   stays refused, with its message; each schema installs natively and
   reopens with its import.
-- `./kotlin test -m schema-qualification`: regenerates the checked-in exports
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:jvmTest`: regenerates the checked-in exports
   with Room 2.8.4 and checks REAL/BLOB/null values and compound keys through
   Room DAOs on `BundledSQLiteDriver` (Room's value shape, not Rocky's driver);
   a hand-built definition opens through JVM UniFFI and reopens with its import.

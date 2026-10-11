@@ -35,8 +35,8 @@ custody peer; then the host closes and its contact is removed from both phones. 
 devices reach the custody peer through `adb reverse` and never each other.
 
 ```sh
-sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
-./kotlin build -m androidApp
+sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal
+cd examples/shoppinglist-app && ./kotlin build -m androidApp
 ROCKY_PHONES=<serial A>,<serial B> ROCKY_APK=<androidApp APK> \
     ./examples/shoppinglist-app/qualify
 ```

@@ -1,7 +1,0 @@
-.gradle/
-.kotlin/
-build/
-buildSrc/.gradle/
-buildSrc/.kotlin/
-buildSrc/build/
-local.properties

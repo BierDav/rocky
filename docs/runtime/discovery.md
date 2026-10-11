@@ -109,7 +109,7 @@ cadence while the process runs.
 `cargo test -p rocky-iroh` and `./scripts/check` cover the record, both paths
 and the hub scenarios; `./scripts/check --e2e` the two-process runs;
 `./sdks/native/qualify-ios-discovery` the simulator and
-`./sdks/kotlin/qualify-android-discovery` the multicast lock on an emulator.
+`sdks/kotlin/gradlew -p sdks/kotlin :qualification:android-discovery:qualify` the multicast lock on an emulator.
 [SDK transports](sdk-transports.md#qualification) lists what each shows.
 
 ## Not covered

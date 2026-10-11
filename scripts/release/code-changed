@@ -8,7 +8,7 @@ set -eu
 base=${1:?usage: code-changed TAG SHA}
 head=${2:?usage: code-changed TAG SHA}
 # Paths that end up in a published artifact. Markdown never does.
-shipped='^(crates/|sdks/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|project\.yaml$|project\.module-template\.yaml$|kotlin$|\.dockerignore$)'
+shipped='^(crates/|sdks/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|\.dockerignore$)'
 
 files=$(git diff --name-only "$base...$head")
 if printf '%s\n' "$files" | grep -E "$shipped" | grep -vqE '\.md$'; then

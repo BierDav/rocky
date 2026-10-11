@@ -9,16 +9,20 @@ continues to test offline delivery through custody.
 
 ## Run and pair
 
+The app is its own Kotlin toolchain project and depends on Rocky only by Maven
+coordinates (`rocky:rocky-room`). In this repository they resolve from Maven
+local, so publish the SDK first, and again after SDK or Rust changes:
+
 ```sh
+../../sdks/kotlin/gradlew -p ../../sdks/kotlin publishToMavenLocal
 ./kotlin run -m desktopApp
-sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
 ./kotlin build -m androidApp
 ```
 
 The desktop keeps its household in `~/.rocky-shopping`, or
 `ROCKY_SHOPPING_DATA`. Install the Android debug APK with `adb install -r`;
 Android keeps secrets in the Keystore and pauses automatic sync in the
-background. Republish the Android runtime after Rust changes.
+background.
 
 For a desktop reached over SSH, the running trusted app can write a one-use
 pairing code to a private file, and the new instance can read that file:

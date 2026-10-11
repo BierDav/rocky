@@ -1,4 +1,4 @@
-//! Consumes Kotlin qualification output; run through `./kotlin check qualify -m schema-qualification`.
+//! Consumes Kotlin qualification output; run through `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:qualify`.
 use rocky_core::{DomainId, LogicalSchema, Profile, SchemaDefinition, TypedRows};
 use rocky_sdk::{Database, Failure, Open, TypedApp};
 use serde_json::{Value, json};

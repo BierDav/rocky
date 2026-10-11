@@ -169,10 +169,10 @@ data directory or its keys. Local rows are plaintext at rest.
 
 ## Build and verification
 
-Every `./kotlin` build prepares SDK-owned bindings and the native resource;
+Every SDK Gradle build prepares SDK-owned bindings and the native resource;
 that needs Rust, and consumers of a packaged artifact do not.
 
-- `./kotlin test -m room-qualification` is the acceptance reference for the
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:room:jvmTest` is the acceptance reference for the
   pinned version. Room's recorded statements replay through the driver
   ([statement fixture](sql-driver.md#qualification)); the same DAOs run on
   Rocky's file with the ids Rocky issues, and an id Rocky did not issue is
@@ -189,7 +189,7 @@ that needs Rust, and consumers of a packaged artifact do not.
 - `./examples/shoppinglist-app/check` runs the shopping repository on two
   devices: offline DAO edits converge field by field, a delete beats a
   concurrent rename, and a filtered DAO flow follows synced and local writes.
-- `./kotlin check qualify -m schema-qualification` checks that the example's hand declaration
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` checks that the example's hand declaration
   equals its imported Room export.
 
 Limits: macOS ARM64 desktop; Android as recorded in [Android](android.md).

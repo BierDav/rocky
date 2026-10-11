@@ -1,0 +1,9 @@
+modules:
+  - androidApp
+  - desktopApp
+  - iosApp/shoppingIos
+  - libraryDemo
+  - pairing-ui
+  - qualification
+  - requiredSchema
+  - shared

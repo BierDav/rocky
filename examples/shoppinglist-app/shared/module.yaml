@@ -4,7 +4,7 @@ product:
 apply:
   - //project.module-template.yaml
 dependencies:
-  - ../../../sdks/kotlin/rocky-room: exported
+  - rocky:rocky-room:0.1.0: exported
   - $compose.runtime
   - $compose.foundation
   - $compose.material3
@@ -12,7 +12,7 @@ dependencies:
   - $compose.ui
   - $compose.preview
   - $compose.hotReload.runtimeApi
-  - //examples/shoppinglist-app/pairing-ui
+  - ../pairing-ui
   - dev.zacsweers.metro:runtime:1.4.5
   - dev.zacsweers.metro:metrox-viewmodel-compose:1.4.5: exported
   - org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0: exported

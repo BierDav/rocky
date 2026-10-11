@@ -190,18 +190,18 @@ on receipt, projection rebuild and reopen.
   clashes under both policies, loser reappearance, parent deletion concurrent
   with child insertion, repointing, recreated parents, child-before-parent
   delivery, local refusal, reopen, checkpoint bootstrap and eviction/rebuild.
-- `./kotlin check qualify -m schema-qualification`: the Room
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check`: the Room
   `ConstraintDatabase` fixture with both policies and delete actions imports to
   the hand-built descriptor, installs natively, reopens, and is refused on the
   trusted profile.
-- `./kotlin run -m requiredSchema`: the scope's shopping schema, hand-built and
+- `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema`: the scope's shopping schema, hand-built and
   imported from Room with its overlay, has identical bytes and installs
-  natively from either; `ShoppingIntegrationTest` (`./kotlin test -m shared`)
+  natively from either; `ShoppingIntegrationTest` (`cd examples/shoppinglist-app && ./kotlin test -m shared`)
   covers its DAOs, per-list titles, `SET NULL` categories and cascading lists.
 - `cargo test -p rocky-sdk --test driver room_reads_each`: Room's
   `foreign_key_list` reads each reference's own delete action when references
   share a partition column.
-- `RoomConstraintsTest` (`./kotlin test -m room-qualification`): DAO inserts,
+- `RoomConstraintsTest` (`sdks/kotlin/gradlew -p sdks/kotlin :qualification:room:jvmTest`): DAO inserts,
   local unique and dangling refusal, parent deletion, `SET NULL`, `CASCADE`
   and reopen through Rocky's driver.
 

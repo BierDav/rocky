@@ -406,9 +406,11 @@ jobs:
             chmod +x "$RUNNER_TEMP/build/rocky-peer"
             export ROCKY_PEER="$RUNNER_TEMP/build/rocky-peer"
           fi
+          # The application resolves Rocky from Maven local.
+          sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal
           ./examples/shoppinglist-app/qualify
-          sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
-          ./kotlin check
+          sdks/kotlin/gradlew -p sdks/kotlin check
+          ./examples/shoppinglist-app/check
           cargo test --locked --release -p rocky-sdk --lib cancellation_at_every_session_byte -- --ignored --nocapture
 
       - uses: ./source/.github/actions/record-pass
@@ -485,7 +487,7 @@ jobs:
 
   android:
     # Runs the release workflow's Android build steps to keep its caches warm:
-    # Gradle and Kotlin CLI toolchain files, and the Cargo registry with the
+    # Gradle's files, and the Cargo registry with the
     # native target directory. The release restores both and saves them again,
     # so a nightly build does not recompile the Android runtime from nothing.
     # The cache keys must stay identical to the release workflow's Android job.
@@ -516,8 +518,7 @@ jobs:
         with:
           path: |
             ~/.gradle
-            ~/.cache/JetBrains/Kotlin
-          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}
           restore-keys: |
             android-tooling-${{ runner.os }}-
 
@@ -528,7 +529,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
 
@@ -574,24 +575,18 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Build the Android runtime
-        working-directory: source
-        run: sdks/kotlin/android-runtime/gradlew -p sdks/kotlin/android-runtime publishToMavenLocal
-
-      - name: Package the Android SDK
+      - name: Build the Android runtime and libraries
         working-directory: source
         run: |
-          ./kotlin build -p android -m rocky-core -m rocky-sqlite -m rocky-room
-          # shellcheck disable=SC1010 # `do` is the toolchain's command
-          ./kotlin do packageAndroid -m rocky-runtime-android
+          sdks/kotlin/gradlew -p sdks/kotlin publishAndroidPublicationToMavenLocal \
+            :rocky-runtime-android:publishReleasePublicationToMavenLocal
 
       - name: Save the Android toolchain cache
         uses: actions/cache/save@v4
         with:
           path: |
             ~/.gradle
-            ~/.cache/JetBrains/Kotlin
-          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/**/*.yaml', 'source/project.yaml', 'source/project.module-template.yaml', 'source/kotlin') }}
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}
 
       - name: Save the Android native cache
         uses: actions/cache/save@v4
@@ -600,7 +595,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             source/sdks/native/target
-          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/tooling/build-logic/src/Android.kt') }}
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
 
   ios:
     needs: build
@@ -644,10 +639,10 @@ jobs:
           mkdir -p local/phase17-evidence
           ./sdks/native/check-ios 2>&1 | tee local/phase17-evidence/matrix.log
           ./sdks/native/qualify-ios-binding 2>&1 | tee local/phase17-evidence/callbacks.log
-          ./kotlin build -p iosArm64 -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification
-          ./sdks/native/qualify-ios-sdk 2>&1 | tee local/phase17-evidence/sdk.log
-          ./kotlin test -p jvm -m rocky-core -m rocky-sqlite -m rocky-room -m room-qualification
-          ./kotlin check packaged -m packaged-consumer
+          sdks/kotlin/gradlew -p sdks/kotlin compileKotlinIosArm64
+          # The simulator runtime carries the fault injection the lifecycle probes use.
+          sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test 2>&1 | tee local/phase17-evidence/sdk.log
+          sdks/kotlin/gradlew -p sdks/kotlin jvmTest :qualification:packaged-jvm:check
 
       - name: Qualify iOS lifecycle and artifact-only consumer
         working-directory: source
@@ -655,8 +650,8 @@ jobs:
           set -euo pipefail
           mkdir -p local/phase18-evidence
           ./sdks/native/qualify-ios-lifecycle 2>&1 | tee local/phase18-evidence/lifecycle.log
-          ./sdks/kotlin/package-ios 2>&1 | tee local/phase18-evidence/package.log
-          ./sdks/native/qualify-ios-package 2>&1 | tee local/phase18-evidence/consumer.log
+          sdks/kotlin/gradlew -p sdks/kotlin packageIos 2>&1 | tee local/phase18-evidence/package.log
+          sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage 2>&1 | tee local/phase18-evidence/consumer.log
 
       - name: Qualify iOS simulator discovery
         working-directory: source
@@ -678,6 +673,9 @@ jobs:
           set -euo pipefail
           mkdir -p local/phase21-evidence
           npm install --global agent-device@0.21.23
+          # The application resolves Rocky from Maven local.
+          sdks/kotlin/gradlew -p sdks/kotlin publishKotlinMultiplatformPublicationToMavenLocal \
+            publishIosArm64PublicationToMavenLocal publishIosSimulatorArm64PublicationToMavenLocal
           ./examples/shoppinglist-app/check-ios 2>&1 | tee local/phase21-evidence/build-and-tests.log
           ./scripts/coordinator-local local/phase21-service 17300
           trap 'kill $(cat local/phase21-service/voter-*.pid)' EXIT

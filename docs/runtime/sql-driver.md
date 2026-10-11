@@ -199,7 +199,7 @@ val connection = driver.open("shopping")  // the name names no file
 - A failure is an `androidx.sqlite.SQLiteException` with
   `Error code: <code>, message: <message>`, as the bundled driver words it.
 
-Run `./kotlin test -m rocky-sqlite`.
+Run `sdks/kotlin/gradlew -p sdks/kotlin :rocky-sqlite:jvmTest`.
 
 ## Qualification
 
@@ -214,14 +214,14 @@ Run `./kotlin test -m rocky-sqlite`.
 - `cargo test -p rocky-sdk --test driver room_`: every housekeeping answer,
   refusal of entities without identity fields or with an autoincrement key,
   and schema pragmas compared with ordinary SQLite on the file.
-- `./kotlin test -m rocky-sqlite`: a JVM `SQLiteDriver` transaction with a
+- `sdks/kotlin/gradlew -p sdks/kotlin :rocky-sqlite:jvmTest`: a JVM `SQLiteDriver` transaction with a
   nested savepoint, a reader's snapshot across a commit, 700 rows over pages
   and a rerun after `reset`, codes 18, 1555, 23 and 4, and getter parity with
   `BundledSQLiteDriver` over 16 values.
-- `./kotlin test -m room-qualification` is the acceptance reference for the
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:room:jvmTest` is the acceptance reference for the
   pinned Room version; see [Room integration](room-integration.md#build-and-verification).
   The 49 distinct statements Room 2.8.4 sends are pinned in
-  `sdks/kotlin/room-qualification/fixtures/room-2.8.4.statements`
+  `sdks/kotlin/qualification/room/fixtures/room-2.8.4.statements`
   (`ROCKY_RECORD_ROOM=1` rewrites it after an intended upgrade) and replayed
   through the Rocky driver: no housekeeping statement fails and every DAO
   statement returns the bundled engine's rows and codes; only Room's upsert

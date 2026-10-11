@@ -72,7 +72,7 @@ results change command-controlled rows.
 - `cargo test -p rocky-sdk --test confirmed_tables`: driver readers and the
   writer read confirmed rows, writes fail with code 23 and publish no bundle,
   table events carry `confirmed`.
-- `./kotlin test -m room-qualification` (`ConfirmedRowsTest`): a DAO `Flow`
+- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:room:jvmTest` (`ConfirmedRowsTest`): a DAO `Flow`
   follows confirmation, every DAO write kind fails with code 23, the
   transaction publishes nothing and the mergeable table beside it stays
   writable.

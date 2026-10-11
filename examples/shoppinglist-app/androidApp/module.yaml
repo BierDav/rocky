@@ -4,8 +4,6 @@ apply:
 
 dependencies:
   - ../shared
-  # Rocky's native runtime; the shared code brings the Kotlin SDK.
-  - ../../../sdks/kotlin/rocky-runtime-android
   - androidx.activity:activity-compose:1.13.0
   - $compose.material3
   - $compose.preview

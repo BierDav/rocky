@@ -193,7 +193,7 @@ cargo test -p rocky-credentials
 cargo test -p rocky-secure --lib tests::delegation
 cargo test -p rocky-sdk --test grants --test service --test pseudonyms
 ./examples/shoppinglist-app/check
-./kotlin check packaged -m packaged-consumer
+sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:qualifyPackage
 ```
 
 Covered: raw grants resolving and describing back; chains widening rights,

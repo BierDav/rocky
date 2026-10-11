@@ -17,7 +17,6 @@ driver on Rocky's own file, without a Room dependency ([SQL driver](../../docs/r
 and refreshes their observers after sync ([Room](../../docs/runtime/room-integration.md)). The modules build JVM desktop and
 [Android](../../docs/runtime/android.md), plus arm64 iOS device/simulator
 through the [Kotlin/Native binding](../../docs/runtime/kotlin-native-binding.md).
-iOS consumer packaging, Keychain and lifecycle belong to phase 18.
 
 The application defines its schema in Kotlin. No Rust, native host path or
 application-specific operation codec is needed. Start with the
@@ -31,11 +30,9 @@ application-owned. Starter `create/join/resume` share this implementation.
 `ServiceCoordinator` pins a certified service trust bundle. Independent credential
 issuers use `Credentials.prepare` and `RockyDatabase.install`.
 
-Contributors build the package with `./kotlin do packageSdk -m packaged-consumer` and
-qualify it with `./kotlin check packaged -m packaged-consumer`. Consumers use only the
-resulting JVM jars/resources; Rust generation tools are not required at launch or for
-application schemas and handlers. [Releases](../../docs/releasing.md) publish them to
-GitHub Packages.
+Applications depend on `rocky:rocky-core`, `rocky:rocky-sqlite` or `rocky:rocky-room`;
+the Android variant brings the native runtime. They need no Rust tools.
+[Releases](../../docs/releasing.md) publish the libraries to GitHub Packages.
 
 Partitioned schema declarations, Room overlays, scoped keys/grants and
 transactional per-partition IDs are described in
@@ -43,27 +40,38 @@ transactional per-partition IDs are described in
 `RockyDatabase.partitions` and `SqlWrite.nextId(table, partitionValues...)` use the
 same packaged bindings as ordinary database requests.
 
-## Build tooling
+## Build
 
-Building from source needs the pinned Rust toolchain; the build runs Cargo through
-the [Kotlin toolchain plugins](https://kotlin-toolchain.org/latest/user-guide/plugins/topics/structure/)
-in `tooling/`, which share helpers in `tooling/build-logic`. Their output is under
-`build/` or `local/`. The native ABI has its own [verification script](../native/check).
+A [Gradle](settings.gradle.kts) build. Building from source needs the pinned Rust
+toolchain: Gradle runs Cargo for the native runtime and generates the UniFFI bindings.
 
-| Plugin | Enabled on | Run with |
-| --- | --- | --- |
-| `rocky-native` | `rocky-core` | Every build: common contract, JNA/cinterop implementations and target library |
-| `rocky-qualification` | `inventory-qualification`, `schema-qualification` | `./kotlin check qualify -m <module>` |
-| `rocky-package` | `packaged-consumer` | `./kotlin do packageSdk`, `./kotlin check packaged`, `./kotlin do qualifyPackageOnLinux` |
-| `rocky-android` | `rocky-runtime-android` | Every build: the [Android runtime](android-runtime/README.md) is current; `./kotlin do packageAndroid` |
+| Directory | Contents |
+| --- | --- |
+| `rocky-core`, `rocky-sqlite`, `rocky-room` | The published libraries for the JVM, Android and arm64 iOS |
+| `rocky-runtime-android` | The native runtime for Android, which `rocky-core` brings to applications |
+| `qualification/` | Tests and conformance checks; never published |
+| `build-logic/` | Convention plugins and the Cargo, binding and packaging tasks |
+| `gradle/libs.versions.toml` | Every dependency version |
 
-`inventory-qualification` keeps the original inventory contract on its legacy
-process-host transport, and checks that each mismatched typed command in
-`rejected/` is a type error. It is not part of the native application API.
-`schema-qualification` checks hand/Room definition equivalence and native installation.
-`./kotlin check` runs both, the packaged consumer and every module's tests. Android
-apps depend on `rocky-runtime-android`, whose native libraries a small
-[Gradle build](android-runtime/README.md) publishes first.
-`android-discovery-check` is the small Android app that
-[`qualify-android-discovery`](qualify-android-discovery) installs on an emulator to show the Wi-Fi
-multicast lock held while [local discovery](../../docs/runtime/discovery.md#lifecycle-and-platforms) is on.
+```sh
+./gradlew publishToMavenLocal   # what the examples build against
+./gradlew jvmTest               # JVM tests
+./gradlew check                 # every test and qualification of this host
+```
+
+The [shopping-list example](../../examples/shoppinglist-app/README.md) is a separate
+Kotlin toolchain project that resolves `rocky:rocky-room` from Maven local, as a released
+application resolves it from the registry. Publish again after SDK or Rust changes.
+
+| Task | Checks or produces |
+| --- | --- |
+| `:qualification:inventory:check` | The original inventory contract on its legacy process-host transport, and that each mismatched typed command in `rejected/` is a type error |
+| `:qualification:schema:check` | Hand and Room definitions are equivalent and install natively |
+| `:qualification:packaged-jvm:check` | A [packaged](../../docs/runtime/sdk-packaging.md) JVM consumer runs with only a JVM |
+| `:qualification:android-discovery:qualify` | On an emulator, the Wi-Fi multicast lock follows [local discovery](../../docs/runtime/discovery.md#lifecycle-and-platforms) |
+| `packageIos`, `qualifyIosPackage` | The [iOS package](../../docs/runtime/ios.md) and its consumer without Rust tools |
+| `-Procky.qualification=true iosSimulatorArm64Test` | The simulator tests, with the runtime's fault injection |
+
+Android needs the SDK with platform `android-35` and NDK 28.2 ([Android](../../docs/runtime/android.md));
+without `ANDROID_HOME`, Android Studio's default location is used. The native ABI has its
+own [verification script](../native/check).

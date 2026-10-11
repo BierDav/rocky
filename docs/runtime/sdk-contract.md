@@ -95,8 +95,8 @@ A Flow snapshot is a local read; strong reads are explicit suspend calls.
 
 ## Kotlin/JVM fixture
 
-`sdks/kotlin/rocky-core/src/RockyClient.kt` supplies the suspend/Flow facade.
-`sdks/kotlin/inventory-qualification/src/ProcessTransport.kt` supplies the JVM fixture transport. `InventoryClient` demonstrates typed stock reads and precise note
+`sdks/kotlin/rocky-core/src/commonMain/kotlin/RockyClient.kt` supplies the suspend/Flow facade.
+`sdks/kotlin/qualification/inventory/src/main/kotlin/ProcessTransport.kt` supplies the JVM fixture transport. `InventoryClient` demonstrates typed stock reads and precise note
 changes. The fixture Rust host installs Inventory with a trusted caller, executes
 its queued commands against a memory coordinator and multiplexes replies by call
 ID. It is a qualification/example executable, not a credentialed deployment server
@@ -104,7 +104,7 @@ or JNI ABI. It drains admitted work and cancels subscriptions when stdin closes.
 The memory coordinator does not persist across host restarts; the consumer checks
 local handle recovery across restart before exercising strong transitions.
 
-Run `./kotlin check qualify -m inventory-qualification`. It compiles JVM target 17
+Run `sdks/kotlin/gradlew -p sdks/kotlin :qualification:inventory:check`. It compiles JVM target 17
 with warnings as errors against coroutines 1.10.2 and kotlinx.serialization 1.9.0,
 builds the Rust fixture and runs a real Kotlin consumer against the bundled SQLite
 engine in a fresh directory under `build/`. This check is separate from `./scripts/check`.

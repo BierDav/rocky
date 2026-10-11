@@ -1,7 +1,8 @@
 # shellcheck shell=sh disable=SC2034 # scripts/lint reads the module's variables
 # Kotlin formatting and lint rules from .editorconfig.
 tools=ktlint
-patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts'
+# Build output is generated code.
+patterns='examples/**/*.kt examples/**/*.kts sdks/kotlin/**/*.kt sdks/kotlin/**/*.kts !**/build/**'
 
 # ktlint expands the patterns itself.
 # shellcheck disable=SC2086

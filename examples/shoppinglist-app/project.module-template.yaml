@@ -1,0 +1,7 @@
+# Rocky's SDK comes from Maven local, where `sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal`
+# puts it; a released application names the registry of docs/releasing.md here instead.
+repositories:
+  - mavenLocal
+settings:
+  kotlin:
+    version: 2.4.20

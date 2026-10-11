@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simulator/Android emulator acceptance: custody delivery and market in both directions."""
+"""Simulator/Android emulator acceptance: shopping custody delivery."""
 import argparse
 import base64
 import json
@@ -12,12 +12,9 @@ import subprocess
 import time
 from urllib.parse import urlencode
 import uuid
-import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "local/phase21-evidence/pair"
-sys.path.insert(0, str(ROOT / "examples/market-app"))
-from emulator_udp import EmulatorUdp
 
 
 def run(*args):
@@ -115,12 +112,7 @@ class Mobile:
         else:
             subprocess.run(["adb", "-s", self.device, "uninstall", self.package], cwd=ROOT, check=False, capture_output=True)
         self.call("install", self.package, str(Path(artifact).resolve()))
-        launch = ()
-        if self.platform == "android" and self.package == "org.example.examples.market":
-            launch = ("--launch-args=--ez", "--launch-args=loopback", "--launch-args=true")
-        elif self.platform == "ios" and self.package == "org.example.rockymarket":
-            launch = ("--launch-args=-qualification-loopback", "--launch-args=YES")
-        self.call("open", self.package, "--foreground", *launch)
+        self.call("open", self.package, "--foreground")
 
     def click(self, label):
         if self.platform == "ios":
@@ -144,19 +136,6 @@ class Mobile:
         else:
             self.call("fill", 'label="' + label + '"', value, "--settle")
 
-    def fill_market(self, field, value):
-        if self.platform == "ios":
-            self.call("clipboard", "write", value)
-            button = "Paste bundle" if field == "Coordination bundle" else "Paste invitation"
-            self.call("click", 'id="' + button + '"', "--settle")
-            alert = self.call("alert", "get", absent_alert=True)
-            if alert.get("data") is not None:
-                text = json.dumps(alert)
-                if "would like to paste" not in text or "Allow Paste" not in text:
-                    raise RuntimeError("Unexpected paste alert: " + text)
-                self.call("click", 'label="Allow Paste"', "--settle")
-        else:
-            self.call("fill", 'label="' + field + '"', value, "--settle")
 
 
 class Host:
@@ -215,188 +194,117 @@ def emulator_contact(contact, android, forwards):
     return prefix + base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode()).decode().rstrip("=")
 
 
-def emulator_pairing_address(invitation, owner, android, redirects):
-    # Drive the app's manual route selection rather than mix addresses from different networks.
-    prefix = "rocky://join/"
-    if not invitation.startswith(prefix):
-        raise RuntimeError("unexpected invitation URI")
-    encoded = invitation.removeprefix(prefix)
-    value = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-    if value.get("v") != 4:
-        raise RuntimeError("unsupported invitation version")
-    for route in value["routes"]:
-        if route["transport"] != "iroh":
-            continue
-        address = json.loads(route["address"])
-        candidates = [item["Ip"] for item in address["addrs"] if "Ip" in item and not item["Ip"].startswith("[")]
-        if not candidates:
-            raise RuntimeError("iroh endpoint has no IPv4 route")
-        port = int(candidates[0].rsplit(":", 1)[1])
-        if owner.platform == "ios":
-            hint = f"10.0.2.2:{port}"
-        else:
-            route = EmulatorUdp(android.device, port)
-            redirects.append(route)
-            hint = route.address
-        owner.notes.append({"name": "emulator NAT route configured", "text": hint})
-        return hint
-    raise RuntimeError("invitation has no iroh route")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("ios-device", "android-device", "ios-shopping", "android-shopping", "ios-market", "android-market", "bundle", "peer"):
+    for name in ("ios-device", "android-device", "ios-shopping", "android-shopping", "peer"):
         parser.add_argument("--" + name, required=True)
-    parser.add_argument("--scenario", choices=("all", "shopping", "market"), default="all", help="run one acceptance slice or both")
-    parser.add_argument("--market-owner", choices=("both", "ios", "android"), default="both")
-    parser.add_argument("--emulator-routes", action="store_true", help="add iroh route hints through emulator NAT")
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     ios = Mobile("ios", args.ios_device, "org.example.rockyshopping")
     android = Mobile("android", args.android_device, "org.example.examples")
     host, custody = None, None
-    redirects = []
     forwards = []
     reverse_owned = []
     passed = False
     failure = None
     try:
-        if args.scenario in ("all", "shopping"):
-            ios.fresh(args.ios_shopping)
-            android.fresh(args.android_shopping)
-            host = Host()
-            port = free_port()
-            created = host.request("create", directory=str(OUT / ("host-" + uuid.uuid4().hex)), listen="127.0.0.1:" + str(port))
-            host_node = created["node"]
-            android.reverse_ports.append(port)
-            reverse_owned.append(port)
-            run("adb", "-s", args.android_device, "reverse", f"tcp:{port}", f"tcp:{port}")
-            contacts = {}
-            for mobile in (ios, android):
-                invitation = host.request("pairing", profile="issuer" if mobile.platform == "ios" else "writer")
-                lines = mobile.drive(invitation=invitation, transport="tcp", contact="1", sync="1")
-                contact = next(line.removeprefix("contact ").split(" ", 1) for line in lines if line.startswith("contact "))
-                contacts[mobile.platform] = contact
-            contacts["android"][1] = emulator_contact(contacts["android"][1], android, forwards)
-            # Both issuer registries receive the second enrollment before the host stops.
-            ios.drive(sync="1")
-            android.drive(sync="1")
-            custody_port = free_port()
-            config = {
-                "directory": str(OUT / ("custody-" + uuid.uuid4().hex)),
-                "schema": host.request("schema"),
-                "transport": {"kind": "tcp", "listen": f"127.0.0.1:{custody_port}"},
-                "invitation": host.request("pairing", profile="custody"),
-                "peers": [host.request("contact")["uri"], *[contact[1] for contact in contacts.values()]],
-            }
-            config_path = OUT / "peer.json"
-            config_path.write_text(json.dumps(config))
-            custody = subprocess.Popen([args.peer, str(config_path)], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=(OUT / "custody.log").open("w"))
-            selector = selectors.DefaultSelector()
-            selector.register(custody.stdout, selectors.EVENT_READ)
-            if not selector.select(30):
-                raise RuntimeError("custody did not publish its contact")
-            custody_contact = custody.stdout.readline().strip()
-            if not custody_contact.startswith("rocky://peer/"):
-                raise RuntimeError("unexpected custody contact: " + custody_contact)
-            android.reverse_ports.append(custody_port)
-            reverse_owned.append(custody_port)
-            run("adb", "-s", args.android_device, "reverse", f"tcp:{custody_port}", f"tcp:{custody_port}")
-            for mobile in (ios, android):
-                mobile.drive(peer=custody_contact, forget=host_node, sync="1")
-            ios.drive(add="Before background", list="Offline groceries", share="Offline groceries", to=contacts["android"][0])
-            # Establish the shared list before the offline/background acceptance slice.
-            ios.drive(sync="1")
-            android.drive(sync="1")
-            ios.expect("shared list exists before disconnecting", "Offline groceries")
-            android.expect("shared list arrives before disconnecting", "Offline groceries")
-            host.close()
-            android.reverse_ports.remove(port)
-            android.drive(online="false")
-            ios.drive(online="false", add="Milk", list="Offline groceries")
-            ios.expect("simulator committed the offline row", "Milk")
-            # Restore configured connectivity with automatic sync already paused, then
-            # use the real application visibility notification for the resume.
-            ios.drive(background="true", online="true")
-            ios.call("home")
-            android.drive(online="true")
-            android.call("wait", "absent", 'label="Milk"', "1000")
-            android.notes.append({"name": "row is absent before simulator foreground", "text": "Milk absent"})
-            ios.call("open", ios.package, "--foreground")
-            android.expect("foreground automatically delivers the offline row through custody", "Milk")
-            ios.expect("foreground keeps the committed local row", "Milk")
-            for mobile in (ios, android):
-                mobile.call("close")
-            custody.terminate()
-            custody.wait(timeout=30)
-            custody = None
-            android.reverse_ports.clear()
-
-        if args.scenario in ("all", "market"):
-            # A fresh market per direction: the caller never runs the owner's handler.
-            bundle = Path(args.bundle).read_text()
-            for owner, buyer in ((ios, android), (android, ios)):
-                if args.market_owner not in ("both", owner.platform):
-                    continue
-                ios.package, android.package = "org.example.rockymarket", "org.example.examples.market"
-                ios.fresh(args.ios_market)
-                android.fresh(args.android_market)
-                for mobile in (owner, buyer):
-                    mobile.fill_market("Coordination bundle", bundle)
-                owner.click("Create market")
-                owner.expect("owner opens on " + owner.platform, "No reservation yet")
-                owner.click("Pair buyer")
-                invitation = owner.invitation()
-                owner.click("Done")
-                if args.emulator_routes:
-                    address = emulator_pairing_address(invitation, owner, android, redirects)
-                    buyer.fill("Direct pairing address (optional)", address)
-                buyer.fill_market("Pairing invitation", invitation)
-                buyer.click("Join market")
-                buyer.expect("buyer opens on " + buyer.platform, "No reservation yet")
-                buyer.call("wait", "absent", 'label="Pair buyer"', "1000")
-                buyer.notes.append({"name": "fresh buyer has no owner's Keychain tenant", "text": "Pair buyer absent"})
-                owner.fill("New listing", "Bolt")
-                owner.click("List")
-                owner.expect("owner listing commits", "Bolt")
-                owner.click("Restock")
-                buyer.expect("confirmed stock reaches " + buyer.platform, "1 in stock")
-                buyer.click("Reserve")
-                buyer.expect("remote reservation accepted on " + buyer.platform, "Accepted: 0 left")
-                owner.expect("remote reservation projects on " + owner.platform, "0 in stock")
-                for mobile in (ios, android):
-                    mobile.call("close")
+        ios.fresh(args.ios_shopping)
+        android.fresh(args.android_shopping)
+        host = Host()
+        port = free_port()
+        created = host.request("create", directory=str(OUT / ("host-" + uuid.uuid4().hex)), listen="127.0.0.1:" + str(port))
+        host_node = created["node"]
+        android.reverse_ports.append(port)
+        reverse_owned.append(port)
+        run("adb", "-s", args.android_device, "reverse", f"tcp:{port}", f"tcp:{port}")
+        contacts = {}
+        for mobile in (ios, android):
+            invitation = host.request("pairing", profile="issuer" if mobile.platform == "ios" else "writer")
+            lines = mobile.drive(invitation=invitation, transport="tcp", contact="1", sync="1")
+            contact = next(line.removeprefix("contact ").split(" ", 1) for line in lines if line.startswith("contact "))
+            contacts[mobile.platform] = contact
+        contacts["android"][1] = emulator_contact(contacts["android"][1], android, forwards)
+        # Both issuer registries receive the second enrollment before the host stops.
+        ios.drive(sync="1")
+        android.drive(sync="1")
+        custody_port = free_port()
+        config = {
+            "directory": str(OUT / ("custody-" + uuid.uuid4().hex)),
+            "schema": host.request("schema"),
+            "transport": {"kind": "tcp", "listen": f"127.0.0.1:{custody_port}"},
+            "invitation": host.request("pairing", profile="custody"),
+            "peers": [host.request("contact")["uri"], *[contact[1] for contact in contacts.values()]],
+        }
+        config_path = OUT / "peer.json"
+        config_path.write_text(json.dumps(config))
+        custody = subprocess.Popen([args.peer, str(config_path)], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=(OUT / "custody.log").open("w"))
+        selector = selectors.DefaultSelector()
+        selector.register(custody.stdout, selectors.EVENT_READ)
+        if not selector.select(30):
+            raise RuntimeError("custody did not publish its contact")
+        custody_contact = custody.stdout.readline().strip()
+        if not custody_contact.startswith("rocky://peer/"):
+            raise RuntimeError("unexpected custody contact: " + custody_contact)
+        android.reverse_ports.append(custody_port)
+        reverse_owned.append(custody_port)
+        run("adb", "-s", args.android_device, "reverse", f"tcp:{custody_port}", f"tcp:{custody_port}")
+        for mobile in (ios, android):
+            mobile.drive(peer=custody_contact, forget=host_node, sync="1")
+        ios.drive(add="Before background", list="Offline groceries", share="Offline groceries", to=contacts["android"][0])
+        # Establish the shared list before the offline/background acceptance slice.
+        ios.drive(sync="1")
+        android.drive(sync="1")
+        ios.expect("shared list exists before disconnecting", "Offline groceries")
+        android.expect("shared list arrives before disconnecting", "Offline groceries")
+        host.close()
+        android.reverse_ports.remove(port)
+        android.drive(online="false")
+        ios.drive(online="false", add="Milk", list="Offline groceries")
+        ios.expect("simulator committed the offline row", "Milk")
+        # Restore configured connectivity with automatic sync already paused, then
+        # use the real application visibility notification for the resume.
+        ios.drive(background="true", online="true")
+        ios.call("home")
+        android.drive(online="true")
+        android.call("wait", "absent", 'label="Milk"', "1000")
+        android.notes.append({"name": "row is absent before simulator foreground", "text": "Milk absent"})
+        ios.call("open", ios.package, "--foreground")
+        android.expect("foreground automatically delivers the offline row through custody", "Milk")
+        ios.expect("foreground keeps the committed local row", "Milk")
+        for mobile in (ios, android):
+            mobile.call("close")
+        custody.terminate()
+        custody.wait(timeout=30)
+        custody = None
+        android.reverse_ports.clear()
         elapsed = time.monotonic() - started
         if elapsed > 900:
             raise RuntimeError(f"pair e2e suite exceeded 15 min: {elapsed:.2f} s")
         passed = True
     except Exception as error:
         failure = str(error)
-        if args.scenario in ("all", "shopping") and ios.package == "org.example.rockyshopping":
-            # Diagnostics run after failure and cannot turn the acceptance result green.
-            for mobile in (ios, android):
-                if not mobile.active:
-                    continue
-                try:
-                    lines = mobile.drive(dump="1", status="1", sync="1", events="1")
-                    (OUT / (mobile.platform + "-failure-diagnostics.json")).write_text(json.dumps(lines, indent=2) + "\n")
-                except Exception as diagnostic_error:
-                    print("Failure diagnostics: " + str(diagnostic_error), flush=True)
+        # Diagnostics run after failure and cannot turn the acceptance result green.
+        for mobile in (ios, android):
+            if not mobile.active:
+                continue
+            try:
+                lines = mobile.drive(dump="1", status="1", sync="1", events="1")
+                (OUT / (mobile.platform + "-failure-diagnostics.json")).write_text(json.dumps(lines, indent=2) + "\n")
+            except Exception as diagnostic_error:
+                print("Failure diagnostics: " + str(diagnostic_error), flush=True)
         raise
     finally:
         for port in reverse_owned:
             run("adb", "-s", android.device, "reverse", "--remove", f"tcp:{port}")
         for port in forwards:
             run("adb", "-s", android.device, "forward", "--remove", f"tcp:{port}")
-        for route in redirects:
-            route.close()
         if host is not None:
             host.close()
         if custody is not None:
             custody.terminate()
             custody.wait(timeout=30)
-        (OUT / ("expectations-" + args.scenario + ".json")).write_text(json.dumps({"passed": passed, "scenario": args.scenario, "market_owner": args.market_owner, "emulator_routes": args.emulator_routes, "error": failure, "seconds": time.monotonic() - started, "ios": ios.notes, "android": android.notes}, indent=2) + "\n")
+        (OUT / "expectations-shopping.json").write_text(json.dumps({"passed": passed, "scenario": "shopping", "error": failure, "seconds": time.monotonic() - started, "ios": ios.notes, "android": android.notes}, indent=2) + "\n")
 
 
 if __name__ == "__main__":

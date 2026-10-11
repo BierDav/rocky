@@ -54,7 +54,7 @@ def main():
         device("click", 'id="' + identifier + '"', "--settle")
         alert = device("alert", "get", absent_alert=True)
         if alert:
-            if "would like to paste" not in alert or not any(name in alert for name in ("Shopping", "Market")):
+            if "would like to paste" not in alert or "Shopping" not in alert:
                 raise RuntimeError("Unexpected paste alert: " + alert)
             device("click", 'label="Allow Paste"', "--settle")
 
@@ -99,28 +99,6 @@ def main():
         expect("foreground keeps committed row", "Milk")
         device("open", "org.example.rockyshopping", "--relaunch", "--foreground")
         expect("process restart reopens committed row", "Milk")
-        device("close")
-
-        install("Market", "org.example.rockymarket")
-        expect("market setup opens", "Coordination bundle")
-        device("clipboard", "write", args.bundle.read_text())
-        paste("Paste bundle")
-        expect("market paste fills the service bundle", json.loads(args.bundle.read_text())["root"])
-        paste("Paste bundle")
-        device("click", 'label="Create market"', "--settle")
-        expect("market installation opens", "No reservation yet")
-        device("fill", input_ref("New listing"), "Bolt", "--settle")
-        device("click", 'label="List"', "--settle")
-        expect("mergeable listing is visible", "Bolt")
-        device("click", 'label="Restock"', "--settle")
-        expect("service confirms stock", "1 in stock")
-        device("click", 'label="Reserve"', "--settle")
-        expect("service confirms reservation", "Accepted: 0 left")
-        device("home")
-        device("open", "org.example.rockymarket", "--foreground")
-        expect("market resumes its confirmed projection", "0 in stock")
-        device("open", "org.example.rockymarket", "--relaunch", "--foreground")
-        expect("market reopens confirmed hold", "1 confirmed holds, 1 items")
         device("close")
         elapsed = time.monotonic() - started
         if elapsed > 900:

@@ -290,17 +290,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 }
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn table_complete(&self, table: Commitment) -> Result<bool, Error> {
-        let (_, selectors) = self
-            .config
-            .credentials
-            .verify_selectors(
-                self.config.publisher,
-                self.manifest,
-                self.config.node.public_key(),
-                &self.config.revocations,
-                now()?,
-            )
-            .map_err(credential)?;
+        let selectors = self.local_selectors(now()?)?;
         let Some(typed) = &self.typed else {
             return Ok(false);
         };

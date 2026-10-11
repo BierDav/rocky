@@ -2,8 +2,8 @@
 
 Qualified on 2026-10-09 by [phase 10](../features_06/10-qualification.md) on
 the JVM desktop profile (macOS arm64, loopback TCP), with each device in its own
-process, and its sharing and move steps on two Android emulators. Phone runs, the
-market scenario on devices are [outstanding](#outstanding). This is not an Internet, NAT or relay claim.
+process, and its sharing and move steps on two Android emulators. Phone runs are
+[outstanding](#outstanding). This is not an Internet, NAT or relay claim.
 
 ## Commands
 
@@ -47,8 +47,7 @@ a mailbox, and a second issuing device. Every scenario ends by querying the remo
 and checking `no such table`; on members it also checks `devices`. Its lists merge; its approvals are strong
 commands the public coordination service orders, which this harness does not
 run: its devices open over TCP without a coordinator. Strong commands under
-contention, loss, takeover and voter faults are qualified by the
-[market](market-qualification.md).
+contention, loss, takeover and voter faults are not qualified as processes.
 
 | Scenario | Evidence | Status |
 | --- | --- | --- |
@@ -57,7 +56,6 @@ contention, loss, takeover and voter faults are qualified by the
 | 3 Offline relink and duplicate title policy | Harness `relink` and `gate` | Passed on JVM processes |
 | 4 Creator loss; second issuer invites and renews | Harness `creator-loss`; `IssuerRecoveryTest` | Passed on JVM processes |
 | 5 All-device horizon and long-offline rebootstrap | Harness `gate` | Passed on JVM processes |
-| 6 Market 4,096 commands, DAO stock, keyed read | `./examples/market-app/qualify` (five scenarios), `./examples/market-app/soak`; [market qualification](market-qualification.md) | Passed on JVM processes; devices [outstanding](#outstanding) |
 | 7 ERP fixture, 200 partitions | `measure_200_partition_group_sync`, `erp_group_sync_preserves_all_references_and_reopens` | Measured; see [evidence](#evidence) |
 
 ## Partitioned constraints acceptance
@@ -152,7 +150,6 @@ see [Phase 13 evidence](../features_07/13-relayed-horizon-evidence.md).
 | Scenario | Blocking contract |
 | --- | --- |
 | Two-phone runs of the gate, moves and revocation | Two physical Android phones on the qualification host, running the [device procedure](shopping-devices.md#two-phone-procedure). Only one phone, in personal use, was attached; the procedure [passed on two emulators](shopping-devices.md#emulator-pair-2026-10-09) |
-| 6 Market on devices | Two phones competing for the last item, in [phase 22](../features_07/22-qualification.md). JVM processes and one emulator reservation passed; see [market qualification](market-qualification.md) |
 | Internet, NAT and relays | A run over iroh relays between networks; only loopback and one LAN were used |
 
 The earlier single-phone LAN run is recorded in [shopping devices](shopping-devices.md).

@@ -53,7 +53,11 @@ pub struct ConnectionOptions {
 }
 impl ConnectionOptions {
     fn sql(&self) -> rocky_secure::SqlOptions {
-        let mut options = rocky_secure::SqlOptions::default();
+        // A driver never hands frames out: sync flushes before it sends them.
+        let mut options = rocky_secure::SqlOptions {
+            acknowledge: rocky_secure::CommitClass::Buffered,
+            ..Default::default()
+        };
         if let Some(timeout) = self.transaction_timeout {
             options.transaction_timeout = timeout;
         }

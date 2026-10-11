@@ -192,7 +192,8 @@ fun main(args: Array<String>) = runBlocking {
     check(!db.network().attached)
     check(endpoint.address().isNotEmpty())
     val owned = db.attach(PeerTransport.Tcp("127.0.0.1:0"))
-    val invitation = db.credentials.pairing(GrantProfile.Writer(setOf("items")))
+    // An issuer backup includes the registry projection, so restore with issuer read grants.
+    val invitation = db.credentials.pairing(GrantProfile.Issuer)
     val archive = File(root, "device.backup")
     db.backup(archive)
     val restored = RockyDatabase.restore(
@@ -204,6 +205,7 @@ fun main(args: Array<String>) = runBlocking {
         commands = runtime,
     )
     check(restored.credentials.status().node != db.credentials.status().node)
+    check(restored.credentials.status().isIssuer)
     check(titles(restored) == listOf("apples"))
     check(restored.commands.ticket(add, handle(2))?.state == TicketState.Applied)
     check(calls == 1) // Restore and replay never redispatch the command handler.
@@ -218,6 +220,14 @@ fun main(args: Array<String>) = runBlocking {
     check(db.credentials.status().node == node)
     check(db.generation().getValue("current").jsonObject.getValue("schema").jsonPrimitive.int == 2)
     check(titles(db) == listOf("apples"))
+    check(Row.decode(db.read(upgraded.table("items").query())).single().isNull("note"))
+    check(db.commands.ticket(add, handle(2))?.state == TicketState.Applied)
+    check(db.reconcile(action).getValue("committed").jsonPrimitive.boolean)
+    check(calls == 1)
+    db.close()
+    db = RockyDatabase.open(directory, upgraded, commands = runtime)
+    check(db.credentials.status().node == node)
+    check(Row.decode(db.read(upgraded.table("items").query())).single().isNull("note"))
     check(db.commands.ticket(add, handle(2))?.state == TicketState.Applied)
     check(db.reconcile(action).getValue("committed").jsonPrimitive.boolean)
     check(calls == 1)

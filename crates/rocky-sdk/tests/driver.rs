@@ -1089,3 +1089,75 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     a.close().await?;
     Ok(())
 }
+
+/// A measurement of one device's write path, per statement. Run with
+/// `cargo test -p rocky-sdk --test driver local_write_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement"]
+async fn local_write_latency() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let database = create(open(root.path(), None), None).await?.database;
+    let writer = database.connect(WRITER).await?;
+    let reader = database.connect(READER).await?;
+    run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+    all(
+        &writer,
+        "INSERT INTO lists(key,title) VALUES(?,?)",
+        vec![text("l1"), text("Groceries")],
+    )
+    .await?;
+    for index in 0..50 {
+        all(
+            &writer,
+            "INSERT INTO items(key,list,title,completed,note) VALUES(?,?,?,0,NULL)",
+            vec![text(&format!("i{index}")), text("l1"), text(&format!("Item {index}"))],
+        )
+        .await?;
+    }
+    run(&writer, "END TRANSACTION").await?;
+    let mut phases: BTreeMap<&str, Vec<Duration>> = BTreeMap::new();
+    let taps = std::env::var("ROCKY_LATENCY_TAPS").ok().and_then(|taps| taps.parse().ok()).unwrap_or(200);
+    let pause = std::env::var("ROCKY_LATENCY_PAUSE_MS").ok().and_then(|pause| pause.parse().ok()).unwrap_or(0);
+    for tap in 0..taps + 20 {
+        tokio::time::sleep(Duration::from_millis(pause)).await;
+        let mut mark = std::time::Instant::now();
+        let mut lap = |name: &'static str, phases: &mut BTreeMap<&str, Vec<Duration>>| {
+            let now = std::time::Instant::now();
+            if tap >= 20 {
+                phases.entry(name).or_default().push(now - mark);
+            }
+            mark = now;
+        };
+        let started = std::time::Instant::now();
+        run(&writer, "BEGIN IMMEDIATE TRANSACTION").await?;
+        lap("1 begin", &mut phases);
+        all(
+            &writer,
+            "UPDATE items SET completed = ? WHERE key = ?",
+            vec![SqlValue::Integer(tap % 2), text("i7")],
+        )
+        .await?;
+        lap("2 update", &mut phases);
+        run(&writer, "END TRANSACTION").await?;
+        lap("3 commit", &mut phases);
+        if std::env::var("ROCKY_LATENCY_SERIES").is_ok() {
+            println!("SERIES {tap} {:.3}", phases.get("3 commit").and_then(|times| times.last()).map_or(0.0, |d| d.as_secs_f64() * 1e3));
+        }
+        all(
+            &reader,
+            "SELECT key, title, completed FROM items WHERE list = ? ORDER BY completed, title",
+            vec![text("l1")],
+        )
+        .await?;
+        lap("4 read", &mut phases);
+        if tap >= 20 {
+            phases.entry("5 total").or_default().push(started.elapsed());
+        }
+    }
+    for (name, mut times) in phases {
+        times.sort();
+        let at = |p: usize| times[(times.len() * p / 100).min(times.len() - 1)].as_secs_f64() * 1e3;
+        println!("LATENCY {name:<10} p50={:.3} ms p95={:.3} ms max={:.3} ms", at(50), at(95), at(100));
+    }
+    Ok(())
+}

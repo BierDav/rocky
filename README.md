@@ -149,7 +149,6 @@ cargo run -p todo-desktop --locked -- --data-dir local/todo-demo
 | `examples/todo-desktop` | Desktop composition and development controls |
 | `sdks/kotlin/rocky-core` / `rocky-room` | ORM-neutral Kotlin APIs and Room projection/action adapter |
 | `examples/shoppinglist-app` | Desktop library walkthrough, pairing and Room migration qualification |
-| `examples/market-app` | Kotlin market on a coordination service: strong reservations and their multi-process qualification |
 | `benchmarks/engine-comparison` | Separate engine qualification workspace |
 | `benchmarks/engine-scale` | Separate workspace comparing engines at target size |
 | `benchmarks/runtime-scaling` | Scaling probes and timing qualification for the runtime |

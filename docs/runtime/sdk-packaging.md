@@ -81,6 +81,9 @@ only artifacts outside the repository and runs with an empty environment and
 only Java on `PATH`. It covers local sessions, readiness Flow and cancellation,
 handle reconciliation, Kotlin handlers, durable tickets, network ownership,
 fresh restore and additive upgrade with reopen, on a development coordinator.
+The issuer backup is restored with an issuer invitation, preserving access to
+its registry projection. The upgraded schema is reopened again to check its
+nullable field, durable ticket and original mutation handle.
 
 | Artifact | Default iroh | Without iroh |
 | --- | --- | --- |

@@ -8,8 +8,7 @@ An application consists of Kotlin schemas, command declarations and deterministi
 the [packaged SDK jars](sdk-packaging.md) and needs no Rust project or native
 build, and no backend of its own. Devices sync mergeable data directly with each other. A
 provider's coordination service orders the strong commands. It holds metadata
-only. `examples/shoppinglist-app` is a complete example;
-[`examples/market-app`](../../examples/market-app/README.md) implements the market these steps define.
+only. `examples/shoppinglist-app` is a complete example.
 
 ## 1. Define the application
 

@@ -372,17 +372,8 @@ market-shaped and compound-key scalar fixtures and DAO value tests. The SDK supp
 native behavior. The walkthrough and household tests cover direct device pairing, full/partial
 key delivery and immediate received-list reads after reopen. See [Room on Rocky's file](runtime/room-integration.md).
 
-`examples/market-app` is the Kotlin-only market on a coordination service, laid
-out as the shopping example with prefixed module names, since module names are
-unique in the workspace. `marketShared` holds the schema, the `Reserve` and
-`Restock` commands and handlers, Room DAOs over the command-controlled tables
-and the one screen, with no platform file API; `marketDesktop` and
-`marketAndroid` and `marketIos` are the applications and `marketQualification` the multi-process
-[market qualification](runtime/market-qualification.md) harness against three
-voters.
-
 `examples/shoppinglist-app/pairing-ui` owns the QR display and platform camera scanner used by
-both Compose examples. QRose displays codes on all targets; EasyQRScan supplies
+the Compose example. QRose displays codes on all targets; EasyQRScan supplies
 the shared Android/iOS scanner under `src@mobile`. iOS asks for camera access
 only; camera-less simulators and desktop use the common paste fields.
 

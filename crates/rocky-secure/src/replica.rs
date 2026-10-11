@@ -221,6 +221,12 @@ pub(super) struct Inner<A> {
     /// count and second they were resolved at: resolving the chain against
     /// every registered partition otherwise repeats for each frame and scope.
     local: std::sync::Mutex<Option<LocalGrants>>,
+    /// Scopes buffered SQL commits wrote, whose maintenance step `maintain`
+    /// runs after the commit answered.
+    deferred_maintenance: BTreeSet<ResourceScope>,
+    /// This device's verified partition selectors for an authority and
+    /// second: every statement of a partitioned schema asks for them.
+    local_selectors: std::sync::Mutex<Option<LocalSelectors>>,
     /// Cursors, table events and the authority mirror of this replica.
     pub(super) queries: queries::Queries,
     pub(super) notifications: watch::Sender<u64>,
@@ -347,6 +353,8 @@ pub struct Buffered<T> {
 pub(super) type Grants = Arc<Vec<rocky_core::ResourceGrant>>;
 /// Grants with the authority, partition count and second they hold for.
 type LocalGrants = ((u64, usize, u64), Grants);
+pub(super) type Selectors = Arc<Vec<rocky_credentials::PartitionGrant>>;
+type LocalSelectors = ((u64, u64), Selectors);
 
 /// Encrypted protocol files use an explicit API; trusted files cannot be opened here.
 pub struct EncryptedReplica<A> {
@@ -577,6 +585,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             strict_projection: false,
             settling: Default::default(),
             local: Default::default(),
+            local_selectors: Default::default(),
+            deferred_maintenance: BTreeSet::new(),
             queries: Default::default(),
             notifications,
             frames: watch::channel(()).0,
@@ -819,11 +829,32 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .collect()
     }
     /// Flushes every commit so far with one device flush; returns the
-    /// durable watermark.
+    /// durable watermark. The flush runs on a blocking thread without the
+    /// replica, so statements and reads proceed meanwhile.
     pub async fn flush(&self) -> Result<u64, Error> {
+        let (flusher, commit) = {
+            let inner = self.inner.lock().await;
+            (inner.flusher.clone(), inner.commit)
+        };
+        if flusher.durable() < commit {
+            let flushing = flusher.clone();
+            tokio::task::spawn_blocking(move || flushing.flush(commit))
+                .await
+                .map_err(|_| Error::Closed)??;
+        }
+        Ok(flusher.durable())
+    }
+    /// Runs the maintenance buffered SQL commits left for later: one bounded
+    /// checkpoint or pruning step for the scopes they wrote, and a WAL
+    /// checkpoint when one is due. A commit acknowledged `Flushed` runs its
+    /// own step before it answers.
+    pub async fn maintain(&self) {
         let mut inner = self.inner.lock().await;
-        inner.flush()?;
-        Ok(inner.flusher.durable())
+        let scopes = std::mem::take(&mut inner.deferred_maintenance);
+        if !scopes.is_empty() {
+            inner.maintain(&scopes).await;
+        }
+        inner.checkpoint_if_due().await;
     }
     /// The last commit known to survive power loss.
     pub async fn durable_commit(&self) -> u64 {
@@ -1057,6 +1088,34 @@ impl<A: RowApplication> Inner<A> {
         )?);
         *local = Some((key, grants.clone()));
         Ok(grants)
+    }
+    /// This device's partition selectors under its current credentials,
+    /// verified once per authority and second like `local_grants`.
+    pub(super) fn local_selectors(&self, time: u64) -> Result<Selectors, Error> {
+        let key = (self.authority, time);
+        let mut local = self
+            .local_selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((resolved, selectors)) = local.as_ref()
+            && *resolved == key
+        {
+            return Ok(selectors.clone());
+        }
+        let (_, selectors) = self
+            .config
+            .credentials
+            .verify_selectors(
+                self.config.publisher,
+                self.manifest,
+                self.config.node.public_key(),
+                &self.config.revocations,
+                time,
+            )
+            .map_err(credential)?;
+        let selectors = Arc::new(selectors);
+        *local = Some((key, selectors.clone()));
+        Ok(selectors)
     }
     pub(super) fn can_read_key(
         &self,
@@ -1354,6 +1413,10 @@ impl<A: RowApplication> Inner<A> {
         self.config.revocations = merged;
         *self
             .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .local_selectors
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())

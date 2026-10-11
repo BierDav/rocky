@@ -922,6 +922,7 @@ async fn run(
     let connections = Arc::new(connection::Registry::default());
     let mut tasks = tokio::task::JoinSet::new();
     let mut shutdown = None;
+    let settling = tokio::task::spawn_local(settle_commits(replica.clone()));
     while let Some(command) = input.recv().await {
         let node = node.clone();
         match command {
@@ -1032,6 +1033,8 @@ async fn run(
     node.detach(None).await;
     let purge = *node.ended.lock().await == Some(true);
     drop(node);
+    settling.abort();
+    let _ = settling.await;
     // Dropping the last handle closes the file.
     let mut result = replica.flush().await.map(drop).map_err(|e| e.to_string());
     drop(replica);
@@ -1044,6 +1047,18 @@ async fn run(
     Ok(())
 }
 /// Removes what a logged-out device stored, keeping only the lock.
+/// Finishes buffered SQL commits after they answered: a flush makes them
+/// durable, then their maintenance step runs. The flush runs on a blocking
+/// thread, so no statement waits for the device, and one flush covers every
+/// commit that arrived during the previous one. A flush failure surfaces at
+/// the next call that exposes data, which flushes itself.
+async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedCommands>) {
+    let mut revisions = replica.observe_revision();
+    while revisions.changed().await.is_ok() {
+        let _ = replica.flush().await;
+        replica.maintain().await;
+    }
+}
 fn purge_directory(directory: &Path) -> Result<(), Failure> {
     for name in [
         "identity.json",

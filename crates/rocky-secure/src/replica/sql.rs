@@ -3,6 +3,7 @@
 //! engine transaction. See `docs/runtime/secure-sql.md`.
 use super::*;
 use crate::{
+    CommitClass,
     capture::Plan,
     sql::{AbortReason, Control, SqlError, SqlOptions, SqlState, classify},
     sqlite::{self, Run},
@@ -780,15 +781,22 @@ impl<A: RowApplication> SecureSql<A> {
         qualification_kill("after");
         inner.note_commit().await;
         inner.publish_revision().await?;
-        // The frames may leave the device.
-        inner.flush()?;
         let scopes = committed
             .frames
             .iter()
             .map(EncryptedFrame::scope)
             .collect::<Result<BTreeSet<_>, _>>()?;
-        inner.maintain(&scopes).await;
-        inner.checkpoint_if_due().await;
+        if self.options.acknowledge == CommitClass::Flushed {
+            // The frames may leave the device.
+            inner.flush()?;
+            inner.maintain(&scopes).await;
+            inner.checkpoint_if_due().await;
+        } else {
+            // Buffered frames leave only through a call that flushes first,
+            // such as a transfer page; `EncryptedReplica::maintain` runs the
+            // maintenance step after this commit answered.
+            inner.deferred_maintenance.extend(scopes);
+        }
         rows.committed = Some(committed);
         Ok(rows)
     }

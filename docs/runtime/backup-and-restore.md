@@ -28,6 +28,9 @@ storage and encrypted recovery-key packages remain separate mechanisms.
 
 1. Obtain a fresh invitation with the required grants from an available enrolled
    issuer. Delegated issuer recovery remains the primary authority recovery path.
+   Match the backup's readable tables: an issuer backup needs an issuer invitation
+   to retain its registry projection. Changing access to an existing table requires
+   [reinstalling the readable projection](../decisions/0061-readable-projections-and-checkpoint-custody.md#physical-projection).
 2. Restore into an empty data directory, with a secret provider and a network able
    to reach that issuer. Verify archive signature, complete file hashes, installed
    publisher and invitation domain before replacing local files.

@@ -11,6 +11,8 @@ struct Entry {
     id: u64,
     dialed: bool,
     held: Vec<ResourceScope>,
+    handle: link::channels::Handle,
+    authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
     changed: watch::Sender<Option<Vec<ResourceScope>>>,
     frontiers: BTreeMap<ResourceScope, [u8; 32]>,
@@ -34,6 +36,16 @@ impl Default for Registry {
     }
 }
 impl Registry {
+    pub fn handle(&self, peer: PublicKey) -> Option<link::channels::Handle> {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .filter(|entry| {
+                entry.close.borrow().is_none() && !entry.authority.has_changed().unwrap_or(true)
+            })
+            .map(|entry| entry.handle.clone())
+    }
     pub async fn wait_empty(&self) {
         let mut events = self.events.subscribe();
         loop {
@@ -65,7 +77,10 @@ impl Registry {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&peer)
+            .get(&peer)
+            .is_some_and(|entry| {
+                entry.close.borrow().is_none() && !entry.authority.has_changed().unwrap_or(true)
+            })
     }
     #[cfg(test)]
     pub fn dialed(&self, peer: PublicKey) -> Option<bool> {
@@ -179,10 +194,7 @@ impl Node {
         settings: Settings,
         handshake_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), Failure> {
-        if !self.automatic.load(Ordering::SeqCst)
-            || !self.online.load(Ordering::SeqCst)
-            || *service.stage.borrow() != Stage::Open
-        {
+        if !self.online.load(Ordering::SeqCst) || *service.stage.borrow() != Stage::Open {
             return Err("live links are disabled".into());
         }
         let mut authority = self.replica.observe_authority().await;
@@ -190,8 +202,7 @@ impl Node {
         let own = local.public_key();
         let mut opened =
             link::Link::open(stream, &self.replica, local, settings.credentials, expected).await?;
-        if !self.automatic.load(Ordering::SeqCst)
-            || !self.online.load(Ordering::SeqCst)
+        if !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open
             || authority.has_changed()?
         {
@@ -220,6 +231,7 @@ impl Node {
         } else {
             None
         };
+        opened.ready().await?;
         let peer = opened.peer;
         let dialed = expected.is_some();
         let preferred = own < peer;
@@ -246,10 +258,11 @@ impl Node {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if entries
-                .get(&peer)
-                .is_some_and(|old| old.dialed == preferred || old.dialed == dialed)
-            {
+            if entries.get(&peer).is_some_and(|old| {
+                (old.dialed == preferred || old.dialed == dialed)
+                    && old.close.borrow().is_none()
+                    && !old.authority.has_changed().unwrap_or(true)
+            }) {
                 false
             } else {
                 if let Some(old) = entries.insert(
@@ -258,6 +271,8 @@ impl Node {
                         id,
                         dialed,
                         held: opened.held.clone(),
+                        handle: opened.channels.handle.clone(),
+                        authority: authority.clone(),
                         close: close.clone(),
                         changed: changed.clone(),
                         frontiers,
@@ -294,6 +309,7 @@ impl Node {
             state.link = false;
             state.link_retry.reset();
             state.retry.reset();
+            state.pending = true;
             if state.pending {
                 self.link_events.send_replace(());
             }

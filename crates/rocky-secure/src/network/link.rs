@@ -4,7 +4,8 @@ use tokio::io::{ReadHalf, WriteHalf};
 
 // A distinct handshake identity prevents a native session being used as a link.
 pub(super) const HANDSHAKE_VERSION: u32 = 0x10001;
-pub const CHANNELS: u16 = 2;
+pub const CHANNELS: u16 = 6;
+pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
 pub const SIGNAL_SCOPES: usize = 64;
 
@@ -16,12 +17,18 @@ pub enum CloseReason {
     Detached,
     Busy,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     Changed {
         scopes: Vec<ResourceScope>,
         token: [u8; 32],
     },
+    Push {
+        scope: ResourceScope,
+        frames: Vec<EncryptedFrame>,
+    },
+    Ready,
+    Channel(channels::Packet),
     Ping,
     Pong,
     Close {
@@ -39,13 +46,26 @@ pub struct Frame {
 impl Frame {
     pub fn new(direction: bool, message: Message) -> Self {
         Self {
-            channel: u16::from(matches!(message, Message::Changed { .. })),
+            channel: match message {
+                Message::Changed { .. } | Message::Push { .. } => 1,
+                _ => 0,
+            },
             direction,
             message,
         }
     }
     fn validate(&self) -> Result<(), Error> {
-        let channel = u16::from(matches!(self.message, Message::Changed { .. }));
+        let channel = match &self.message {
+            Message::Channel(packet) => {
+                packet.validate()?;
+                if self.channel < 2 {
+                    return Err(denied("link request channel"));
+                }
+                self.channel
+            }
+            Message::Changed { .. } | Message::Push { .. } => 1,
+            _ => 0,
+        };
         if self.channel >= CHANNELS || self.channel != channel {
             return Err(denied("link channel quota"));
         }
@@ -60,6 +80,11 @@ impl Frame {
         {
             return Err(denied("link signal scope quota"));
         }
+        if let Message::Push { frames, .. } = &self.message
+            && (frames.is_empty() || frames.len() > rows::MAX_SECURE_PAGE)
+        {
+            return Err(denied("link push frame quota"));
+        }
         Ok(())
     }
 }
@@ -71,6 +96,7 @@ pub struct Link {
     pub direction: bool,
     pub expires: u64,
     pub states: std::collections::BTreeMap<ResourceScope, Commitment>,
+    pub channels: channels::Channels,
     pub reader: Reader,
     pub writer: Writer,
 }
@@ -86,7 +112,32 @@ pub struct Writer {
     signing: Vec<u8>,
     sequence: u64,
 }
+#[derive(Debug)]
+pub struct Busy;
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("live link budget is busy")
+    }
+}
+impl std::error::Error for Busy {}
 impl Link {
+    /// Both ends confirm their independent link budget before any data channel opens.
+    pub async fn ready(&mut self) -> Result<(), Error> {
+        self.writer
+            .send(Frame::new(self.direction, Message::Ready))
+            .await?;
+        let frame = timeout(TIMEOUT, self.reader.receive())
+            .await
+            .map_err(|_| denied("link ready timeout"))??;
+        match frame.message {
+            Message::Ready if frame.direction != self.direction => Ok(()),
+            Message::Close {
+                reason: CloseReason::Busy,
+            } => Err(Error::Application(Box::new(Busy))),
+            _ => Err(denied("link ready response")),
+        }
+    }
+
     pub async fn open<A: RowApplication>(
         stream: impl SessionStream + 'static,
         replica: &EncryptedReplica<A>,
@@ -152,9 +203,11 @@ impl Link {
             states
         };
         let held = session.proved.iter().copied().collect();
+        let channels = channels::Channels::new(&session, side == Side::Acceptor);
         let (read, write) = tokio::io::split(session.stream);
         Ok(Self {
             peer: session.peer,
+            channels,
             states,
             held,
             offered: session.offered.iter().copied().collect(),

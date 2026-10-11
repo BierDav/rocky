@@ -232,12 +232,12 @@ async fn saturated_link_budget_leaves_pair_and_command_admission_free() -> Resul
                 Some(PrivateKey::from_bytes(&a.vault.get("node")?).public_key()),
             )
             .await?;
-            assert_eq!(
+            assert!(matches!(
                 refused.reader.receive().await?.message,
                 rocky_secure::network::link::Message::Close {
                     reason: rocky_secure::network::link::CloseReason::Busy
                 }
-            );
+            ));
             let before = service.served.load(Ordering::Relaxed);
             let pair = transport.connect("a", Protocol::Pair).await?;
             let command = transport.connect("a", Protocol::Command).await?;
@@ -631,12 +631,12 @@ async fn real_budget_gate(kind: &str) -> Result<(), Failure> {
                 Some(PrivateKey::from_bytes(&a.vault.get("node")?).public_key()),
             )
             .await?;
-            assert_eq!(
+            assert!(matches!(
                 refused.reader.receive().await?.message,
                 Message::Close {
                     reason: CloseReason::Busy
                 }
-            );
+            ));
             let before = sa.served.load(Ordering::Relaxed);
             let mut pair = transport.connect(&aa, Protocol::Pair).await?;
             let mut command = transport.connect(&aa, Protocol::Command).await?;

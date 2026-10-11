@@ -62,3 +62,17 @@ and no reconcile.
 - Revocation and key rotation tests that run across sessions today pass
   across links, including a revocation learned in the middle of a push.
 - Two devices each writing to the same scope at the same time converge.
+
+## Development evidence
+
+Slice 1: decision [0064](../decisions/0064-sync-on-live-links.md) records inherited
+admission, channel bounds and the self-contained live push.
+
+Slices 2–3: the session factory opens a logical request channel on the link.
+Rows, existence, horizons, results and checkpoint bootstrap retain their native
+handlers; envelopes and contacts use the same factory. Busy refusal is typed;
+other link errors do not silently fall back. Explicit sync uses a short link.
+The large-row checkpoint regression `join_restores_large_rows_across_checkpoint_pages`
+passed (1.61 s). The reverse-opened memory-link row regression passed (0.22 s).
+Concurrent issuer renewal invalidates inherited channels; reconciliation retries
+only when the observed authority changed. Full qualification remains pending.

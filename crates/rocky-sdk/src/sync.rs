@@ -25,6 +25,7 @@ const HEAD: std::time::Duration = std::time::Duration::from_secs(2);
 /// One device's view of a peer. `addresses` are hints: the session only
 /// proceeds with whoever proves the `peer` key.
 pub struct Upstream<'a> {
+    pub link: Option<rocky_secure::network::link::channels::Handle>,
     pub transport: &'a dyn Transport,
     pub addresses: &'a [String],
     pub peer: PublicKey,
@@ -230,16 +231,20 @@ pub(crate) async fn session(
     replica: &EncryptedReplica<TypedCommands>,
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
-    let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
-    let mut session = NativeSession::authenticate(
-        stream,
-        replica,
-        upstream.node.clone(),
-        upstream.credentials.clone(),
-        upstream.peer,
-        MAX_SECURE_BYTES,
-    )
-    .await?;
+    let mut session = if let Some(link) = &upstream.link {
+        link.open().await?
+    } else {
+        let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
+        NativeSession::authenticate(
+            stream,
+            replica,
+            upstream.node.clone(),
+            upstream.credentials.clone(),
+            upstream.peer,
+            MAX_SECURE_BYTES,
+        )
+        .await?
+    };
     if let Some(handler) = upstream.contacts {
         crate::mesh::exchange(&mut session, handler).await?;
     }

@@ -21,16 +21,47 @@ impl Node {
         let expires = opened.expires;
         let mut stage = service.stage.subscribe();
         let mut changes = changed.subscribe();
+        let mut outgoing = std::mem::replace(&mut opened.channels.outgoing, mpsc::channel(1).1);
         let exit = {
             let (controls, mut control) = mpsc::channel(4);
             let pongs = watch::channel(0u64).0;
             let mut pong = pongs.subscribe();
             let receive = async {
+                let mut requests = futures_util::stream::FuturesUnordered::<
+                    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Failure>>>>,
+                >::new();
                 let mut seen = VecDeque::new();
                 loop {
-                    let frame = opened.reader.receive().await?;
+                    let frame = tokio::select! {
+                        result = opened.reader.receive() => result?,
+                        Some(result) = requests.next(), if !requests.is_empty() => { result?; continue; }
+                    };
                     if expires <= now()? {
                         return Err("link credentials expired".into());
+                    }
+                    if matches!(frame.message, Message::Channel(_)) {
+                        if let Some(mut session) = opened.channels.accept(frame)? {
+                            requests.push(Box::pin(async move {
+                                let result = session
+                                    .serve_all(
+                                        &self.replica,
+                                        self.coordinator.as_deref(),
+                                        &delivery::Port {
+                                            node: self,
+                                            serving: true,
+                                        },
+                                        Some(self),
+                                    )
+                                    .await;
+                                let result = result.map_err(|error| Box::new(error) as Failure);
+                                let absorbed = self.absorb_revocations(result.as_ref().err()).await;
+                                result?;
+                                absorbed?;
+                                session.close().await?;
+                                Ok(())
+                            }));
+                        }
+                        continue;
                     }
                     match frame.message {
                         Message::Changed { scopes, token } if frame.direction != direction => {
@@ -82,6 +113,10 @@ impl Node {
                             if missed == 3 { return Err("three missed link pongs".into()); }
                             opened.writer.send(Frame::new(direction, Message::Ping)).await?;
                             missed += 1;
+                            deadline = tokio::time::Instant::now() + PING;
+                        }
+                        Some(frame) = outgoing.recv() => {
+                            opened.writer.send(frame).await?;
                             deadline = tokio::time::Instant::now() + PING;
                         }
                         _ = changes.changed() => {

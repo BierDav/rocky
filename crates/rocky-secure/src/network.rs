@@ -207,6 +207,7 @@ enum Side {
 /// Confidentiality is provided by encrypted payloads; routing and credentials are visible.
 pub struct NativeSession {
     stream: Box<dyn SessionStream>,
+    channel: Option<link::channels::Io>,
     local: PrivateKey,
     peer: PublicKey,
     credentials: CredentialChain,
@@ -436,6 +437,7 @@ impl NativeSession {
         );
         let mut session = Self {
             stream,
+            channel: None,
             local,
             peer: peer.node,
             peer_chain: crate::wire::Chain::new(peer.credentials.clone())?,
@@ -508,6 +510,9 @@ impl NativeSession {
     /// Ends the session: the peer reads the end of the stream after the
     /// last message. Transports that reset unfinished streams need this.
     pub async fn close(mut self) -> Result<(), Error> {
+        if let Some(channel) = &mut self.channel {
+            return channel.close().await;
+        }
         timeout(TIMEOUT, self.stream.shutdown())
             .await
             .map_err(|_| denied("native write timeout"))?
@@ -524,7 +529,11 @@ impl NativeSession {
             signature,
         })?;
         self.spend(frame.len())?;
-        write_frame(&mut self.stream, &frame).await?;
+        if let Some(channel) = &mut self.channel {
+            channel.send(frame).await?;
+        } else {
+            write_frame(&mut self.stream, &frame).await?;
+        }
         self.sent = self
             .sent
             .checked_add(1)
@@ -532,7 +541,11 @@ impl NativeSession {
         Ok(())
     }
     async fn receive(&mut self) -> Result<Message, Error> {
-        let bytes = read_frame(&mut self.stream).await?;
+        let bytes = if let Some(channel) = &mut self.channel {
+            channel.receive().await?
+        } else {
+            read_frame(&mut self.stream).await?
+        };
         self.spend(bytes.len())?;
         let message: SignedMessage = decode(&bytes)?;
         if message.sequence != self.received

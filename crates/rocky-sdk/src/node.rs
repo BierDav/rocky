@@ -236,6 +236,7 @@ async fn settle() {
 }
 
 pub(crate) struct Node {
+    owner: std::sync::OnceLock<std::sync::Weak<Node>>,
     pub replica: EncryptedReplica<TypedCommands>,
     pub domain: Domain,
     /// The scopes this device's credentials name. A renewal keeps them.
@@ -311,6 +312,7 @@ impl Node {
         acquire: Option<Acquire>,
     ) -> Self {
         Self {
+            owner: Default::default(),
             replica,
             granted: std::sync::Mutex::new(settings.granted(&domain)),
             domain,
@@ -463,6 +465,7 @@ impl Node {
         transport: Arc<dyn Transport>,
         owned: bool,
     ) -> u64 {
+        let _ = self.owner.set(Arc::downgrade(self));
         let link = Arc::new(Link {
             id: self.links.fetch_add(1, Ordering::Relaxed),
             owned,
@@ -2104,6 +2107,14 @@ impl Node {
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
         let result = self.sync_pass(transport, false, false).await;
+        if !self.automatic.load(Ordering::SeqCst)
+            && let Some(service) = self.current()
+        {
+            service
+                .live
+                .close(rocky_secure::network::link::CloseReason::Detached);
+            service.live.wait_empty().await;
+        }
         self.topics_changed();
         result
     }
@@ -2540,14 +2551,20 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
-        let result = self.exchange(transport, peer, contact).await;
-        let absorbed = self.absorb_revocations(result.as_ref().err()).await;
+        let mut result = Err("link authority kept changing during reconciliation".into());
+        for _ in 0..4 {
+            let authority = self.replica.observe_authority().await;
+            result = self.exchange(transport, peer, contact).await;
+            self.absorb_revocations(result.as_ref().err()).await?;
+            if result.is_ok() || !authority.has_changed()? || self.learned.load(Ordering::SeqCst) {
+                break;
+            }
+        }
         let transfer = result?;
         self.handover
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(peer);
-        absorbed?;
         Ok(transfer)
     }
     async fn exchange(
@@ -2569,7 +2586,31 @@ impl Node {
             let renewable = !settings.issuer() || !settings.issuers.is_empty();
             (settings.credentials.clone(), renewable)
         };
+        let service = self
+            .current()
+            .ok_or(ServiceError::NetworkRequired("sync"))?;
+        if !service.live.contains(peer) {
+            let stream = crate::enrollment::dial(transport, &addresses, Protocol::Link).await?;
+            let owner = self
+                .owner
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or("network owner ended")?;
+            let link_settings = self.settings.lock().await.clone();
+            let admitted = owner
+                .admit_link(service.clone(), stream, Some(peer), link_settings, None)
+                .await;
+            if let Err(error) = admitted {
+                let busy = error.downcast_ref::<rocky_secure::Error>().is_some_and(|error| {
+                    matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::Busy>())
+                });
+                if !busy {
+                    return Err(error);
+                }
+            }
+        }
         let upstream = Upstream {
+            link: service.live.handle(peer),
             transport,
             addresses: &addresses,
             peer,

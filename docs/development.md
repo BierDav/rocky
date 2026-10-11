@@ -321,6 +321,10 @@ iOS builds while assembling that metadata. The macOS job publishes and tests
 the iOS artifacts; its host needs full Xcode selected with `xcode-select`, an
 installed iOS simulator runtime and an available iPhone simulator. It installs
 Java 21 for the Kotlin checks.
+Gitea resolves the current Temurin 21 archive through Adoptium's major-version
+endpoint, verifies its SHA-256 checksum, and installs it with `setup-java`.
+This avoids the action's paginated lookup of every Temurin release, which has
+timed out before lint could start.
 The tier budgets apply in CI as they do locally, scaled by the runner's load;
 no hosted run has measured them yet. CI retries a failing nextest test once
 (`NEXTEST_RETRIES`).

@@ -377,10 +377,7 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
 
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
+      - uses: ./source/.github/actions/setup-java
 
       - name: Install the system build dependencies
         working-directory: source
@@ -456,10 +453,7 @@ jobs:
           restore-keys: |
             android-native-${{ runner.os }}-
 
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "21"
+      - uses: ./source/.github/actions/setup-java
 
       # Gitea's runner image has no Android SDK.
       - uses: android-actions/setup-android@v3

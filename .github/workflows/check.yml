@@ -109,7 +109,7 @@ jobs:
     # reuses the x64 peer, while Gitea builds its own.
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-latest' }}
     timeout-minutes: 60
     steps:
       - name: Download the exact source revision

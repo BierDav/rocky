@@ -74,7 +74,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<CiphertextPage, Error> {
         // Frames leave the device: flush every commit they may include,
         // first without the replica so local statements do not wait for it.
-        self.flush().await?;
         let mut inner = self.inner.lock().await;
         inner.flush()?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;

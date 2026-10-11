@@ -1,9 +1,9 @@
 modules:
-  - examples/pairing-ui
   - examples/shoppinglist-app/androidApp
   - examples/shoppinglist-app/desktopApp
   - examples/shoppinglist-app/iosApp/shoppingIos
   - examples/shoppinglist-app/libraryDemo
+  - examples/shoppinglist-app/pairing-ui
   - examples/shoppinglist-app/qualification
   - examples/shoppinglist-app/requiredSchema
   - examples/shoppinglist-app/shared

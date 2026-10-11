@@ -12,7 +12,7 @@ dependencies:
   - $compose.ui
   - $compose.preview
   - $compose.hotReload.runtimeApi
-  - ../../pairing-ui
+  - //examples/shoppinglist-app/pairing-ui
   - dev.zacsweers.metro:runtime:1.4.5
   - dev.zacsweers.metro:metrox-viewmodel-compose:1.4.5: exported
   - org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0: exported

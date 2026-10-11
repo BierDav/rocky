@@ -58,7 +58,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {
         self.served.0 += 1;
         let at = self.served.0;
-        self.served.1.insert(peer, at);
+        self.served.1.insert(PeerId::of(peer), at);
     }
     /// Whether `peer` has no row in either bounded table yet.
     pub(super) async fn unrecorded_peer(&self, peer: PublicKey) -> Result<bool, Error> {
@@ -78,6 +78,7 @@ impl<A: RowApplication> Inner<A> {
     /// frontier only delays pruning, lost credentials a horizon deadline.
     pub(super) async fn bound_peers(&mut self) -> Result<(), Error> {
         let full = self.role().await?.full_nodes;
+        let configured: BTreeSet<_> = self.configured.iter().copied().map(PeerId::of).collect();
         let mut unconfigured = Vec::new();
         for record in rows(
             &self.conn,
@@ -89,20 +90,15 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("peer key".into()));
             };
             let peer = PeerId::from_bytes(peer.as_slice().try_into().map_err(|_| Error::Corrupt("peer reference".into()))?);
-            if !self.configured.iter().any(|node| PeerId::of(*node) == peer) && !full.contains(&peer) {
+            if !configured.contains(&peer) && !full.contains(&peer) {
                 unconfigured.push(peer);
             }
         }
-        let Some(excess) = unconfigured.len().checked_sub(MAX_UNCONFIGURED_PEERS) else {
+        if unconfigured.len() <= MAX_UNCONFIGURED_PEERS {
             return Ok(());
-        };
-        unconfigured.sort_by_key(|peer| {
-            self.served
-                .1
-                .iter()
-                .find_map(|(node, at)| (PeerId::of(*node) == *peer).then_some(*at))
-                .unwrap_or(0)
-        });
+        }
+        let excess = unconfigured.len() - MAX_UNCONFIGURED_PEERS;
+        unconfigured.sort_by_key(|peer| self.served.1.get(peer).copied().unwrap_or(0));
         for peer in &unconfigured[..excess] {
             let key = peer.as_bytes().to_vec();
             self.conn
@@ -114,7 +110,7 @@ impl<A: RowApplication> Inner<A> {
             self.conn
                 .execute("DELETE FROM secure_peer_frontiers WHERE peer=?", [key])
                 .await?;
-            self.served.1.retain(|node, _| PeerId::of(*node) != *peer);
+            self.served.1.remove(peer);
         }
         Ok(())
     }

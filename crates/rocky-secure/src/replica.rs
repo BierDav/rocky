@@ -258,7 +258,7 @@ pub(super) struct Inner<A> {
     configured: BTreeSet<PublicKey>,
     /// When each peer was last served since open, by a growing count; a
     /// peer not served since open counts as the least recent.
-    served: (u64, HashMap<PublicKey, u64>),
+    served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
     #[cfg(test)]
@@ -604,7 +604,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             reconciled: None,
             acknowledged: (0, BTreeMap::new()),
             configured: BTreeSet::new(),
-            served: (0, HashMap::new()),
+            served: (0, BTreeMap::new()),
             #[cfg(test)]
             stage_fault: None,
             #[cfg(test)]

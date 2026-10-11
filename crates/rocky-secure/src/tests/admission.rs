@@ -301,4 +301,14 @@ async fn unconfigured_peers_stay_within_the_bound_and_the_least_recently_served_
     assert!(present(&configured).await && present(&full_node).await);
     assert!(present(&strangers[299]).await && present(&strangers[300 - 256]).await);
     assert!(!present(&strangers[0]).await && !present(&strangers[300 - 257]).await);
+
+    // Serving an existing peer refreshes its place before the next eviction.
+    let oldest = strangers.len() - MAX_UNCONFIGURED_PEERS;
+    serve(&strangers[oldest]).await;
+    let newcomer = PrivateKey::new();
+    serve(&newcomer).await;
+    assert!(present(&strangers[oldest]).await && present(&newcomer).await);
+    assert!(!present(&strangers[oldest + 1]).await);
+    assert!(present(&configured).await && present(&full_node).await);
+    assert_eq!(a.recorded_peers().await, (kept, kept));
 }

@@ -93,6 +93,17 @@ async fn rejection_isolated_from_independent_work_and_preparation_survives() {
 }
 #[tokio::test]
 async fn every_strong_ledger_binding_is_checked_offline_on_open() {
+    let baseline = TempDir::new().unwrap();
+    let replica = todo(&baseline).await;
+    let preparer = coordinator();
+    for _ in 0..2 {
+        replica
+            .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
+            .await
+            .unwrap();
+        replica.execute_pending(&preparer).await.unwrap();
+    }
+    replica.close().await.unwrap();
     for sql in [
         "UPDATE rocky_strong_meta SET head=zeroblob(32)",
         "UPDATE rocky_strong_meta SET command_sequence=command_sequence+1",
@@ -110,16 +121,7 @@ async fn every_strong_ledger_binding_is_checked_offline_on_open() {
         "UPDATE rocky_requests SET sequence=9 WHERE rowid=1",
     ] {
         let dir = TempDir::new().unwrap();
-        let replica = todo(&dir).await;
-        let coordinator = coordinator();
-        for _ in 0..2 {
-            replica
-                .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-                .await
-                .unwrap();
-            replica.execute_pending(&coordinator).await.unwrap();
-        }
-        replica.close().await.unwrap();
+        std::fs::copy(baseline.path().join("test.db"), dir.path().join("test.db")).unwrap();
         edit_file(&dir, sql).await;
         let restored = Replica::open_with_config(
             dir.path().join("test.db"),

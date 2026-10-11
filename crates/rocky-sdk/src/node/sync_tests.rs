@@ -178,6 +178,14 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
         };
         a.configure(|settings| settings.add_peer(&a.vault, &contact)).await?;
         enable(&a).await?;
+        enable(&b).await?;
+        while !a.current().is_some_and(|service| service.live.len() == 1)
+            || !b.current().is_some_and(|service| service.live.len() == 1)
+            || *a.worker_running.borrow()
+            || *b.worker_running.borrow()
+        {
+            tokio::task::yield_now().await;
+        }
         let dials = hub.counts()[1];
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(86400)).await;

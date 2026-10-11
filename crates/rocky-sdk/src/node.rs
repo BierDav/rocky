@@ -5,6 +5,7 @@ mod command_mesh;
 mod delivery;
 mod discovery;
 mod horizon;
+mod live_links;
 mod mesh;
 mod partition;
 mod registry;
@@ -179,11 +180,15 @@ struct Link {
     stage: watch::Sender<Stage>,
     server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     synchronizer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    publisher: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// What the transport finds peers with, and the worker announcing on it.
     discovery: Option<Arc<dyn crate::transport::Discovery>>,
     discoverer: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Inbound streams being served, served so far and dropped over budget.
     active: Arc<Semaphore>,
+    live_budget: Arc<Semaphore>,
+    live_handshakes: Arc<Semaphore>,
+    live: live_links::Registry,
     served: AtomicU64,
     refused: AtomicU64,
 }
@@ -204,6 +209,8 @@ impl Drop for SyncActivity {
 struct PeerRetry {
     retry: crate::scheduling::Retry,
     pending: bool,
+    link: bool,
+    link_retry: crate::scheduling::Retry,
     generation: u64,
 }
 struct Reached {
@@ -257,6 +264,7 @@ pub(crate) struct Node {
     sync_state: watch::Sender<&'static str>,
     automatic: AtomicBool,
     sync_events: watch::Sender<u64>,
+    link_events: watch::Sender<()>,
     sync_status: watch::Sender<Value>,
     /// What the node did in the background, for applications to show.
     pub(crate) activity: crate::activity::Activity,
@@ -326,6 +334,7 @@ impl Node {
             sync_state: watch::channel("idle").0,
             automatic: AtomicBool::new(false),
             sync_events: watch::channel(0).0,
+            link_events: watch::channel(()).0,
             sync_status: watch::channel(json!({"token": "0", "state": "idle", "retry": false})).0,
             activity: crate::activity::Activity::new(),
             backups: Mutex::new(()),
@@ -460,14 +469,23 @@ impl Node {
             stage: watch::channel(Stage::Open).0,
             server: std::sync::Mutex::new(None),
             synchronizer: std::sync::Mutex::new(None),
+            publisher: std::sync::Mutex::new(None),
             discovery: transport.discovery(),
             transport,
             discoverer: std::sync::Mutex::new(None),
             active: Arc::new(Semaphore::new(INBOUND)),
+            live_budget: Arc::new(Semaphore::new(live_links::BUDGET)),
+            live_handshakes: Arc::new(Semaphore::new(live_links::BUDGET)),
+            live: live_links::Registry::default(),
             served: AtomicU64::new(0),
             refused: AtomicU64::new(0),
         });
         link.transport.listen(true);
+        let publisher = tokio::task::spawn_local(self.clone().publish_links(link.clone()));
+        *link
+            .publisher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(publisher);
         let synchronizer = tokio::task::spawn_local(self.clone().synchronize(link.clone()));
         *link
             .synchronizer
@@ -547,6 +565,14 @@ impl Node {
         if let Some(synchronizer) = synchronizer {
             let _ = synchronizer.await;
         }
+        let publisher = link
+            .publisher
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(publisher) = publisher {
+            let _ = publisher.await;
+        }
         let discoverer = link
             .discoverer
             .lock()
@@ -555,6 +581,7 @@ impl Node {
         if let Some(discoverer) = discoverer {
             let _ = discoverer.await;
         }
+        link.live.wait_empty().await;
         if link.owned {
             link.transport.close().await;
         }
@@ -571,15 +598,28 @@ impl Node {
             let Some((protocol, stream)) = inbound else {
                 break;
             };
-            let Ok(permit) = link.active.clone().try_acquire_owned() else {
+            let budget = if protocol == Protocol::Link {
+                &link.live_handshakes
+            } else {
+                &link.active
+            };
+            let Ok(permit) = budget.clone().try_acquire_owned() else {
                 link.refused.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
             link.served.fetch_add(1, Ordering::Relaxed);
             let node = self.clone();
+            let service = link.clone();
             tasks.spawn_local(async move {
-                let _permit = permit;
-                let _ = node.serve(protocol, stream).await;
+                if protocol == Protocol::Link {
+                    let settings = node.settings.lock().await.clone();
+                    let _ = node
+                        .admit_link(service, stream, None, settings, Some(permit))
+                        .await;
+                } else {
+                    let _permit = permit;
+                    let _ = node.serve(protocol, stream).await;
+                }
             });
             while tasks.try_join_next().is_some() {}
         }
@@ -733,9 +773,17 @@ impl Node {
                 }
                 self.control_sync();
                 if !enabled {
+                    if let Some(service) = self.current() {
+                        service
+                            .live
+                            .close(rocky_secure::network::link::CloseReason::Offline);
+                    }
                     // Acknowledge only after the worker has dropped its pass.
                     let mut running = self.worker_running.subscribe();
                     running.wait_for(|running| !running).await?;
+                    if let Some(service) = self.current() {
+                        service.live.wait_empty().await;
+                    }
                     self.synced(json!({"state": "idle", "retry": false}));
                 }
                 Ok(self.sync_status.borrow().clone())
@@ -924,7 +972,15 @@ impl Node {
                 if enabled {
                     self.reset_retry(None);
                 }
+                if !enabled && let Some(service) = self.current() {
+                    service
+                        .live
+                        .close(rocky_secure::network::link::CloseReason::Offline);
+                }
                 self.control_sync();
+                if !enabled && let Some(service) = self.current() {
+                    service.live.wait_empty().await;
+                }
                 Ok(json!({"online": enabled}))
             }
 
@@ -1891,6 +1947,7 @@ impl Node {
         for (node, state) in retries.iter_mut() {
             if peer.is_none_or(|peer| peer == *node) {
                 state.retry.reset();
+                state.link_retry.reset();
                 state.generation = state.generation.wrapping_add(1);
             }
         }
@@ -1926,13 +1983,38 @@ impl Node {
             state.pending = true;
         }
     }
+    fn pending_without_links(&self, service: &Link) {
+        for (peer, state) in self
+            .retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter_mut()
+        {
+            if !service.live.contains(*peer) {
+                state.pending = true;
+            }
+        }
+    }
     fn retry_deadline(&self) -> Option<tokio::time::Instant> {
         self.retries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .filter(|state| state.pending)
-            .filter_map(|state| state.retry.deadline())
+            .flat_map(|state| {
+                [
+                    if state.pending {
+                        state.retry.deadline()
+                    } else {
+                        None
+                    },
+                    if state.link {
+                        state.link_retry.deadline()
+                    } else {
+                        None
+                    },
+                ]
+            })
+            .flatten()
             .chain(
                 self.resolution_retries
                     .lock()
@@ -1950,6 +2032,7 @@ impl Node {
         let mut frames = self.replica.observe_frames().await;
         let mut revisions = self.replica.observe_revision();
         let mut connectivity = link.transport.connectivity();
+        let mut link_events = self.link_events.subscribe();
         let mut retry_only = false;
         loop {
             if *stage.borrow() != Stage::Open {
@@ -1969,7 +2052,9 @@ impl Node {
                         if attached.as_ref().is_none_or(|current| current.id != link.id) {
                             return Ok((json!({"state": "idle"}), false));
                         }
-                        self.sync_pass(&*link.transport, true, retry_only).await
+                        let result = self.sync_pass(&*link.transport, true, retry_only).await;
+                        self.open_links(&link).await;
+                        result
                     } => result,
                 };
                 drop(running);
@@ -1996,8 +2081,9 @@ impl Node {
                 _ = stage.wait_for(|stage| *stage != Stage::Open) => break,
                 _ = control.changed() => {},
                 changed = events.changed() => { if changed.is_err() { break; } self.pending_sync(); }
-                changed = frames.changed() => { if changed.is_err() { break; } self.pending_sync(); settle().await; }
-                changed = revisions.changed() => { if changed.is_err() { break; } self.pending_sync(); settle().await; }
+                changed = frames.changed() => { if changed.is_err() { break; } settle().await; self.pending_without_links(&link); retry_only = true; }
+                changed = revisions.changed() => { if changed.is_err() { break; } settle().await; self.pending_without_links(&link); retry_only = true; }
+                changed = link_events.changed() => { if changed.is_err() { break; } retry_only = true; }
                 () = async {
                     match &mut connectivity {
                         Some(events) => { if events.changed().await.is_err() { connectivity = None; } },
@@ -2032,6 +2118,27 @@ impl Node {
         }
         if !self.online.load(Ordering::SeqCst) {
             return Ok((json!({"state": "offline"}), false));
+        }
+        if automatic
+            && retry_only
+            && {
+                let targets = self.dialed(&*self.settings.lock().await);
+                let retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
+                targets.iter().all(|(peer, _)| retries.contains_key(peer))
+                    && !retries
+                        .values()
+                        .any(|state| state.pending && state.retry.ready())
+            }
+            && self
+                .resolution_retries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+        {
+            return Ok((
+                self.sync_status.borrow().clone(),
+                self.retry_deadline().is_some(),
+            ));
         }
         let _syncing = self.syncing.lock().await;
         let _activity = SyncActivity(self.sync_state.clone());
@@ -2689,6 +2796,7 @@ impl Node {
                 })
                 .await
             }
+            Protocol::Link => Err("links require network-service ownership".into()),
             Protocol::Coordinate => Err("a database serves no coordinator requests".into()),
         }
     }

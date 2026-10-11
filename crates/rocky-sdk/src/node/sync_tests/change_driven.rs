@@ -683,3 +683,44 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
         }))
         .await
 }
+
+mod live_links;
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_wakeup_still_initializes_an_unattempted_peer() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            add(&a, 1).await?;
+            assert!(
+                a.retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_empty()
+            );
+            // A queued frame wakeup can precede enabling the worker.
+            let (status, retry) = a.sync_pass(&*transport(&a).await?, true, true).await?;
+            assert_eq!(status["state"], "connected");
+            assert!(!retry);
+            assert_eq!(rows(&b).await?, ["1"]);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}

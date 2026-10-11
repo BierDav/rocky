@@ -15,7 +15,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     sync::mpsc,
 };
 
@@ -40,6 +40,8 @@ pub struct Hub {
     cut_waiters: Mutex<Vec<Waker>>,
     stalled_peers: Mutex<HashSet<String>>,
     peer_dials: Mutex<HashMap<String, usize>>,
+    muted: Mutex<HashSet<(String, Protocol)>>,
+    protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
     /// At the cut, hold the stream instead of disconnecting it.
@@ -71,6 +73,8 @@ impl Default for Hub {
             cut_waiters: Mutex::default(),
             stalled_peers: Mutex::default(),
             peer_dials: Mutex::default(),
+            muted: Mutex::default(),
+            protocol_dials: Mutex::default(),
             dial_events: tokio::sync::watch::channel(()).0,
             written: tokio::sync::watch::channel(0).0,
             hold_cut: AtomicBool::new(false),
@@ -87,6 +91,14 @@ impl Hub {
         Arc::new(Memory {
             hub: self.clone(),
             name: name.into(),
+        })
+    }
+    /// Applies hub faults and counters to a real transport for qualification.
+    pub fn wrap(self: &Arc<Self>, name: &str, transport: Arc<dyn Transport>) -> Arc<dyn Transport> {
+        Arc::new(Wrapped {
+            hub: self.clone(),
+            name: name.into(),
+            transport,
         })
     }
     /// Records the bytes of every later stream `name` dials or accepts.
@@ -159,6 +171,23 @@ impl Hub {
         } else {
             peers.remove(address);
         }
+    }
+    /// Silently drops writes on existing and future streams from this node.
+    pub fn mute(&self, node: &str, protocol: Protocol, muted: bool) {
+        let mut faults = self.muted.lock().unwrap_or_else(PoisonError::into_inner);
+        if muted {
+            faults.insert((node.into(), protocol));
+        } else {
+            faults.remove(&(node.into(), protocol));
+        }
+    }
+    pub fn protocol_dials(&self, from: &str, to: &str, protocol: Protocol) -> usize {
+        self.protocol_dials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(from.into(), to.into(), protocol))
+            .copied()
+            .unwrap_or(0)
     }
     pub fn dials_to(&self, address: &str) -> usize {
         self.peer_dials
@@ -241,9 +270,11 @@ impl Hub {
 
 /// One end of a pipe, subject to the hub's cut.
 struct Pipe {
-    io: DuplexStream,
+    io: Stream,
     hub: Arc<Hub>,
     taps: Vec<Tap>,
+    from: String,
+    protocol: Protocol,
 }
 fn cut() -> std::io::Error {
     std::io::ErrorKind::ConnectionReset.into()
@@ -266,6 +297,15 @@ impl AsyncWrite for Pipe {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if self
+            .hub
+            .muted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(self.from.clone(), self.protocol))
+        {
+            return Poll::Ready(Ok(buf.len()));
+        }
         let Some(allowed) = self.hub.allow(buf.len()) else {
             return self.hub.blocked(cx).map_ok(|()| 0);
         };
@@ -448,15 +488,24 @@ impl Transport for Node {
             }
             let (near, far) = tokio::io::duplex(self.hub.capacity.load(Ordering::SeqCst).max(1));
             let taps = self.hub.taps([&self.name, address]);
-            let pipe = |io| Pipe {
-                io,
+            *self
+                .hub
+                .protocol_dials
+                .lock()
+                .map_err(|_| "hub poisoned")?
+                .entry((self.name.clone(), address.into(), protocol))
+                .or_default() += 1;
+            let pipe = |io, from: &str| Pipe {
+                io: Box::new(io),
                 hub: self.hub.clone(),
                 taps: taps.clone(),
+                from: from.into(),
+                protocol,
             };
             listener
-                .try_send((protocol, Box::new(pipe(far))))
+                .try_send((protocol, Box::new(pipe(far, address))))
                 .map_err(|_| "unreachable or busy")?;
-            Ok(Box::new(pipe(near)) as Stream)
+            Ok(Box::new(pipe(near, &self.name)) as Stream)
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<Inbound>> {
@@ -476,5 +525,92 @@ impl Transport for Node {
             }
             self.inbound.lock().await.close();
         })
+    }
+}
+
+struct Wrapped {
+    hub: Arc<Hub>,
+    name: String,
+    transport: Arc<dyn Transport>,
+}
+impl Wrapped {
+    fn pipe(&self, stream: Stream, protocol: Protocol) -> Stream {
+        Box::new(Pipe {
+            io: stream,
+            hub: self.hub.clone(),
+            taps: vec![],
+            from: self.name.clone(),
+            protocol,
+        })
+    }
+}
+impl Transport for Wrapped {
+    fn kind(&self) -> &str {
+        self.transport.kind()
+    }
+    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
+        self.transport.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+    ) -> BoxFuture<'a, Result<Stream, Failure>> {
+        Box::pin(async move {
+            self.hub.dials.fetch_add(1, Ordering::SeqCst);
+            *self
+                .hub
+                .peer_dials
+                .lock()
+                .map_err(|_| "hub poisoned")?
+                .entry(address.into())
+                .or_default() += 1;
+            self.hub.dial_events.send_replace(());
+            if self.hub.stalled.load(Ordering::SeqCst)
+                || self
+                    .hub
+                    .stalled_peers
+                    .lock()
+                    .map_err(|_| "hub poisoned")?
+                    .contains(address)
+            {
+                std::future::pending::<()>().await;
+            }
+            let stream = self.transport.connect(address, protocol).await?;
+            *self
+                .hub
+                .protocol_dials
+                .lock()
+                .map_err(|_| "hub poisoned")?
+                .entry((self.name.clone(), address.into(), protocol))
+                .or_default() += 1;
+            Ok(self.pipe(stream, protocol))
+        })
+    }
+    fn accept(&self) -> BoxFuture<'_, Option<Inbound>> {
+        Box::pin(async {
+            self.transport
+                .accept()
+                .await
+                .map(|(protocol, stream)| (protocol, self.pipe(stream, protocol)))
+        })
+    }
+    fn listen(&self, listening: bool) {
+        self.transport.listen(listening);
+    }
+    fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        Some(self.hub.connectivity.subscribe())
+    }
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {
+            self.hub.closes.fetch_add(1, Ordering::SeqCst);
+            self.transport.close().await;
+        })
+    }
+    fn forget(&self, address: &str) {
+        self.transport.forget(address);
+    }
+    fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
+        self.transport.foreground()
     }
 }

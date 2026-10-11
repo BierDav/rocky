@@ -1,0 +1,745 @@
+use super::*;
+
+async fn pair(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Arc<Node>, Arc<Node>), Failure> {
+    let a = enrolled(&root.join("a"), hub, "a", None).await?;
+    let b = enrolled(
+        &root.join("b"),
+        hub,
+        "b",
+        Some((
+            &a,
+            Profile::Reader {
+                scopes: ["items".into()].into(),
+            },
+        )),
+    )
+    .await?;
+    targets(&a, std::slice::from_ref(&b)).await?;
+    targets(&b, std::slice::from_ref(&a)).await?;
+    start(&a, true).await?;
+    start(&b, true).await?;
+    until(|| {
+        a.current().is_some_and(|s| s.live.len() == 1)
+            && b.current().is_some_and(|s| s.live.len() == 1)
+    })
+    .await;
+    settled(&a).await;
+    settled(&b).await;
+    Ok((a, b))
+}
+
+#[tokio::test(start_paused = true)]
+async fn commit_signals_over_one_link_and_only_receiver_dials() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let before = [hub.dials_to("a"), hub.dials_to("b")];
+            add(&a, 1).await?;
+            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            settled(&a).await;
+            settled(&b).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(hub.dials_to("b"), before[1], "publisher must not dial");
+            assert_eq!(
+                hub.dials_to("a"),
+                before[0] + 1,
+                "receiver opens one native pass"
+            );
+            // An idle link advances only the ping clock, with no new streams.
+            let idle = hub.counts();
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(15)).await;
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert_eq!(hub.counts(), idle);
+            assert_eq!(a.current().ok_or("service")?.live.len(), 1);
+            assert_eq!(b.current().ok_or("service")?.live.len(), 1);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_opened_link_delivers_when_receiver_cannot_be_dialed() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            // Enable the publisher's link acceptor without initiating a pass.
+            a.automatic.store(true, Ordering::SeqCst);
+            hub.stall_peer("b", true);
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&b).await;
+            let before = hub.dials_to("b");
+            add(&a, 1).await?;
+            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            settled(&b).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(hub.dials_to("b"), before);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let c = enrolled(
+                &root.path().join("c"),
+                &hub,
+                "c",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&c)).await?;
+            start(&c, true).await?;
+            let peers = [
+                PrivateKey::from_bytes(&b.vault.get("node")?).public_key(),
+                PrivateKey::from_bytes(&c.vault.get("node")?).public_key(),
+            ];
+            until(|| peers.iter().all(|peer| service.live.contains(*peer))).await;
+            let links: Vec<_> = peers
+                .iter()
+                .map(|peer| (*peer, service.live.id(*peer)))
+                .collect();
+            // Renewal replaces every authenticated link, including inbound links.
+            let chain = a.settings.lock().await.credentials.clone();
+            let before = hub.counts()[1];
+            a.replica.renew_credentials(chain).await?;
+            until(|| hub.counts()[1] > before).await;
+            until(|| {
+                links
+                    .iter()
+                    .all(|(peer, id)| service.live.id(*peer).is_some_and(|new| Some(new) != *id))
+            })
+            .await;
+            start(&a, false).await?;
+            until(|| service.live.len() == 0).await;
+            start(&a, true).await?;
+            until(|| peers.iter().all(|peer| service.live.contains(*peer))).await;
+            a.dispatch(
+                &*a.client(1)?,
+                &json!({"type":"connection", "online":false}),
+            )
+            .await?;
+            until(|| service.live.len() == 0).await;
+            a.detach(None).await;
+            b.detach(None).await;
+            c.detach(None).await;
+            assert_eq!(service.live.len(), 0);
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            hub.mute("b", Protocol::Link, true);
+            for _ in 0..3 {
+                tokio::time::advance(Duration::from_secs(15)).await;
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(service.live.len(), 1);
+            }
+            let dials = hub.protocol_dials("a", "b", Protocol::Link);
+            tokio::time::advance(Duration::from_secs(15)).await;
+            until(|| service.live.len() == 0).await;
+            assert!(
+                a.retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&peer)
+                    .is_some_and(|state| state.link_retry.deadline().is_some())
+            );
+            assert_eq!(hub.protocol_dials("a", "b", Protocol::Link), dials);
+            hub.mute("b", Protocol::Link, false);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            until(|| service.live.len() == 1).await;
+            assert!(hub.protocol_dials("a", "b", Protocol::Link) > dials);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn saturated_link_budget_leaves_pair_and_command_admission_free() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let remaining = service.live_budget.available_permits();
+            let _full = service
+                .live_budget
+                .clone()
+                .try_acquire_many_owned(u32::try_from(remaining)?)?;
+            let transport = transport(&b).await?;
+            let stream = transport.connect("a", Protocol::Link).await?;
+            let settings = b.settings.lock().await.clone();
+            let mut refused = rocky_secure::network::link::Link::open(
+                stream,
+                &b.replica,
+                PrivateKey::from_bytes(&b.vault.get("node")?),
+                settings.credentials,
+                Some(PrivateKey::from_bytes(&a.vault.get("node")?).public_key()),
+            )
+            .await?;
+            assert_eq!(
+                refused.reader.receive().await?.message,
+                rocky_secure::network::link::Message::Close {
+                    reason: rocky_secure::network::link::CloseReason::Busy
+                }
+            );
+            let before = service.served.load(Ordering::Relaxed);
+            let pair = transport.connect("a", Protocol::Pair).await?;
+            let command = transport.connect("a", Protocol::Command).await?;
+            until(|| service.served.load(Ordering::Relaxed) >= before + 2).await;
+            assert_eq!(service.live_budget.available_permits(), 0);
+            drop(pair);
+            drop(command);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            a.automatic.store(true, Ordering::SeqCst);
+            b.automatic.store(true, Ordering::SeqCst);
+            let sa = a.current().ok_or("service")?;
+            let sb = b.current().ok_or("service")?;
+            let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let (ab, ba) = tokio::join!(
+                sa.transport.connect("b", Protocol::Link),
+                sb.transport.connect("a", Protocol::Link)
+            );
+            let ca = a.settings.lock().await.clone();
+            let cb = b.settings.lock().await.clone();
+            let (ra, rb) = tokio::join!(
+                a.admit_link(sa.clone(), ab?, Some(kb), ca, None),
+                b.admit_link(sb.clone(), ba?, Some(ka), cb, None),
+            );
+            ra?;
+            rb?;
+            until(|| sa.live.dialed(kb) == Some(ka < kb) && sb.live.dialed(ka) == Some(kb < ka))
+                .await;
+            assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn link_handshake_refuses_native_session_identity() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let ca = a.settings.lock().await.credentials.clone();
+            let cb = b.settings.lock().await.credentials.clone();
+            let ka = PrivateKey::from_bytes(&a.vault.get("node")?);
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?);
+            let (near, far) = tokio::io::duplex(4096);
+            let (dialer, acceptor) = tokio::join!(
+                rocky_secure::network::NativeSession::authenticate(
+                    near,
+                    &a.replica,
+                    ka,
+                    ca,
+                    kb.public_key(),
+                    1024 * 1024
+                ),
+                rocky_secure::network::link::Link::open(far, &b.replica, kb, cb, None),
+            );
+            assert!(dialer.is_err());
+            assert!(acceptor.is_err());
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn learned_revocation_closes_the_revoked_peers_link() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            learn_revocation(&a, peer).await?;
+            until(|| !service.live.contains(peer)).await;
+            assert!(a.replica.revocations().await.revokes(&peer));
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+async fn real_pair(
+    kind: &str,
+    root: &std::path::Path,
+    hub: &Arc<Hub>,
+) -> Result<(Arc<Node>, Arc<Node>, String, String), Failure> {
+    let a = enrolled(&root.join("a"), hub, "a", None).await?;
+    let b = enrolled(
+        &root.join("b"),
+        hub,
+        "b",
+        Some((
+            &a,
+            Profile::Reader {
+                scopes: ["items".into()].into(),
+            },
+        )),
+    )
+    .await?;
+    a.detach(None).await;
+    b.detach(None).await;
+    let connector: Arc<dyn Connector> = match kind {
+        "tcp" => Arc::new(crate::transport::TransportOptions::Tcp {
+            listen: Some("127.0.0.1:0".into()),
+            advertised: None,
+        }),
+        "iroh" => Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")),
+        _ => return Err("test transport".into()),
+    };
+    let ta = connector
+        .start(true, Settings::transport_key(&a.vault)?)
+        .await?;
+    let tb = connector
+        .start(true, Settings::transport_key(&b.vault)?)
+        .await?;
+    let aa = ta.address().await?;
+    let ab = tb.address().await?;
+    a.link(hub.wrap("a", ta), true).await;
+    b.link(hub.wrap("b", tb), true).await;
+    targets(&a, std::slice::from_ref(&b)).await?;
+    targets(&b, std::slice::from_ref(&a)).await?;
+    Ok((a, b, aa, ab))
+}
+
+async fn real_signal_gate(kind: &str) -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, aa, ab) = real_pair(kind, root.path(), &hub).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&a).await;
+            settled(&b).await;
+            let before = [hub.dials_to(&aa), hub.dials_to(&ab)];
+            add(&a, 1).await?;
+            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            settled(&b).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(hub.dials_to(&ab), before[1]);
+            assert_eq!(hub.dials_to(&aa), before[0] + 1);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test]
+async fn tcp_signal_gate() -> Result<(), Failure> {
+    real_signal_gate("tcp").await
+}
+#[tokio::test]
+async fn iroh_signal_gate() -> Result<(), Failure> {
+    real_signal_gate("iroh").await
+}
+
+async fn real_reverse_gate(kind: &str) -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, _, ab) = real_pair(kind, root.path(), &hub).await?;
+            a.automatic.store(true, Ordering::SeqCst);
+            hub.stall_peer(&ab, true);
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&b).await;
+            let before = hub.dials_to(&ab);
+            add(&a, 1).await?;
+            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            settled(&b).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(hub.dials_to(&ab), before);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test]
+async fn tcp_reverse_gate() -> Result<(), Failure> {
+    real_reverse_gate("tcp").await
+}
+#[tokio::test]
+async fn iroh_reverse_gate() -> Result<(), Failure> {
+    real_reverse_gate("iroh").await
+}
+
+async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, _, ab) = real_pair(kind, root.path(), &hub).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            let sa = a.current().ok_or("service")?;
+            let sb = b.current().ok_or("service")?;
+            until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
+            settled(&a).await;
+            settled(&b).await;
+            let before = hub.counts();
+            assert!(a.retry_deadline().is_none());
+            assert!(b.retry_deadline().is_none());
+            for _ in 0..2 {
+                let pongs = [
+                    sa.live.pongs.load(Ordering::Relaxed),
+                    sb.live.pongs.load(Ordering::Relaxed),
+                ];
+                tokio::time::advance(Duration::from_secs(15)).await;
+                until(|| {
+                    sa.live.pongs.load(Ordering::Relaxed) > pongs[0]
+                        && sb.live.pongs.load(Ordering::Relaxed) > pongs[1]
+                })
+                .await;
+            }
+            assert_eq!(hub.counts(), before);
+            hub.mute("b", Protocol::Link, true);
+            for _ in 0..3 {
+                let written = *hub.written().borrow();
+                tokio::time::advance(Duration::from_secs(15)).await;
+                until(|| *hub.written().borrow() > written).await;
+                assert_eq!(sa.live.len(), 1);
+            }
+            let dials = hub.protocol_dials("a", &ab, Protocol::Link);
+            tokio::time::advance(Duration::from_secs(15)).await;
+            until(|| sa.live.len() == 0).await;
+            assert_eq!(hub.protocol_dials("a", &ab, Protocol::Link), dials);
+            hub.mute("b", Protocol::Link, false);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
+            assert!(hub.protocol_dials("a", &ab, Protocol::Link) > dials);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test(start_paused = true)]
+async fn tcp_liveness_gate() -> Result<(), Failure> {
+    real_liveness_gate("tcp").await
+}
+#[tokio::test(start_paused = true)]
+async fn iroh_liveness_gate() -> Result<(), Failure> {
+    real_liveness_gate("iroh").await
+}
+
+async fn real_authority_gate(kind: &str) -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, _, _) = real_pair(kind, root.path(), &hub).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            let sa = a.current().ok_or("service")?;
+            let sb = b.current().ok_or("service")?;
+            until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
+            settled(&a).await;
+            settled(&b).await;
+            let dials = hub.counts()[1];
+            let credentials = a.settings.lock().await.credentials.clone();
+            a.replica.renew_credentials(credentials).await?;
+            until(|| hub.counts()[1] > dials).await;
+            until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            learn_revocation(&a, peer).await?;
+            until(|| !sa.live.contains(peer)).await;
+            assert!(a.replica.revocations().await.revokes(&peer));
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test]
+async fn tcp_authority_gate() -> Result<(), Failure> {
+    real_authority_gate("tcp").await
+}
+#[tokio::test]
+async fn iroh_authority_gate() -> Result<(), Failure> {
+    real_authority_gate("iroh").await
+}
+
+async fn real_tie_gate(kind: &str) -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, aa, ab) = real_pair(kind, root.path(), &hub).await?;
+            a.automatic.store(true, Ordering::SeqCst);
+            b.automatic.store(true, Ordering::SeqCst);
+            let sa = a.current().ok_or("service")?;
+            let sb = b.current().ok_or("service")?;
+            let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let ca = a.settings.lock().await.clone();
+            let cb = b.settings.lock().await.clone();
+            let (near, far) = tokio::join!(
+                sa.transport.connect(&ab, Protocol::Link),
+                sb.transport.connect(&aa, Protocol::Link)
+            );
+            let (one, two) = tokio::join!(
+                a.admit_link(sa.clone(), near?, Some(kb), ca, None),
+                b.admit_link(sb.clone(), far?, Some(ka), cb, None)
+            );
+            one?;
+            two?;
+            until(|| sa.live.dialed(kb) == Some(ka < kb) && sb.live.dialed(ka) == Some(kb < ka))
+                .await;
+            assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test]
+async fn tcp_tie_gate() -> Result<(), Failure> {
+    real_tie_gate("tcp").await
+}
+#[tokio::test]
+async fn iroh_tie_gate() -> Result<(), Failure> {
+    real_tie_gate("iroh").await
+}
+
+async fn real_budget_gate(kind: &str) -> Result<(), Failure> {
+    use rocky_secure::network::link::{CloseReason, Message};
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b, aa, _) = real_pair(kind, root.path(), &hub).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            let sa = a.current().ok_or("service")?;
+            until(|| sa.live.len() == 1 && b.current().is_some_and(|s| s.live.len() == 1)).await;
+            settled(&a).await;
+            settled(&b).await;
+            let full = sa
+                .live_budget
+                .clone()
+                .try_acquire_many_owned(u32::try_from(sa.live_budget.available_permits())?)?;
+            let transport = transport(&b).await?;
+            let stream = transport.connect(&aa, Protocol::Link).await?;
+            let mut refused = rocky_secure::network::link::Link::open(
+                stream,
+                &b.replica,
+                PrivateKey::from_bytes(&b.vault.get("node")?),
+                b.settings.lock().await.credentials.clone(),
+                Some(PrivateKey::from_bytes(&a.vault.get("node")?).public_key()),
+            )
+            .await?;
+            assert_eq!(
+                refused.reader.receive().await?.message,
+                Message::Close {
+                    reason: CloseReason::Busy
+                }
+            );
+            let before = sa.served.load(Ordering::Relaxed);
+            let mut pair = transport.connect(&aa, Protocol::Pair).await?;
+            let mut command = transport.connect(&aa, Protocol::Command).await?;
+            // QUIC exposes a newly opened stream to the peer on its first write.
+            tokio::io::AsyncWriteExt::write_all(&mut pair, &[0]).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut command, &[0]).await?;
+            until(|| sa.served.load(Ordering::Relaxed) >= before + 2).await;
+            assert_eq!(sa.live_budget.available_permits(), 0);
+            drop(pair);
+            drop(command);
+            drop(full);
+            assert!(sa.live_budget.available_permits() > 0);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+#[tokio::test]
+async fn tcp_budget_gate() -> Result<(), Failure> {
+    real_budget_gate("tcp").await
+}
+#[tokio::test]
+async fn iroh_budget_gate() -> Result<(), Failure> {
+    real_budget_gate("iroh").await
+}
+
+#[tokio::test(start_paused = true)]
+async fn busy_links_keep_native_sync_and_reopen_when_a_slot_frees() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let full = service
+                .live_budget
+                .clone()
+                .try_acquire_many_owned(u32::try_from(service.live_budget.available_permits())?)?;
+            hub.stall_peer("c", true);
+            let c = enrolled(
+                &root.path().join("c"),
+                &hub,
+                "c",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            start(&c, true).await?;
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            until(|| {
+                c.current().is_some_and(|s| !s.live.contains(peer))
+                    && c.retries
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&peer)
+                        .is_some_and(|retry| retry.link && retry.link_retry.deadline().is_some())
+            })
+            .await;
+            assert!(
+                c.retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&peer)
+                    .is_some_and(|retry| retry.retry.ready())
+            );
+            add(&a, 1).await?;
+            c.sync(&*transport(&c).await?).await?;
+            assert_eq!(rows(&c).await?, ["1"]);
+            drop(full);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            until(|| c.current().is_some_and(|s| s.live.contains(peer))).await;
+            a.detach(None).await;
+            b.detach(None).await;
+            c.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+// Inject a verified incoming statement without renewal or key installation.
+async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
+    let issuer = PrivateKey::from_bytes(&node.vault.get("node")?);
+    let publisher = PrivateKey::from_bytes(&node.vault.get("publisher")?);
+    let statement = rocky_credentials::SignedRevocation::sign(
+        rocky_credentials::Revocation {
+            app: node.domain.manifest().app,
+            issuer: issuer.public_key(),
+            time: now()?,
+            nodes: [rocky_credentials::PeerId::of(peer)].into(),
+            users: Default::default(),
+            capabilities: Default::default(),
+            pseudonyms: Default::default(),
+        },
+        &publisher,
+        &issuer,
+    )?;
+    node.replica
+        .learn_revocations(&RevocationSet::try_from(vec![statement])?)
+        .await?;
+    Ok(())
+}

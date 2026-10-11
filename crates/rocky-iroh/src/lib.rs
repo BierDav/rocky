@@ -98,6 +98,7 @@ struct Shared {
     incoming: Mutex<mpsc::Receiver<(Protocol, Stream)>>,
     connections: Mutex<HashMap<(EndpointId, Protocol), Connection>>,
     inbound: Semaphore,
+    inbound_links: Semaphore,
     closed: watch::Sender<bool>,
     /// Whether a service takes what the handler queues.
     listening: AtomicBool,
@@ -159,6 +160,7 @@ impl Attachment {
             incoming: Mutex::new(receiver),
             connections: Mutex::new(HashMap::new()),
             inbound: Semaphore::new(CONNECTIONS),
+            inbound_links: Semaphore::new(CONNECTIONS),
             closed: watch::channel(false).0,
             listening: AtomicBool::new(false),
             refused: AtomicU64::new(0),
@@ -221,10 +223,16 @@ impl ProtocolHandler for Handler {
             attachment.refuse(&connection, CLOSED, b"no service");
             return Ok(());
         }
-        let Ok(_permit) = self.0.inbound.try_acquire() else {
+        let budget = if protocol == Protocol::Link {
+            &self.0.inbound_links
+        } else {
+            &self.0.inbound
+        };
+        let Ok(_permit) = budget.try_acquire() else {
             attachment.refuse(&connection, BUSY, b"busy");
             return Ok(());
         };
+        // Duplicate link handshakes must reach the service's tie-break/busy reply.
         let slots = Arc::new(Semaphore::new(STREAMS_PER_CONNECTION));
         loop {
             let accepted = tokio::select! {

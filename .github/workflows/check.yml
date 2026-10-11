@@ -178,6 +178,7 @@ jobs:
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
+        timeout-minutes: 300
         run: |
           set -euo pipefail
           ./scripts/check --build "$RUNNER_TEMP/build"

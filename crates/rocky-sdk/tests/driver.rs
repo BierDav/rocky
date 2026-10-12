@@ -32,7 +32,7 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
     Open {
         directory,
         schema: SHOPPING,
-        secrets: None,
+        secrets: Some(support::secrets::keys(directory)),
         network,
         commands: None,
     }

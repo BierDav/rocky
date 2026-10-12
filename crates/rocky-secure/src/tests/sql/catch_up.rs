@@ -27,8 +27,7 @@ fn values(key: usize, done: i64, id: i64) -> Vec<SqlValue> {
         SqlValue::Integer(0),
     ]
 }
-fn write(t: &Typed, before: Option<&[SqlValue]>, after: &[SqlValue]) -> RowWrite {
-    let app = t.app();
+fn write(t: &Typed, app: &TypedRows, before: Option<&[SqlValue]>, after: &[SqlValue]) -> RowWrite {
     let table = app
         .tables()
         .find(|table| table.sql_name == "items")
@@ -172,6 +171,7 @@ struct Measured {
 /// per transaction and a probe measures how long the replica is held.
 async fn catch_up_beside_a_writer(operations: usize) -> Measured {
     let t = Typed::new(UpdatePolicy::Changed);
+    let app = t.app();
     let dir = TempDir::new().unwrap();
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
@@ -195,7 +195,10 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
     let started = Instant::now();
     author_all(
         &source,
-        created.iter().map(|after| write(&t, None, after)).collect(),
+        created
+            .iter()
+            .map(|after| write(&t, &app, None, after))
+            .collect(),
         "create",
     )
     .await;
@@ -210,7 +213,7 @@ async fn catch_up_beside_a_writer(operations: usize) -> Measured {
             .map(|before| {
                 let mut after = before.clone();
                 after[2] = SqlValue::Integer(1);
-                write(&t, Some(before), &after)
+                write(&t, &app, Some(before), &after)
             })
             .collect(),
         "tick",
@@ -344,6 +347,7 @@ async fn retrying_a_receipt_resumes_an_interrupted_catch_up_without_reopening() 
 
 async fn interrupted_catch_up(retry_receipt: bool) {
     let t = Typed::new(UpdatePolicy::Changed);
+    let app = t.app();
     let dir = TempDir::new().unwrap();
     let both = [t.items, t.salaries];
     let (creator, updater) = loop {
@@ -366,7 +370,10 @@ async fn interrupted_catch_up(retry_receipt: bool) {
         .collect();
     author_all(
         &source,
-        created.iter().map(|after| write(&t, None, after)).collect(),
+        created
+            .iter()
+            .map(|after| write(&t, &app, None, after))
+            .collect(),
         "create",
     )
     .await;
@@ -381,7 +388,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
             .map(|before| {
                 let mut after = before.clone();
                 after[2] = SqlValue::Integer(1);
-                write(&t, Some(before), &after)
+                write(&t, &app, Some(before), &after)
             })
             .collect(),
         "tick",
@@ -400,6 +407,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
 
     let reader_node = PrivateKey::new();
     let path = dir.path().join("reader.db");
+    let reader_credentials = t.credentials(&reader_node, t.full());
     let open = || {
         EncryptedReplica::open(
             &path,
@@ -409,7 +417,7 @@ async fn interrupted_catch_up(retry_receipt: bool) {
                 manifest: t.manifest.clone(),
                 revocations: t.policy.clone(),
                 node: reader_node.clone(),
-                credentials: t.credentials(&reader_node, t.full()),
+                credentials: reader_credentials.clone(),
                 keys: both.iter().map(|scope| t.key(*scope)).collect(),
             },
         )
@@ -427,10 +435,8 @@ async fn interrupted_catch_up(retry_receipt: bool) {
         )
         .await
         .unwrap();
-    for page in frames.chunks(32) {
-        for status in reader.receive_all(page.to_vec()).await {
-            assert_eq!(status.unwrap(), ReceiveStatus::PendingDependencies);
-        }
+    for status in reader.receive_all(frames).await {
+        assert_eq!(status.unwrap(), ReceiveStatus::PendingDependencies);
     }
     // The first creation's group applies what it can; the pass stops
     // before the next transaction.

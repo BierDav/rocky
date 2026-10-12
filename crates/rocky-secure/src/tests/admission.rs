@@ -50,23 +50,32 @@ impl AsyncWrite for Recorded {
     }
 }
 
-/// `count` statements, each revoking one fresh node key, or `nodes` when given.
+/// `count` statements revoking distinct capability IDs, or `nodes` when given.
 fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
     let issuer = PrivateKey::new();
     let time = now().unwrap();
     let signed: Vec<_> = (0..count)
         .map(|index| {
-            let node = nodes
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| PrivateKey::new().public_key());
             let statement = Revocation {
                 app: f.app().definition().app,
                 issuer: issuer.public_key(),
                 time,
-                nodes: [rocky_credentials::PeerId::of(node)].into(),
+                nodes: nodes
+                    .get(index)
+                    .copied()
+                    .map(rocky_credentials::PeerId::of)
+                    .into_iter()
+                    .collect(),
                 users: BTreeSet::new(),
-                capabilities: BTreeSet::new(),
+                capabilities: if nodes.get(index).is_none() {
+                    [rocky_core::commitment(
+                        "admission.fixture",
+                        &index.to_be_bytes(),
+                    )]
+                    .into()
+                } else {
+                    BTreeSet::new()
+                },
                 pseudonyms: BTreeSet::new(),
             };
             SignedRevocation::sign(statement, &f.publisher, &issuer).unwrap()

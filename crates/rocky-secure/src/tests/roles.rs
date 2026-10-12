@@ -95,20 +95,38 @@ async fn insert(
 ) {
     let mut start = range.start;
     while start < range.end {
-        let end = (start + per).min(range.end);
-        let changes = (start..end)
-            .map(|index| RowChange {
-                scope,
-                row: row(index),
-                before: None,
-                after: Some(f.app().name(&format!("row {index}"))),
+        let guard = node.replica.inner.lock().await;
+        let mut pending = tokio::task::JoinSet::new();
+        for _ in 0..64 {
+            if start == range.end {
+                break;
+            }
+            let end = (start + per).min(range.end);
+            let changes = (start..end)
+                .map(|index| RowChange {
+                    scope,
+                    row: row(index),
+                    before: None,
+                    after: Some(f.app().name(&format!("row {index}"))),
+                })
+                .collect();
+            let handle = insert_handle(node, scope, start);
+            let replica = node.replica.clone();
+            let mut request =
+                Box::pin(async move { replica.author_buffered(handle, changes, vec![]).await });
+            // Preserve log order while enqueuing a shared transaction.
+            std::future::poll_fn(|cx| {
+                assert!(request.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
             })
-            .collect();
-        node.replica
-            .author_buffered(insert_handle(node, scope, start), changes, vec![])
-            .await
-            .unwrap();
-        start = end;
+            .await;
+            pending.spawn(request);
+            start = end;
+        }
+        drop(guard);
+        while let Some(result) = pending.join_next().await {
+            result.unwrap().unwrap();
+        }
     }
 }
 async fn rename(f: &Fixture, node: &Node, scope: ResourceScope, index: u32, from: &str, to: &str) {
@@ -164,6 +182,7 @@ async fn serve(node: &Node) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     );
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
         let Ok(mut session) =
             NativeSession::accept(stream, &replica, key, credentials, MAX_SECURE_BYTES).await
         else {
@@ -192,6 +211,7 @@ async fn connect_with(
 ) -> (NativeSession, tokio::task::JoinHandle<()>) {
     let (address, task) = serve(server).await;
     let stream = TcpStream::connect(address).await.unwrap();
+    stream.set_nodelay(true).unwrap();
     let session = NativeSession::authenticate(
         stream,
         &node.replica,

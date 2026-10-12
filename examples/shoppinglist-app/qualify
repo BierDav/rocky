@@ -13,4 +13,4 @@ if [ -z "${ROCKY_PEER:-}" ]; then
 fi
 ROCKY_PEER="$ROCKY_PEER" \
 ROCKY_EVIDENCE="${ROCKY_EVIDENCE:-$repo_root/local/shopping-qualification}" \
-    ./kotlin run -m qualification
+    ./kotlin run -m qualification --project-dir "${ROCKY_SHOPPING_PROJECT:-$app}"

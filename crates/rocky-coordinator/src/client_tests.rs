@@ -272,9 +272,14 @@ async fn observed_heads_reopen_at_65_and_the_public_cap_without_eviction() {
         schema: 1,
         handler: 1,
     };
-    for index in 0..65 {
-        client.observe_head(&head(index)).await.unwrap();
+    {
+        let mut cache = client.cache.lock().await;
+        let mut updated = cache.clone();
+        updated.heads.extend((0..64).map(head));
+        client.persist(&updated).unwrap();
+        *cache = updated;
     }
+    client.observe_head(&head(64)).await.unwrap();
     drop(client);
     client = open();
     assert_eq!(client.cache.lock().await.heads.len(), 65);

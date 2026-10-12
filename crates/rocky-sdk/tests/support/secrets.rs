@@ -1,6 +1,21 @@
 //! Transport fixtures retain keys across reopen without testing file-key fsync.
 use rocky_sdk::{SecretStore, credentials::ProviderError};
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+};
+
+static STORES: LazyLock<Mutex<HashMap<PathBuf, Arc<Keys>>>> = LazyLock::new(Default::default);
+
+pub fn keys(directory: &Path) -> Arc<dyn SecretStore> {
+    STORES
+        .lock()
+        .unwrap()
+        .entry(directory.to_path_buf())
+        .or_default()
+        .clone()
+}
 
 #[derive(Default)]
 pub struct Keys(Mutex<HashMap<String, Vec<u8>>>);

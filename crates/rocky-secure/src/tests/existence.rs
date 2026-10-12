@@ -2395,14 +2395,17 @@ async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_ke
         let credentials = full.credentials.clone();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            stream.set_nodelay(true).unwrap();
             let mut session =
                 NativeSession::accept(stream, &source, key, credentials, MAX_SECURE_BYTES)
                     .await
                     .unwrap();
             while session.serve_once(&source).await.is_ok() {}
         });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        stream.set_nodelay(true).unwrap();
         let mut session = NativeSession::authenticate(
-            TcpStream::connect(addr).await.unwrap(),
+            stream,
             &child.replica,
             child.node.clone(),
             child.credentials.clone(),
@@ -2525,12 +2528,8 @@ async fn horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unkno
     let path = dir.path().join("child.db");
     let target = erp.open(&path, &node, 142, &["items"]).await;
     let sql = erp.sql(&source).await;
-    let mut ids = Vec::new();
-    for batch in 0..17 {
-        let count = if batch == 16 { 4 } else { 16 };
-        let changes = vec![("INSERT INTO lists(title,id) VALUES('live',?id)", vec![]); count];
-        ids.extend(commit(&sql, &changes).await.0);
-    }
+    let changes = vec![("INSERT INTO lists(title,id) VALUES('live',?id)", vec![]); 260];
+    let ids = commit(&sql, &changes).await.0;
     let scope = erp.scope("lists");
     let (key, credentials) = erp.pseudonym(
         145,

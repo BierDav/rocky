@@ -4,6 +4,8 @@
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
+#[path = "support/secrets.rs"]
+mod secrets;
 
 const SCHEMA: &str = r#"{"format":4,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
@@ -93,7 +95,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
         directory,
         schema: SCHEMA,
-        secrets: None,
+        secrets: Some(secrets::keys(directory)),
         network: Some(Network::Owned(hub.connector(name))),
         commands: None,
     }

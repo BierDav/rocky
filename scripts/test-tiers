@@ -98,10 +98,12 @@ class Source:
 
     def __init__(self, build=None, archive=None, cranelift=False):
         self.cargo = ["cargo"]
+        self.target_dir = None
         if archive:
             self.name = Path(archive).name.split(".")[0]
             extract = REPORTS / "extract" / self.name
             extract.mkdir(parents=True, exist_ok=True)
+            self.target_dir = extract / "target"
             self.run_args = ["--archive-file", archive, "--workspace-remap", str(ROOT)]
             self.list_args = self.run_args + ["--extract-to", str(extract), "--extract-overwrite"]
         else:
@@ -122,8 +124,15 @@ class Source:
             fail(f"listing the tests of {self.name} failed with exit {listing.returncode}")
         out = listing.stdout
         listed = json.loads(out)
+        meta = listed["rust-build-meta"]
+        target = self.target_dir or Path(meta["target-directory"])
         tests = []
         for suite in listed["rust-suites"].values():
+            suite["non-test-environment"] = {
+                f"CARGO_BIN_EXE_{binary['name']}": str(target / binary["path"])
+                for binary in meta["non-test-binaries"].get(suite["package-id"], [])
+                if binary["kind"] == "bin-exe"
+            }
             for name, case in suite["testcases"].items():
                 if case["filter-match"]["status"] == "matches":
                     tests.append((suite, name))
@@ -139,6 +148,7 @@ def libtest(suite, names, threads=None):
     # libtest's JSON format is unstable; RUSTC_BOOTSTRAP enables it at run time
     # only, so it never reaches rustc or cargo's fingerprints.
     env = dict(os.environ, RUSTC_BOOTSTRAP="1", CARGO_MANIFEST_DIR=suite["cwd"])
+    env.update(suite.get("non-test-environment", {}))
     try:
         proc = subprocess.run(cmd, cwd=suite["cwd"], env=env, capture_output=True,
                               text=True, timeout=UNIT_BINARY_TIMEOUT)

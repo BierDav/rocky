@@ -313,7 +313,8 @@ When `build` finds `check` already passed for the tree it builds nothing, and
 the jobs after it build what they still run themselves. The Rust action restores dependencies and a fallback `target` directory. A
 separate compiled `target` cache then overlays it and has a separate cache key per source tree, OS, architecture and pinned
 build configuration, with a compatible prefix for restoring the previous tree.
-This saves newly rebuilt workspace crates instead of repeatedly restoring an
+When manifests change, an OS/architecture fallback still restores the previous
+targets; Cargo's fingerprints rebuild incompatible crates. This saves newly rebuilt workspace crates instead of repeatedly restoring an
 immutable dependency key's original artifacts. The build job saves it; test
 consumers restore it when an artifact is missing. Shopping also saves its x64
 build and dependency caches, since Gitea's ARM baseline cannot warm them. Gitea's Kubernetes runners
@@ -326,10 +327,16 @@ Linux shopping checks publish only the common metadata, JVM and Android
 artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
 iOS builds while assembling that metadata. `scripts/ci/local-maven` removes
 references to unpublished native variants from the local SDK metadata: Amper
-resolves those references even for JVM qualification. The macOS job publishes and tests
+resolves those references even for JVM qualification. `scripts/ci/shopping-linux`
+prepares an Amper workspace over the same application sources with only JVM/Android
+platforms and no iOS app module. `ROCKY_SHOPPING_PROJECT` selects it for both
+application gates, so dependency resolution never requests an iOS variant.
+The macOS job publishes and tests
 the iOS artifacts; its host needs full Xcode selected with `xcode-select`, an
 installed iOS simulator runtime and an available iPhone simulator. It installs
-Java 21 for the Kotlin checks.
+Java 21 for the Kotlin checks. `scripts/ci/ios-simulator` verifies a real boot before
+compilation. If the installed cryptex runtime has a stale path in the runner's
+CoreSimulator service, it refreshes only that user's service and retries the boot.
 Gitea resolves the current Temurin 21 archive through Adoptium's major-version
 endpoint, verifies its SHA-256 checksum, and installs it with `setup-java`.
 This avoids the action's paginated lookup of every Temurin release, which has

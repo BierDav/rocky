@@ -131,6 +131,7 @@ runs:
         key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
         restore-keys: |
           rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
+          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Restore and save the shopping job's x64 compiled crates
       if: steps.passed.outputs.cache-hit != 'true' && inputs.job == 'shopping'
@@ -140,3 +141,4 @@ runs:
         key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
         restore-keys: |
           rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
+          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-

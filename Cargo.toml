@@ -42,6 +42,12 @@ opt-level = 1
 [profile.dev.package.rocky-secure]
 opt-level = 3
 
+[profile.dev.package.rocky-sdk]
+opt-level = 1
+
+[profile.dev.package.rocky-coordinator]
+opt-level = 1
+
 [patch.crates-io]
 netdev = { path = "vendor/netdev" }
 netwatch = { path = "vendor/netwatch" }

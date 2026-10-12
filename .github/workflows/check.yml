@@ -168,6 +168,7 @@ jobs:
           key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ steps.source.outputs.tree }}
           restore-keys: |
             rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
+            rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
 
       - uses: taiki-e/install-action@v2
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
@@ -397,6 +398,18 @@ jobs:
           done
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
+      - name: Restore the Android native cache for the JVM/Android SDK
+        if: steps.reuse.outputs.passed != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            source/sdks/native/target
+          key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
+          restore-keys: |
+            android-native-${{ runner.os }}-
+
       - name: Run the shopping qualification
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
@@ -412,6 +425,8 @@ jobs:
             publishJvmPublicationToMavenLocal publishAndroidPublicationToMavenLocal \
             :rocky-runtime-android:publishReleasePublicationToMavenLocal
           ./scripts/ci/local-maven
+          export ROCKY_SHOPPING_PROJECT
+          ROCKY_SHOPPING_PROJECT=$(./scripts/ci/shopping-linux "$RUNNER_TEMP/shopping-linux")
           ./examples/shoppinglist-app/qualify
           sdks/kotlin/gradlew -p sdks/kotlin check
           ./examples/shoppinglist-app/check
@@ -576,6 +591,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p local/phase17-evidence
+          ./scripts/ci/ios-simulator
           ./sdks/native/check-ios 2>&1 | tee local/phase17-evidence/matrix.log
           ./sdks/native/qualify-ios-binding 2>&1 | tee local/phase17-evidence/callbacks.log
           sdks/kotlin/gradlew -p sdks/kotlin compileKotlinIosArm64

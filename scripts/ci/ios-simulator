@@ -1,0 +1,23 @@
+#!/bin/sh
+# Check a real simulator boot; refresh the user's stale cryptex runtime lookup.
+set -eu
+device=$(xcrun simctl list devices --json available | python3 -c '
+import json, sys
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".iOS-" in runtime:
+        for device in devices:
+            if "iPhone" in device["deviceTypeIdentifier"]:
+                print(device["udid"])
+                sys.exit(0)
+sys.exit("No available iPhone simulator")
+')
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+if ! xcrun simctl bootstatus "$device" -b >"$log" 2>&1; then
+    cat "$log" >&2
+    grep -Fq 'runtime path not found' "$log" || exit 1
+    pkill -u "$(id -u)" -f '[.]CoreSimulatorService$' || true
+    xcrun simctl bootstatus "$device" -b
+fi
+xcrun simctl spawn "$device" launchctl print system >/dev/null
+echo "Simulator $device booted and responding"

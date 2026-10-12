@@ -4,6 +4,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -51,6 +52,27 @@ class BudgetConfirmation(unittest.TestCase):
         over, _, calls = self.judge([], {"unit example": (0.001, 0.5)})
         self.assertEqual(over, [])
         self.assertEqual(calls, 0)
+
+
+class ArchivedExecutables(unittest.TestCase):
+    def test_confirmation_uses_the_package_executable_from_the_archive(self):
+        source = tiers.Source(archive="workspace.tar.zst")
+        suite = {"binary-id": "coordinator::public", "package-id": "coordinator",
+                 "binary-path": "/extracted/target/debug/deps/public", "cwd": "/workspace",
+                 "testcases": {"example": {"filter-match": {"status": "matches"}}}}
+        metadata = {"rust-build-meta": {"target-directory": "/original/target",
+                    "non-test-binaries": {
+                        "coordinator": [{"kind": "bin-exe", "name": "rocky-voter", "path": "debug/rocky-voter"}],
+                        "other": [{"kind": "bin-exe", "name": "other", "path": "debug/other"}]}},
+                    "rust-suites": {"public": suite}}
+        listing = SimpleNamespace(returncode=0, stdout=json.dumps(metadata))
+        execution = SimpleNamespace(stdout='', stderr='')
+        with patch.object(tiers.subprocess, "run", side_effect=[listing, execution]) as run:
+            [(record, name)] = source.list("all()")
+            tiers.libtest(record, [name], threads=1)
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["CARGO_BIN_EXE_rocky-voter"], str(source.target_dir / "debug/rocky-voter"))
+        self.assertNotIn("CARGO_BIN_EXE_other", environment)
 
 
 if __name__ == "__main__":

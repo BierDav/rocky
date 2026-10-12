@@ -554,6 +554,7 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
 
 async fn serve(listener: TcpListener, source: &Replica, identity: (PrivateKey, CredentialChain)) {
     let (stream, _) = listener.accept().await.unwrap();
+    stream.set_nodelay(true).unwrap();
     let mut session =
         NativeSession::accept(stream, source, identity.0, identity.1, MAX_SECURE_BYTES)
             .await
@@ -644,6 +645,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
         let address = listener.local_addr().unwrap();
         let client = async {
             let stream = TcpStream::connect(address).await.unwrap();
+            stream.set_nodelay(true).unwrap();
             let mut session = NativeSession::authenticate(
                 stream,
                 &c,

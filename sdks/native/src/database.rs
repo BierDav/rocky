@@ -2,10 +2,8 @@
 //! sessions and an optional network service, each closed on its own. The
 //! starter `NativeSession` composes the same services. See
 //! `docs/runtime/sdk-composition.md`.
-use crate::{
-    Adapter, ForeignTransport, NativeCommands, NativeError, NativeSecretStore, failure, foreign,
-};
-use rocky_sdk::{Network, transport::adapter::adapt};
+use crate::{NativeCommands, NativeError, NativeSecretStore, failure, foreign};
+use rocky_sdk::Network;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -42,18 +40,13 @@ impl NativeNetwork {
 }
 #[uniffi::export]
 impl NativeNetwork {
-    /// The starter's transport `options` name, such as
-    /// `{"kind":"iroh"}` or `{"kind":"tcp","listen":"127.0.0.1:0"}`.
+    /// The starter's iroh transport `options` name, such as
+    /// `{"kind":"iroh"}` or `{"kind":"iroh","relay":"disabled","bind":"127.0.0.1:0"}`.
     #[uniffi::constructor]
     pub fn starter(options: String) -> Result<Arc<Self>, NativeError> {
         let options: rocky_sdk::transport::TransportOptions =
             serde_json::from_str(&options).map_err(message)?;
         Ok(Self::new(Network::Owned(Arc::new(options))))
-    }
-    /// A transport the application implements, starts and closes.
-    #[uniffi::constructor]
-    pub fn foreign(transport: Arc<dyn ForeignTransport>) -> Arc<Self> {
-        Self::new(Network::Borrowed(adapt(Arc::new(Adapter(transport)))))
     }
 }
 

@@ -57,6 +57,8 @@ things remain and are not the old path:
 - **Transport-neutral.** Liveness is an application ping on the link, so the
   in-memory, TCP and foreign Kotlin transports behave like iroh. iroh may add
   QUIC keepalive below it, but correctness does not depend on that.
+  Superseded by [decision 0065](../decisions/0065-iroh-only-transport.md):
+  iroh is the only transport and its QUIC liveness replaced the ping.
 - One current version per format
   ([decision 0039](../decisions/0039-single-current-formats.md)). The link
   replaces the session format; nothing is negotiated or migrated.

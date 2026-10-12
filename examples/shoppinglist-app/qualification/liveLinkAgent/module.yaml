@@ -1,0 +1,11 @@
+# The live-link qualification agent: one shopping device answering JSON lines, on desktop and Android.
+product:
+  type: kmp/lib
+  platforms: [jvm, android]
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../../shared: exported
+settings:
+  android:
+    minSdk: 26

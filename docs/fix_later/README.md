@@ -14,17 +14,6 @@ projection or ledger on the writer thread. Listed under
 
 Fix: page them, or serve them from the read connection.
 
-## Kotlin tests choose TCP ports that another process can take
-
-`sdks/kotlin/qualification/room` and `examples/shoppinglist-app/shared` tests
-pick a listen address with `ServerSocket(0)`, close it and pass the port to
-`PeerTransport.Tcp`, which binds it later. On a host running other tests, a
-process can take the port in between; `RoomGateTest` failed once on
-2026-10-10 with `Address already in use (os error 48)` during `sdks/kotlin/gradlew -p sdks/kotlin check`.
-
-Fix: let `PeerTransport.Tcp` listen on port 0 and advertise the bound port,
-and use that in the tests.
-
 ## Six e2e tests fail on main since explicit passes respect back-off
 
 On main `a7d24a97`, before phase 15, `./scripts/check --e2e` fails in

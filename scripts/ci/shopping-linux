@@ -8,7 +8,7 @@ import sys
 app = Path(__file__).resolve().parents[2] / 'examples/shoppinglist-app'
 project = Path(sys.argv[1]).resolve()
 project.mkdir(parents=True, exist_ok=True)
-modules = ('androidApp', 'desktopApp', 'qualification', 'requiredSchema', 'shared')
+modules = ('androidApp', 'desktopApp', 'qualification', 'shared')
 (project / 'project.yaml').write_text('modules:\n' + ''.join(f'  - {name}\n' for name in modules))
 
 

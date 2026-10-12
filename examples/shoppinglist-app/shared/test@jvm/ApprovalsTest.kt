@@ -24,7 +24,7 @@ class ApprovalsTest {
         File(root, name).absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp("127.0.0.1:0") },
+        transport = { PeerTransport.Iroh.isolated() },
         commands = { CommandRuntime(coordinator, ApprovalHandlers) },
     )
 
@@ -33,7 +33,7 @@ class ApprovalsTest {
         val nodes = mutableListOf<RockyDatabase>()
         val rooms = mutableListOf<ShoppingDatabase>()
         val coordinator = DevelopmentCoordinator()
-        fun transport() = PeerTransport.Tcp("127.0.0.1:0")
+        fun transport() = PeerTransport.Iroh.isolated()
         fun commands() = CommandRuntime(coordinator, ApprovalHandlers)
         try {
             val executor = RockyDatabase.create(File(root, "executor"), ShoppingSchema, transport(), commands = commands(), automaticSync = false).also(nodes::add)

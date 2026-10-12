@@ -55,12 +55,12 @@ class DiscoveryTest {
     @Test
     fun aTransportWithoutDiscoveryReportsEachPathUnavailableWithItsReason() = runBlocking {
         val root = Files.createTempDirectory("rocky-discovery").toFile()
-        val a = RockyDatabase.create(File(root, "a"), schema, PeerTransport.Tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(root, "a"), schema, PeerTransport.Iroh.isolated(), automaticSync = false)
         try {
             val status = a.discovery()
             assertFalse(status.announcing)
             for (path in listOf(status.local, status.topic)) {
-                assertEquals(DiscoveryPath(DiscoveryPathState.Unavailable, "the tcp transport has no discovery"), path)
+                assertEquals(DiscoveryPath(DiscoveryPathState.Unavailable, "the iroh transport has no discovery"), path)
             }
         } finally {
             a.close()

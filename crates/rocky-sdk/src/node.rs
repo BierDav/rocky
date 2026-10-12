@@ -1241,7 +1241,7 @@ impl Node {
                     "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else { "session" }, |meta| meta.source.as_str()),
                     "choice": self.choices.lock().unwrap_or_else(PoisonError::into_inner).get(&node).copied().unwrap_or("not_considered"),
                     "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
-                    "link": self.current().map_or_else(|| json!({"state":"closed","opened":null,"round_trip_ms":null}), |service| service.live.status(node)),
+                    "link": self.current().map_or_else(|| json!({"state":"closed","opened":null,"round_trip_ms":null,"paths":[]}), |service| service.live.status(node)),
                     "state": state,
                     "checked": checked.map(|at| at.to_string()),
                     "error": last.and_then(|last| last.error.clone()),
@@ -1512,8 +1512,10 @@ impl Node {
         });
         let mut token_status = status.clone();
         if let Some(peers) = token_status["network"]["peers"].as_array_mut() {
+            // Path measurements change continuously and must not move the token.
             for peer in peers {
                 peer["link"]["round_trip_ms"] = Value::Null;
+                peer["link"]["paths"] = json!([]);
             }
         }
         let token = HEXLOWER

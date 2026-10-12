@@ -48,7 +48,7 @@ class CheckApplication : Application() {
     private suspend fun checkLinks(definition: Schema) {
         val aDirectory = File(filesDir, "link-a").also { it.deleteRecursively() }
         val bDirectory = File(filesDir, "link-b").also { it.deleteRecursively() }
-        val transport = PeerTransport.Tcp(listen = "127.0.0.1:0")
+        val transport = PeerTransport.Iroh.isolated()
         val a = RockyDatabase.create(aDirectory, definition, transport)
         var b: RockyDatabase? = null
         try {

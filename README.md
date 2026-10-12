@@ -92,7 +92,7 @@ for checkpoint, application migration and mobile limits.
 
 [Room on Rocky's file](docs/runtime/room-integration.md) runs Room DAOs on the
 replicated tables through Rocky's `androidx.sqlite` driver, with SDK-owned UniFFI
-native loading, Kotlin schemas and authenticated enrollment over iroh or TCP.
+native loading, Kotlin schemas and authenticated enrollment over iroh.
 The shopping-list example has Metro/ViewModel screens, QR pairing, selectable
 trusted/full/partial devices and visible [SDK activity](docs/runtime/activity.md).
 

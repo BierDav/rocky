@@ -4,21 +4,22 @@ import kotlinx.serialization.json.*
 import org.example.examples.shopping.data.db.ShoppingSchema
 import java.io.File
 import java.lang.management.ManagementFactory
-import java.net.ServerSocket
+import java.net.DatagramSocket
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
 
 /**
  * Multi-process shopping qualification. Every device is its own JVM running the app's Room repository on Rocky's
- * file over TCP; the custody peer is the packaged `rocky-peer` launcher. The application contains no Rust source.
+ * file over isolated iroh; the custody peer is the packaged `rocky-peer` launcher. The application contains no Rust source.
  *
  * `ROCKY_PEER` names the `rocky-peer` executable; `ROCKY_EVIDENCE` the directory for logs and `evidence.json`.
  * With `ROCKY_PHONES`, it drives two Android devices instead ([phones]); `live-links …` runs the live-link
- * qualification instead ([liveLinks]).
+ * qualification instead ([liveLinks]); `required-schema` runs the schema preflight ([requiredSchema]).
  * See docs/runtime/shopping-qualification.md.
  */
 fun main(args: Array<String>) {
     if (args.firstOrNull() == "live-links") return liveLinks(args.drop(1))
+    if (args.firstOrNull() == "required-schema") return requiredSchema()
     val peer = File(System.getenv("ROCKY_PEER") ?: error("set ROCKY_PEER to the rocky-peer executable"))
     check(peer.canExecute()) { "$peer is not executable" }
     val evidence = File(System.getenv("ROCKY_EVIDENCE") ?: Files.createTempDirectory("shopping-qualification").toString())
@@ -77,7 +78,8 @@ private val scenarios: List<Pair<String, (Run) -> Unit>> = listOf(
     "creator-loss" to Run::creatorLoss,
 )
 
-private fun freePort() = ServerSocket(0).use { it.localPort }
+// iroh binds UDP.
+private fun freePort() = DatagramSocket(0).use { it.localPort }
 private fun json(value: Any?): JsonElement = when (value) {
     null -> JsonNull
     is JsonElement -> value
@@ -177,8 +179,12 @@ internal class Custody(private val root: File, private val binary: File, invitat
                 put(
                     "transport",
                     buildJsonObject {
-                        put("kind", "tcp")
-                        put("listen", listen)
+                        put("kind", "iroh")
+                        put("relay", "disabled")
+                        put("lookup", "disabled")
+                        put("topic", false)
+                        put("local", false)
+                        put("bind", listen)
                     },
                 )
                 put("invitation", invitation)

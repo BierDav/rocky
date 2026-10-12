@@ -39,12 +39,6 @@ impl CustodyPeer {
         if config.peers.len() > crate::enrollment::MAX_CONTACTS {
             return Err("custody peer quota".into());
         }
-        if matches!(
-            &config.transport,
-            TransportOptions::Tcp { listen: None, .. }
-        ) {
-            return Err("a custody TCP peer needs a listening address".into());
-        }
         let directory = Path::new(&config.directory);
         let identity = directory.join("identity.json");
         let existing = identity.exists();

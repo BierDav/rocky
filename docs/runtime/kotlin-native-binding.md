@@ -22,12 +22,12 @@ sdks/kotlin/gradlew -p sdks/kotlin publishAndroidPublicationToMavenLocal
 
 The matrix builds the bundled-SQLite static runtime on both targets, with and
 without iroh, at deployment target 13.0. It reports every failed configuration.
-The isolated binding fixture qualifies an async session call, Rust-thread
-secret callbacks and Kotlin transport/ByteStream enrollment without iroh.
+The isolated binding fixture qualifies an async session call and Rust-thread
+secret callbacks during enrollment over loopback iroh.
 The SDK check runs the common core, SQLite and Room qualification tests with
-iroh, plus public SecretStore/custom transport enrollment, endpoint, command,
+iroh, plus public SecretStore enrollment, endpoint, command,
 cancellation and lifetime tests on the simulator. The public callback fixture
-also checks zero binding handles after both databases and transports close.
+also checks zero binding handles after both databases close.
 The SDK Gradle build supplies the absolute source fixture directory
 through `ROCKY_TEST_ROOT` and `SIMCTL_CHILD_ROCKY_TEST_ROOT`, including for plain
 `sdks/kotlin/gradlew -p sdks/kotlin check`; no arbitrary sleep synchronizes a new test.

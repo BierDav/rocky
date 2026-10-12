@@ -1,7 +1,6 @@
 package org.example.examples.shopping
 
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.json.*
 import org.example.examples.shopping.data.ShoppingRepository
@@ -35,79 +34,11 @@ class ShoppingIntegrationTest {
 
     /** Loopback iroh: no relay and no address lookup, so tests need no network. */
     private fun local(): PeerTransport = PeerTransport.Iroh.isolated()
-    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
+    private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
     private val items get() = ItemsSchema.table("items")
     private val writer = GrantProfile.Writer(setOf("items"))
     private suspend fun RockyDatabase.add(title: String) = insertItem(title)
     private suspend fun RockyDatabase.titles() = Row.decode(read(items.query())).map { it.text("title") }.sorted()
-
-    /** A transport written in Kotlin: named nodes joined by small in-process queues. */
-    private class Pipes {
-        val listeners = java.util.concurrent.ConcurrentHashMap<String, Channel<InboundStream>>()
-    }
-    private class PipeStream(private val incoming: Channel<ByteArray>, private val outgoing: Channel<ByteArray>) : ByteStream {
-        private var rest = ByteArray(0)
-        override suspend fun read(max: Int): ByteArray {
-            if (rest.isEmpty()) rest = incoming.receiveCatching().getOrNull() ?: return ByteArray(0)
-            val head = rest.copyOf(minOf(max, rest.size))
-            rest = rest.copyOfRange(head.size, rest.size)
-            return head
-        }
-        override suspend fun write(bytes: ByteArray) = outgoing.send(bytes)
-        override suspend fun finish() {
-            outgoing.close()
-        }
-        override suspend fun close() {
-            outgoing.close()
-            incoming.cancel()
-        }
-    }
-    private class PipeTransport(private val pipes: Pipes, private val name: String) : StreamTransport {
-        private val inbound = Channel<InboundStream>(8).also { pipes.listeners[name] = it }
-        override val kind = "pipe"
-        override suspend fun address() = name
-        override suspend fun connect(address: String, protocol: String): ByteStream {
-            val listener = pipes.listeners[address] ?: error("unreachable")
-            val there = Channel<ByteArray>(4)
-            val back = Channel<ByteArray>(4)
-            listener.send(InboundStream(protocol, PipeStream(there, back)))
-            return PipeStream(back, there)
-        }
-        override suspend fun accept(): InboundStream? = inbound.receiveCatching().getOrNull()
-    }
-
-    @Test fun `a Kotlin transport carries enrollment and sync and stays the application's`() = runBlocking {
-        val root = directory()
-        val pipes = Pipes()
-        val first = PeerTransport.Custom(PipeTransport(pipes, "a"))
-        val second = PeerTransport.Custom(PipeTransport(pipes, "b"))
-        var a = RockyDatabase.create(File(root, "a"), ItemsSchema, first, automaticSync = false)
-        var b: RockyDatabase? = null
-        try {
-            b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, second, automaticSync = false)
-            assertEquals("pipe", b.session().transport)
-            a.author()
-            b.author(issuer = a)
-            a.add("Milk")
-            b.add("Eggs")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(listOf("Eggs", "Milk"), a.titles())
-            assertEquals(a.titles(), b.titles())
-            assertFalse(b.network().owned)
-            // Closing the databases leaves both transports open: the same objects carry the next ones.
-            b.close()
-            a.close()
-            a = RockyDatabase.resume(File(root, "a"), ItemsSchema, first, automaticSync = false)
-            b = RockyDatabase.resume(File(root, "b"), ItemsSchema, second, automaticSync = false)
-            a.add("Jam")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(listOf("Eggs", "Jam", "Milk"), b.titles())
-        } finally {
-            b?.close()
-            a.close()
-            root.deleteRecursively()
-        }
-    }
 
     @Test fun `a Kotlin protocol and Rocky share an endpoint the application owns`() = runBlocking {
         val root = directory()
@@ -179,12 +110,12 @@ class ShoppingIntegrationTest {
 
     @Test fun `members sync directly while the creator is closed`() = runBlocking {
         val root = directory()
-        val a = RockyDatabase.create(File(root, "a"), ItemsSchema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(root, "a"), ItemsSchema, loopback(), automaticSync = false)
         var b: RockyDatabase? = null
         var c: RockyDatabase? = null
         try {
-            b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, tcp(), automaticSync = false)
-            c = RockyDatabase.join(File(root, "c"), ItemsSchema, a.pairing(writer).uri, tcp(), automaticSync = false)
+            b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, loopback(), automaticSync = false)
+            c = RockyDatabase.join(File(root, "c"), ItemsSchema, a.pairing(writer).uri, loopback(), automaticSync = false)
             b.author(issuer = a)
             c.author(issuer = a)
             assertTrue(b.contact().uri.startsWith("rocky://peer/"))
@@ -203,10 +134,10 @@ class ShoppingIntegrationTest {
             val peers = c.peers()
             assertEquals("unreachable", peers.single { it.isIssuer }.state)
             assertEquals("connected", peers.single { !it.isIssuer }.state)
-            assertEquals("tcp", peers.single { !it.isIssuer }.routes.single().transport)
+            assertEquals("iroh", peers.single { !it.isIssuer }.routes.single().transport)
             val network = c.network()
             assertTrue(network.attached && network.owned)
-            assertEquals("tcp", network.kind)
+            assertEquals("iroh", network.kind)
             assertEquals(32, network.inboundLimit)
             b.removePeer(peers.single { it.isIssuer }.node)
             assertEquals(listOf(c.session().node), b.peers().map { it.node })
@@ -226,7 +157,7 @@ class ShoppingIntegrationTest {
 
     @Test fun `raw grants and delegation reach devices that are not issuers without Rust`() = runBlocking<Unit> {
         val root = directory()
-        val a = RockyDatabase.create(File(root, "a"), ItemsSchema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(root, "a"), ItemsSchema, loopback(), automaticSync = false)
         var s: RockyDatabase? = null
         var d: RockyDatabase? = null
         try {
@@ -234,7 +165,7 @@ class ShoppingIntegrationTest {
             val readsTitles = listOf(Grant("items", setOf(Right.Read, Right.Custody), columns = setOf("title")))
             // The issuer grants raw rights, and one further delegation, to a device it prepared nothing for.
             val sKeys = Credentials.prepare(File(root, "s"))
-            s = RockyDatabase.install(File(root, "s"), ItemsSchema, a.credentials.grant(sKeys, inserts, delegations = 2), transport = tcp())
+            s = RockyDatabase.install(File(root, "s"), ItemsSchema, a.credentials.grant(sKeys, inserts, delegations = 2), transport = loopback())
             assertEquals(GrantProfile.Grants(inserts), s.session().profile)
             assertFalse(s.isIssuer)
             assertEquals(GrantProfile.Grants(inserts), a.devices().single().profile)
@@ -242,7 +173,7 @@ class ShoppingIntegrationTest {
             val dKeys = Credentials.prepare(File(root, "d"))
             assertFailsWith<RockyException> { s.credentials.delegate(dKeys, listOf(Grant("items", setOf(Right.Read, Right.Delete)))) }
             assertFailsWith<RockyException> { s.credentials.delegate(dKeys, inserts, delegations = 2) }
-            d = RockyDatabase.install(File(root, "d"), ItemsSchema, s.credentials.delegate(dKeys, inserts), transport = tcp())
+            d = RockyDatabase.install(File(root, "d"), ItemsSchema, s.credentials.delegate(dKeys, inserts), transport = loopback())
             assertEquals(GrantProfile.Grants(inserts), d.session().profile)
             assertFailsWith<RockyException> { d.credentials.delegate(Credentials.prepare(File(root, "e")), inserts) }
             for ((left, right) in listOf(a to s, a to d)) {
@@ -385,13 +316,13 @@ class ShoppingIntegrationTest {
 
     @Test fun `filtered DAO flows follow local and synced writes`() = runBlocking {
         val root = directory()
-        val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false)
         val da = openShoppingDatabase(File(root, "a"), a)
         var b: RockyDatabase? = null
         var db: ShoppingDatabase? = null
         var following: Job? = null
         try {
-            b = RockyDatabase.join(File(root, "b"), ShoppingSchema, a.pairing(shopper).uri, tcp(), automaticSync = false)
+            b = RockyDatabase.join(File(root, "b"), ShoppingSchema, a.pairing(shopper).uri, loopback(), automaticSync = false)
             db = openShoppingDatabase(File(root, "b"), b)
             val repository = ShoppingRepository(db, b)
             val owner = ShoppingRepository(da, a)
@@ -518,8 +449,6 @@ class ShoppingIntegrationTest {
             assertFalse(File(root, "a/secrets").exists())
             assertTrue(keys.keys.any { it.endsWith(".publisher") })
             val invitation = a.pairing(writer)
-            // The invitation carries no route of another transport kind.
-            assertFailsWith<RockyException> { RockyDatabase.join(File(root, "tcp"), ItemsSchema, invitation.uri, tcp(), automaticSync = false) }
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, invitation.uri, local(), automaticSync = false)
             assertTrue(File(root, "b/secrets").isDirectory)
             assertFailsWith<RockyException> { RockyDatabase.join(File(root, "used"), ItemsSchema, invitation.uri, local(), automaticSync = false) }

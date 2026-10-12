@@ -87,8 +87,8 @@ nullable field, durable ticket and original mutation handle.
 
 | Artifact | Default iroh | Without iroh |
 | --- | --- | --- |
-| Rust SDK | Local database, owned or borrowed networks, composed/service coordinator | Local database, TCP/custom networks, composed coordinator |
-| Native ABI | Databases, sessions, callbacks, endpoint handles, service bundles | Databases, sessions, foreign transports; endpoint/service configuration refuses |
+| Rust SDK | Local database, owned or borrowed networks, composed/service coordinator | Local database without a network, composed coordinator |
+| Native ABI | Databases, sessions, callbacks, endpoint handles, service bundles | Databases and sessions without a network; network, endpoint and service configuration refuse |
 | Kotlin JVM package | Qualified | ABI compile gate only |
 | Android AAR (`arm64-v8a`, `x86_64`, API 26+) | See [Android](android.md#qualification) | No claim |
 

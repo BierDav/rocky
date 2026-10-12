@@ -1,4 +1,4 @@
-package org.example.examples.shopping.data.qualification
+package org.example.examples.shopping.qualification
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -124,13 +124,21 @@ class LiveLinkAgent(
         fun platform() = platform(text("directory"), text("name"), request["transport"]?.jsonObject ?: JsonObject(emptyMap()))
         return when (val op = text("op")) {
             "now" -> JsonPrimitive(epochMicros())
+
             "create" -> open { ShoppingNode.create(platform()) }
+
             "join" -> open { ShoppingNode.join(platform(), PairingCode.parse(text("code"))) }
+
             "resume" -> open { ShoppingNode.resume(platform()) }
+
             "invite" -> JsonPrimitive(opened.household.invite(NodeKind.valueOf(text("kind")), text("name")).toString())
+
             "contact" -> JsonPrimitive(opened.rocky.contact().uri)
+
             "createList" -> JsonPrimitive(opened.repository.createList(text("title")))
+
             "lists" -> JsonObject(lists.mapKeys { it.key.toString() }.mapValues { JsonPrimitive(it.value) })
+
             "watch" -> {
                 val list = long("list")
                 if (watched.add(list)) {
@@ -143,6 +151,7 @@ class LiveLinkAgent(
                 }
                 JsonNull
             }
+
             "add" -> {
                 val start = epochMicros()
                 val id = opened.repository.add(long("list"), text("title"))
@@ -152,9 +161,13 @@ class LiveLinkAgent(
                     put("committed", epochMicros())
                 }
             }
+
             "awaitSeen" -> awaitSeen(request.getValue("titles").jsonArray.map { it.jsonPrimitive.content }, long("timeoutMs"))
+
             "status" -> status()
+
             "traffic" -> traffic()
+
             "awaitLink" -> {
                 // `NotOpen` is reached by the first status without an open link: a closed link may redial at once.
                 val wanted = text("state")
@@ -168,25 +181,32 @@ class LiveLinkAgent(
                     put("at", epochMicros())
                 }
             }
+
             "events" -> JsonArray(events.drop(request["after"]?.jsonPrimitive?.int ?: 0))
+
             "links" -> JsonArray(links.drop(request["after"]?.jsonPrimitive?.int ?: 0))
+
             "removePeer" -> {
                 opened.rocky.removePeer(text("node"))
                 JsonNull
             }
+
             "background" -> {
                 opened.rocky.enterBackground()
                 JsonNull
             }
+
             "foreground" -> {
                 opened.rocky.enterForeground()
                 JsonNull
             }
+
             "close" -> {
                 node?.close()
                 node = null
                 JsonNull
             }
+
             else -> error("unknown op $op")
         }
     }

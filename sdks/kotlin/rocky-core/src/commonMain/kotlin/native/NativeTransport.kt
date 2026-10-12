@@ -2,36 +2,12 @@ package rocky
 
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
-import rocky.internal.native.ForeignTransport
 import rocky.internal.native.NativeCommandHandler
 import rocky.internal.native.NativeCommands
 import rocky.internal.native.NativeException
 import rocky.internal.native.NativeHandlerReads
 import rocky.internal.native.NativeSecretStore
-import rocky.internal.native.OutboundStream
 import rocky.internal.native.ByteStream as NativeByteStream
-import rocky.internal.native.InboundStream as NativeInboundStream
-
-/** A Kotlin stream as the native runtime calls it. Unexpected failures of `close` are swallowed. */
-internal class ForeignStream(private val stream: ByteStream) : NativeByteStream {
-    override suspend fun read(max: UInt): ByteArray = guarded { stream.read(max.toInt()) }
-    override suspend fun write(bytes: ByteArray) = guarded { stream.write(bytes) }
-    override suspend fun finish() = guarded { stream.finish() }
-    override suspend fun abandon() {
-        try {
-            stream.close()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {}
-    }
-    private suspend fun <T> guarded(call: suspend () -> T): T = try {
-        call()
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (error: Exception) {
-        throw NativeException.Failure(error.message ?: error.toString())
-    }
-}
 
 /** A native stream as Kotlin uses it. */
 internal class NativeStream(private val stream: NativeByteStream) : ByteStream {
@@ -49,19 +25,6 @@ internal class NativeStream(private val stream: NativeByteStream) : ByteStream {
         call()
     } catch (error: NativeException.Failure) {
         throw RockyException("unreachable", true, error.detail)
-    }
-}
-internal class ForeignAdapter(private val transport: StreamTransport) : ForeignTransport {
-    override fun kind(): String = transport.kind
-    override suspend fun address(): String = guarded { transport.address() }
-    override suspend fun connect(address: String, protocol: String): OutboundStream = guarded { OutboundStream(ForeignStream(transport.connect(address, protocol))) }
-    override suspend fun accept(): NativeInboundStream? = guarded { transport.accept()?.let { NativeInboundStream(it.protocol, ForeignStream(it.stream)) } }
-    private suspend fun <T> guarded(call: suspend () -> T): T = try {
-        call()
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (error: Exception) {
-        throw NativeException.Failure(error.message ?: error.toString())
     }
 }
 

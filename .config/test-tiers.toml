@@ -89,9 +89,6 @@ filter = '''
         | test(=retention_tests::death_inside_any_step_leaves_a_file_that_opens_and_audits)
         | test(=stored_state_tests::open_does_not_replay_and_a_domain_outgrows_the_former_quota)
     ))
-    | (binary_id(rocky-sdk::adapter) & (
-          test(=a_chunk_transport_carries_enrollment_and_sync)
-    ))
     | (binary_id(rocky-sdk::bootstrap) & (
           test(=join_restores_large_rows_across_checkpoint_pages)
     ))

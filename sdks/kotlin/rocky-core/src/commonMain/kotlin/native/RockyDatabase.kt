@@ -267,10 +267,7 @@ class Credentials internal constructor(private val session: RockySession) {
     suspend fun logout(purge: Boolean = false) = session.logout(purge)
 }
 
-@Suppress("REDUNDANT_ELSE_IN_WHEN")
 private fun network(peers: PeerTransport): NativeNetwork = when (peers) {
-    is PeerTransport.Custom -> NativeNetwork.foreign(ForeignAdapter(peers.transport))
-
     is PeerTransport.Endpoint -> NativeNetwork.endpoint(
         (
             peers.endpoint as? RockyEndpoint
@@ -278,26 +275,14 @@ private fun network(peers: PeerTransport): NativeNetwork = when (peers) {
             ).native,
     )
 
-    else -> NativeNetwork.starter(
+    is PeerTransport.Iroh -> NativeNetwork.starter(
         buildJsonObject {
-            when (peers) {
-                is PeerTransport.Iroh -> {
-                    put("kind", "iroh")
-                    put("relay", peers.relay)
-                    put("lookup", peers.lookup)
-                    put("topic", peers.topic)
-                    put("local", peers.local)
-                    peers.bind?.let { put("bind", it) }
-                }
-
-                is PeerTransport.Tcp -> {
-                    put("kind", "tcp")
-                    peers.listen?.let { put("listen", it) }
-                    peers.advertised?.let { put("advertised", it) }
-                }
-
-                else -> error("unsupported transport")
-            }
+            put("kind", "iroh")
+            put("relay", peers.relay)
+            put("lookup", peers.lookup)
+            put("topic", peers.topic)
+            put("local", peers.local)
+            peers.bind?.let { put("bind", it) }
         }.toString(),
     )
 }

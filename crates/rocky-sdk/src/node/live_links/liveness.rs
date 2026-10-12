@@ -15,7 +15,6 @@ impl Node {
         mut close: watch::Receiver<Option<CloseReason>>,
         changed: watch::Sender<Option<Vec<ResourceScope>>>,
         mut authority: watch::Receiver<u64>,
-        id: u64,
     ) -> Result<&'static str, Failure> {
         let peer = opened.peer;
         let direction = opened.direction;
@@ -24,9 +23,6 @@ impl Node {
         let mut changes = changed.subscribe();
         let mut outgoing = std::mem::replace(&mut opened.channels.outgoing, mpsc::channel(1).1);
         let exit = {
-            let (controls, mut control) = mpsc::channel(4);
-            let pongs = watch::channel(0u64).0;
-            let mut pong = pongs.subscribe();
             let receive = async {
                 let mut requests = futures_util::stream::FuturesUnordered::<
                     std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Failure>>>>,
@@ -116,16 +112,6 @@ impl Node {
                                 }));
                             }
                         }
-                        Message::Ping if frame.direction != direction => {
-                            controls
-                                .try_send(Frame::new(frame.direction, Message::Pong))
-                                .map_err(|_| "link control quota")?;
-                        }
-                        Message::Pong if frame.direction == direction => {
-                            #[cfg(test)]
-                            service.live.pongs.fetch_add(1, Ordering::Relaxed);
-                            pongs.send_modify(|count| *count = count.wrapping_add(1));
-                        }
                         Message::Close {
                             reason: CloseReason::Authority | CloseReason::Busy,
                         } => return Err("peer closed link".into()),
@@ -134,10 +120,9 @@ impl Node {
                     }
                 }
             };
+            // A dead peer surfaces as a failed read or write: the transport
+            // keeps the connection alive and times it out.
             let send = async {
-                let mut deadline = tokio::time::Instant::now() + PING;
-                let mut missed = 0;
-                let mut ping_at = None;
                 changes.borrow_and_update();
                 let mut initial = take_signal(&changed);
                 loop {
@@ -146,20 +131,10 @@ impl Node {
                     }
                     tokio::select! {
                         biased;
-                        _ = pong.changed() => { pong.borrow_and_update(); missed = 0; if let Some(at) = ping_at.take() { service.live.pong(peer, id, tokio::time::Instant::now() - at); } }
-                        Some(frame) = control.recv() => { opened.writer.send(frame).await?; }
-                        _ = tokio::time::sleep_until(deadline) => {
-                            if missed == 3 { return Err("three missed link pongs".into()); }
-                            ping_at = Some(tokio::time::Instant::now());
-                            opened.writer.send(Frame::new(direction, Message::Ping)).await?;
-                            missed += 1;
-                            deadline = tokio::time::Instant::now() + PING;
-                        }
                         Some(frame) = outgoing.recv() => {
                             let finished = if let Message::Reconcile { generation, started: false } = frame.message { Some(generation) } else { None };
                             opened.writer.send(frame).await?;
                             if let Some(generation) = finished { opened.channels.handle.flushed_reconcile(generation); }
-                            deadline = tokio::time::Instant::now() + PING;
                         }
                         _ = changes.changed() => {
                             changes.borrow_and_update();
@@ -167,12 +142,10 @@ impl Node {
                             if let Some(scopes) = pending {
                                 opened.writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
                             }
-                            deadline = tokio::time::Instant::now() + PING;
                         }
                         _ = std::future::ready(()), if initial.is_some() => {
                             let scopes = initial.take().ok_or("initial link signal")?;
                             opened.writer.send(Frame::new(direction, Message::Changed { token: self.signal_token(&scopes).await?, scopes })).await?;
-                            deadline = tokio::time::Instant::now() + PING;
                         }
                     }
                 }

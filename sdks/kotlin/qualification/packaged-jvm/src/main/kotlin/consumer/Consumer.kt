@@ -191,7 +191,7 @@ fun main(args: Array<String>) = runBlocking {
     attached.close()
     check(!db.network().attached)
     check(endpoint.address().isNotEmpty())
-    val owned = db.attach(PeerTransport.Tcp("127.0.0.1:0"))
+    val owned = db.attach(PeerTransport.Iroh.isolated())
     // An issuer backup includes the registry projection, so restore with issuer read grants.
     val invitation = db.credentials.pairing(GrantProfile.Issuer)
     val archive = File(root, "device.backup")
@@ -201,7 +201,7 @@ fun main(args: Array<String>) = runBlocking {
         schema,
         archive,
         invitation.uri,
-        PeerTransport.Tcp("127.0.0.1:0"),
+        PeerTransport.Iroh.isolated(),
         commands = runtime,
     )
     check(restored.credentials.status().node != db.credentials.status().node)

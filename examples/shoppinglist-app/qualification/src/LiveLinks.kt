@@ -3,8 +3,6 @@ package org.example.examples.shopping.qualification
 import androidx.room.Room
 import kotlinx.serialization.json.*
 import org.example.examples.shopping.data.db.ShoppingDatabase
-import org.example.examples.shopping.data.qualification.LiveLinkAgent
-import org.example.examples.shopping.data.qualification.epochMicros
 import org.example.examples.shopping.data.session.ShoppingPlatform
 import rocky.PeerTransport
 import java.io.Closeable
@@ -67,7 +65,12 @@ private class LiveLinkRemote(val name: String, port: Int) : Closeable {
     private val writer = PrintWriter(socket.getOutputStream(), true)
 
     fun call(op: String, build: JsonObjectBuilder.() -> Unit = {}): JsonElement {
-        writer.println(buildJsonObject { put("op", op); build() })
+        writer.println(
+            buildJsonObject {
+                put("op", op)
+                build()
+            },
+        )
         val reply = Json.parseToJsonElement(reader.readLine() ?: error("$name closed the connection")).jsonObject
         reply["error"]?.let { error("$name $op: ${it.jsonPrimitive.content}") }
         return reply.getValue("ok")
@@ -120,22 +123,40 @@ private class LiveLinkDriver {
     fun run(args: List<String>) {
         when (args.first()) {
             "pair" -> pair(args[1], args[2])
+
             "resume" -> resume(args[1], args[2])
+
             "prepare" -> prepare()
+
             "finish" -> finish()
-            "status" -> desktop().use { d -> phone().use { p -> println(buildJsonObject { put("desktop", d.call("status")); put("phone", p.call("status")) }) } }
+
+            "status" -> desktop().use { d ->
+                phone().use { p ->
+                    println(
+                        buildJsonObject {
+                            put("desktop", d.call("status"))
+                            put("phone", p.call("status"))
+                        },
+                    )
+                }
+            }
+
             "latency" -> latency(args[1].toInt(), args.getOrElse(2) { "run" })
+
             "lifecycle" -> lifecycle(args[1].toInt())
+
             "idle" -> idle(args[1].toLong())
+
             "mesh" -> mesh(args[1])
+
             "undialable" -> undialable(args[1].toInt())
+
             else -> error("unknown command ${args.first()}")
         }
     }
 
-    /** Enables the agent in the installed debug app and starts it in the foreground. */
+    /** Restarts the installed agent app in the foreground. */
     private fun prepare() {
-        adb("shell", "run-as", PHONE_PACKAGE, "touch", "files/$PHONE_AGENT_FLAG")
         adb("shell", "am", "force-stop", PHONE_PACKAGE)
         // A start that races the stop is delivered to the dying activity and leaves no process.
         val deadline = System.currentTimeMillis() + 30_000
@@ -152,9 +173,8 @@ private class LiveLinkDriver {
         }
     }
 
-    /** Disables the agent again; its households stay under the app's `files/live-links`. */
+    /** Stops the agent app; its households stay under its `files/live-links`. */
     private fun finish() {
-        adb("shell", "run-as", PHONE_PACKAGE, "rm", "-f", "files/$PHONE_AGENT_FLAG")
         adb("shell", "am", "force-stop", PHONE_PACKAGE)
         adb("forward", "--remove", "tcp:$phonePort")
     }
@@ -162,9 +182,20 @@ private class LiveLinkDriver {
     /** A new household on the desktop; the phone joins it as a full device and receives one list. */
     private fun pair(desktopDirectory: String, phoneDirectory: String) = desktop().use { desktop ->
         phone().use { phone ->
-            val d = desktop.call("create") { put("directory", desktopDirectory); put("name", "Desktop") }.obj()
-            val code = desktop.call("invite") { put("kind", "Full"); put("name", "Phone") }.jsonPrimitive.content
-            val p = phone.call("join") { put("directory", phoneDirectory); put("name", "Phone"); put("code", code); put("transport", phoneTransport) }.obj()
+            val d = desktop.call("create") {
+                put("directory", desktopDirectory)
+                put("name", "Desktop")
+            }.obj()
+            val code = desktop.call("invite") {
+                put("kind", "Full")
+                put("name", "Phone")
+            }.jsonPrimitive.content
+            val p = phone.call("join") {
+                put("directory", phoneDirectory)
+                put("name", "Phone")
+                put("code", code)
+                put("transport", phoneTransport)
+            }.obj()
             val list = desktop.call("createList") { put("title", "Qualification") }.jsonPrimitive.long
             val arrived = awaitList(phone, list, 180_000)
             check(arrived) { "the list did not reach the phone" }
@@ -183,8 +214,15 @@ private class LiveLinkDriver {
 
     private fun resume(desktopDirectory: String, phoneDirectory: String) = desktop().use { desktop ->
         phone().use { phone ->
-            desktop.call("resume") { put("directory", desktopDirectory); put("name", "Desktop") }
-            phone.call("resume") { put("directory", phoneDirectory); put("name", "Phone"); put("transport", phoneTransport) }
+            desktop.call("resume") {
+                put("directory", desktopDirectory)
+                put("name", "Desktop")
+            }
+            phone.call("resume") {
+                put("directory", phoneDirectory)
+                put("name", "Phone")
+                put("transport", phoneTransport)
+            }
             watchAndLink(desktop, phone, state())
         }
     }
@@ -202,8 +240,16 @@ private class LiveLinkDriver {
         val list = state.long("list")
         desktop.call("watch") { put("list", list) }
         phone.call("watch") { put("list", list) }
-        val d = desktop.call("awaitLink") { put("peer", state.text("phoneNode")); put("state", "Open"); put("timeoutMs", 120_000) }
-        val p = phone.call("awaitLink") { put("peer", state.text("desktopNode")); put("state", "Open"); put("timeoutMs", 120_000) }
+        val d = desktop.call("awaitLink") {
+            put("peer", state.text("phoneNode"))
+            put("state", "Open")
+            put("timeoutMs", 120_000)
+        }
+        val p = phone.call("awaitLink") {
+            put("peer", state.text("desktopNode"))
+            put("state", "Open")
+            put("timeoutMs", 120_000)
+        }
         println("links desktop=$d phone=$p")
     }
 
@@ -247,7 +293,10 @@ private class LiveLinkDriver {
         var missing = 0
         for (i in 1..count) {
             val title = "$prefix-$i"
-            val added = from.call("add") { put("list", list); put("title", title) }.obj()
+            val added = from.call("add") {
+                put("list", list)
+                put("title", title)
+            }.obj()
             val seen = to.call("awaitSeen") {
                 put("titles", JsonArray(listOf(JsonPrimitive(title))))
                 put("timeoutMs", 60_000)
@@ -299,21 +348,43 @@ private class LiveLinkDriver {
         val phoneNode = state.text("phoneNode")
         val desktopNode = state.text("desktopNode")
         val (phoneLinks, phoneEvents, offset) = phone().use { phone ->
-            check(phone.call("awaitLink") { put("peer", desktopNode); put("state", "Open"); put("timeoutMs", 60_000) }.obj().getValue("reached").jsonPrimitive.boolean)
+            check(
+                phone.call("awaitLink") {
+                    put("peer", desktopNode)
+                    put("state", "Open")
+                    put("timeoutMs", 60_000)
+                }.obj().getValue("reached").jsonPrimitive.boolean,
+            )
             Triple(phone.call("links").jsonArray.size, phone.call("events").jsonArray.size, phone.offset())
         }
         val home = epochMicros()
         adb("shell", "input", "keyevent", "KEYCODE_HOME")
-        val closed = desktop.call("awaitLink") { put("peer", phoneNode); put("state", "NotOpen"); put("timeoutMs", 120_000) }.obj()
+        val closed = desktop.call("awaitLink") {
+            put("peer", phoneNode)
+            put("state", "NotOpen")
+            put("timeoutMs", 120_000)
+        }.obj()
         val titles = (1..edits).map { "background-$home-$it" }
-        val committed = titles.map { title -> desktop.call("add") { put("list", list); put("title", title) }.obj().long("committed") }
+        val committed = titles.map { title ->
+            desktop.call("add") {
+                put("list", list)
+                put("title", title)
+            }.obj().long("committed")
+        }
         Thread.sleep(30_000)
         val stillClosed = desktop.call("status").obj().getValue("peers").jsonArray.map { it.obj() }.first { it.text("node") == phoneNode }.text("link")
         val start = epochMicros()
         adb("shell", "am", "start", "-n", PHONE_ACTIVITY)
         phone().use { phone ->
-            val seen = phone.call("awaitSeen") { put("titles", JsonArray(titles.map(::JsonPrimitive))); put("timeoutMs", 120_000) }.obj()
-            val reopened = desktop.call("awaitLink") { put("peer", phoneNode); put("state", "Open"); put("timeoutMs", 120_000) }.obj()
+            val seen = phone.call("awaitSeen") {
+                put("titles", JsonArray(titles.map(::JsonPrimitive)))
+                put("timeoutMs", 120_000)
+            }.obj()
+            val reopened = desktop.call("awaitLink") {
+                put("peer", phoneNode)
+                put("state", "Open")
+                put("timeoutMs", 120_000)
+            }.obj()
             Thread.sleep(5_000)
             val phoneOffset = offset.long("offsetUs")
             write(
@@ -397,7 +468,11 @@ private class LiveLinkDriver {
         val desktopEvents = desktop.call("events").jsonArray.size
         val home = epochMicros()
         adb("shell", "input", "keyevent", "KEYCODE_HOME")
-        val closed = desktop.call("awaitLink") { put("peer", phoneNode); put("state", "NotOpen"); put("timeoutMs", 120_000) }.obj()
+        val closed = desktop.call("awaitLink") {
+            put("peer", phoneNode)
+            put("state", "NotOpen")
+            put("timeoutMs", 120_000)
+        }.obj()
         // While the phone is away, the desktop must not try to open a link to it.
         val away = (1..60).map {
             Thread.sleep(1_000)
@@ -405,7 +480,11 @@ private class LiveLinkDriver {
         }
         val foreground = epochMicros()
         adb("shell", "am", "start", "-n", PHONE_ACTIVITY)
-        val reopened = desktop.call("awaitLink") { put("peer", phoneNode); put("state", "Open"); put("timeoutMs", 180_000) }.obj()
+        val reopened = desktop.call("awaitLink") {
+            put("peer", phoneNode)
+            put("state", "Open")
+            put("timeoutMs", 180_000)
+        }.obj()
         phone().use { phone ->
             val offsets = offsets(desktop, phone)
             val toPhone = direction(desktop, phone, list, "undialable-d", count, offsets)
@@ -439,19 +518,46 @@ private class LiveLinkDriver {
         val remotes = ports.mapIndexed { i, port -> connect(names[i], port) }.toMutableList()
         try {
             val nodes = mutableListOf<String>()
-            nodes += remotes[0].call("create") { put("directory", "$root/A"); put("name", "A") }.obj().text("node")
+            nodes += remotes[0].call("create") {
+                put("directory", "$root/A")
+                put("name", "A")
+            }.obj().text("node")
             for (i in 1..2) {
-                val code = remotes[0].call("invite") { put("kind", "Full"); put("name", names[i]) }.jsonPrimitive.content
-                nodes += remotes[i].call("join") { put("directory", "$root/${names[i]}"); put("name", names[i]); put("code", code) }.obj().text("node")
+                val code = remotes[0].call("invite") {
+                    put("kind", "Full")
+                    put("name", names[i])
+                }.jsonPrimitive.content
+                nodes += remotes[i].call("join") {
+                    put("directory", "$root/${names[i]}")
+                    put("name", names[i])
+                    put("code", code)
+                }.obj().text("node")
             }
             val list = remotes[0].call("createList") { put("title", "Mesh") }.jsonPrimitive.long
             check(awaitList(remotes[1], list, 120_000) && awaitList(remotes[2], list, 120_000)) { "the list did not reach every desktop" }
             // B and C learn each other through contact handover; an edit makes every pair reconcile.
-            remotes[1].call("add") { put("list", list); put("title", "from-B") }
-            remotes[2].call("add") { put("list", list); put("title", "from-C") }
+            remotes[1].call("add") {
+                put("list", list)
+                put("title", "from-B")
+            }
+            remotes[2].call("add") {
+                put("list", list)
+                put("title", "from-C")
+            }
             val open = buildJsonObject {
-                for (i in 0..2) for (j in 0..2) if (i != j) {
-                    put("${names[i]}->${names[j]}", remotes[i].call("awaitLink") { put("peer", nodes[j]); put("state", "Open"); put("timeoutMs", 180_000) })
+                for (i in 0..2) {
+                    for (j in 0..2) {
+                        if (i != j) {
+                            put(
+                                "${names[i]}->${names[j]}",
+                                remotes[i].call("awaitLink") {
+                                    put("peer", nodes[j])
+                                    put("state", "Open")
+                                    put("timeoutMs", 180_000)
+                                },
+                            )
+                        }
+                    }
                 }
             }
             println("mesh open $open")
@@ -461,19 +567,42 @@ private class LiveLinkDriver {
             processes[2].destroyForcibly().waitFor()
             val closed = buildJsonObject {
                 for (i in 0..1) {
-                    val reached = remotes[i].call("awaitLink") { put("peer", nodes[2]); put("state", "NotOpen"); put("timeoutMs", 180_000) }.obj()
-                    put(names[i], buildJsonObject { put("reached", reached.getValue("reached")); put("afterMs", (reached.long("at") - killed) / 1000.0) })
+                    val reached = remotes[i].call("awaitLink") {
+                        put("peer", nodes[2])
+                        put("state", "NotOpen")
+                        put("timeoutMs", 180_000)
+                    }.obj()
+                    put(
+                        names[i],
+                        buildJsonObject {
+                            put("reached", reached.getValue("reached"))
+                            put("afterMs", (reached.long("at") - killed) / 1000.0)
+                        },
+                    )
                 }
             }
             println("mesh closed $closed")
             val restarted = epochMicros()
             processes[2] = spawn(ports[2])
             remotes[2] = connect("C", ports[2])
-            remotes[2].call("resume") { put("directory", "$root/C"); put("name", "C") }
+            remotes[2].call("resume") {
+                put("directory", "$root/C")
+                put("name", "C")
+            }
             val reopened = buildJsonObject {
                 for (i in 0..1) {
-                    val reached = remotes[i].call("awaitLink") { put("peer", nodes[2]); put("state", "Open"); put("timeoutMs", 180_000) }.obj()
-                    put(names[i], buildJsonObject { put("reached", reached.getValue("reached")); put("afterMs", (reached.long("at") - restarted) / 1000.0) })
+                    val reached = remotes[i].call("awaitLink") {
+                        put("peer", nodes[2])
+                        put("state", "Open")
+                        put("timeoutMs", 180_000)
+                    }.obj()
+                    put(
+                        names[i],
+                        buildJsonObject {
+                            put("reached", reached.getValue("reached"))
+                            put("afterMs", (reached.long("at") - restarted) / 1000.0)
+                        },
+                    )
                 }
             }
             println("mesh reopened $reopened")
@@ -493,8 +622,15 @@ private class LiveLinkDriver {
                 },
             )
         } finally {
-            remotes.forEach { runCatching { it.call("close") }; it.close() }
-            processes.forEach { it.destroy(); it.waitFor(30, TimeUnit.SECONDS); it.destroyForcibly() }
+            remotes.forEach {
+                runCatching { it.call("close") }
+                it.close()
+            }
+            processes.forEach {
+                it.destroy()
+                it.waitFor(30, TimeUnit.SECONDS)
+                it.destroyForcibly()
+            }
         }
     }
 
@@ -518,8 +654,7 @@ private class LiveLinkDriver {
 
     companion object {
         const val PHONE_AGENT_PORT = 47110
-        const val PHONE_PACKAGE = "org.example.examples"
-        const val PHONE_ACTIVITY = "$PHONE_PACKAGE/.MainActivity"
-        const val PHONE_AGENT_FLAG = "live-links-agent"
+        const val PHONE_PACKAGE = "org.example.examples.qualification"
+        const val PHONE_ACTIVITY = "$PHONE_PACKAGE/.AgentActivity"
     }
 }

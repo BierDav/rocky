@@ -30,7 +30,7 @@ class LocalLatencyProbe {
         File(root, name).absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp("127.0.0.1:0") },
+        transport = { PeerTransport.Iroh.isolated() },
     )
     private fun percentiles(name: String, nanos: List<Long>) {
         val sorted = nanos.sorted()

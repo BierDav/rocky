@@ -22,7 +22,7 @@ class RoomInvalidationTest {
         "shop",
         File(root, "sdks/kotlin/qualification/room/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
     )
-    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
+    private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
     private fun item(key: String, title: String) = ShopItem(key, "l1", title)
 
     @Test fun readTimeoutRetriesCommittedRowsAndPermanentErrorsStillFail() = runTest {
@@ -47,7 +47,7 @@ class RoomInvalidationTest {
 
     @Test fun daoObserversFireOnLocalAndSyncWrites() = runBlocking {
         val directory = Files.createTempDirectory("room-invalidation").toFile()
-        val a = RockyDatabase.create(File(directory, "a").path, schema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(directory, "a").path, schema, loopback(), automaticSync = false)
         var b: RockyDatabase? = null
         val work = mutableListOf<Job>()
         try {
@@ -56,7 +56,7 @@ class RoomInvalidationTest {
                 File(directory, "b").path,
                 schema,
                 a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
-                tcp(),
+                loopback(),
                 automaticSync = false,
             )
             b.installRoomAuthors(issuer = a)

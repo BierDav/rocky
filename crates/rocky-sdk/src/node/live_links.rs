@@ -5,11 +5,11 @@ use std::collections::BTreeSet;
 mod liveness;
 
 pub(super) const BUDGET: usize = 32;
-const PING: Duration = Duration::from_secs(15);
 
 struct Entry {
     opened_at: u64,
-    round_trip_ms: Option<u64>,
+    /// The transport's live path measurements, when it reports them.
+    paths: Option<Arc<dyn crate::transport::PathSource>>,
     id: u64,
     dialed: bool,
     persistent: bool,
@@ -28,8 +28,6 @@ pub(super) struct Registry {
     next: AtomicU64,
     events: watch::Sender<()>,
     #[cfg(test)]
-    pub pongs: AtomicU64,
-    #[cfg(test)]
     pub closing: AtomicU64,
 }
 impl Default for Registry {
@@ -40,8 +38,6 @@ impl Default for Registry {
             opening: Default::default(),
             next: AtomicU64::new(0),
             events: watch::channel(()).0,
-            #[cfg(test)]
-            pongs: AtomicU64::new(0),
             #[cfg(test)]
             closing: AtomicU64::new(0),
         }
@@ -72,23 +68,28 @@ impl Drop for Opening<'_> {
 }
 impl Registry {
     pub fn status(&self, peer: PublicKey) -> Value {
-        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(entry) = entries.get(&peer) {
-            return json!({"state": "open", "opened": entry.opened_at.to_string(), "round_trip_ms": entry.round_trip_ms.map(|ms| ms.to_string())});
+        let source = {
+            let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+            entries
+                .get(&peer)
+                .map(|entry| (entry.opened_at, entry.paths.clone()))
+        };
+        if let Some((opened, source)) = source {
+            // Measured now, outside the registry lock.
+            let paths = source.map(|source| source.paths()).unwrap_or_default();
+            let round_trip = paths
+                .iter()
+                .find(|path| path.selected)
+                .map(|path| path.rtt.as_millis().to_string());
+            return json!({
+                "state": "open",
+                "opened": opened.to_string(),
+                "round_trip_ms": round_trip,
+                "paths": paths.iter().map(path_json).collect::<Vec<_>>(),
+            });
         }
         let opening = self.opening.lock().unwrap_or_else(PoisonError::into_inner);
-        json!({"state": if opening.contains_key(&peer) { "opening" } else { "closed" }, "opened": null, "round_trip_ms": null})
-    }
-    pub fn pong(&self, peer: PublicKey, id: u64, round_trip: Duration) {
-        if let Some(entry) = self
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&peer)
-            .filter(|entry| entry.id == id)
-        {
-            entry.round_trip_ms = Some(u64::try_from(round_trip.as_millis()).unwrap_or(u64::MAX));
-        }
+        json!({"state": if opening.contains_key(&peer) { "opening" } else { "closed" }, "opened": null, "round_trip_ms": null, "paths": []})
     }
 
     pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
@@ -331,6 +332,7 @@ impl Node {
         let mut authority = self.replica.observe_authority().await;
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
+        let paths = stream.paths();
         let opened = match expected {
             Some(_) => Box::pin(link::Link::open(
                 stream,
@@ -466,7 +468,7 @@ impl Node {
                     peer,
                     Entry {
                         opened_at: now()?,
-                        round_trip_ms: None,
+                        paths: paths.clone(),
                         id,
                         dialed,
                         persistent,
@@ -543,7 +545,7 @@ impl Node {
         tokio::task::spawn_local(async move {
             let _permit = permit;
             let result = node
-                .run_link(&service, opened, close_rx, changed_tx, authority, id)
+                .run_link(&service, opened, close_rx, changed_tx, authority)
                 .await;
             let removed = {
                 let mut entries = service
@@ -746,4 +748,24 @@ impl Node {
         drop(retries);
         self.link_events.send_replace(());
     }
+}
+
+/// One measured path in link status; integers are decimal strings.
+fn path_json(path: &crate::transport::NetworkPath) -> Value {
+    json!({
+        "selected": path.selected,
+        "kind": path.kind,
+        "remote": path.remote,
+        "local": path.local,
+        "rtt_us": path.rtt.as_micros().to_string(),
+        "mtu": path.mtu.to_string(),
+        "window": path.window.to_string(),
+        "sent_bytes": path.sent_bytes.to_string(),
+        "sent_datagrams": path.sent_datagrams.to_string(),
+        "received_bytes": path.received_bytes.to_string(),
+        "received_datagrams": path.received_datagrams.to_string(),
+        "lost_packets": path.lost_packets.to_string(),
+        "lost_bytes": path.lost_bytes.to_string(),
+        "congestion_events": path.congestion_events.to_string(),
+    })
 }

@@ -2,8 +2,14 @@
 //! carrying one named, versioned protocol. A transport adds no security the
 //! protocols rely on, and an address is never a grant. See
 //! `docs/runtime/sdk-transports.md`.
-use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -11,7 +17,86 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// A reliable ordered byte stream a protocol session runs over.
 pub trait SessionStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> SessionStream for T {}
-pub type Stream = Box<dyn SessionStream>;
+
+/// One network path to the peer of a stream, as its transport measures it
+/// when asked. Counters cover the path's lifetime so far.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkPath {
+    /// Whether the transport sends application data on this path now.
+    pub selected: bool,
+    /// `direct` for an IP path, `relay` through a relay server.
+    pub kind: &'static str,
+    /// The peer's address on this path: a socket address or relay URL.
+    pub remote: String,
+    /// This node's address on it, where the transport knows one.
+    pub local: Option<String>,
+    pub rtt: Duration,
+    /// The largest payload the path currently carries, in bytes.
+    pub mtu: u16,
+    /// The congestion window, in bytes.
+    pub window: u64,
+    pub sent_bytes: u64,
+    pub sent_datagrams: u64,
+    pub received_bytes: u64,
+    pub received_datagrams: u64,
+    pub lost_packets: u64,
+    pub lost_bytes: u64,
+    pub congestion_events: u64,
+}
+
+/// A transport's live view of the paths under a stream's connection.
+pub trait PathSource: Send + Sync {
+    /// The open paths, the selected one first. Empty once the connection closed.
+    fn paths(&self) -> Vec<NetworkPath>;
+}
+
+/// A stream and, where its transport measures them, its network paths.
+pub struct Stream {
+    io: Box<dyn SessionStream>,
+    paths: Option<Arc<dyn PathSource>>,
+}
+impl Stream {
+    pub fn new(io: impl SessionStream + 'static) -> Self {
+        Self {
+            io: Box::new(io),
+            paths: None,
+        }
+    }
+    pub fn with_paths(io: impl SessionStream + 'static, paths: Arc<dyn PathSource>) -> Self {
+        Self {
+            io: Box::new(io),
+            paths: Some(paths),
+        }
+    }
+    /// The stream's paths, which outlive the stream for status reads.
+    pub fn paths(&self) -> Option<Arc<dyn PathSource>> {
+        self.paths.clone()
+    }
+}
+impl AsyncRead for Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for Stream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
 
 /// The protocols a stream can carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -31,12 +116,12 @@ pub enum Protocol {
 impl Protocol {
     /// The protocols a database serves.
     pub const ALL: [Self; 4] = [Self::Pair, Self::Link, Self::Renew, Self::Command];
-    /// The protocol's versioned name: an ALPN for QUIC, a preamble or a
-    /// label elsewhere. A changed wire format takes a new name.
+    /// The protocol's versioned name, used as the QUIC ALPN. A changed wire
+    /// format takes a new name.
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Link => b"rocky/link/1",
+            Self::Link => b"rocky/link/2",
             Self::Renew => b"rocky/sdk-renew/2",
             Self::Command => b"rocky/command/2",
             Self::Coordinate => b"rocky/coordinator/1",
@@ -53,7 +138,7 @@ impl Protocol {
 /// Connects nodes. An address is a reachability hint whose format belongs
 /// to the transport kind; who answers is authenticated above the stream.
 pub trait Transport: Send + Sync {
-    /// Names the address format, such as `iroh` or `tcp`.
+    /// Names the address format, such as `iroh`.
     fn kind(&self) -> &str;
     /// Where peers reach this node. Fails for a node that does not accept.
     fn address(&self) -> BoxFuture<'_, Result<String, Failure>>;
@@ -163,5 +248,6 @@ mod tests {
     fn only_the_current_command_protocol_is_named() {
         assert_eq!(Protocol::named(b"rocky/command/1"), None);
         assert_eq!(Protocol::named(b"rocky/command/2"), Some(Protocol::Command));
+        assert_eq!(Protocol::named(b"rocky/link/1"), None);
     }
 }

@@ -60,10 +60,16 @@ class SyncViewModel(private val session: ShoppingSession) : NodeViewModel(sessio
             .map { lists -> lists.map { ListHolding(it, runCatching { rocky.list(it.id).status() }.getOrNull()) } }
         val log = merge(events.map { Entry.Event(it) }, node.household.deliveries.map { Entry.Note(it, kotlin.time.Clock.System.now().toEpochMilliseconds()) })
             .runningFold(emptyList<Entry>()) { kept, entry -> (listOf(entry) + kept).take(KEPT) }
-        val identity = ticks.map { rocky.session() }
-        combine(rocky.observeReadiness(), combine(rocky.status, rocky.serving(), ::Pair), holdings, combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), identity, ::Triple)) { readiness, (connection, served), held, (entries, devices, self) ->
+        // Readiness does not emit for path measurements: read them again with the identity on each tick.
+        val identity = ticks.map { rocky.session() to runCatching { rocky.network().peers }.getOrDefault(emptyList()) }
+        combine(rocky.observeReadiness(), combine(rocky.status, rocky.serving(), ::Pair), holdings, combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), identity, ::Triple)) { readiness, (connection, served), held, (entries, devices, identified) ->
+            val (self, measured) = identified
             val lists = held.flatMap { holding -> holding.status?.tables.orEmpty().map { it.partition to holding.list.title } }.toMap()
-            val peers = readiness.peers
+            val paths = measured.associate { it.node to it.link }
+            val peers = readiness.peers.map { peer ->
+                paths[peer.node]?.takeIf { it.state == peer.link.state && it.openedAtEpochSeconds == peer.link.openedAtEpochSeconds }
+                    ?.let { peer.copy(link = it) } ?: peer
+            }
             val names = peers.associate { it.node to node.contacts.label(it.node) } + devices.associate { it.node to it.name }
             val titles = held.associate { it.list.id to it.list.title }
             SyncState(

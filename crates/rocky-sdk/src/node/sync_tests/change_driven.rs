@@ -107,7 +107,9 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
             let (mut caller, server) = tokio::io::duplex(64 * 1024);
             let serving = issuer.clone();
             let served = tokio::task::spawn_local(async move {
-                serving.serve(Protocol::Pair, Box::new(server)).await
+                serving
+                    .serve(Protocol::Pair, crate::transport::Stream::new(server))
+                    .await
             });
             caller.write_u32(u32::try_from(request.len())?).await?;
             caller.write_all(&request).await?;

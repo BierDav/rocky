@@ -15,9 +15,8 @@ scope, so a write between reconciliation and link registration is signalled.
 No other version is accepted.
 
 Every subsequent signed frame carries the request channel and direction.
-Channel 0 carries Ping, Pong and Close; channel 1 carries Changed. The direction
-is false for requests started by the dialer, true for the acceptor. Pong echoes
-the ping's direction. Each frame is at most 64 KiB and a Changed names at most
+Channel 0 carries Ready and Close; channel 1 carries Changed. The direction
+is false for requests started by the dialer, true for the acceptor. Each frame is at most 64 KiB and a Changed names at most
 64 distinct scopes. Control and signals have independent bounded queues;
 control is selected first. A blocked transport write has a ten-second deadline.
 Idle reads have no deadline; a started frame has ten seconds to finish.
@@ -35,8 +34,10 @@ later changed scopes cannot be hidden by an earlier batch.
 Receiving a new token makes only that peer pending and resets its back-off.
 Data continues through native sync sessions during this phase.
 
-Idle links ping every 15 seconds. Three consecutive unanswered pings end the
-link and schedule a reconnect through per-peer back-off. Link retry deadlines
+The transport keeps idle links alive and ends those to a vanished peer
+([decision 0065](0065-iroh-only-transport.md), which replaced the link ping and
+renamed the protocol `rocky/link/2`); a failed link schedules a reconnect
+through per-peer back-off. Link retry deadlines
 are independent of data-pass retries, so busy links retain working native sync.
 Authority changes, offline mode, disabling the worker and detach close the
 service's links.

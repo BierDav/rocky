@@ -238,7 +238,7 @@ See [Room on Rocky's file](runtime/room-integration.md).
 
 On macOS/Xcode, run `./sdks/native/check-ios` for both arm64 runtime targets
 with and without iroh. `./sdks/native/qualify-ios-binding` generates and tests
-the isolated no-iroh callbacks on the simulator. `sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test`
+the isolated binding's callbacks over loopback iroh on the simulator. `sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test`
 runs the common SDK/driver/Room tests and the endpoint, command, cancellation
 and lifetime gates with iroh. [The binding guide](runtime/kotlin-native-binding.md)
 records the toolchain, dependency repair, threading contract and evidence.

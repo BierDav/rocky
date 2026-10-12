@@ -4,7 +4,8 @@ product: jvm/app
 apply:
   - //project.module-template.yaml
 dependencies:
-  - ../shared
+  - //shared: exported
+  - ../liveLinkAgent
 settings:
   jvm:
     mainClass: org.example.examples.shopping.qualification.QualificationKt

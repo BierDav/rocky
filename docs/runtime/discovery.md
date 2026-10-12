@@ -48,8 +48,8 @@ An endpoint the application owns discovers only when asked:
 `RockyEndpoint.bind(secret, topic = true, local = true)`, or in Rust
 `Attachment::discovering(endpoint, options.discover())`. Rocky announces
 beside the endpoint: it adds no lookup service to it, sets no user data on it
-and leaves it open. TCP, custom transports and the hub's default have no
-discovery and work from contacts.
+and leaves it open. The isolated starter, an attachment not asked to discover
+and the test hub's default have no discovery and work from contacts.
 
 ## Status
 

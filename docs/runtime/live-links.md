@@ -8,7 +8,7 @@ defines the request lifecycle. Pair, Renew and Command retain their own streams.
 
 ## Authentication and ownership
 
-`rocky/link/1` reuses credential admission, revocation exchange and
+`rocky/link/2` reuses credential admission, revocation exchange and
 session-bound holding proofs, with a distinct signed handshake identity.
 Other versions are refused. Every data request retains the native authorization,
 page, chain, dependency and transaction checks. A changed authority ends the link.
@@ -36,7 +36,7 @@ an incoming short exchange finishes.
 An accepted link stream whose first frame is a pinned contact reference's
 resolution gets the signed proof of the node key and closes without a link.
 `Link::drive` carries request channels for an embedder without the SDK worker,
-such as the employees demo; it answers pings and ignores signals and pushes.
+such as the employees demo; it ignores signals and pushes.
 
 One registry entry exists per authenticated node. Simultaneous dials retain
 the stream initiated by the lower node key. Replacement cancels old requests;
@@ -46,10 +46,25 @@ a bounded retry uses the surviving link without classifying it as unreachable.
 
 Network status and readiness expose each peer's `link`: `state` is `open`,
 `opening` during a dial/admission, or `closed`; `opened` is Unix seconds and
-`round_trip_ms` the latest ping round trip, both decimal strings or null.
-Closed links have null measurements. Cancelling a dial clears `opening`.
-Opening and closing wake the existing sync-status and readiness waits. Ping
-measurements are available from a fresh status read but do not advance tokens.
+`round_trip_ms` the selected path's round trip, both decimal strings or null.
+`paths` lists the transport's network paths, the selected one first, measured
+when status is read:
+
+| Field | Meaning |
+| --- | --- |
+| `selected` | Whether data uses this path now |
+| `kind` | `direct` (IP) or `relay` |
+| `remote`, `local` | The peer's socket address or relay URL; this node's address or null |
+| `rtt_us` | Smoothed round trip in microseconds |
+| `mtu`, `window` | Current MTU and congestion window, in bytes |
+| `sent_bytes`, `sent_datagrams`, `received_bytes`, `received_datagrams` | Path lifetime totals |
+| `lost_packets`, `lost_bytes`, `congestion_events` | Path lifetime totals |
+
+Integers are decimal strings. Closed and opening links, and transports that
+measure nothing, such as the test hub, have an empty list. Cancelling a dial
+clears `opening`. Opening and closing wake the existing sync-status and
+readiness waits. Measurements do not advance tokens; poll status to follow
+them.
 `link_opened` and `link_closed` activity includes the peer and reason; an error
 close also carries the error. Duplicate replacement closes the displaced link.
 
@@ -99,22 +114,22 @@ reconciliation still govern release of retained operations.
 | Channel data fragment | 8 KiB |
 | Native message / exchange | 256 KiB / 32 MiB, unchanged |
 | Completed-message queue per slot | 64 messages |
-| Outgoing data queue / control replies | 64 fragments or pushes / 4 replies |
+| Outgoing data queue | 64 fragments or pushes |
 | Reconcile leases | One per direction |
 | Changed scopes / pushed frames | 64 / 32 per message, within the byte bound |
-| Idle ping / missed pong limit | 15 seconds / 3 |
+| Keep-alive / idle close | iroh's: 5 seconds / 30 seconds ([liveness](sdk-transports.md#liveness-and-paths)) |
 | Started frame, request wait or write | 10 seconds |
 
-A queue, reassembly or byte overflow fails explicitly. Control is selected
-before data; a stalled write ends before the next ping interval. An idle read
-has no deadline, but a started frame has ten seconds. After unanswered pings
-at 15, 30 and 45 seconds, the third miss closes at 60 seconds. Errors, a busy
-refusal included, reconnect with per-peer back-off; nothing falls back to
-another sync path.
+A queue, reassembly or byte overflow fails explicitly. A stalled write ends
+after ten seconds. An idle read has no deadline, but a started frame has ten
+seconds. Rocky sends no keep-alive: the transport keeps an idle link's
+connection open and closes one whose peer stopped answering, which fails the
+link. Errors, a busy refusal included, reconnect with per-peer back-off;
+nothing falls back to another sync path.
 
 The iroh link ALPN keeps its independent connection and stream budgets. See
 [SDK transports](sdk-transports.md#bounds). The memory hub counts complete
-link messages and injects byte cuts, write muting and stalled dials under the
+link messages and injects byte cuts, severed links and stalled dials under the
 paused clock. Android lifecycle evidence is in the [phase 5 brief](../features_08/05-status-kotlin-lifecycle.md);
 desktop and phone runs over cellular and an iroh relay are in the
 [phase 6 evidence](../features_08/06-qualification-evidence.md).

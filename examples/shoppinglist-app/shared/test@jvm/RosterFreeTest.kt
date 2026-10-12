@@ -33,7 +33,7 @@ class RosterFreeTest {
         val root = Files.createTempDirectory("rocky-roster-free").toFile()
         val nodes = mutableListOf<RockyDatabase>()
         val rooms = mutableListOf<ShoppingDatabase>()
-        fun transport() = PeerTransport.Tcp("127.0.0.1:0")
+        fun transport() = PeerTransport.Iroh.isolated()
         try {
             val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             val left = RockyDatabase.join(File(root, "left"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
@@ -68,11 +68,11 @@ class RosterFreeTest {
 
     @Test fun `member SQL opens no roster tables`() = runBlocking {
         val root = Files.createTempDirectory("rocky-member-tables").toFile()
-        val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, PeerTransport.Tcp("127.0.0.1:0"), secrets = keys(), automaticSync = false)
+        val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, PeerTransport.Iroh.isolated(), secrets = keys(), automaticSync = false)
         var member: RockyDatabase? = null
         var room: ShoppingDatabase? = null
         try {
-            member = RockyDatabase.join(File(root, "member"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, PeerTransport.Tcp("127.0.0.1:0"), secrets = keys(), automaticSync = false)
+            member = RockyDatabase.join(File(root, "member"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, PeerTransport.Iroh.isolated(), secrets = keys(), automaticSync = false)
             val memberRoom = openShoppingDatabase(File(root, "member"), member)
             room = memberRoom
             for (table in listOf("devices", "keys", "identities")) {
@@ -92,7 +92,7 @@ class RosterFreeTest {
     @Test fun `one contact hands over a second partner without roster or discovery`() = runBlocking {
         val root = Files.createTempDirectory("rocky-contact-handover").toFile()
         val nodes = mutableListOf<RockyDatabase>()
-        fun transport() = PeerTransport.Tcp("127.0.0.1:0")
+        fun transport() = PeerTransport.Iroh.isolated()
         try {
             val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             val first = RockyDatabase.join(File(root, "first"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)

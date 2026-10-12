@@ -54,11 +54,11 @@ Make it faster first; move it only if it is a different kind of test.
 - Build expensive state once per binary behind a `OnceLock` and copy it:
   keys, signed chains, template databases.
 - Queue independent fixture operations in log order so they share group commits;
-  keep every operation and row. Loopback TCP fixtures disable Nagle delays.
+  keep every operation and row.
   Archive confirmations preserve each package's remapped `CARGO_BIN_EXE_*` paths.
 - Test a boundary on constructed state instead of driving hundreds of real
   operations; keep one full-size run in e2e.
-- Use the in-process hub and its deterministic faults instead of TCP and
+- Use the in-process hub and its deterministic faults instead of sockets and
   process restarts; Tokio's paused clock for timeouts the code under test
   drives.
 - Make sizes and iteration counts configurable through existing test
@@ -108,7 +108,7 @@ when they are:
 | --- | --- | --- | --- |
 | `sdks/kotlin/rocky-core` | 5 | unit and integration | value mapping without the native library is unit; anything that loads it is integration |
 | `sdks/kotlin/rocky-sqlite` | 2 | integration | opens SQLite files through the driver |
-| `sdks/kotlin/qualification/room` | 13 | integration | Room on Rocky's file; `RoomGateTest` binds TCP ports and needs the free-port fix in [fix later](fix_later/README.md) before it runs in parallel |
+| `sdks/kotlin/qualification/room` | 13 | integration | Room on Rocky's file over loopback iroh on port 0 |
 | `sdks/kotlin/qualification/schema` | 2 | integration | about 55 s in phase 1, so over budget until made faster |
 | `examples/shoppinglist-app/shared` | 28 | integration | devices in temporary directories, six at a time |
 | shopping qualification, packaged consumer | | e2e | several JVMs and the custody peer; CI only |

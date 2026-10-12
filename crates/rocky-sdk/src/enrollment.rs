@@ -4152,10 +4152,10 @@ mod deadline_tests {
     #[tokio::test(start_paused = true)]
     async fn exchange_tries_later_routes_after_two_full_dial_deadlines() {
         let (client, server) = tokio::io::duplex(1024);
-        let mut server: Stream = Box::new(server);
+        let mut server = Stream::new(server);
         let transport = Routes {
             attempts: AtomicUsize::new(0),
-            stream: Mutex::new(Some(Box::new(client))),
+            stream: Mutex::new(Some(Stream::new(client))),
         };
         let answer = tokio::spawn(async move {
             assert_eq!(read_message(&mut server).await.unwrap(), b"request");

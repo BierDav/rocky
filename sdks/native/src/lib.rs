@@ -1,10 +1,5 @@
-use rocky_sdk::{
-    Network,
-    transport::{
-        BoxFuture, Transport,
-        adapter::{ChunkStream, ChunkTransport, Inbound, adapt},
-    },
-};
+#[cfg(feature = "iroh")]
+use rocky_sdk::{Network, transport::Transport};
 use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
@@ -67,8 +62,8 @@ impl rocky_sdk::SecretStore for Foreign {
     }
 }
 
-/// One reliable ordered byte stream, as chunks. A foreign transport
-/// implements it for its streams; `NativeEndpoint` returns its own.
+/// One reliable ordered byte stream, as chunks: an application protocol's
+/// stream on a `NativeEndpoint`.
 #[uniffi::export(with_foreign)]
 #[async_trait::async_trait]
 pub trait ByteStream: Send + Sync {
@@ -81,79 +76,6 @@ pub trait ByteStream: Send + Sync {
     /// Abandons the stream; a pending `read` ends.
     async fn abandon(&self);
 }
-#[derive(uniffi::Record)]
-pub struct InboundStream {
-    /// The versioned protocol name the dialer gave.
-    pub protocol: String,
-    pub stream: Arc<dyn ByteStream>,
-}
-/// What `connect` returns. A record, because an async callback cannot
-/// return the stream object itself.
-#[derive(uniffi::Record)]
-pub struct OutboundStream {
-    pub stream: Arc<dyn ByteStream>,
-}
-/// A transport the foreign application implements, starts and closes.
-/// Streams must buffer 64 KiB per direction or forward without waiting
-/// for the peer to read.
-#[uniffi::export(with_foreign)]
-#[async_trait::async_trait]
-pub trait ForeignTransport: Send + Sync {
-    /// Names the address format; routes of another kind are not dialed.
-    fn kind(&self) -> String;
-    /// Where peers reach this node.
-    async fn address(&self) -> Result<String, NativeError>;
-    async fn connect(
-        &self,
-        address: String,
-        protocol: String,
-    ) -> Result<OutboundStream, NativeError>;
-    /// The next inbound stream; `None` once the transport closed.
-    async fn accept(&self) -> Result<Option<InboundStream>, NativeError>;
-}
-struct Chunks(Arc<dyn ByteStream>);
-impl ChunkStream for Chunks {
-    fn read(&self, max: u32) -> BoxFuture<'_, Result<Vec<u8>, Failure>> {
-        Box::pin(async move { Ok(self.0.read(max).await?) })
-    }
-    fn write(&self, bytes: Vec<u8>) -> BoxFuture<'_, Result<(), Failure>> {
-        Box::pin(async move { Ok(self.0.write(bytes).await?) })
-    }
-    fn finish(&self) -> BoxFuture<'_, Result<(), Failure>> {
-        Box::pin(async move { Ok(self.0.finish().await?) })
-    }
-    fn close(&self) -> BoxFuture<'_, ()> {
-        self.0.abandon()
-    }
-}
-pub(crate) struct Adapter(pub(crate) Arc<dyn ForeignTransport>);
-impl ChunkTransport for Adapter {
-    fn kind(&self) -> String {
-        self.0.kind()
-    }
-    fn address(&self) -> BoxFuture<'_, Result<String, Failure>> {
-        Box::pin(async move { Ok(self.0.address().await?) })
-    }
-    fn connect(
-        &self,
-        address: String,
-        protocol: String,
-    ) -> BoxFuture<'_, Result<Arc<dyn ChunkStream>, Failure>> {
-        Box::pin(async move {
-            let connected = self.0.connect(address, protocol).await?;
-            Ok(Arc::new(Chunks(connected.stream)) as Arc<dyn ChunkStream>)
-        })
-    }
-    fn accept(&self) -> BoxFuture<'_, Result<Option<Inbound>, Failure>> {
-        Box::pin(async move {
-            Ok(self.0.accept().await?.map(|inbound| {
-                let stream = Arc::new(Chunks(inbound.stream)) as Arc<dyn ChunkStream>;
-                (inbound.protocol, stream)
-            }))
-        })
-    }
-}
-
 pub(crate) fn foreign(
     secrets: Option<Arc<dyn NativeSecretStore>>,
 ) -> Option<Arc<dyn rocky_sdk::SecretStore>> {
@@ -166,6 +88,7 @@ pub struct NativeSession {
 }
 impl NativeSession {
     /// Opens on a network the application keeps.
+    #[cfg(feature = "iroh")]
     fn open_on(
         options: String,
         schema: String,
@@ -210,24 +133,6 @@ impl NativeSession {
             )
             .map_err(failure)?,
         }))
-    }
-    /// Opens over a transport the application owns instead of the one
-    /// `options` name. Closing the session leaves that transport open.
-    #[uniffi::constructor]
-    pub fn open_with_transport(
-        options: String,
-        schema: String,
-        secrets: Option<Arc<dyn NativeSecretStore>>,
-        transport: Arc<dyn ForeignTransport>,
-        commands: Option<NativeCommands>,
-    ) -> Result<Arc<Self>, NativeError> {
-        Self::open_on(
-            options,
-            schema,
-            secrets,
-            adapt(Arc::new(Adapter(transport))),
-            commands,
-        )
     }
     pub fn scope(&self) -> String {
         self.engine.scope()

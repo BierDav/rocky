@@ -545,7 +545,7 @@ impl Transport for FaultyTransport {
         Box::pin(async move {
             let stream = self.inner.connect(address, protocol).await?;
             Ok(if Faults::take(&self.faults.receipt, protocol) {
-                Box::new(Unread(stream)) as Stream
+                Stream::new(Unread(stream))
             } else {
                 stream
             })
@@ -555,7 +555,7 @@ impl Transport for FaultyTransport {
         Box::pin(async move {
             let (protocol, stream) = self.inner.accept().await?;
             Some(if Faults::take(&self.faults.answer, protocol) {
-                (protocol, Box::new(Mute(stream)) as Stream)
+                (protocol, Stream::new(Mute(stream)))
             } else {
                 (protocol, stream)
             })

@@ -40,9 +40,10 @@ pub struct Hub {
     cut_waiters: Mutex<Vec<Waker>>,
     stalled_peers: Mutex<HashSet<String>>,
     peer_dials: Mutex<HashMap<String, usize>>,
-    muted: Mutex<HashSet<(String, Protocol)>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
     link_messages: Mutex<HashMap<String, usize>>,
+    /// Open link pipes by their two nodes, for `sever_links`.
+    links: Mutex<Vec<([String; 2], std::sync::Weak<Severed>)>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
     /// At the cut, hold the stream instead of disconnecting it.
@@ -74,9 +75,9 @@ impl Default for Hub {
             cut_waiters: Mutex::default(),
             stalled_peers: Mutex::default(),
             peer_dials: Mutex::default(),
-            muted: Mutex::default(),
             protocol_dials: Mutex::default(),
             link_messages: Mutex::default(),
+            links: Mutex::default(),
             dial_events: tokio::sync::watch::channel(()).0,
             written: tokio::sync::watch::channel(0).0,
             hold_cut: AtomicBool::new(false),
@@ -184,15 +185,6 @@ impl Hub {
             peers.remove(address);
         }
     }
-    /// Silently drops writes on existing and future streams from this node.
-    pub fn mute(&self, node: &str, protocol: Protocol, muted: bool) {
-        let mut faults = self.muted.lock().unwrap_or_else(PoisonError::into_inner);
-        if muted {
-            faults.insert((node.into(), protocol));
-        } else {
-            faults.remove(&(node.into(), protocol));
-        }
-    }
     pub fn protocol_dials(&self, from: &str, to: &str, protocol: Protocol) -> usize {
         self.protocol_dials
             .lock()
@@ -238,6 +230,21 @@ impl Hub {
     pub fn counts(&self) -> [usize; 3] {
         [&self.starts, &self.dials, &self.closes].map(|count| count.load(Ordering::SeqCst))
     }
+    /// Fails the open link streams of `node`, as a transport's idle timeout
+    /// ends a connection to a vanished peer. Later links are unaffected.
+    pub fn sever_links(&self, node: &str) {
+        let mut links = self.links.lock().unwrap_or_else(PoisonError::into_inner);
+        links.retain(|(nodes, severed)| {
+            let Some(severed) = severed.upgrade() else {
+                return false;
+            };
+            if nodes.iter().any(|name| name == node) {
+                severed.sever();
+                return false;
+            }
+            true
+        });
+    }
     /// Breaks every stream once `bytes` more have been written across the
     /// hub; `None` heals it for later writes.
     pub fn cut_after(&self, bytes: Option<usize>) {
@@ -280,6 +287,37 @@ impl Hub {
     }
 }
 
+/// Shared by both ends of one pipe: once set, both fail.
+#[derive(Default)]
+struct Severed {
+    set: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+impl Severed {
+    fn sever(&self) {
+        self.set.store(true, Ordering::SeqCst);
+        for waker in self
+            .wakers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+        {
+            waker.wake();
+        }
+    }
+    /// Fails once severed; otherwise wakes `cx` when it is.
+    fn check(&self, cx: &Context<'_>) -> std::io::Result<()> {
+        let mut wakers = self.wakers.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.set.load(Ordering::SeqCst) {
+            return Err(cut());
+        }
+        if !wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
+            wakers.push(cx.waker().clone());
+        }
+        Ok(())
+    }
+}
+
 /// One end of a pipe, subject to the hub's cut.
 #[derive(Default)]
 struct MessageCounter {
@@ -317,6 +355,7 @@ impl MessageCounter {
 }
 struct Pipe {
     messages: MessageCounter,
+    severed: Arc<Severed>,
     io: Stream,
     hub: Arc<Hub>,
     taps: Vec<Tap>,
@@ -335,6 +374,7 @@ impl AsyncRead for Pipe {
         if self.hub.allow(1).is_none() {
             return self.hub.blocked(cx);
         }
+        self.severed.check(cx)?;
         Pin::new(&mut self.io).poll_read(cx, buf)
     }
 }
@@ -344,15 +384,7 @@ impl AsyncWrite for Pipe {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        if self
-            .hub
-            .muted
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&(self.from.clone(), self.protocol))
-        {
-            return Poll::Ready(Ok(buf.len()));
-        }
+        self.severed.check(cx)?;
         let Some(allowed) = self.hub.allow(buf.len()) else {
             return self.hub.blocked(cx).map_ok(|()| 0);
         };
@@ -552,18 +584,26 @@ impl Transport for Node {
                 .map_err(|_| "hub poisoned")?
                 .entry((self.name.clone(), address.into(), protocol))
                 .or_default() += 1;
+            let severed = Arc::new(Severed::default());
+            if protocol == Protocol::Link {
+                self.hub.links.lock().map_err(|_| "hub poisoned")?.push((
+                    [self.name.clone(), address.into()],
+                    Arc::downgrade(&severed),
+                ));
+            }
             let pipe = |io, from: &str| Pipe {
                 messages: Default::default(),
-                io: Box::new(io),
+                severed: severed.clone(),
+                io: Stream::new(io),
                 hub: self.hub.clone(),
                 taps: taps.clone(),
                 from: from.into(),
                 protocol,
             };
             listener
-                .try_send((protocol, Box::new(pipe(far, address))))
+                .try_send((protocol, Stream::new(pipe(far, address))))
                 .map_err(|_| "unreachable or busy")?;
-            Ok(Box::new(pipe(near, &self.name)) as Stream)
+            Ok(Stream::new(pipe(near, &self.name)))
         })
     }
     fn accept(&self) -> BoxFuture<'_, Option<Inbound>> {
@@ -593,14 +633,20 @@ struct Wrapped {
 }
 impl Wrapped {
     fn pipe(&self, stream: Stream, protocol: Protocol) -> Stream {
-        Box::new(Pipe {
+        let paths = stream.paths();
+        let pipe = Pipe {
             messages: Default::default(),
+            severed: Default::default(),
             io: stream,
             hub: self.hub.clone(),
             taps: vec![],
             from: self.name.clone(),
             protocol,
-        })
+        };
+        match paths {
+            Some(paths) => Stream::with_paths(pipe, paths),
+            None => Stream::new(pipe),
+        }
     }
 }
 impl Transport for Wrapped {

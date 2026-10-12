@@ -79,21 +79,21 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     Ok(())
 }
 
+#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn configuration_enrolls_resumes_and_refuses_reading_identities() -> Result<(), Failure> {
     use rocky_sdk::{CustodyPeer, transport::TransportOptions};
     let root = tempfile::tempdir()?;
-    let tcp = || {
-        Some(Network::Owned(Arc::new(TransportOptions::Tcp {
-            listen: Some("127.0.0.1:0".into()),
-            advertised: None,
-        })))
+    let iroh = || {
+        Some(Network::Owned(Arc::new(TransportOptions::isolated_iroh(
+            "127.0.0.1:0",
+        ))))
     };
-    let issuer = Device::create(&root.path().join("issuer"), tcp())?;
+    let issuer = Device::create(&root.path().join("issuer"), iroh())?;
     let config = |invitation: String, directory: &str| {
         json!({
         "directory": root.path().join(directory), "schema": serde_json::from_str::<serde_json::Value>(common::SCHEMA).expect("schema"),
-        "transport": {"kind": "tcp", "listen": "127.0.0.1:0"}, "invitation": invitation,
+        "transport": {"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": "127.0.0.1:0"}, "invitation": invitation,
     }).to_string()
     };
     let wrong = config(issuer.invite().await, "wrong");
@@ -148,7 +148,7 @@ async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<
     issuer.close().await;
     std::fs::write(root.path().join("peer.json"), json!({
         "directory":"/data", "schema":serde_json::from_str::<serde_json::Value>(common::SCHEMA)?,
-        "transport":{"kind":"tcp", "listen":"0.0.0.0:7447", "advertised":"127.0.0.1:7447"}, "peers":[]
+        "transport":{"kind":"iroh", "relay":"disabled", "lookup":"disabled", "topic":false, "local":false, "bind":"0.0.0.0:7447"}, "peers":[]
     }).to_string())?;
     let name = format!(
         "rocky-p06-{}",

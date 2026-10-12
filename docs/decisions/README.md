@@ -39,11 +39,12 @@ naturally holds.
 | [0062](0062-node-references-and-credential-aliases.md) | One-way node references and distinct credential signing aliases |
 | [0063](0063-live-link-sessions.md) | Live link sessions and signals |
 | [0064](0064-sync-on-live-links.md) | Sync on live links |
+| [0065](0065-iroh-only-transport.md) | iroh as the only transport, with its liveness and path measurements |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0065; 0064 remains reserved for
+unreserved record is 0066; 0064 remains reserved for
 [features_08](../features_08/README.md#reserved-decision-records).
 
 ## Rationale by topic

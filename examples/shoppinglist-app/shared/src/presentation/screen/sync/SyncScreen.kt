@@ -20,6 +20,7 @@ import dev.zacsweers.metrox.viewmodel.metroViewModel
 import kotlinx.coroutines.*
 import kotlinx.serialization.Serializable
 import org.example.examples.shopping.presentation.component.KindChip
+import org.example.examples.shopping.presentation.component.LinkPaths
 import org.example.examples.shopping.presentation.component.ResetShoppingButton
 import org.example.examples.shopping.presentation.component.SectionTitle
 import org.example.examples.shopping.presentation.component.ShowMessages
@@ -57,6 +58,7 @@ fun SyncScreen(model: SyncViewModel = metroViewModel()) {
                     Text("${peer.source} · ${peer.choice} · ${peer.state}", style = MaterialTheme.typography.bodySmall)
                     if (peer.link.state == rocky.LinkState.Open) {
                         Badge(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer) { Text("Live") }
+                        LinkPaths(peer.link, Modifier.padding(top = 4.dp))
                     } else {
                         Text("Link ${peer.link.state.name.lowercase()}", style = MaterialTheme.typography.labelSmall)
                     }

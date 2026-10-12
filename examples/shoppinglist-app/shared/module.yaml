@@ -26,11 +26,15 @@ dependencies:
   - org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0: exported
   - org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-navigation3:2.11.0
   - org.jetbrains.androidx.navigation3:navigation3-ui:1.1.1
+  - org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0
+
 dependencies@mobile:
   - io.github.kalinjul.easyqrscan:scanner:0.7.2
+
 dependencies@android:
   # Permission requests from Compose.
   - androidx.activity:activity-compose:1.13.0
+
 settings:
   android:
     minSdk: 26
@@ -51,5 +55,3 @@ settings:
 
 aliases:
   - mobile: [android, iosArm64, iosSimulatorArm64]
-  # The live-link qualification agent: JDK sockets and clocks on desktop and Android.
-  - jvmAndroid: [jvm, android]

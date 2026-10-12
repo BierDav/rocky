@@ -12,7 +12,7 @@ import kotlin.test.*
 
 /** The starter pairing makes a second issuer, which carries the list once the creator device is lost. */
 class IssuerRecoveryTest {
-    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
+    private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
 
     /** Room checks every table it declares, so a device reads the household and approval tables too. */
     private val writer = NodeKind.Full.profile
@@ -34,13 +34,13 @@ class IssuerRecoveryTest {
         rooms.remove(runtime)?.close()
         runtime.close()
     }
-    private suspend fun join(directory: File, invitation: PairingInvitation) = RockyDatabase.join(directory, ShoppingSchema, invitation.uri, tcp(), automaticSync = false)
+    private suspend fun join(directory: File, invitation: PairingInvitation) = RockyDatabase.join(directory, ShoppingSchema, invitation.uri, loopback(), automaticSync = false)
 
     @Test fun `a second device invites and renews after the creator device is destroyed`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-issuers").toFile()
         val opened = mutableListOf<RockyDatabase>()
         try {
-            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
+            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
             list = a.repository.createList("Groceries")
             val b = join(File(root, "b"), a.pairDevice()).withRoom(File(root, "b")).also { opened += it }.joined()
             assertTrue(b.isIssuer)
@@ -50,7 +50,7 @@ class IssuerRecoveryTest {
             // A credential the creator issued for one minute, to a device that knows both issuers.
             val keys = Credentials.prepare(File(root, "d"))
             val supplied = a.grant(keys, writer, ttlSeconds = 60)
-            val d = RockyDatabase.install(File(root, "d"), ShoppingSchema, supplied, transport = tcp()).withRoom(File(root, "d")).also { opened += it }
+            val d = RockyDatabase.install(File(root, "d"), ShoppingSchema, supplied, transport = loopback()).withRoom(File(root, "d")).also { opened += it }
             val expiring = d.session()
             a.share(b, d)
             a.add("Milk")
@@ -97,7 +97,7 @@ class IssuerRecoveryTest {
         val root = Files.createTempDirectory("rocky-issuers").toFile()
         val opened = mutableListOf<RockyDatabase>()
         try {
-            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, tcp(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
+            val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, loopback(), automaticSync = false).withRoom(File(root, "a")).also { opened += it }
             list = a.repository.createList("Groceries")
             val x = join(File(root, "x"), a.pairDevice(issuing = false)).withRoom(File(root, "x")).also { opened += it }.joined()
             assertFalse(x.isIssuer)

@@ -25,7 +25,7 @@ class RoomGateTest {
         "shop",
         File(root, "sdks/kotlin/qualification/room/schemas/rocky.room.qualification.ShopDatabase/1.json").readText(),
     )
-    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
+    private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
     private fun item(key: String, title: String, list: String = "l1") = ShopItem(key, list, title)
     private fun room(directory: File, database: RockyDatabase): ShopDatabase = Room.databaseBuilder<ShopDatabase>(File(directory, "shop").path).setRockyDatabase(database).build()
 
@@ -55,14 +55,14 @@ class RoomGateTest {
     private class Devices(val directory: File, val a: RockyDatabase, val b: RockyDatabase, val roomA: ShopDatabase, val roomB: ShopDatabase)
     private fun <T> pair(block: suspend Devices.() -> T): T = runBlocking {
         val directory = Files.createTempDirectory("room-gate").toFile()
-        val a = RockyDatabase.create(File(directory, "a"), schema, tcp(), automaticSync = false)
+        val a = RockyDatabase.create(File(directory, "a"), schema, loopback(), automaticSync = false)
         try {
             a.installRoomAuthors()
             val b = RockyDatabase.join(
                 File(directory, "b"),
                 schema,
                 a.pairing(GrantProfile.Writer(setOf("lists", "items"))).uri,
-                tcp(),
+                loopback(),
                 automaticSync = false,
             )
             try {

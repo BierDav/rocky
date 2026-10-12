@@ -27,6 +27,7 @@ import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.presentation.component.ContactDialog
 import org.example.examples.shopping.presentation.component.KindChip
+import org.example.examples.shopping.presentation.component.LinkPaths
 import org.example.examples.shopping.presentation.component.SectionTitle
 import org.example.examples.shopping.presentation.component.ShowMessages
 import org.example.examples.shopping.presentation.component.pairing.InvitationCode
@@ -285,6 +286,7 @@ private fun DeviceCard(
             peer?.routes?.firstOrNull()?.let { route ->
                 Text("via ${route.transport}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            peer?.let { LinkPaths(it.link) }
             if (device.lists.isNotEmpty()) Text("Keys sent: ${device.lists.joinToString()}", style = MaterialTheme.typography.bodySmall)
             Row {
                 if (canShare) {

@@ -37,7 +37,7 @@ class HouseholdTest {
         File(root, name).absolutePath,
         name,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        transport = { PeerTransport.Tcp("127.0.0.1:0") },
+        transport = { PeerTransport.Iroh.isolated() },
     )
     private suspend fun ShoppingNode.titles(list: Long) = repository.observe(list).first().map { it.title }.sorted()
 
@@ -92,7 +92,7 @@ class HouseholdTest {
 
     @Test fun `an undescribed member cannot receive every list from its grant profile`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-undescribed-member").toFile()
-        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val transport = { PeerTransport.Iroh.isolated() }
         val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), automaticSync = false)
         val room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
         var member: RockyDatabase? = null
@@ -114,7 +114,7 @@ class HouseholdTest {
 
     @Test fun `delayed enrollment events keep each invitation choice and leave the newer code open`() = runBlocking {
         val root = Files.createTempDirectory("rocky-invitation-order").toFile()
-        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val transport = { PeerTransport.Iroh.isolated() }
         val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), automaticSync = false)
         val room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
         val household = Household(room.room, issuer, issuer.session().node)
@@ -144,7 +144,7 @@ class HouseholdTest {
 
     @Test fun `consumed invitations disappear after restarting without enrollment events`() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-invitation-restart").toFile()
-        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val transport = { PeerTransport.Iroh.isolated() }
         val path = File(root, "issuer")
         var issuer = RockyDatabase.create(path, ShoppingSchema, transport(), automaticSync = false)
         var room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
@@ -280,7 +280,7 @@ class HouseholdTest {
             File(root, "desk").absolutePath,
             "desk",
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-            transport = { PeerTransport.Tcp("127.0.0.1:0") },
+            transport = { PeerTransport.Iroh.isolated() },
             closed = { closed += it },
             erase = { erased++ },
         )

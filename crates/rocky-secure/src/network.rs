@@ -580,7 +580,7 @@ impl NativeSession {
         }
     }
 }
-async fn write_frame(stream: &mut Box<dyn SessionStream>, bytes: &[u8]) -> Result<(), Error> {
+async fn write_frame(stream: &mut impl SessionStream, bytes: &[u8]) -> Result<(), Error> {
     if bytes.len() > MAX_SECURE_FRAME {
         return Err(denied("native frame quota"));
     }
@@ -593,7 +593,7 @@ async fn write_frame(stream: &mut Box<dyn SessionStream>, bytes: &[u8]) -> Resul
     .map_err(|_| denied("native write timeout"))?
     .map_err(Error::Io)
 }
-async fn read_frame(stream: &mut Box<dyn SessionStream>) -> Result<Vec<u8>, Error> {
+async fn read_frame(stream: &mut impl SessionStream) -> Result<Vec<u8>, Error> {
     timeout(TIMEOUT, async {
         let length = stream.read_u32().await.map_err(Error::Io)? as usize;
         if length == 0 || length > MAX_SECURE_FRAME {

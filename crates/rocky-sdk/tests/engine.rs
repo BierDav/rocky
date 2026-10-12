@@ -1,4 +1,4 @@
-//! The secure SDK engine end to end: enrollment, sync over TCP and iroh,
+//! The secure SDK engine end to end: enrollment, sync over iroh,
 //! durable mutations, observation, renewal, revocation and logout.
 use rocky_sdk::{Engine, Network, transport::memory::Hub};
 use serde_json::{Value, json};
@@ -10,12 +10,6 @@ type Failure = Box<dyn std::error::Error + Send + Sync>;
 
 const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"body","type":"text","not_null":false}],"primary_key":["key"]}]}"#;
 
-fn tcp() -> Value {
-    tcp_at(0)
-}
-fn tcp_at(port: u16) -> Value {
-    json!({"kind": "tcp", "listen": format!("127.0.0.1:{port}")})
-}
 fn iroh() -> Value {
     iroh_at(0)
 }
@@ -24,12 +18,10 @@ fn iroh_at(port: u16) -> Value {
     json!({"kind": "iroh", "relay": "disabled", "lookup": "disabled", "topic": false, "local": false, "bind": format!("127.0.0.1:{port}")})
 }
 /// A port free now, so a restarted creator listens where members look.
+#[cfg(feature = "iroh")]
 fn free_port() -> u16 {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("udp");
-    let tcp = std::net::TcpListener::bind(socket.local_addr().expect("addr"));
-    let port = socket.local_addr().expect("addr").port();
-    drop((socket, tcp));
-    port
+    socket.local_addr().expect("addr").port()
 }
 
 struct Db {
@@ -54,6 +46,7 @@ impl Db {
         support::engine(&engine);
         Ok(Self { engine, scope })
     }
+    #[cfg(feature = "iroh")]
     fn create(directory: &Path, transport: Value) -> Result<Self, Failure> {
         Self::open(directory, json!({"mode": "create"}), transport)
     }
@@ -64,6 +57,7 @@ impl Db {
             transport,
         )
     }
+    #[cfg(feature = "iroh")]
     fn resume(directory: &Path, transport: Value) -> Result<Self, Failure> {
         Self::open(directory, json!({"mode": "resume"}), transport)
     }
@@ -155,6 +149,7 @@ fn titles(items: &[(String, String, i64)]) -> Vec<&str> {
     titles
 }
 
+#[cfg(feature = "iroh")]
 async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     // The creator keeps its port across the restart.
@@ -264,21 +259,17 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     Ok(())
 }
 
-#[tokio::test]
-async fn devices_converge_over_tcp() -> Result<(), Failure> {
-    converge(tcp_at).await
-}
-
 #[cfg(feature = "iroh")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn devices_converge_over_iroh() -> Result<(), Failure> {
     converge(iroh_at).await
 }
 
+#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let db = Db::create(root.path(), tcp())?;
+    let db = Db::create(root.path(), iroh())?;
     let id = db.add(9, "Tea").await;
     assert_eq!(id.len(), 64);
     // The same handle reports its earlier commit and creates nothing else.
@@ -293,7 +284,7 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
         json!(true)
     );
     db.close().await;
-    let db = Db::resume(root.path(), tcp())?;
+    let db = Db::resume(root.path(), iroh())?;
     let replay = db
         .mutate(9, json!({"type": "create", "collection": "items", "values": {"title": "Tea", "completed": false}}), None)
         .await
@@ -338,10 +329,11 @@ async fn mutations_are_durable_once_and_definite_rejections_are_final() -> Resul
     Ok(())
 }
 
+#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let db = Db::create(root.path(), tcp())?;
+    let db = Db::create(root.path(), iroh())?;
     for handle in 1..=5 {
         db.add(handle, &format!("Item {handle}")).await;
     }
@@ -388,23 +380,22 @@ async fn pages_and_subscriptions_follow_committed_revisions() -> Result<(), Fail
     Ok(())
 }
 
+#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
-    let creator = Db::create(&root.path().join("a"), tcp())?;
-    let alice = Db::join(&root.path().join("b"), &creator.invite().await, tcp())?;
+    let creator = Db::create(&root.path().join("a"), iroh())?;
+    let alice = Db::join(&root.path().join("b"), &creator.invite().await, iroh())?;
     let invitation = creator.invite().await;
     // A wrong application schema does not consume the invitation.
     let mut wrong = json!({"mode": "join", "invitation": invitation});
     wrong["directory"] = json!(root.path().join("wrong"));
-    wrong["transport"] = tcp();
+    wrong["transport"] = iroh();
     let other = SCHEMA.replace("shopping", "other");
     assert!(Engine::open(&wrong.to_string(), &other, None).is_err());
-    // Nor does a transport the invitation does not use.
-    assert!(Db::join(&root.path().join("quic"), &invitation, iroh()).is_err());
-    let bob = Db::join(&root.path().join("c"), &invitation, tcp())?;
+    let bob = Db::join(&root.path().join("c"), &invitation, iroh())?;
     // A used invitation enrolls nobody else.
-    assert!(Db::join(&root.path().join("d"), &invitation, tcp()).is_err());
+    assert!(Db::join(&root.path().join("d"), &invitation, iroh()).is_err());
 
     let status = alice.ok(json!({"type": "session"})).await;
     assert_eq!(status["revocations"]["statements"], 0);
@@ -447,10 +438,10 @@ async fn renewal_revocation_and_logout_need_no_application_code() -> Result<(), 
     alice.close().await;
     assert!(!root.path().join("b/identity.json").exists());
     assert!(!root.path().join("b/secrets").exists());
-    assert!(Db::resume(&root.path().join("b"), tcp()).is_err());
+    assert!(Db::resume(&root.path().join("b"), iroh()).is_err());
     bob.ok(json!({"type": "logout"})).await;
     bob.close().await;
-    assert!(Db::resume(&root.path().join("c"), tcp()).is_err());
+    assert!(Db::resume(&root.path().join("c"), iroh()).is_err());
     creator.close().await;
     Ok(())
 }
@@ -475,7 +466,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     );
     let invitation = creator.invite().await;
     // A transport of another kind has no route in the invitation.
-    assert!(Db::join(&root.path().join("tcp"), &invitation, tcp()).is_err());
+    assert!(Db::join(&root.path().join("other"), &invitation, iroh()).is_err());
     let member = open("b", json!({"mode": "join", "invitation": invitation}), "b")?;
     creator.add(1, "Milk").await;
     member.add(2, "Eggs").await;

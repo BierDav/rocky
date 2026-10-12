@@ -85,6 +85,13 @@ the same two fields form the opaque registry label, available before that table
 syncs. **Clear name** clears a revoked device's application description; its
 registry tombstone and signed revocation remain. No roster horizon is declared.
 
+A peer with an open live link shows its network paths under its card in
+**Devices** and in **Sync → Sync partners**: collapsed, the path count, the
+selected path's kind and round trip; expanded, each path's kind, addresses
+and round trip, and tapping a path shows its MTU, congestion window, traffic,
+loss and congestion events. Devices refreshes them every two seconds, Sync
+every three; see [link status](../../docs/runtime/live-links.md#status-and-lifecycle).
+
 Copy and paste use Klip's system clipboard; iOS may request paste consent.
 Credential dates use kotlinx-datetime in the device's time zone, displayed as
 `yyyy-MM-dd HH:mm`. SHA-256 and secure random bytes use KotlinCrypto on every target.
@@ -108,7 +115,7 @@ execute, and the control is renewed before its 29 days end. Command identities c
 query the registry. Requests and decisions retain command identities, which members
 label **This device** or **Another device**. Trusted nodes show the registry name. The service learns request
 identities and commitments, never titles or decisions. A device opened over
-direct TCP, as in qualification, has no coordinator and shows the tab as
+isolated loopback iroh, as in qualification, has no coordinator and shows the tab as
 unavailable. A member's request discovers the assigned executor through contacts, or is forwarded
 once by an admitted peer; a request
 that cannot be delivered stays stored and is retried in the background.

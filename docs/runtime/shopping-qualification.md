@@ -11,7 +11,7 @@ process, and its sharing and move steps on two Android emulators. Phone runs are
 | --- | --- |
 | `./examples/shoppinglist-app/qualify` | Builds the packaged `rocky-peer`, then the [multi-process harness](../../examples/shoppinglist-app/qualification/src/Qualification.kt): every device is a JVM running the app's Room repository; evidence in `local/shopping-qualification/evidence.json` |
 | `cargo test -p rocky-sdk --test shopping_release` | The native gate and checkpoint join run in the e2e tier; custody restart is integration |
-| `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
+| `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` | The required schema by hand and from Room, installed natively |
 | `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and every partitioned refusal |
 | `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
 | `./examples/shoppinglist-app/qualify-live-links <command>` | Live links between a desktop process and the debug Android app over iroh: latency, lifecycle, idle cost and a three-desktop mesh; see the [phase 6 evidence](../features_08/06-qualification-evidence.md) |
@@ -63,7 +63,7 @@ contention, loss, takeover and voter faults are not qualified as processes.
 
 | # | Evidence |
 | --- | --- |
-| 1 | `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema` passes |
+| 1 | `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` passes |
 | 2 | `partitioned_latest_wins_isolated_identity_rebuild_eviction_and_reopen`; harness `gate` |
 | 3 | `partition_frames_keys_custody_sql_and_checkpoints_are_isolated`; harness `exclusion-revocation` |
 | 4 | `group_references_hold_cascade_and_null_only_category_per_partition`, `group_horizon_finalizes_losers_orphans_and_recovers_each_atomic_step`; harness `gate` |

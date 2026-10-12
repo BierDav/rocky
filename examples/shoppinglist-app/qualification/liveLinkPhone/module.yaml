@@ -1,0 +1,15 @@
+# The live-link qualification's phone: an APK apart from the shopping app that serves the agent on loopback,
+# reached through `adb forward`. See docs/runtime/shopping-qualification.md.
+product: android/app
+apply:
+  - //project.module-template.yaml
+dependencies:
+  - ../../shared
+  - ../liveLinkAgent
+settings:
+  android:
+    namespace: org.example.examples.qualification
+    applicationId: org.example.examples.qualification
+    minSdk: 26
+    # The ABIs Rocky's Android runtime is built for.
+    abiFilters: [arm64-v8a, x86_64]

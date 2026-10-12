@@ -49,7 +49,7 @@ class ConfirmedRowsTest {
         table("stock") { tableClass = TableClass.CommandControlled }
         commands = CommandSet(listOf(Restock))
     }
-    private fun tcp(): PeerTransport = PeerTransport.Tcp("127.0.0.1:0")
+    private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
     private fun bundles(directory: File): Long = BundledSQLiteDriver().open(File(directory, "rocky.sqlite").path, SQLITE_OPEN_READONLY).use { file ->
         file.prepare("SELECT count(DISTINCT handle) FROM secure_bundle_handles").use {
             it.step()
@@ -64,7 +64,7 @@ class ConfirmedRowsTest {
         val database = RockyDatabase.create(
             data,
             schema,
-            tcp(),
+            loopback(),
             automaticSync = false,
             commands = CommandRuntime(coordinator, listOf(restock)),
         )

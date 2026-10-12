@@ -233,8 +233,9 @@ impl rocky_sdk::transport::Transport for Gate {
         Box::pin(async move {
             let stream = self.inner.connect(address, protocol).await?;
             if protocol == rocky_sdk::transport::Protocol::Link {
-                return Ok(Box::new(link_gate::LinkGate::new(stream, self))
-                    as rocky_sdk::transport::Stream);
+                return Ok(rocky_sdk::transport::Stream::new(link_gate::LinkGate::new(
+                    stream, self,
+                )));
             }
             Ok(stream)
         })

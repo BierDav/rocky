@@ -708,7 +708,7 @@ async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_ses
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let (resolved, accepted) = tokio::join!(
             NativeSession::resolve_peer(
-                Box::new(client_stream),
+                rocky_core::net::Stream::new(client_stream),
                 rocky_credentials::PeerId::of(expected)
             ),
             super::link::Link::accept_or_resolve(

@@ -1,7 +1,9 @@
 //! Rocky's network port on iroh. `Attachment` serves Rocky's protocols on
 //! an endpoint and router the application owns; `Options` is the starter
 //! that binds and owns its own. See `docs/runtime/sdk-transports.md`.
-use rocky_core::net::{BoxFuture, Connector, Discovery, Failure, Protocol, Stream, Transport};
+use rocky_core::net::{
+    BoxFuture, Connector, Discovery, Failure, NetworkPath, PathSource, Protocol, Stream, Transport,
+};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -29,9 +31,9 @@ pub use discovery::{
 /// The iroh version these handlers attach to; build the endpoint with it.
 pub use iroh;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
     address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
-    endpoint::{Connection, PortmapperConfig, RecvStream, SendStream, presets},
+    endpoint::{Connection, LocalTransportAddr, PortmapperConfig, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router, RouterBuilder},
 };
 
@@ -84,11 +86,56 @@ impl AsyncWrite for QuicStream {
     }
 }
 fn stream(connection: Connection, (send, recv): (SendStream, RecvStream)) -> Stream {
-    Box::new(QuicStream {
-        _connection: connection,
-        io: tokio::io::join(recv, send),
-        _slot: None,
-    })
+    Stream::with_paths(
+        QuicStream {
+            _connection: connection.clone(),
+            io: tokio::io::join(recv, send),
+            _slot: None,
+        },
+        Arc::new(Paths(connection)),
+    )
+}
+
+/// iroh's per-path QUIC measurements of one connection.
+struct Paths(Connection);
+impl PathSource for Paths {
+    fn paths(&self) -> Vec<NetworkPath> {
+        let list = self.0.paths();
+        let mut paths: Vec<_> = list
+            .iter()
+            .map(|path| {
+                let stats = path.stats();
+                let (kind, remote) = match path.remote_addr() {
+                    TransportAddr::Ip(address) => ("direct", address.to_string()),
+                    TransportAddr::Relay(url) => ("relay", url.to_string()),
+                    other => ("other", format!("{other:?}")),
+                };
+                let local = match path.local_addr() {
+                    LocalTransportAddr::Ip(address) => address.map(|ip| ip.to_string()),
+                    LocalTransportAddr::Relay(url) => Some(url.to_string()),
+                    _ => None,
+                };
+                NetworkPath {
+                    selected: path.is_selected(),
+                    kind,
+                    remote,
+                    local,
+                    rtt: stats.rtt,
+                    mtu: stats.current_mtu,
+                    window: stats.cwnd,
+                    sent_bytes: stats.udp_tx.bytes,
+                    sent_datagrams: stats.udp_tx.datagrams,
+                    received_bytes: stats.udp_rx.bytes,
+                    received_datagrams: stats.udp_rx.datagrams,
+                    lost_packets: stats.lost_packets,
+                    lost_bytes: stats.lost_bytes,
+                    congestion_events: stats.congestion_events,
+                }
+            })
+            .collect();
+        paths.sort_by_key(|path| !path.selected);
+        paths
+    }
 }
 
 struct Shared {
@@ -252,11 +299,14 @@ impl ProtocolHandler for Handler {
                 attachment.refuse(&connection, CLOSED, b"no service");
                 break;
             }
-            let inbound = Box::new(QuicStream {
-                _connection: connection.clone(),
-                io: tokio::io::join(recv, send),
-                _slot: Some(slot),
-            });
+            let inbound = Stream::with_paths(
+                QuicStream {
+                    _connection: connection.clone(),
+                    io: tokio::io::join(recv, send),
+                    _slot: Some(slot),
+                },
+                Arc::new(Paths(connection.clone())),
+            );
             // A full queue resets the stream: the dialer fails at once.
             if self.0.sender.try_send((protocol, inbound)).is_err() {
                 self.0.refused.fetch_add(1, Ordering::Relaxed);

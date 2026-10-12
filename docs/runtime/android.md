@@ -136,7 +136,6 @@ Notes for consumers:
 
 - `RockyLifecycle.follow(database, onApplied)` calls `onApplied` on its IO worker after each completed
   transition; `Activity.onStop` alone precedes the asynchronous pause.
-- Two issuing apps on one device collide on the default `127.0.0.1:47470`; give each a `listen` address.
-- An app targeting API 37 must hold `ACCESS_LOCAL_NETWORK` before opening, or LAN TCP times out.
+- An app targeting API 37 must hold `ACCESS_LOCAL_NETWORK` before opening, or LAN connections time out.
 - The shopping example's [Compose app](../../examples/shoppinglist-app/README.md) builds from the Kotlin
   toolchain modules instead of the AAR and gets the runtime transitively through `rocky-room`.

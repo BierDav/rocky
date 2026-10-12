@@ -51,7 +51,7 @@ Select the guide for your task rather than reading every document.
 | Integrate Room, pair desktop apps or review the shopping-list developer API | [Room on Rocky's file](runtime/room-integration.md) |
 | Enroll, renew, revoke or log out SDK devices and choose where keys live | [SDK enrollment](runtime/sdk-enrollment.md) |
 | Join from a checkpoint, catch up after pruning and configure SDK retention | [SDK bootstrapping](runtime/sdk-bootstrapping.md) |
-| Select iroh or TCP for SDK devices, or supply a transport in Rust or Kotlin | [SDK transports](runtime/sdk-transports.md) |
+| Configure iroh for SDK devices, follow link liveness and per-path round trips | [SDK transports](runtime/sdk-transports.md) |
 | Serve Rocky on your own iroh endpoint next to your protocols, or use the starter | [iroh networking](runtime/sdk-transports.md#iroh) |
 | Find domain members on the local network or through the topic, and read the status of each path | [Discovery](runtime/discovery.md) |
 | Open a secure database without a network, share it between sessions or attach your own transport | [SDK composition](runtime/sdk-composition.md) |

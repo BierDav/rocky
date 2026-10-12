@@ -101,7 +101,7 @@ async fn committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcil
                     .iter()
                     .all(|event| event["kind"] != "peer_reached" && event["kind"] != "rows_synced")
             );
-            // An idle link advances only the ping clock, with no new streams.
+            // An idle link opens no new streams as time passes.
             let idle = hub.counts();
             for _ in 0..4 {
                 tokio::time::advance(Duration::from_secs(15)).await;
@@ -297,7 +297,8 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let link = sa.live.id(peer);
             let before = [hub.dials_to("a"), hub.dials_to("b")];
-            // Pings keep the link; nothing dials, polls or replaces it.
+            // An idle link writes nothing; nothing dials, polls or replaces it.
+            let written = *hub.written().borrow();
             for _ in 0..240 {
                 tokio::time::advance(Duration::from_secs(15)).await;
                 for _ in 0..100 {
@@ -305,6 +306,7 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
                 }
             }
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
+            assert_eq!(*hub.written().borrow(), written);
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
             assert_eq!(sa.live.id(peer), link);
             a.detach(None).await;
@@ -315,7 +317,7 @@ async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> 
 }
 
 #[tokio::test(start_paused = true)]
-async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Failure> {
+async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
@@ -326,35 +328,17 @@ async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Fa
             let status = a.readiness().await?;
             assert_eq!(status["network"]["peers"][0]["link"]["state"], "open");
             assert!(status["network"]["peers"][0]["link"]["opened"].is_string());
+            // The hub measures no paths; iroh's are covered by its liveness gate.
+            assert_eq!(service.live.status(peer)["paths"], json!([]));
+            assert!(service.live.status(peer)["round_trip_ms"].is_null());
             let sync_token = a.sync_status.borrow()["token"].clone();
-            let pongs = service.live.pongs.load(Ordering::Relaxed);
-            tokio::time::advance(Duration::from_secs(15)).await;
-            until(|| service.live.pongs.load(Ordering::Relaxed) > pongs).await;
-            until(|| service.live.status(peer)["round_trip_ms"].is_string()).await;
-            assert_eq!(
-                a.readiness().await?["token"],
-                status["token"],
-                "pings do not change readiness"
-            );
-            assert_eq!(
-                a.sync_status.borrow()["token"],
-                sync_token,
-                "pings do not change sync status"
-            );
             let client = a.client(1)?;
             let token = status["token"].as_str().ok_or("readiness token")?;
             let mut waiting = Box::pin(a.readiness_after(&client, token));
             assert!(futures_util::poll!(waiting.as_mut()).is_pending());
-            hub.mute("b", Protocol::Link, true);
-            for _ in 0..3 {
-                tokio::time::advance(Duration::from_secs(15)).await;
-                for _ in 0..100 {
-                    tokio::task::yield_now().await;
-                }
-                assert_eq!(service.live.len(), 1);
-            }
             let dials = hub.protocol_dials("a", "b", Protocol::Link);
-            tokio::time::advance(Duration::from_secs(15)).await;
+            // As iroh's idle timeout ends a connection to a vanished peer.
+            hub.sever_links("b");
             until(|| service.live.len() == 0).await;
             assert!(
                 a.retries
@@ -372,12 +356,9 @@ async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Fa
                     .as_array()
                     .ok_or("events")?
                     .iter()
-                    .any(|event| event["kind"] == "link_closed"
-                        && event["reason"] == "error"
-                        && event["error"] == "three missed link pongs")
+                    .any(|event| event["kind"] == "link_closed" && event["reason"] == "error")
             );
             assert_eq!(hub.protocol_dials("a", "b", Protocol::Link), dials);
-            hub.mute("b", Protocol::Link, false);
             tokio::time::advance(Duration::from_secs(1)).await;
             until(|| service.live.len() == 1).await;
             assert!(hub.protocol_dials("a", "b", Protocol::Link) > dials);
@@ -499,7 +480,6 @@ async fn learned_revocation_closes_the_revoked_peers_link() -> Result<(), Failur
 }
 
 async fn real_pair(
-    kind: &str,
     root: &std::path::Path,
     hub: &Arc<Hub>,
 ) -> Result<(Arc<Node>, Arc<Node>, String, String), Failure> {
@@ -518,14 +498,7 @@ async fn real_pair(
     .await?;
     a.detach(None).await;
     b.detach(None).await;
-    let connector: Arc<dyn Connector> = match kind {
-        "tcp" => Arc::new(crate::transport::TransportOptions::Tcp {
-            listen: Some("127.0.0.1:0".into()),
-            advertised: None,
-        }),
-        "iroh" => Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0")),
-        _ => return Err("test transport".into()),
-    };
+    let connector: Arc<dyn Connector> = Arc::new(rocky_iroh::Options::isolated("127.0.0.1:0"));
     let ta = connector
         .start(true, Settings::transport_key(&a.vault)?)
         .await?;
@@ -541,12 +514,12 @@ async fn real_pair(
     Ok((a, b, aa, ab))
 }
 
-async fn real_signal_gate(kind: &str) -> Result<(), Failure> {
+async fn real_signal_gate() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, aa, ab) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, aa, ab) = real_pair(root.path(), &hub).await?;
             start(&a, true).await?;
             start(&b, true).await?;
             until(|| {
@@ -570,20 +543,16 @@ async fn real_signal_gate(kind: &str) -> Result<(), Failure> {
         .await
 }
 #[tokio::test]
-async fn tcp_signal_gate() -> Result<(), Failure> {
-    real_signal_gate("tcp").await
-}
-#[tokio::test]
 async fn iroh_signal_gate() -> Result<(), Failure> {
-    real_signal_gate("iroh").await
+    real_signal_gate().await
 }
 
-async fn real_reverse_gate(kind: &str) -> Result<(), Failure> {
+async fn real_reverse_gate() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, _, ab) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, _, ab) = real_pair(root.path(), &hub).await?;
             a.automatic.store(true, Ordering::SeqCst);
             hub.stall_peer(&ab, true);
             start(&b, true).await?;
@@ -606,12 +575,8 @@ async fn real_reverse_gate(kind: &str) -> Result<(), Failure> {
         .await
 }
 #[tokio::test]
-async fn tcp_reverse_gate() -> Result<(), Failure> {
-    real_reverse_gate("tcp").await
-}
-#[tokio::test]
 async fn iroh_reverse_gate() -> Result<(), Failure> {
-    real_reverse_gate("iroh").await
+    real_reverse_gate().await
 }
 
 // Stop both workers before either endpoint closes, so neither redials a closing peer.
@@ -623,12 +588,12 @@ async fn detach_real_pair(a: &Node, b: &Node) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
+async fn real_liveness_gate() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, _, ab) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, _, ab) = real_pair(root.path(), &hub).await?;
             start(&a, true).await?;
             start(&b, true).await?;
             let sa = a.current().ok_or("service")?;
@@ -649,54 +614,56 @@ async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
                 *b.sync_status.borrow(),
                 b.activity.after(0)
             );
-            for _ in 0..2 {
-                let pongs = [
-                    sa.live.pongs.load(Ordering::Relaxed),
-                    sb.live.pongs.load(Ordering::Relaxed),
-                ];
+            // iroh keeps the idle connection alive below the stream: the
+            // link itself writes nothing and nothing redials.
+            let written = *hub.written().borrow();
+            for _ in 0..4 {
                 tokio::time::advance(Duration::from_secs(15)).await;
-                until(|| {
-                    sa.live.pongs.load(Ordering::Relaxed) > pongs[0]
-                        && sb.live.pongs.load(Ordering::Relaxed) > pongs[1]
-                })
-                .await;
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
             }
             assert_eq!(hub.counts(), before);
-            hub.mute("b", Protocol::Link, true);
-            for _ in 0..3 {
-                let written = *hub.written().borrow();
-                tokio::time::advance(Duration::from_secs(15)).await;
-                until(|| *hub.written().borrow() > written).await;
-                assert_eq!(sa.live.len(), 1);
-            }
-            let dials = hub.protocol_dials("a", &ab, Protocol::Link);
-            tokio::time::advance(Duration::from_secs(15)).await;
-            until(|| sa.live.len() == 0).await;
-            assert_eq!(hub.protocol_dials("a", &ab, Protocol::Link), dials);
-            hub.mute("b", Protocol::Link, false);
-            tokio::time::advance(Duration::from_secs(1)).await;
-            until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
-            assert!(hub.protocol_dials("a", &ab, Protocol::Link) > dials);
+            assert_eq!(*hub.written().borrow(), written);
+            assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
+            assert_eq!(hub.protocol_dials("a", &ab, Protocol::Link), 1);
+            // Status measures the connection's paths when read.
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let link = sa.live.status(peer);
+            let paths = link["paths"].as_array().ok_or("paths")?;
+            let selected = paths.first().ok_or("no measured path")?;
+            assert_eq!(selected["selected"], true);
+            assert_eq!(selected["kind"], "direct");
+            assert!(
+                selected["remote"]
+                    .as_str()
+                    .is_some_and(|remote| remote.starts_with("127.0.0.1:"))
+            );
+            assert!(selected["rtt_us"].is_string());
+            assert!(
+                selected["sent_bytes"]
+                    .as_str()
+                    .ok_or("sent")?
+                    .parse::<u64>()?
+                    > 0
+            );
+            assert!(link["round_trip_ms"].is_string());
             detach_real_pair(&a, &b).await?;
             Ok(())
         }))
         .await
 }
 #[tokio::test(start_paused = true)]
-async fn tcp_liveness_gate() -> Result<(), Failure> {
-    real_liveness_gate("tcp").await
-}
-#[tokio::test(start_paused = true)]
 async fn iroh_liveness_gate() -> Result<(), Failure> {
-    real_liveness_gate("iroh").await
+    real_liveness_gate().await
 }
 
-async fn real_authority_gate(kind: &str) -> Result<(), Failure> {
+async fn real_authority_gate() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, _, _) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, _, _) = real_pair(root.path(), &hub).await?;
             start(&a, true).await?;
             start(&b, true).await?;
             let sa = a.current().ok_or("service")?;
@@ -719,20 +686,16 @@ async fn real_authority_gate(kind: &str) -> Result<(), Failure> {
         .await
 }
 #[tokio::test]
-async fn tcp_authority_gate() -> Result<(), Failure> {
-    real_authority_gate("tcp").await
-}
-#[tokio::test]
 async fn iroh_authority_gate() -> Result<(), Failure> {
-    real_authority_gate("iroh").await
+    real_authority_gate().await
 }
 
-async fn real_tie_gate(kind: &str) -> Result<(), Failure> {
+async fn real_tie_gate() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, aa, ab) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, aa, ab) = real_pair(root.path(), &hub).await?;
             a.automatic.store(true, Ordering::SeqCst);
             b.automatic.store(true, Ordering::SeqCst);
             let sa = a.current().ok_or("service")?;
@@ -761,21 +724,17 @@ async fn real_tie_gate(kind: &str) -> Result<(), Failure> {
         .await
 }
 #[tokio::test]
-async fn tcp_tie_gate() -> Result<(), Failure> {
-    real_tie_gate("tcp").await
-}
-#[tokio::test]
 async fn iroh_tie_gate() -> Result<(), Failure> {
-    real_tie_gate("iroh").await
+    real_tie_gate().await
 }
 
-async fn real_budget_gate(kind: &str) -> Result<(), Failure> {
+async fn real_budget_gate() -> Result<(), Failure> {
     use rocky_secure::network::link::{CloseReason, Message};
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
-            let (a, b, aa, _) = real_pair(kind, root.path(), &hub).await?;
+            let (a, b, aa, _) = real_pair(root.path(), &hub).await?;
             start(&a, true).await?;
             start(&b, true).await?;
             let sa = a.current().ok_or("service")?;
@@ -821,12 +780,8 @@ async fn real_budget_gate(kind: &str) -> Result<(), Failure> {
         .await
 }
 #[tokio::test]
-async fn tcp_budget_gate() -> Result<(), Failure> {
-    real_budget_gate("tcp").await
-}
-#[tokio::test]
 async fn iroh_budget_gate() -> Result<(), Failure> {
-    real_budget_gate("iroh").await
+    real_budget_gate().await
 }
 
 #[tokio::test(start_paused = true)]

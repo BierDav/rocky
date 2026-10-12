@@ -1,8 +1,9 @@
 # SDK transports and iroh
 
-The port (`Transport`, `Connector`, `Protocol`, stream type) is in
-`rocky_core::net`; iroh is in `rocky-iroh`; TCP, the in-process hub and the
-chunk adapter are in `rocky-sdk`. See [enrollment](sdk-enrollment.md) for what
+iroh is Rocky's only network transport ([decision 0065](../decisions/0065-iroh-only-transport.md)).
+The port (`Transport`, `Connector`, `Protocol`, `Stream`, `PathSource`) is in
+`rocky_core::net`; iroh is in `rocky-iroh`; the in-process test hub is in
+`rocky-sdk`. See [enrollment](sdk-enrollment.md) for what
 travels over a transport and [composition](sdk-composition.md#attach-a-network)
 for attaching one, and [discovery](discovery.md) for finding peers without a
 contact. Qualified on one host only.
@@ -10,13 +11,14 @@ contact. Qualified on one host only.
 ## What a transport does
 
 A transport connects two devices with a reliable ordered byte stream and
-carries the protocol name: pairing, live links, renewal or commands. It adds no
-security the SDK relies on. Pairing answers are sealed under the invitation
+carries the protocol name: pairing, live links, renewal or commands. It also
+keeps connections alive, ends those to a vanished peer, and may measure the
+network paths under a stream. It adds no security the SDK relies on. Pairing answers are sealed under the invitation
 token, renewals are signed, and sync runs on mutually authenticated
 [live links](live-links.md) carrying encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/link/1`,
+Protocols are versioned strings, used as QUIC ALPNs: `rocky/sdk-pair/1`, `rocky/link/2`,
 `rocky/sdk-renew/2`, `rocky/command/2`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream, a retired one included. A link stream
@@ -34,9 +36,8 @@ connection a restarted peer would otherwise leave looking open.
 ```kotlin
 RockyDatabase.create(directory, schema)                                   // starter iroh
 RockyDatabase.create(directory, schema, PeerTransport.Iroh(relay = "https://relay.example"))
-RockyDatabase.create(directory, schema, PeerTransport.Tcp("0.0.0.0:47470", advertised = "192.168.0.20:47470"))
+RockyDatabase.create(directory, schema, PeerTransport.Iroh.isolated("0.0.0.0:47470"))  // no public services
 RockyDatabase.create(directory, schema, PeerTransport.Endpoint(endpoint))  // your RockyEndpoint
-RockyDatabase.create(directory, schema, PeerTransport.Custom(transport))   // your transport
 ```
 
 Native options carry the starter's choice as `transport`; an application's
@@ -44,34 +45,47 @@ endpoint or transport goes to its own constructor instead.
 
 ```json
 {"kind": "iroh", "relay": "default", "lookup": "default", "topic": true, "local": true, "bind": null}
-{"kind": "tcp", "listen": "127.0.0.1:47470", "advertised": null}
 ```
 
 | Transport | Kind | Use |
 | --- | --- | --- |
-| iroh, starter or your endpoint | `iroh` | The Internet transport |
-| TCP | `tcp` | Loopback or a trusted network: plaintext with a five-byte protocol preamble |
+| iroh, starter or your endpoint | `iroh` | Every network: Internet, LAN and loopback |
 | In-process hub | `memory` | Tests and deterministic faults |
-| Yours | Your name | Anything that carries a byte stream |
 
-TCP listens on `listen`; without it an issuer listens on an ephemeral loopback
-port (`127.0.0.1:0`) and a member only dials, so it cannot be another member's
-peer. Multiple issuing apps can use their defaults concurrently. Invitations
-and contacts carry `advertised`, or the bound address. Configure `listen` and `advertised` for
-stable or remotely reachable TCP routes.
+Any other `kind` is refused. For a LAN or a fixed address without public
+services, use the isolated starter with a fixed `bind`; peers then dial the
+addresses in invitations and contacts directly over QUIC.
 
 `rocky_sdk::transport::memory::Hub` joins named nodes of one process with
 bounded pipes, counts starts, dials and closes, and injects faults: `stalled`
 holds every dial, `stall_peer(address, true)` holds just one peer,
 `dials_to(address)` counts its attempts, `cut_after(bytes)` breaks streams,
 `hold_cut` pauses at the cut for cancellation tests, `capacity` sets the pipe
-buffer and `network_changed()` signals connectivity. `mute(node, protocol, true)` drops
-writes on that node's existing streams for deterministic missing-pong tests;
-`protocol_dials(from, to, protocol)` counts its successful stream openings.
+buffer and `network_changed()` signals connectivity. `sever_links(node)` fails
+that node's open link streams, as iroh's idle timeout ends a connection to a
+vanished peer; `protocol_dials(from, to, protocol)` counts its successful
+stream openings. The hub measures no paths.
 
-[Live links](live-links.md) reuse these streams for synchronization requests,
-committed-frame pushes and application ping/pong liveness. `link_messages(node)`
-counts complete link frames even when transport writes fragment them. A link has a separate inbound service budget.
+[Live links](live-links.md) reuse these streams for synchronization requests
+and committed-frame pushes. `link_messages(node)` counts complete link frames
+even when transport writes fragment them. A link has a separate inbound service budget.
+
+## Liveness and paths
+
+Rocky sends no keep-alive of its own. iroh's default QUIC configuration sends
+a keep-alive every 5 seconds on the connection and each path, closes a direct
+path idle for 15 seconds (a relay path after 30) and the connection after 30.
+A closed connection fails the link's read or write, and the link reconnects
+with per-peer back-off. An application endpoint passed as
+`PeerTransport.Endpoint` or `Network::Borrowed` must keep a keep-alive
+interval below its idle timeout, as iroh's default does.
+
+A transport may attach a `PathSource` to a stream. iroh reports each open
+path of the stream's connection, measured when status is read: whether it is
+selected, `direct` or `relay`, the remote and local address, the smoothed
+round trip, MTU, congestion window, bytes and datagrams sent and received,
+lost packets and bytes, and congestion events. Link status shows them; see
+[live links](live-links.md#status-and-lifecycle).
 
 ## Sync wakeups
 
@@ -83,43 +97,13 @@ the application calls `setOnline` / the native `connection` request. See
 Pausing the worker cancels outstanding dials and links without closing the
 attached transport.
 
-## Supplying a transport
-
-In Rust, implement `Transport` and attach it as `Network::Borrowed`. A
-`Connector` is only needed for a transport Rocky should start and close.
-
-In another language, implement the chunk contract (strings and byte arrays
-only, no native build):
-
-```kotlin
-class MyTransport : StreamTransport {
-    override val kind = "mine"
-    override suspend fun address(): String = …
-    override suspend fun connect(address: String, protocol: String): ByteStream = …
-    override suspend fun accept(): InboundStream? = …   // null once closed
-}
-```
-
-| `ByteStream` call | Contract |
-| --- | --- |
-| `read(max)` | The next bytes, at most `max`; empty once the peer finished |
-| `write(bytes)` | Delivered in order; returns once accepted |
-| `finish()` | No more writes; the peer's `read` ends after what was sent |
-| `close()` | Abandons the stream; a pending `read` ends |
-
-Carry `protocol` to the accepting side unchanged and return it from `accept`.
-Both ends send their handshake before reading, so a stream must buffer some
-bytes without a reader; the adapter buffers 64 KiB per direction in chunks of
-at most 16 KiB. The application starts and closes the transport; Rocky never
-does. Native names: `ForeignTransport`, `ByteStream`,
-`NativeSession.open_with_transport`; Rust: `transport::adapter`.
-
 ## iroh
 
 iroh is the default `iroh` feature of `rocky-sdk` and the native ABI. Without
-it both build with no iroh dependency, the starter's `iroh` option reports
-that the build has no iroh transport, and `NativeEndpoint`/`RockyEndpoint`
-are absent.
+it both build with no iroh dependency and no network: the starter's `iroh`
+option reports that the build has no iroh transport, and
+`NativeEndpoint`/`RockyEndpoint` are absent. Applications share iroh through
+their own endpoint, not through another transport.
 
 | | Endpoint and router | Closed by |
 | --- | --- | --- |
@@ -189,8 +173,8 @@ Name your own relay and lookup service to depend on no public one.
 An optional capability of a transport, next to `connectivity`: it announces
 the device under the domain's topic and reports the contacts it finds. iroh
 has two paths, `local` (mDNS) and `topic` (a sealed rendezvous record on the
-lookup service); TCP, custom transports and the hub's default have none. An
-attached endpoint has it only when asked. [Discovery](discovery.md) covers
+lookup service); the hub's default has none. An attached endpoint has it only
+when asked. [Discovery](discovery.md) covers
 options, status, lifecycle and bounds.
 
 Rows and commands stay encrypted and sessions authenticated on every path;
@@ -211,12 +195,12 @@ session follows.
 | --- | --- |
 | Inbound live links per network service | 32, separate from transient streams |
 | Inbound streams served at once per network service | 32; further ones are dropped and counted (`network.inbound.refused`) |
-| Inbound streams queued, only while a service is attached | iroh 32, TCP 32, hub 8 |
+| Inbound streams queued, only while a service is attached | iroh 32, hub 8 |
 | Inbound iroh connections with Rocky ALPNs; streams in flight each | 64; 4 |
 | Inbound iroh link connections; streams in flight each | 64 separately; 4 |
 | Cached outbound iroh connections | 64 |
 | `RockyEndpoint` inbound streams per application protocol | 64 |
-| Dial and stream open | iroh and SDK dial 15 s each; TCP connect and preamble 10 s |
+| Dial and stream open | iroh and SDK dial 15 s each |
 | Handshake or channel frame read or write | 10 s |
 | Pairing/renewal exchange | 30 s after dialing; each route has its own dial deadline |
 | Request channels per sync and peer | 16, each with its own byte budget |
@@ -234,8 +218,8 @@ in back-off. Disabling that worker cancels its attempts within one second.
 
 ## Qualification
 
-- `cargo test -p rocky-sdk`: convergence over TCP, iroh and the hub (`engine`),
-  a chunk-contract transport with small queues (`adapter`), and `faults`:
+- `cargo test -p rocky-sdk`: convergence over loopback iroh and the hub (`engine`),
+  and `faults`:
   streams cut during handshake, push and pull lose no local row and leave no
   partial one; a 4 KiB pipe converges; inbound streams beyond 32 are dropped
   and served again once free.
@@ -253,8 +237,8 @@ in back-off. Disabling that worker cancels its attempts within one second.
   database that used it.
 - `cargo test -p rocky-sdk --no-default-features` and
   `cargo check --manifest-path sdks/native/Cargo.toml --no-default-features`.
-- `./examples/shoppinglist-app/check`: a Kotlin transport and a Kotlin protocol
-  on a `RockyEndpoint`.
+- `./examples/shoppinglist-app/check`: the app's integration tests over
+  loopback iroh and a Kotlin protocol on a `RockyEndpoint`.
 
 - `cargo test -p rocky-iroh --test discovery`: members of a topic find each
   other over mDNS and through the rendezvous record on a local lookup server,
@@ -285,3 +269,6 @@ are not qualified ([phase 22](../features_07/22-qualification.md)).
   closes application infrastructure.
 - Contacts and routes are unsigned hints: the link handshake already
   proves the node key, and a signature would suggest routes are trusted.
+- One transport: iroh already authenticates, encrypts, keeps connections
+  alive and measures paths, so Rocky needs no liveness, preamble or chunk
+  adapter of its own ([decision 0065](../decisions/0065-iroh-only-transport.md)).

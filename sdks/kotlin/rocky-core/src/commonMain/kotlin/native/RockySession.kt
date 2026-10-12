@@ -369,9 +369,29 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                     LinkState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)),
                     it.getValue("opened").jsonPrimitive.contentOrNull?.toLong(),
                     it.getValue("round_trip_ms").jsonPrimitive.contentOrNull?.toLong(),
+                    it.getValue("paths").jsonArray.map { path -> linkPath(path.jsonObject) },
                 )
             },
         )
+        private fun linkPath(value: JsonObject): LinkPath {
+            fun count(name: String) = value.text(name).toLong()
+            return LinkPath(
+                value.getValue("selected").jsonPrimitive.boolean,
+                value.text("kind"),
+                value.text("remote"),
+                value.getValue("local").jsonPrimitive.contentOrNull,
+                count("rtt_us"),
+                value.text("mtu").toInt(),
+                count("window"),
+                count("sent_bytes"),
+                count("sent_datagrams"),
+                count("received_bytes"),
+                count("received_datagrams"),
+                count("lost_packets"),
+                count("lost_bytes"),
+                count("congestion_events"),
+            )
+        }
         private fun discovery(value: JsonObject): DiscoveryStatus {
             fun path(name: String) = value.getValue("paths").jsonObject.getValue(name).jsonObject.let {
                 DiscoveryPath(DiscoveryPathState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)), it["reason"]?.jsonPrimitive?.contentOrNull)

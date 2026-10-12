@@ -16,7 +16,7 @@ class DatabaseObservationLifetimeTest {
                 primaryKey("id")
             }
         }
-        val database = RockyDatabase.create(File(root, "database"), schema, PeerTransport.Tcp(), automaticSync = false)
+        val database = RockyDatabase.create(File(root, "database"), schema, PeerTransport.Iroh.isolated(), automaticSync = false)
         try {
             withTimeout(2_000) {
                 val snapshot = CompletableDeferred<Unit>()

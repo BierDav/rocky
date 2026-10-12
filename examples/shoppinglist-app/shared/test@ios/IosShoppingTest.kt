@@ -37,7 +37,7 @@ class IosShoppingTest {
             "Simulator",
             room = { Room.databaseBuilder<ShoppingDatabase>(name = it) },
             secrets = { secrets },
-            transport = { PeerTransport.Tcp("127.0.0.1:0") },
+            transport = { PeerTransport.Iroh.isolated() },
         )
         var node = ShoppingNode.create(platform)
         try {

@@ -100,12 +100,6 @@ sealed interface PeerTransport {
         }
     }
 
-    /** Plain TCP. A device listens on `listen`; without it an issuer listens on an ephemeral loopback port and a member only dials. */
-    data class Tcp(val listen: String? = null, val advertised: String? = null) : PeerTransport
-
-    /** A transport the application implements, starts and closes. Closing the database leaves it open. */
-    class Custom(val transport: StreamTransport) : PeerTransport
-
     /** An endpoint the application owns, which also serves its own protocols. Closing the database leaves it open. */
     class Endpoint(val endpoint: AppEndpoint) : PeerTransport
 }
@@ -126,23 +120,6 @@ interface ByteStream {
 
     /** Abandons the stream; a pending `read` ends. */
     suspend fun close()
-}
-data class InboundStream(val protocol: String, val stream: ByteStream)
-
-/**
- * A transport defined in Kotlin. `protocol` is a versioned name to carry to the accepting side unchanged.
- * A stream must buffer 64 KiB per direction or forward without waiting for the peer to read.
- */
-interface StreamTransport {
-    /** Names the address format; routes of another kind are not dialed. */
-    val kind: String
-
-    /** Where peers reach this device. */
-    suspend fun address(): String
-    suspend fun connect(address: String, protocol: String): ByteStream
-
-    /** The next inbound stream, or null once the transport closed. */
-    suspend fun accept(): InboundStream?
 }
 
 /** One way to reach a device. A hint: whoever answers must still prove the device's key. */
@@ -169,8 +146,37 @@ data class Peer(
 
 enum class LinkState { Open, Opening, Closed }
 
-/** Link lifetime and the latest ping measurement; pings do not emit readiness changes. */
-data class PeerLink(val state: LinkState, val openedAtEpochSeconds: Long?, val roundTripMillis: Long?)
+/**
+ * Link lifetime and its network paths, measured by the transport when status is read. [roundTripMillis] is the
+ * selected path's. Measurements alone do not emit readiness changes.
+ */
+data class PeerLink(
+    val state: LinkState,
+    val openedAtEpochSeconds: Long?,
+    val roundTripMillis: Long?,
+    val paths: List<LinkPath> = emptyList(),
+)
+
+/**
+ * One network path of an open link, the selected one first. [kind] is `direct` for an IP path or `relay`; [remote]
+ * is the peer's socket address or relay URL. Counters cover the path's lifetime; [window] is the congestion window.
+ */
+data class LinkPath(
+    val selected: Boolean,
+    val kind: String,
+    val remote: String,
+    val local: String?,
+    val roundTripMicros: Long,
+    val mtu: Int,
+    val window: Long,
+    val sentBytes: Long,
+    val sentDatagrams: Long,
+    val receivedBytes: Long,
+    val receivedDatagrams: Long,
+    val lostPackets: Long,
+    val lostBytes: Long,
+    val congestionEvents: Long,
+)
 
 /** A `rocky://peer/…` URI naming this device and its current route. It grants nothing. */
 data class Contact(val uri: String, val node: String, val routes: List<Route>)

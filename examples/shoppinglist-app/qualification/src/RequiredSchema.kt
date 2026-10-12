@@ -1,4 +1,4 @@
-package shopping.qualification
+package org.example.examples.shopping.qualification
 
 import kotlinx.coroutines.runBlocking
 import org.example.examples.shopping.data.db.ShoppingSchema
@@ -8,10 +8,10 @@ import java.io.File
 import java.nio.file.Files
 
 /**
- * The preflight before device qualification: the definition builds by hand and from the shopping app's Room export
+ * `required-schema`, the preflight before device qualification: the definition builds by hand and from the shopping app's Room export
  * to the same bytes, and the native runtime installs either and reopens with the other.
  */
-fun main() = runBlocking {
+internal fun requiredSchema() = runBlocking {
     val checkout = generateSequence(File(System.getProperty("user.dir")).absoluteFile) { it.parentFile }.first { File(it, "project.yaml").isFile }
     val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/6.json").readText()
     val required = ShoppingSchema

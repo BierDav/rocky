@@ -35,8 +35,6 @@ pub enum Message {
         persistent: bool,
     },
     Channel(channels::Packet),
-    Ping,
-    Pong,
     Close {
         reason: CloseReason,
     },
@@ -318,9 +316,9 @@ impl Link {
 }
 impl Link {
     /// Carries request channels until either side ends the link: sessions the
-    /// peer opens go to `incoming`, pings are answered. Signals and pushes are
-    /// ignored; an embedder that needs liveness or live changes drives the
-    /// link itself, as the SDK does.
+    /// peer opens go to `incoming`. Signals and pushes are ignored; an
+    /// embedder that needs live changes drives the link itself, as the SDK
+    /// does. Liveness is the transport's.
     pub async fn drive(
         self,
         incoming: tokio::sync::mpsc::Sender<NativeSession>,
@@ -329,12 +327,10 @@ impl Link {
             mut reader,
             mut writer,
             mut channels,
-            direction,
             ..
         } = self;
         let mut outgoing =
             std::mem::replace(&mut channels.outgoing, tokio::sync::mpsc::channel(1).1);
-        let (controls, mut control) = tokio::sync::mpsc::channel(4);
         let receive = async {
             loop {
                 let frame = match reader.receive().await {
@@ -356,32 +352,26 @@ impl Link {
                         generation,
                         started,
                     } => channels.reconcile(frame.direction, generation, started)?,
-                    Message::Ping if frame.direction != direction => controls
-                        .try_send(Frame::new(frame.direction, Message::Pong))
-                        .map_err(|_| denied("link control quota"))?,
                     Message::Close { .. } => return Ok(()),
                     _ => {}
                 }
             }
         };
         let send = async {
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(frame) = control.recv() => writer.send(frame).await?,
-                    frame = outgoing.recv() => {
-                        let Some(frame) = frame else { return writer.finish().await };
-                        let finished = match frame.message {
-                            Message::Reconcile { generation, started: false } => Some(generation),
-                            _ => None,
-                        };
-                        writer.send(frame).await?;
-                        if let Some(generation) = finished {
-                            channels.handle.flushed_reconcile(generation);
-                        }
-                    }
+            while let Some(frame) = outgoing.recv().await {
+                let finished = match frame.message {
+                    Message::Reconcile {
+                        generation,
+                        started: false,
+                    } => Some(generation),
+                    _ => None,
+                };
+                writer.send(frame).await?;
+                if let Some(generation) = finished {
+                    channels.handle.flushed_reconcile(generation);
                 }
             }
+            writer.finish().await
         };
         tokio::select! {
             result = receive => result,
@@ -621,12 +611,15 @@ mod tests {
     use super::*;
     #[test]
     fn channels_are_bounded_and_control_has_its_own_channel() {
-        assert!(Frame::new(false, Message::Ping).validate().is_ok());
+        let close = || Message::Close {
+            reason: CloseReason::Offline,
+        };
+        assert!(Frame::new(false, close()).validate().is_ok());
         assert!(
             Frame {
                 channel: CHANNELS,
                 direction: false,
-                message: Message::Ping
+                message: close()
             }
             .validate()
             .is_err()
@@ -635,7 +628,7 @@ mod tests {
             Frame {
                 channel: 1,
                 direction: false,
-                message: Message::Pong
+                message: close()
             }
             .validate()
             .is_err()
@@ -718,11 +711,12 @@ mod tests {
     }
     #[test]
     fn only_current_link_name_and_handshake_label() {
+        // Frames without Ping and Pong took the new name; the handshake is unchanged.
         assert_eq!(
-            rocky_core::net::Protocol::named(b"rocky/link/1"),
+            rocky_core::net::Protocol::named(b"rocky/link/2"),
             Some(rocky_core::net::Protocol::Link)
         );
-        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
+        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v1");
     }
 }

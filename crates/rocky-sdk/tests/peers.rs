@@ -5,7 +5,7 @@ use common::{Device, Failure, introduce};
 use data_encoding::BASE64URL_NOPAD;
 use rocky_sdk::{
     Network,
-    transport::{Connector, TransportOptions, memory::Hub},
+    transport::{Connector, memory::Hub},
 };
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
@@ -15,11 +15,10 @@ mod common;
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
     Network::Owned(hub.connector(name))
 }
-fn tcp() -> Network {
-    Network::Owned(Arc::new(TransportOptions::Tcp {
-        listen: Some("127.0.0.1:0".into()),
-        advertised: None,
-    }))
+#[cfg(feature = "iroh")]
+fn iroh() -> Network {
+    use rocky_sdk::transport::TransportOptions;
+    Network::Owned(Arc::new(TransportOptions::isolated_iroh("127.0.0.1:0")))
 }
 /// A creator and members named `b`, `c`, … enrolled over `hub`.
 async fn enroll(root: &Path, hub: &Arc<Hub>, members: &[&str]) -> Result<Vec<Device>, Failure> {
@@ -190,6 +189,7 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
     Ok(())
 }
 
+#[cfg(feature = "iroh")]
 #[tokio::test]
 async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -211,20 +211,24 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
     }
 
     // Both devices come back on another transport kind.
-    let a = Device::open(&root.path().join("a"), Some(tcp()))?;
-    let b = Device::open(&root.path().join("b"), Some(tcp()))?;
+    let a = Device::open(&root.path().join("a"), Some(iroh()))?;
+    let b = Device::open(&root.path().join("b"), Some(iroh()))?;
     assert_eq!(a.database.scope(), scope);
     assert_eq!(
         (identity(&a).await, identity(&b).await),
         (before_a, before_b)
     );
-    assert_eq!(a.ok(json!({"type": "domain"})).await["transport"], "tcp");
+    assert_eq!(a.ok(json!({"type": "domain"})).await["transport"], "iroh");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     // The member only knows the creator's old route.
     let error = b.sync().await.err().ok_or("no route yet")?;
     assert_eq!(error["code"], "rejected", "{error}");
-    assert!(error["message"].as_str().is_some_and(|m| m.contains("tcp")));
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("iroh"))
+    );
     // A fresh contact adds the route; the old one is kept for its kind.
     b.add_peer(&a.contact().await)
         .await
@@ -236,7 +240,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
 
     // An address is a hint, not a grant: another enrolled device behind
     // the creator's route is not taken for the creator.
-    let c = Device::open(&root.path().join("c"), Some(tcp()))?;
+    let c = Device::open(&root.path().join("c"), Some(iroh()))?;
     let c_contact: Value = decode(&c.contact().await, "rocky://peer/")?;
     let mut forged: Value = decode(&a.contact().await, "rocky://peer/")?;
     forged["routes"] = c_contact["routes"].clone();

@@ -194,7 +194,7 @@ on receipt, projection rebuild and reopen.
   `ConstraintDatabase` fixture with both policies and delete actions imports to
   the hand-built descriptor, installs natively, reopens, and is refused on the
   trusted profile.
-- `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema`: the scope's shopping schema, hand-built and
+- `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema`: the scope's shopping schema, hand-built and
   imported from Room with its overlay, has identical bytes and installs
   natively from either; `ShoppingIntegrationTest` (`cd examples/shoppinglist-app && ./kotlin test -m shared`)
   covers its DAOs, per-list titles, `SET NULL` categories and cascading lists.

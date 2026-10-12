@@ -1,11 +1,11 @@
 #!/bin/sh
-# Isolated fallback binding spike; this does not qualify the common SDK or iroh.
+# Isolated binding spike over loopback iroh; this does not qualify the common SDK.
 set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 export IPHONEOS_DEPLOYMENT_TARGET=13.0
 cargo build --manifest-path sdks/native/Cargo.toml --features bindgen --bin rocky-bindgen --locked
-cargo build --manifest-path sdks/native/Cargo.toml --lib --target aarch64-apple-ios-sim --no-default-features --locked
+cargo build --manifest-path sdks/native/Cargo.toml --lib --target aarch64-apple-ios-sim --locked
 work="$repo_root/local/ios-binding-spike"
 rm -rf "$work/src" "$work/src@ios"
 mkdir -p "$work/src" "$work/src@ios" "$work/cinterop@ios" "$work/generated"
@@ -22,7 +22,7 @@ package = rocky_uniffi.cinterop
 compilerOpts = -I$work/generated
 staticLibraries = librocky_uniffi.a
 libraryPaths = $repo_root/sdks/native/target/aarch64-apple-ios-sim/debug
-linkerOpts = -framework CoreFoundation -liconv
+linkerOpts = -framework CoreFoundation -framework Security -framework SystemConfiguration -framework Network -liconv
 DEFINITION
 # The spike is a Kotlin toolchain module; the shopping-list app carries the wrapper.
 examples/shoppinglist-app/kotlin test --project-dir "$work" -p iosSimulatorArm64

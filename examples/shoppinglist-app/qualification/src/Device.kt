@@ -66,18 +66,18 @@ private class DeviceProcess {
     }
 
     suspend fun handle(request: JsonObject): JsonElement {
-        fun tcp() = PeerTransport.Tcp(request.text("listen"))
+        fun loopback() = PeerTransport.Iroh.isolated(request.text("listen"))
         fun directory() = File(request.text("directory"))
         val list = { request.long("list") }
         return when (request.text("op")) {
             "schema" -> Json.parseToJsonElement(ShoppingSchema.json())
 
             "create" -> opened(directory()) {
-                RockyDatabase.create(directory(), ShoppingSchema, tcp(), automaticSync = false)
+                RockyDatabase.create(directory(), ShoppingSchema, loopback(), automaticSync = false)
             }
 
             "join" -> opened(directory()) {
-                RockyDatabase.join(directory(), ShoppingSchema, request.text("invitation"), tcp(), automaticSync = false)
+                RockyDatabase.join(directory(), ShoppingSchema, request.text("invitation"), loopback(), automaticSync = false)
             }
 
             "prepare" -> Credentials.prepare(directory().path)
@@ -89,7 +89,7 @@ private class DeviceProcess {
             )
 
             "install" -> opened(directory()) {
-                RockyDatabase.install(directory().path, ShoppingSchema, request.getValue("supplied").jsonObject, transport = tcp())
+                RockyDatabase.install(directory().path, ShoppingSchema, request.getValue("supplied").jsonObject, transport = loopback())
             }
 
             "authorRequest" -> JsonPrimitive(database.credentials.pseudonymRequest(request.text("table")))
@@ -101,7 +101,7 @@ private class DeviceProcess {
                 JsonNull
             }
 
-            "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, tcp(), automaticSync = false) }
+            "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, loopback(), automaticSync = false) }
 
             "pairing" -> JsonPrimitive(
                 when (val profile = request.text("profile")) {

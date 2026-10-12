@@ -5,7 +5,7 @@ command handlers and transports live in application Kotlin; consumers link
 packaged artifacts and need no Rust project, Cargo, Python or native
 executable. Contributor generation still uses those tools. The handles are
 described in [composition](sdk-composition.md); [Android](android.md) adds
-lifecycle and a Keystore store.
+lifecycle.
 
 ## Compose services
 
@@ -106,7 +106,7 @@ bundled-SQLite runtime; the JVM and Android retain JNA. Common openers take
 arrive on Rust threads and must be thread-safe; foreign async traits use
 Kotlin’s default dispatcher. Explicit closure releases owned handles and
 application endpoints remain borrowed. See the [binding guide](kotlin-native-binding.md#threads-cancellation-and-ownership)
-for cancellation, ownership and measured limits. [iOS](ios.md) describes consumer artifacts, Keychain storage and lifecycle.
+for cancellation, ownership and measured limits. [iOS](ios.md) describes consumer artifacts, secrets and lifecycle.
 
 JVM bytecode targets 17. The JVM package carries the locked development
 native profile; publication, optimized artifacts and signing/notarization are

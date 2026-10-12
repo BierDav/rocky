@@ -27,6 +27,8 @@ dependencies:
   - org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-navigation3:2.11.0
   - org.jetbrains.androidx.navigation3:navigation3-ui:1.1.1
   - org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0
+  # Secrets, encrypted and cached in memory: Rocky reads them often.
+  - eu.anifantakis:ksafe:3.3.0
 
 test-dependencies@jvm:
   - org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0

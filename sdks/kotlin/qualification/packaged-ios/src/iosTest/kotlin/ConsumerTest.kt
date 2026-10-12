@@ -9,7 +9,6 @@ import platform.Foundation.NSRecursiveLock
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
 import rocky.*
-import rocky.ios.KeychainSecretStore
 import rocky.room.ROOM_PROFILE
 import rocky.sqlite.RockySQLiteDriver
 import kotlin.test.*
@@ -27,7 +26,7 @@ class ConsumerTest {
                 primaryKey("key")
             }
         }
-        val secrets = TrackedSecrets(KeychainSecretStore("rocky.package." + NSUUID().UUIDString))
+        val secrets = MemorySecrets()
         val db = RockyDatabase.local(directory, definition, secrets)
         db.installAuthors()
         val handle = RockyDatabase.newHandle()
@@ -61,7 +60,6 @@ class ConsumerTest {
             }
         } finally {
             reopened.close()
-            secrets.purge()
             NSFileManager.defaultManager.removeItemAtPath(directory, null)
             val elapsed = started.elapsedNow()
             println("packaged iOS integration test: $elapsed (budget 2 s)")
@@ -70,8 +68,9 @@ class ConsumerTest {
     }
 }
 
-private class TrackedSecrets(private val store: SecretStore) : SecretStore {
-    private val names = mutableSetOf<String>()
+/** The application's store: here only in memory, since the package ships none. */
+private class MemorySecrets : SecretStore {
+    private val held = mutableMapOf<String, ByteArray>()
     private val lock = NSRecursiveLock()
     private fun <T> locked(block: () -> T): T {
         lock.lock()
@@ -81,18 +80,13 @@ private class TrackedSecrets(private val store: SecretStore) : SecretStore {
             lock.unlock()
         }
     }
-    override fun load(name: String): ByteArray? = locked { store.load(name).also { if (it != null) names.add(name) } }
+    override fun load(name: String): ByteArray? = locked { held[name]?.copyOf() }
     override fun store(name: String, secret: ByteArray) = locked {
-        store.store(name, secret)
-        names.add(name)
+        held[name] = secret.copyOf()
         Unit
     }
     override fun delete(name: String) = locked {
-        store.delete(name)
-        names.remove(name)
+        held.remove(name)
         Unit
-    }
-    fun purge() = locked {
-        names.toList().forEach(::delete)
     }
 }

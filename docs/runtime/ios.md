@@ -28,37 +28,17 @@ Gradle repository (`maven { url = uri("/path/to/packaged-ios/maven") }`). The
 depends only on these coordinates. `sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage`
 verifies the full inventory, then builds and runs the consumer on the simulator with Rust tools absent from `PATH`.
 
-## Keychain secret store
+## Secrets
 
-Pass `rocky.ios.KeychainSecretStore(service)` to every create, join, open,
-resume or restore for that installation. Choose a stable service string per
-installation and persist its public name in your application configuration.
-The default remains the file store; selecting the Keychain is explicit.
+The SDK ships no iOS secret store. The application passes its own `SecretStore`,
+backed by storage it chooses, or none for the
+[file fallback](credentials.md#key-providers). The runtime reads secrets often,
+so the store answers loads from memory. The shopping example uses KSafe.
 
-Items are generic passwords identified by service and secret name, with
-`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and synchronization disabled.
-They are available while locked after the first unlock following boot. Before
-that unlock, inaccessible items produce errors. Only `errSecItemNotFound`
-loads as absent; every other Keychain failure includes its OSStatus and fails
-the operation. Store updates the existing item; delete is idempotent.
-`credentials.logout(purge = true)` removes the installation's secrets after
-the existing publisher-custody check permits logout. A sole issuer must first
-transfer custody to another issuer.
-
-Secrets exist in application process memory when used for signing and
-cryptography. They are absent from Rocky's identity directory and SQLite file.
-They are neither included in device backups nor synchronized through iCloud
-Keychain. A device restore carrying the identity's files without its Keychain
-items fails with the missing-secret error; open never manufactures replacement
-keys. Recover through fresh enrollment or the [restore](backup-and-restore.md)
-contract.
-
-Uninstall is not logout: iOS can retain an application's Keychain items across
-uninstall/reinstall. Do not rely on uninstall to purge them; invoke logout
-before removing the installation. A new identity directory creates a fresh
-installation even if old items remain. A device-only item cannot be restored
-to another device. The simulator's Keychain does not qualify device hardware
-protection or locked-device behavior.
+Whatever the store, secrets are absent from Rocky's identity directory and
+SQLite file, open never manufactures a missing secret, and
+`credentials.logout(purge = true)` deletes the installation's secrets after the
+publisher-custody check permits logout.
 
 ## Visibility and sockets
 
@@ -95,7 +75,7 @@ Android uses the same runtime call and keeps its existing lifecycle contract.
 | Lost with the process | What the next open does |
 | --- | --- |
 | Reactor, sessions, subscriptions and waits | Creates new handles; the application subscribes again |
-| Starter endpoint and sockets | Binds with the Keychain transport key, retaining the node ID |
+| Starter endpoint and sockets | Binds with the stored transport key, retaining the node ID |
 | Application-owned endpoint | The application binds it with its own secret and attaches it |
 | An in-flight sync pass | Retries from durable state; sync is idempotent |
 | A write whose reply was lost | `reconcile(handle)` reports whether its atomic local commit happened |
@@ -112,8 +92,8 @@ when reconciliation says it did not commit.
 Run `./sdks/native/check-ios`, `sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true iosSimulatorArm64Test`,
 `./sdks/native/qualify-ios-lifecycle`, `sdks/kotlin/gradlew -p sdks/kotlin packageIos`, then
 `sdks/kotlin/gradlew -p sdks/kotlin qualifyIosPackage` on macOS/Xcode. CI owns these simulator and
-artifact gates. The lifecycle gate checks Keychain persistence, byte-searches
-for secrets, deletion and purge, notifications, the stalled-dial pause, automatic
+artifact gates. The lifecycle gate checks secrets through a supplied store, byte-searches
+for them, deletion and purge, notifications, the stalled-dial pause, automatic
 sync after injected socket closure and subprocess death at commit boundaries.
 The standalone simulator test harness embeds a test Keychain entitlement;
 applications use their own signing identity and access group.
@@ -121,6 +101,6 @@ Only contributor simulator builds enable the `qualification` feature; published
 packages contain neither socket-fault calls nor commit-exit hooks.
 
 [Phase 18 evidence](../features_07/18-ios-evidence.md) records exact results and
-limits. Physical iPhone qualification additionally requires locked-device
-Keychain behavior, restart and restore refusal, and foregrounding after ten
+limits. Physical iPhone qualification additionally requires the locked-device
+behavior of the application's secret store, restart and restore refusal, and foregrounding after ten
 minutes in the background. Simulator results do not establish those properties.

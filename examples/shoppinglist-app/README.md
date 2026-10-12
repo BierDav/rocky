@@ -27,7 +27,8 @@ then build again. Keep the published `.aar`, POM and module metadata.
 
 The desktop keeps its household in `~/.rocky-shopping`, or
 `ROCKY_SHOPPING_DATA`. Install the Android debug APK with `adb install -r`;
-Android keeps secrets in the Keystore and pauses automatic sync in the
+Android keeps secrets in [KSafe](https://github.com/ioannisa/KSafe), encrypted
+at rest and cached in memory once read, and pauses automatic sync in the
 background. The Android lifecycle tracker is registered in `Application.onCreate`,
 before any activity starts, so a lazily created graph cannot miss foreground entry.
 
@@ -238,7 +239,7 @@ wake-ups. The shopping Android app still builds separately.
 
 `shared` builds unchanged screens and logic for `iosArm64` and
 `iosSimulatorArm64`; `iosApp` supplies the Compose host and scene lifecycle,
-and `shared` binds the Room path and Keychain store. Build and test both examples with
+and `shared` binds the Room path and KSafe store. Build and test both examples with
 `./examples/shoppinglist-app/check-ios`. Pair by scanning with camera permission
 on a device, or paste on a simulator.
 See [the device procedure](../../docs/runtime/shopping-devices.md#ios-procedure)

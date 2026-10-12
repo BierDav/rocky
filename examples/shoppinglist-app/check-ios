@@ -5,4 +5,4 @@ app=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$app"
 ./kotlin build -p iosArm64 -p iosSimulatorArm64 -m shared
 ./kotlin test -p iosSimulatorArm64 -m shared
-./kotlin build -p iosSimulatorArm64 -m shoppingIos
+./kotlin build -p iosSimulatorArm64 -m iosApp

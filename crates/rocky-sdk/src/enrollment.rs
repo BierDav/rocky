@@ -200,7 +200,7 @@ impl Minting {
 }
 /// What an issuer keeps besides the registry: its invitation, the device
 /// that claimed it, a revocation it has begun and the keys revoked for good.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Issuing {
     pub invitation: Option<Invitation>,
@@ -214,7 +214,7 @@ pub struct Issuing {
     /// Kept after the statement leaves the set: no renewal for them.
     pub tombstones: BTreeSet<rocky_credentials::PeerId>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Claim {
     pub node: PublicKey,
@@ -225,7 +225,7 @@ pub struct Claim {
 /// A begun revocation: its statement and the key epoch each collection and
 /// group partition rotates to. Signing is deterministic: the statement keeps
 /// its ID however often an interrupted rotation signs it again.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rotation {
     pub node: Option<PublicKey>,
@@ -3140,13 +3140,14 @@ impl Settings {
         })
     }
     /// Saves what a renewal brought before the replica learns it: the keys
-    /// in the provider, then the identity. Returns the keys now listed.
+    /// in the provider, then the identity. Returns the keys now listed and
+    /// whether the identity changed.
     pub fn adopt(
         &mut self,
         path: &Path,
         vault: &Vault,
         renewed: &Renewed,
-    ) -> Result<Vec<(String, rocky_core::KeyEpoch, [u8; 32])>, Failure> {
+    ) -> Result<(Vec<NewKey>, bool), Failure> {
         let mut draft = self.clone();
         let mut held = Vec::new();
         for (name, epoch, key) in &renewed.keys {
@@ -3183,11 +3184,12 @@ impl Settings {
                 next: range.first.max(draft.author_high_water),
             });
         }
-        if serde_json::to_vec(&draft)? != serde_json::to_vec(self)? {
+        let changed = !draft.persisted_eq(self);
+        if changed {
             draft.save(path)?;
         }
         *self = draft;
-        Ok(held)
+        Ok((held, changed))
     }
     /// Answers a renewal with the registry rows to commit before it
     /// leaves. The request proves a device the publisher once issued a
@@ -3957,7 +3959,7 @@ fn whole_partitions(
         .collect()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredContact {
     contact: Contact,
@@ -3983,11 +3985,16 @@ impl Settings {
     }
     fn with_saved_contacts(&self) -> Self {
         let mut saved = self.clone();
+        saved.contact_refs = self.saved_contacts();
         saved
-            .contact_refs
-            .retain(|id, _| !self.resolved_refs.contains(id));
+    }
+    /// The contacts `save` writes: saved ones not yet resolved, and every
+    /// known peer.
+    fn saved_contacts(&self) -> BTreeMap<rocky_credentials::PeerId, StoredContact> {
+        let mut saved = self.contact_refs.clone();
+        saved.retain(|id, _| !self.resolved_refs.contains(id));
         for (node, contact) in &self.peers {
-            saved.contact_refs.insert(
+            saved.insert(
                 rocky_credentials::PeerId::of(*node),
                 StoredContact {
                     contact: contact.clone(),
@@ -3999,6 +4006,65 @@ impl Settings {
             );
         }
         saved
+    }
+    /// Whether `save` writes the same identity for both, compared without
+    /// encoding it. Naming every field keeps a new one from being missed.
+    pub(crate) fn persisted_eq(&self, other: &Self) -> bool {
+        let Self {
+            delivery_nodes: _,
+            contact_refs: _,
+            resolved_refs: _,
+            version,
+            installation,
+            schema,
+            mesh,
+            domain,
+            publisher,
+            manifest,
+            revocations,
+            credentials,
+            ttl,
+            profile,
+            keys,
+            groups,
+            epoch_statements,
+            authority,
+            issuers: _,
+            enrollment_upstream: _,
+            peers: _,
+            contact_meta: _,
+            enrollment_routes: _,
+            logged_out,
+            lineage,
+            minting,
+            pseudonyms,
+            author_high_water,
+            author_issuer,
+            deliveries,
+        } = self;
+        *version == other.version
+            && *installation == other.installation
+            && *schema == other.schema
+            && *mesh == other.mesh
+            && *domain == other.domain
+            && *publisher == other.publisher
+            && *manifest == other.manifest
+            && *revocations == other.revocations
+            && *credentials == other.credentials
+            && *ttl == other.ttl
+            && *profile == other.profile
+            && *keys == other.keys
+            && *groups == other.groups
+            && *epoch_statements == other.epoch_statements
+            && *authority == other.authority
+            && *logged_out == other.logged_out
+            && *lineage == other.lineage
+            && *minting == other.minting
+            && *pseudonyms == other.pseudonyms
+            && *author_high_water == other.author_high_water
+            && *author_issuer == other.author_issuer
+            && *deliveries == other.deliveries
+            && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {
         if self.contact_refs.len() > MAX_CONTACTS

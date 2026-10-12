@@ -25,7 +25,7 @@ const MAX_LINEAGE: usize = 32;
 
 /// A generation a domain left: its schema, signed manifest and the signed
 /// transition to the next. All of it is public.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
     pub schema: Schema,

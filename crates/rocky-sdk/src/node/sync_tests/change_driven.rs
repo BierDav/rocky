@@ -562,14 +562,14 @@ async fn cancellation_offsets(exhaustive: bool) -> Result<(), Failure> {
                         }
                         let a = node(
                             &a_dir,
-                            a_settings.clone(),
+                            (**a_settings).clone(),
                             a_vault.clone(),
                             hub.connector("a").start(true, [0; 32]).await?,
                         )
                         .await?;
                         let b = node(
                             &b_dir,
-                            b_settings.clone(),
+                            (**b_settings).clone(),
                             b_vault.clone(),
                             hub.connector("b").start(true, [0; 32]).await?,
                         )
@@ -701,6 +701,56 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
             a.dispatch(&*a.client(1)?, &json!({"type":"connection", "online":true}))
                 .await?;
             until(|| hub.counts()[1] >= before + 5).await;
+            start(&a, false).await?;
+            a.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unchanged_identity_is_not_rewritten() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            std::fs::remove_file(&a.path)?;
+            a.configure(|_| Ok(())).await?;
+            assert!(!a.path.exists());
+            a.configure(|settings| {
+                settings.ttl += 1;
+                Ok(())
+            })
+            .await?;
+            assert!(a.path.exists());
+            a.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            // With no contact, every automatic pass keeps the published status.
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            start(&a, true).await?;
+            settled(&a).await;
+            let client = a.client(1)?;
+            a.dispatch(&client, &json!({"type":"connection", "online":false}))
+                .await?;
+            until(|| a.sync_status.borrow()["state"] == "offline").await;
+            a.dispatch(&client, &json!({"type":"connection", "online":true}))
+                .await?;
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+            settled(&a).await;
+            assert_ne!(a.sync_status.borrow()["state"], "offline");
             start(&a, false).await?;
             a.detach(None).await;
             Ok(())

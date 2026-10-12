@@ -58,18 +58,31 @@ async fn pseudonym_retries_reopen_and_renewal_keep_the_author() -> Result<(), Fa
         Network::Owned(hub.connector("w")),
     )?;
     let asked = request(&w).await;
+    // Without a network, x cannot ask for its author before the fault.
+    let x_keys = Database::device(&root.join("x"), None)?;
+    let supplied = a.ok(json!({"type": "grant", "device": x_keys, "profile": {"kind": "writer", "scopes": ["items"]}})).await["supplied"].clone();
+    let x = Device::new(Database::install(
+        Open {
+            network: None,
+            ..open(&root.join("x"), &hub, "x")
+        },
+        serde_json::from_value(supplied)?,
+    )?)?;
     // Stop automatic sync before injecting a failure in the shared writer path.
     a.network.take().ok_or("attached network")?.close().await;
     // A failed durable write returns no assignment and consumes no number.
     let before = identity(root, "a")?;
     std::fs::create_dir(root.join("a/identity.tmp"))?;
     assert!(
-        a.call(json!({"type": "pseudonym_assign", "request": asked}))
+        a.call(json!({"type": "pseudonym_assign", "request": request(&x).await}))
             .await
             .is_err()
     );
+    // An assignment the registry already holds needs no write.
+    assert_eq!(author(&assign(&a, &asked).await)?, 2);
     assert_eq!(identity(root, "a")?, before);
     std::fs::remove_dir(root.join("a/identity.tmp"))?;
+    x.close().await;
     a.network = Some(
         a.database
             .attach(Network::Owned(hub.connector("a")))

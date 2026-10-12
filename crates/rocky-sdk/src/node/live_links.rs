@@ -340,7 +340,7 @@ impl Node {
         service: Arc<Link>,
         stream: Stream,
         expected: Option<PublicKey>,
-        settings: Settings,
+        settings: Shared<Settings>,
         handshake_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), Failure> {
         if !self.foreground.load(Ordering::SeqCst)
@@ -358,7 +358,7 @@ impl Node {
                 stream,
                 &self.replica,
                 local,
-                settings.credentials,
+                settings.credentials.clone(),
                 expected,
             ))
             .await
@@ -369,7 +369,7 @@ impl Node {
                     stream,
                     &self.replica,
                     local,
-                    settings.credentials,
+                    settings.credentials.clone(),
                 ))
                 .await
             }

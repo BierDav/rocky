@@ -24,7 +24,7 @@ class IosShoppingTest {
     @Test fun offlineWriteSurvivesBackgroundAndReopen() = runBlocking<Unit> {
         val began = TimeSource.Monotonic.markNow()
         val root = NSTemporaryDirectory() + "shopping-ios-" + NSUUID().UUIDString
-        // A standalone test executable has no app identity for the Keychain, which Rocky's own tests cover.
+        // The app keeps secrets in KSafe; this test needs only a store Rocky can call.
         val lock = ReentrantLock()
         val stored = mutableMapOf<String, ByteArray>()
         val secrets = object : SecretStore {

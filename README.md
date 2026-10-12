@@ -14,7 +14,7 @@ is the first complete consumer target; universal adapter availability is not cla
 
 Phases 1 to 8 of an earlier roadmap are implemented; the current roadmap
 governs ongoing work. The [arm64 iOS binding](docs/runtime/kotlin-native-binding.md)
-shares the common SDK and Room sources; [iOS packaging, Keychain and lifecycle](docs/runtime/ios.md) have separate qualification gates. [Recoverable generations](docs/runtime/generations.md),
+shares the common SDK and Room sources; [iOS packaging and lifecycle](docs/runtime/ios.md) have separate qualification gates. [Recoverable generations](docs/runtime/generations.md),
 [fresh-device backup/restore](docs/runtime/backup-and-restore.md) and
 [composable packaged Kotlin SDKs](docs/runtime/sdk-packaging.md) provide the bounded
 single-file/JVM desktop profile; [qualification limits](docs/runtime/sdk-packaging.md#build-and-consume-a-package)

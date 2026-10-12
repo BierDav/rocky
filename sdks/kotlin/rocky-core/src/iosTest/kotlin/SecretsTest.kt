@@ -11,32 +11,15 @@ import platform.Foundation.NSFileManager
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
 import platform.Foundation.getBytes
-import rocky.ios.KeychainSecretStore
 import kotlin.test.*
 
-class KeychainTest {
-    @Test fun absentUpdateDeleteAndIndependentStoreObjects() {
-        val service = "rocky.test." + NSUUID().UUIDString
-        val store = KeychainSecretStore(service)
-        try {
-            assertNull(store.load("key"))
-            store.store("key", byteArrayOf(0, 1, -1))
-            assertContentEquals(byteArrayOf(0, 1, -1), KeychainSecretStore(service).load("key"))
-            store.store("key", byteArrayOf(7, 0))
-            assertContentEquals(byteArrayOf(7, 0), store.load("key"))
-            store.delete("key")
-            store.delete("key")
-            assertNull(store.load("key"))
-        } finally {
-            store.delete("key")
-        }
-    }
-
-    @Test fun identityFilesContainNoSecretsAndMissingKeychainRefusesOpen() = runBlocking<Unit> {
-        val service = "rocky.test." + NSUUID().UUIDString
-        val root = NSTemporaryDirectory() + "rocky-keychain-" + NSUUID().UUIDString
-        val recorded = RecordingSecrets(KeychainSecretStore(service))
-        val definition = schema("keychaingate", 1) {
+/** What the runtime does with an application-supplied store. */
+class SecretsTest {
+    @Test fun identityFilesContainNoSecretsAndAMissingSecretRefusesOpen() = runBlocking<Unit> {
+        val root = NSTemporaryDirectory() + "rocky-secrets-" + NSUUID().UUIDString
+        val memory = MemorySecrets()
+        val recorded = RecordingSecrets(memory)
+        val definition = schema("secretsgate", 1) {
             table("items") {
                 text("key")
                 primaryKey("key")
@@ -45,7 +28,7 @@ class KeychainTest {
         try {
             val database = RockyDatabase.local(root, definition, recorded)
             database.close()
-            val reopened = RockyDatabase.open(root, definition, secrets = KeychainSecretStore(service))
+            val reopened = RockyDatabase.open(root, definition, secrets = memory)
             reopened.close()
             val manager = NSFileManager.defaultManager
             val paths = manager.subpathsOfDirectoryAtPath(root, null) ?: error("cannot enumerate identity directory")
@@ -67,9 +50,9 @@ class KeychainTest {
         }
     }
 
-    @Test fun logoutPurgeDeletesEveryKeychainItemOfTheIdentity() = runBlocking<Unit> {
+    @Test fun logoutPurgeDeletesEverySecretOfTheIdentity() = runBlocking<Unit> {
         val root = NSTemporaryDirectory() + "rocky-purge-" + NSUUID().UUIDString
-        val secrets = RecordingSecrets(KeychainSecretStore("rocky.test." + NSUUID().UUIDString))
+        val secrets = RecordingSecrets(MemorySecrets())
         val definition = schema("purgegate", 1) {
             table("items") {
                 text("key")
@@ -99,6 +82,17 @@ class KeychainTest {
             secrets.purge()
             NSFileManager.defaultManager.removeItemAtPath(root, null)
         }
+    }
+}
+
+internal class MemorySecrets : SecretStore {
+    private val lock = ReentrantLock()
+    private val held = mutableMapOf<String, ByteArray>()
+    override fun load(name: String): ByteArray? = lock.withLock { held[name]?.copyOf() }
+    override fun store(name: String, secret: ByteArray) = lock.withLock { held[name] = secret.copyOf() }
+    override fun delete(name: String) = lock.withLock {
+        held.remove(name)
+        Unit
     }
 }
 

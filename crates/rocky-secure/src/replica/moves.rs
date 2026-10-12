@@ -162,6 +162,9 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_consumed(hash BLOB PRIMARY KEY,reason TEXT NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_followed(original BLOB NOT NULL,scope BLOB NOT NULL,field BLOB NOT NULL,PRIMARY KEY(original,scope,field)) WITHOUT ROWID",
 ];
+/// The moved rows each commit follows. `CROSS JOIN` keeps the few marked
+/// moves as the outer loop: without it SQLite scans every stored row.
+pub(crate) const MOVE_SCAN: &str = "SELECT r.scope,r.row,r.fields FROM secure_move_rows m CROSS JOIN secure_rows r ON r.scope=m.scope AND r.row=m.row";
 impl<A: RowApplication> Inner<A> {
     pub(super) async fn consume(&self, hash: Hash, reason: &str) -> Result<(), Error> {
         self.conn
@@ -733,12 +736,7 @@ impl<A: RowApplication> Inner<A> {
         if self.row_authors.is_empty() || self.local_grants(time).is_err() {
             return Ok(());
         }
-        let rows = collect_rows(
-            self.conn
-                .query("SELECT r.scope,r.row,r.fields FROM secure_move_rows m JOIN secure_rows r ON r.scope=m.scope AND r.row=m.row", ())
-                .await?,
-        )
-        .await?;
+        let rows = collect_rows(self.conn.query(MOVE_SCAN, ()).await?).await?;
         for row in rows {
             let [
                 SqlValue::Blob(scope),

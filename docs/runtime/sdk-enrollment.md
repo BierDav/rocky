@@ -84,9 +84,9 @@ val database = RockyDatabase.create(directory, schema, secrets = store)
 ```
 
 Without a store, keys are owner-only plaintext files in `secrets/` of the data
-directory. On Android, `KeystoreSecretStore(context)` seals them
-([Android](android.md#keystore-secret-store)); no desktop keychain adapter
-ships. Opening without a needed key fails; no key is made in its place. Local
+directory. An application that wants them protected supplies its own store,
+as the [shopping example](../../examples/shoppinglist-app/README.md) does on
+Android ([key providers](credentials.md#key-providers)). Opening without a needed key fails; no key is made in its place. Local
 rows are plaintext at rest.
 
 ## Persisted formats

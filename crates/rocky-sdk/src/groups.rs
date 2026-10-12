@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 pub(crate) const MAX_GROUP_EPOCHS: usize = 256;
 
 /// A group partition this installation knows, by its group address.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRecord {
     pub group: String,

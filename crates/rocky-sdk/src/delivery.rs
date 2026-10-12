@@ -95,7 +95,7 @@ impl Contents {
 
 /// One envelope this device sends, by its delivery's digest. The sealed
 /// delivery is dropped once the recipient acknowledged it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pending {
     pub recipient: rocky_credentials::PeerId,

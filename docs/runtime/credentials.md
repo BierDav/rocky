@@ -92,7 +92,11 @@ same, or `{"kind": "issuer"}`; unknown fields are refused.
 `get` fails for a missing secret, `create` refuses to overwrite one, and only
 the invitation token is replaced. A lost or deleted key is therefore an error
 at the next use, never a silently regenerated identity. The SDK's `SecretStore`
-is this trait; the Kotlin `SecretStore` adapts a keychain to it.
+is this trait; the Kotlin `SecretStore` adapts an application's storage to it.
+
+The runtime calls `load` on its own thread, often several times a second, and
+waits for it: a store answers from memory and pays any decryption once. `store`
+returns after the secret is durable.
 
 `FileKeyProvider` is the fallback: one owner-only file (`0600`, directory
 `0700`) per secret. Its threat model:
@@ -100,10 +104,8 @@ is this trait; the Kotlin `SecretStore` adapts a keychain to it.
 - Secrets are **plaintext at rest**. File permissions protect them from other
   users of the machine, not from the owner, an administrator, malware running
   as the owner, a backup or a copy of the disk.
-- Use a platform keystore adapter where one exists. Android has
-  `KeystoreSecretStore`, which seals each secret under a non-exportable
-  Keystore key ([threat model](android.md#keystore-secret-store)); others
-  implement the same trait.
+- Supply a `SecretStore` backed by the platform's protected storage where one
+  exists. The application chooses and owns it; the SDK ships no Android store.
 
 Local projections are plaintext at rest as well; see
 [permissions and sync](permissions-and-sync.md#transactions-and-recovery).

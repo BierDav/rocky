@@ -100,7 +100,7 @@ impl Capability {
         Ok(self.extended()?.authors)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SignedCapability {
     /// Portable assignment provenance; carries no partition tuples.
     pub author_binding: crate::AuthorBinding,
@@ -126,7 +126,7 @@ impl SignedCapability {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CredentialChain(pub Vec<SignedCapability>);
 impl CredentialChain {
     /// Concrete grants of a node under `revocations` at `time`.

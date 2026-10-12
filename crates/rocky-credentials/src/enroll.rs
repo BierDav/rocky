@@ -52,7 +52,7 @@ pub(crate) fn open(key: Commitment, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>
 
 /// An issuer's record of one invitation. The token itself is a secret in
 /// the issuer's key provider and in the invitation it hands out.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Invitation {
     digest: Commitment,
     pub expires: u64,

@@ -350,12 +350,11 @@ JVM desktop, Android and arm64 iOS device/simulator. In `rocky-core`, `src/commo
 is common code, including the runtime adapter under `src/commonMain/kotlin/native`; generated
 JNA/cinterop implementations supply the same contract. `src/jnaMain/kotlin` contains
 Java platform calls and `File` overloads; `src/iosMain/kotlin` supplies Foundation and
-Security calls, the device-only Keychain store and notification lifecycle
+Security calls and notification lifecycle
 ([iOS](runtime/ios.md)). `sdks/kotlin/gradlew -p sdks/kotlin packageIos` stages iOS publications;
 `sdks/kotlin/qualification/packaged-ios` is the independent packaged consumer; `rocky-iroh` refreshes or rebinds starter
 sockets on foreground. The test-only `platform-test` module (`sdks/kotlin/qualification/platform-test`) supplies file fixtures.
-`src/androidMain/kotlin` adds the Android Keystore store
-and lifecycle binding. The Android variant of `rocky-core` ships the same sources as an AAR for
+`src/androidMain/kotlin` adds the lifecycle binding. The Android variant of `rocky-core` ships the same sources as an AAR for
 [Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` is the Android library whose Cargo
 task builds the native runtime; `rocky-core`'s Android variant depends on it. `sdks/kotlin/build-logic`
 holds the Gradle convention plugins and task types that

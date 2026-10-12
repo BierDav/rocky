@@ -89,29 +89,11 @@ What a killed process loses, and what the next open does:
 Committed rows, outbox and credentials are in the database file and survive. A process killed while
 backgrounded is replaced by a fresh one; nothing restores open handles.
 
-## Keystore secret store
+## Secrets
 
-`rocky.android.KeystoreSecretStore(context)` implements the [key provider contract](credentials.md#key-providers):
-
-- Each secret is sealed with AES-256-GCM under one Android Keystore key (alias
-  `rocky.secret-store.v1`), created on the first `store`, non-exportable, with randomized encryption.
-  `strongBox = true` requests StrongBox where the device has it.
-- Files hold only the sealed form, bound to their name as associated data, in `noBackupFilesDir/rocky-secrets`:
-  `RKSS`, format byte `1`, the 12-byte nonce, then ciphertext and tag. They are written atomically and
-  synced. A secret is plaintext only in process memory, where the runtime signs and decrypts with it.
-- Secret names support the key-provider contract's 255-byte ASCII limit, including
-  group addresses and sibling epoch hashes. Temporary filenames are short and
-  independent of the secret name.
-- A name with no file loads as absent, so `Vault` reports a missing secret and never makes one.
-- A file that does not open fails loudly: a lost Keystore key, a file moved to another name or altered
-  bytes are errors, never an absent secret. A new key is refused while sealed files exist, since it
-  would orphan them; recovering such a device is a new enrollment or a [restore](backup-and-restore.md).
-- No user authentication is required for the key, because sync runs without the user present.
-
-It protects keys from a copy of the app's files, a backup and other apps; the Keystore keeps the key
-from the app's own process too. It does not protect against code running inside the app process, a
-rooted device or an emulator: an emulator's Keystore is software-backed (security level 0). The file
-store remains the fallback and the default when no store is passed.
+The SDK ships no Android secret store. The application passes its own `SecretStore`, backed by storage
+it chooses, or none for the [file fallback](credentials.md#key-providers). The runtime reads secrets
+often, so the store answers loads from memory. The shopping example uses KSafe.
 
 ## Qualification
 

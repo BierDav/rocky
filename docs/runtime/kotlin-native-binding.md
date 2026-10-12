@@ -3,7 +3,7 @@
 `rocky-core`, `rocky-sqlite` and `rocky-room` share their Kotlin API and common
 sources across JVM, Android, `iosArm64` and `iosSimulatorArm64`.
 [Decision 0058](../decisions/0058-kotlin-native-binding.md) records the XL
-fallback over UniFFI 0.32.2. Consumer packaging, Keychain storage and application
+fallback over UniFFI 0.32.2. Consumer packaging and application
 lifecycle qualification belong to [phase 18](../features_07/18-ios-packaging-keychain-lifecycle.md).
 
 ## Generate and qualify

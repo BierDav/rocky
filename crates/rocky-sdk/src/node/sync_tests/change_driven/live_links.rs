@@ -389,7 +389,7 @@ async fn saturated_link_budget_leaves_pair_and_command_admission_free() -> Resul
                 stream,
                 &b.replica,
                 PrivateKey::from_bytes(&b.vault.get("node")?),
-                settings.credentials,
+                settings.credentials.clone(),
                 Some(PrivateKey::from_bytes(&a.vault.get("node")?).public_key()),
             )
             .await?;

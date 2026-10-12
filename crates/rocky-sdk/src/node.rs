@@ -9,6 +9,7 @@ mod live_links;
 mod mesh;
 mod partition;
 mod registry;
+mod shared;
 use crate::{
     Failure,
     domain::Domain,
@@ -29,6 +30,7 @@ use rocky_secure::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+pub(crate) use shared::Shared;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -243,7 +245,7 @@ pub(crate) struct Node {
     /// The scopes this device's credentials name. A renewal keeps them.
     granted: std::sync::Mutex<Vec<ResourceScope>>,
     pub vault: Vault,
-    pub settings: Mutex<Settings>,
+    pub settings: Mutex<Shared<Settings>>,
     pub path: PathBuf,
     pub online: AtomicBool,
     /// Set by logout; `purge` also removes local data at close.
@@ -320,7 +322,7 @@ impl Node {
             granted: std::sync::Mutex::new(settings.granted(&domain)),
             domain,
             vault,
-            settings: Mutex::new(settings),
+            settings: Mutex::new(Shared::new(settings)),
             path,
             online: AtomicBool::new(true),
             ended: Mutex::new(None),
@@ -1001,6 +1003,10 @@ impl Node {
                 }
                 if enabled {
                     self.reset_retry(None);
+                    // A pass with nothing to dial republishes the current status.
+                    if self.sync_status.borrow()["state"] == "offline" {
+                        self.synced(json!({"state": "idle", "retry": false}));
+                    }
                 }
                 if !enabled && let Some(service) = self.current() {
                     service
@@ -1061,7 +1067,8 @@ impl Node {
             .lock()
             .map_err(|_| "peer status poisoned".into())
     }
-    /// Applies a change of the configured peers and saves it.
+    /// Applies a change of the configured peers, saving it when what is
+    /// persisted changed.
     async fn configure<T>(
         &self,
         change: impl FnOnce(&mut Settings) -> Result<T, Failure>,
@@ -1069,7 +1076,9 @@ impl Node {
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         let result = change(&mut draft).map_err(named)?;
-        draft.save(&self.path)?;
+        if !draft.persisted_eq(&settings) {
+            draft.save(&self.path)?;
+        }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
         *settings = draft;
         Ok(result)
@@ -1177,7 +1186,7 @@ impl Node {
             .map_err(refused)?;
         let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
-        let mut keys = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let (mut keys, _) = settings.adopt(&self.path, &self.vault, &renewed)?;
         if settings.begin_exposure_rotation(&registry)? {
             settings.save(&self.path)?;
             keys.extend(
@@ -1592,7 +1601,7 @@ impl Node {
             drop(settings);
             let settings = snapshot;
             let identity = staging.join("identity.json");
-            std::fs::write(&identity, serde_json::to_vec(&settings)?)?;
+            std::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
             let mut staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
             let evidence = directory.join("coordinator.evidence");
             if evidence.exists() {
@@ -1701,14 +1710,15 @@ impl Node {
     }
     /// Renews this device's credentials: from its issuers on a member,
     /// self-signed on an issuer, which asks the other issuers first when
-    /// `learn` is set. New reader keys arrive with the renewal.
+    /// `learn` is set. New reader keys arrive with the renewal. Returns
+    /// whether anything changed.
     async fn renew(
         &self,
         transport: Option<&dyn Transport>,
         learn: bool,
         first: Option<PublicKey>,
         epochs_only: bool,
-    ) -> Result<(), Failure> {
+    ) -> Result<bool, Failure> {
         let attached = self.current();
         let transport = transport.or_else(|| attached.as_ref().map(|link| &*link.transport));
         if let Some(transport) = transport {
@@ -1760,10 +1770,8 @@ impl Node {
         if epochs_only {
             renewed.chain = settings.credentials.clone();
         }
-        // Compare under the lock: concurrent contact changes are not an epoch install.
-        let before_adopt = serde_json::to_vec(&*settings)?;
-        let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
-        let mut changed = !epochs_only || before_adopt != serde_json::to_vec(&*settings)?;
+        let (keys, adopted) = settings.adopt(&self.path, &self.vault, &renewed)?;
+        let mut changed = !epochs_only || adopted;
         if changed {
             self.apply(&settings.revocations, &settings.credentials, keys)
                 .await?;
@@ -1790,7 +1798,7 @@ impl Node {
             }
         }
         if !changed {
-            return Ok(());
+            return Ok(false);
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
@@ -1805,7 +1813,7 @@ impl Node {
                 .record("registry_failed", json!({"error": error.to_string()}));
         }
         self.wake_sync();
-        Ok(())
+        Ok(true)
     }
     async fn logout(&self, purge: bool) -> Result<Value, Failure> {
         let registry = self.registry().await?;
@@ -2345,21 +2353,11 @@ impl Node {
                                 .as_ref()
                                 .is_err_and(|error| error.is::<ServiceError>())
                         {
-                            let before = serde_json::to_vec(&settings);
                             match self.renew(Some(transport), true, Some(peer), true).await {
-                                Ok(()) => {
-                                    let after = serde_json::to_vec(&*self.settings.lock().await);
-                                    match (before, after) {
-                                        (Ok(before), Ok(after)) if before != after => {
-                                            result =
-                                                self.reconcile(transport, peer, &contact).await;
-                                        }
-                                        (Err(error), _) | (_, Err(error)) => {
-                                            result = Err(error.into())
-                                        }
-                                        _ => {}
-                                    }
+                                Ok(true) => {
+                                    result = self.reconcile(transport, peer, &contact).await;
                                 }
+                                Ok(false) => {}
                                 Err(error) => self.activity.record_changed(
                                     "epoch_delivery_failed",
                                     json!({"peer": peer.to_hex(), "error": error.to_string()}),

@@ -5,7 +5,7 @@ repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 export IPHONEOS_DEPLOYMENT_TARGET=13.0
 sdks/kotlin/gradlew -p sdks/kotlin -Procky.qualification=true :rocky-core:iosSimulatorArm64Test \
-    --tests rocky.KeychainTest --tests 'rocky.Ios*Test'
+    --tests rocky.SecretsTest --tests 'rocky.Ios*Test'
 binary="$repo_root/sdks/kotlin/rocky-core/build/bin/iosSimulatorArm64/debugTest/test.kexe"
 [ -x "$binary" ] || { echo 'cannot find rocky-core simulator test executable' >&2; exit 1; }
 # Gradle shuts down its simulator after tests; boot one for the subprocess probes.
@@ -22,7 +22,7 @@ trap 'if [ "$started" = yes ]; then xcrun simctl shutdown "$simulator"; fi' EXIT
 xcrun simctl bootstatus "$simulator" -b
 mkdir -p local/phase18-evidence
 xcrun simctl spawn "$simulator" "$binary" --ktest_logger=GTEST \
-    '--ktest_filter=rocky.KeychainTest.*:rocky.Ios*Test.*' > local/phase18-evidence/ios-test-budgets.log
+    '--ktest_filter=rocky.SecretsTest.*:rocky.Ios*Test.*' > local/phase18-evidence/ios-test-budgets.log
 python3 - <<'BUDGET'
 from pathlib import Path
 import re

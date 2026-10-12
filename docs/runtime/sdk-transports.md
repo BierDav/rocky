@@ -94,6 +94,8 @@ iroh supplies it from endpoint address updates. Without a transport signal,
 the application calls `setOnline` / the native `connection` request. See
 [change-driven sync](always-on-peer.md#change-driven-sync). Connectivity and
 `setOnline(true)` reset per-peer back-off; committed local writes do not.
+`setOnline(true)` also replaces an `offline` sync status with `idle` at once,
+so a pass with nothing to dial never reports the device offline again.
 Pausing the worker cancels outstanding dials and links without closing the
 attached transport.
 

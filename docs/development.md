@@ -245,7 +245,7 @@ records the toolchain, dependency repair, threading contract and evidence.
 
 Phase 18 adds `sdks/kotlin/gradlew -p sdks/kotlin packageIos` and
 `... qualifyIosPackage` for the independent packaged consumer, and
-`./sdks/native/qualify-ios-lifecycle` for Keychain, suspension and crash probes.
+`./sdks/native/qualify-ios-lifecycle` for secret handling, suspension and crash probes.
 Phase 15 adds `./sdks/native/qualify-ios-discovery`: local discovery follows
 the lifecycle, and a simulator and a host process find each other over mDNS.
 The new Rust endpoint ownership/rebind tests are integration tests through

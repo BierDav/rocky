@@ -9,14 +9,12 @@ import platform.Foundation.NSFileManager
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSUUID
 import platform.posix.getenv
-import rocky.ios.KeychainSecretStore
 import kotlin.test.*
 
-/** Also runs in subprocess modes under qualify-ios-lifecycle. */
+/** Also runs in subprocess modes under qualify-ios-lifecycle; secrets use the file fallback under [root]. */
 class IosCrashProbeTest {
     private fun environment(name: String): String = getenv(name)?.toKString() ?: error("$name is required")
     private val root = getenv("ROCKY_CRASH_ROOT")?.toKString() ?: (NSTemporaryDirectory() + "rocky-crash-" + NSUUID().UUIDString)
-    private val store get() = RecordingSecrets(KeychainSecretStore("rocky.crash." + root.substringAfterLast('/')))
     private val definition = schema("ioscrash", 1) {
         table("items") {
             text("key")
@@ -45,13 +43,13 @@ class IosCrashProbeTest {
     }
 
     private fun prepare() = runBlocking<Unit> {
-        val db = RockyDatabase.local(root, definition, store)
+        val db = RockyDatabase.local(root, definition)
         db.installAuthors()
         db.close()
     }
 
     private fun write(expectKill: Boolean): Unit = runBlocking<Unit> {
-        val db = RockyDatabase.open(root, definition, secrets = store)
+        val db = RockyDatabase.open(root, definition)
         db.write(handle) {
             val id = nextId("items")
             execute("INSERT INTO items(id,key,title) VALUES(?, 'one','durable')", id)
@@ -61,8 +59,7 @@ class IosCrashProbeTest {
     }
 
     private fun verifyAndPurge(committed: Boolean) = runBlocking<Unit> {
-        val secrets = store
-        val db = RockyDatabase.open(root, definition, secrets = secrets)
+        val db = RockyDatabase.open(root, definition)
         try {
             assertEquals(committed, db.reconcile(handle).getValue("committed").jsonPrimitive.boolean)
             val rows = db.read(query("SELECT title FROM items")).getValue("rows").jsonArray
@@ -70,7 +67,6 @@ class IosCrashProbeTest {
             if (committed) assertEquals("durable", rows[0].jsonArray[0].jsonObject.getValue("value").jsonPrimitive.content)
         } finally {
             db.close()
-            secrets.purge()
             NSFileManager.defaultManager.removeItemAtPath(root, null)
         }
     }

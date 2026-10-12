@@ -686,3 +686,38 @@ async fn source_finalization_and_destination_horizon_fence_late_follows() {
         assert_eq!(title(&f, &b, partitions[1]).await.as_deref(), Some("Item"));
     }
 }
+
+#[tokio::test]
+async fn each_commit_follows_marked_moves_without_scanning_stored_rows() {
+    let f = Fixture::new();
+    let root = tempfile::tempdir().unwrap();
+    let partitions = [RowIdentity::new(1, 1).unwrap().integer()];
+    let a = phone(&f, &root.path().join("a"), 1, &partitions).await;
+    let b = phone(&f, &root.path().join("b"), 2, &partitions).await;
+    setup(&f, &a, &b, &partitions).await;
+    let inner = b.inner.lock().await;
+    let plan = crate::storage::collect_rows(
+        inner
+            .conn
+            .query(
+                &format!("EXPLAIN QUERY PLAN {}", crate::replica::moves::MOVE_SCAN),
+                (),
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let details: Vec<_> = plan
+        .iter()
+        .filter_map(|row| match row.last() {
+            Some(SqlValue::Text(detail)) => Some(detail.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(details.first(), Some(&"SCAN m"), "{details:?}");
+    assert!(
+        details.iter().all(|detail| !detail.starts_with("SCAN r")),
+        "{details:?}"
+    );
+}

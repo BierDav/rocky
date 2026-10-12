@@ -3,7 +3,7 @@ use std::future::Future;
 
 // SQLite runs on another thread. Keep Tokio runnable so its paused clock
 // advances only where the test explicitly advances it.
-fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
+pub(super) fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
     let mut future = Box::pin(future);
     async move {
         let watchdog = std::time::Instant::now();

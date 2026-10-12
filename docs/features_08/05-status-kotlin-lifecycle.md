@@ -83,3 +83,23 @@ that the old pin belongs to 9.8.0, while the downloaded bytes match 9.8.1. The
 wrapper pin is corrected to the official 9.8.1 checksum; verification remains
 enabled. SDK, app and Android builds are being retried.
 Phase 6 has not started.
+
+## Prerequisite repairs found in consumer verification
+
+The first fresh-artifact shopping checks exposed two contract failures. Full
+and partial devices have identical SDK grants; the household inferred full
+while an enrollment's application description was pending, so an unshared
+list could reach a partial device. Undescribed members now default to partial;
+only an explicit full description enables every-list delivery. A deterministic
+regression verifies both the fallback and the transition to explicit full.
+
+Contact handover also consumed its hints after an earlier successful pass,
+leaving a later device with only its enrollment upstream. The SDK now retains
+at most 16 recently successful peers. A paused-clock regression exercises two
+earlier passes before a newly contacted device obtains the partner route.
+`cargo test -p rocky-sdk --lib node::sync_tests::mesh --locked` passed all
+seven tests in 1.32 s, including the new paused-clock regression.
+`./scripts/check --unit` passed 149 tests in 90.7 ms after the repairs.
+The application policy regression passed in the consumer run.
+No permission, data, timeout or budget assertion was weakened. Final consumer
+verification after these repairs is in progress.

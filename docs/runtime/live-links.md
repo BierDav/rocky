@@ -28,7 +28,8 @@ and disabling the worker close persistent links. Borrowed application transports
 endpoints and routers remain open. Both workers must request persistence to
 keep a link. Explicit sync reuses the open link or opens one. When both workers
 run, the link remains open; with either worker disabled it is a short link
-using the same protocol and handlers. Short links close after reconciliation;
+using the same protocol and handlers. Contact handover retains at most 16 recently successful peers for later links;
+an earlier pass does not consume those hints. Short links close after reconciliation;
 they do not restart continuously at idle. An automatic worker reconciles after
 an incoming short exchange finishes.
 

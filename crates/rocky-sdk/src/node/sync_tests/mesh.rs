@@ -445,3 +445,29 @@ async fn command(node: &Node, request: Value) -> Result<Value, Failure> {
     let client = node.client(1)?;
     Box::pin(node.dispatch(&client, &request)).await
 }
+
+#[tokio::test(start_paused = true)]
+async fn handover_survives_an_earlier_successful_pass() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(change_driven::frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, writer()))).await?;
+            let c_key = contact(&a, &c).await?;
+            pass(&a).await?;
+            pass(&a).await?;
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
+            assert_eq!(b.settings.lock().await.peers.len(), 1);
+            pass(&b).await?;
+            assert_eq!(
+                b.settings.lock().await.contact_meta[&c_key].source,
+                "handover"
+            );
+            for node in [&a, &b, &c] {
+                node.detach(None).await;
+            }
+            Ok(())
+        }))
+        .await
+}

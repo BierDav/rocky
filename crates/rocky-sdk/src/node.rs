@@ -2297,11 +2297,6 @@ impl Node {
                 self.retry_deadline().is_some(),
             ));
         }
-        let handed = self
-            .handover
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
         let needed: Vec<_> = self
             .scopes()
             .into_iter()
@@ -2391,12 +2386,6 @@ impl Node {
                     );
                     if let Ok((_, _, transfer)) = &result {
                         covered.extend(transfer.held.iter().copied());
-                    }
-                    if result.is_ok() {
-                        self.handover
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .insert(peer);
                     }
                     self.record_reach(peer, before, &result);
                     results.push((peer, contact, generation, result));
@@ -2492,12 +2481,6 @@ impl Node {
                 Err(error) => {
                     first.get_or_insert(error);
                 }
-            }
-        }
-        if connected > 0 {
-            let mut handover = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
-            for node in handed {
-                handover.remove(&node);
             }
         }
         retry |= first.is_some();
@@ -2641,10 +2624,17 @@ impl Node {
             }
         }
         let transfer = result?;
-        self.handover
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(peer);
+        let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut handover = self.handover.lock().unwrap_or_else(PoisonError::into_inner);
+        handover.insert(peer);
+        if handover.len() > 16
+            && let Some(oldest) = handover
+                .iter()
+                .min_by_key(|node| (met.get(node).copied().unwrap_or_default(), **node))
+                .copied()
+        {
+            handover.remove(&oldest);
+        }
         Ok(transfer)
     }
     pub(super) async fn request_link(

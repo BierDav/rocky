@@ -1434,3 +1434,100 @@ async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> 
         }))
         .await
 }
+
+#[tokio::test(start_paused = true)]
+async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+            )
+            .await?;
+            let c = enrolled(
+                &root.path().join("c"),
+                &hub,
+                "c",
+                Some((
+                    &a,
+                    Profile::Writer {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            for (node, peers) in [
+                (&a, vec![b.clone(), c.clone()]),
+                (&b, vec![a.clone(), c.clone()]),
+                (&c, vec![a.clone(), b.clone()]),
+            ] {
+                targets(node, &peers).await?;
+                start(node, true).await?;
+            }
+            until(|| {
+                [&a, &b, &c].iter().all(|node| {
+                    node.current()
+                        .is_some_and(|service| service.live.len() == 2)
+                })
+            })
+            .await;
+            for node in [&a, &b, &c] {
+                settled(node).await;
+            }
+            let a_authority = a.replica.observe_authority().await;
+            let b_authority = b.replica.observe_authority().await;
+            let a_service = a.current().ok_or("service")?;
+            let b_service = b.current().ok_or("service")?;
+            let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let before = [
+                hub.protocol_dials("a", "b", Protocol::Link),
+                hub.protocol_dials("b", "a", Protocol::Link),
+            ];
+            c.dispatch(
+                &*c.client(1)?,
+                &json!({"type":"connection", "online":false}),
+            )
+            .await?;
+            until(|| a_service.live.len() == 1 && b_service.live.len() == 1).await;
+            let b_revision = *b.replica.observe_revision().borrow();
+            let started = tokio::time::Instant::now();
+            add(&a, 1).await?;
+            assert_eq!(rows(&a).await?, ["1"]);
+            assert_eq!(
+                tokio::time::Instant::now(),
+                started,
+                "a local commit must not wait for an offline peer"
+            );
+            until(|| *b.replica.observe_revision().borrow() > b_revision).await;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert!(a_service.live.contains(b_key));
+            assert!(b_service.live.contains(a_key));
+            assert!(
+                !a_authority.has_changed()?,
+                "peer loss must not renew credentials"
+            );
+            assert!(
+                !b_authority.has_changed()?,
+                "peer loss must not renew credentials"
+            );
+            assert_eq!(
+                [
+                    hub.protocol_dials("a", "b", Protocol::Link),
+                    hub.protocol_dials("b", "a", Protocol::Link)
+                ],
+                before,
+                "the healthy link must not be redialed"
+            );
+            for node in [&a, &b, &c] {
+                node.detach(None).await;
+            }
+            Ok(())
+        }))
+        .await
+}

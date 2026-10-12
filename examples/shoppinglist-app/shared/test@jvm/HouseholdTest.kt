@@ -281,6 +281,43 @@ class HouseholdTest {
         }
     }
 
+    @Test fun `a Room background failure closes the node and retry preserves its rows`() = runBlocking {
+        val root = Files.createTempDirectory("rocky-room-failure").toFile()
+        lateinit var room: ShoppingDatabase
+        var closes = 0
+        val platform = ShoppingPlatform(
+            File(root, "desk").absolutePath,
+            "desk",
+            room = { path ->
+                Room.databaseBuilder<ShoppingDatabase>(path, factory = {
+                    org.example.examples.shopping.data.db.ShoppingDatabase_Impl().also { room = it }
+                })
+            },
+            transport = { PeerTransport.Iroh.isolated() },
+            closed = { closes++ },
+        )
+        val session = ShoppingSession(platform)
+        try {
+            session.create()
+            val open = withTimeout(30_000) { session.state.filterIsInstance<SessionState.Open>().first() }
+            val list = open.node.repository.createList("Weekly")
+            open.node.repository.add(list, "Milk")
+            val failure = java.sql.SQLException("replication data rejected: session authority changed; open a new session")
+            // Run on Room's own supervisor, as its invalidation refresh does.
+            room.getCoroutineScope().launch { throw failure }.join()
+            val failed = withTimeout(2_000) { session.state.filterIsInstance<SessionState.Failed>().first() }
+            assertSame(failure, failed.error)
+            assertTrue(failed.existing)
+            assertEquals(1, closes)
+            session.retry()
+            val reopened = withTimeout(30_000) { session.state.filterIsInstance<SessionState.Open>().first() }
+            assertEquals(listOf("Milk"), reopened.node.titles(list))
+        } finally {
+            session.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun `a reset closes the household and removes it, then setup can start a new one`() = runBlocking {
         val root = Files.createTempDirectory("rocky-reset").toFile()
         val closed = mutableListOf<RockyDatabase>()
@@ -355,6 +392,32 @@ class HouseholdTest {
             partial.awaitTitles(weekly, "Bread", "Milk")
             val activity = partial.rocky.activity().first { it is RockyEvent.PartitionChanged && it.action == "key_installed" }
             assertEquals(listOf(weekly.toString()), (activity as RockyEvent.PartitionChanged).values)
+        } finally {
+            withContext(NonCancellable) { opened.forEach { it.close() } }
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun `a trusted phone bootstraps the desktop existing lists and can edit them`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-trusted-bootstrap").toFile()
+        val opened = mutableListOf<ShoppingNode>()
+        try {
+            val desk = ShoppingNode.create(platform(root, "desk")).also { opened += it }
+            val weekly = desk.repository.createList("Weekly")
+            val other = desk.repository.createList("Other")
+            desk.repository.add(weekly, "Milk")
+            desk.repository.add(other, "Bread")
+            // Joining after revocation must bootstrap retained rows across key epochs.
+            val removed = ShoppingNode.join(platform(root, "removed"), desk.household.invite(NodeKind.Full, "Removed"))
+            removed.close()
+            desk.household.revoke(removed.self)
+            val phone = ShoppingNode.join(platform(root, "phone"), desk.household.invite(NodeKind.Trusted, "Phone")).also { opened += it }
+            assertTrue(phone.isTrusted)
+            phone.awaitTitles(weekly, "Milk")
+            phone.awaitTitles(other, "Bread")
+            assertFalse(phone.failure.isCompleted, "Room background work failed during trusted bootstrap")
+            phone.repository.add(weekly, "Eggs")
+            desk.awaitTitles(weekly, "Eggs", "Milk")
         } finally {
             withContext(NonCancellable) { opened.forEach { it.close() } }
             root.deleteRecursively()

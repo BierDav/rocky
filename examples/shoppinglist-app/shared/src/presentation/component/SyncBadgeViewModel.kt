@@ -10,7 +10,6 @@ import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import org.example.examples.shopping.data.session.ShoppingSession
-import org.example.examples.shopping.data.session.serving
 import org.example.examples.shopping.presentation.screen.NodeViewModel
 import rocky.LinkState
 import rocky.RockyEvent
@@ -24,8 +23,8 @@ class SyncBadgeViewModel(session: ShoppingSession) : NodeViewModel(session) {
     val badge: StateFlow<SyncBadgeState> = node.flatMapLatest { node ->
         val rocky = node.rocky
         val lastTransfer = rocky.activity().filterIsInstance<RockyEvent.Synced>().map<RockyEvent.Synced, Long?> { it.atEpochMillis }.onStart { emit(null) }
-        combine(rocky.status, rocky.observeReadiness(), lastTransfer, rocky.serving()) { connection, readiness, transfer, serving ->
-            SyncBadgeState(connection, readiness.state, transfer, serving, readiness.peers.any { it.link.state == LinkState.Open })
+        combine(rocky.status, rocky.observeReadiness(), lastTransfer) { connection, readiness, transfer ->
+            SyncBadgeState(connection, readiness.state, transfer, readiness.peers.any { it.link.state == LinkState.Open })
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SyncBadgeState())
 }

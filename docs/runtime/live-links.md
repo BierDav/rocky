@@ -43,8 +43,10 @@ the stream initiated by the lower node key. Replacement cancels old requests;
 a bounded retry uses the surviving link without classifying it as unreachable.
 A requester uses the newly admitted link immediately, including a competing
 inbound short link, instead of waiting for that peer's reconciliation to end.
-Stream I/O failures retain the ordinary retry/backoff; they do not trigger
-credential renewal, which would cancel unrelated active links.
+Stream I/O failures and link channel close/timeout errors retain ordinary
+retry/backoff; they do not trigger credential renewal, which would cancel
+unrelated active links. Committed publication processes peers concurrently in
+bounded batches and finishes healthy peers even when another publication fails.
 
 ## Status and lifecycle
 

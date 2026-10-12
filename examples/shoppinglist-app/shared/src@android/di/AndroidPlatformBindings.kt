@@ -10,12 +10,12 @@ import dev.zacsweers.metro.ContributesTo
 import dev.zacsweers.metro.Provides
 import dev.zacsweers.metro.SingleIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import org.example.examples.shopping.data.coordination.publicCoordination
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.session.ShoppingPlatform
 import rocky.android.KeystoreSecretStore
-import rocky.android.RockyLifecycle
 import java.io.File
 import java.util.UUID
 
@@ -27,7 +27,8 @@ object AndroidPlatformBindings {
     @SingleIn(AppScope::class)
     fun platform(context: PlatformContext): ShoppingPlatform {
         val application = context.application
-        val lifecycle = RockyLifecycle.register(application)
+        val lifecycle = context.lifecycle
+        val visible = MutableStateFlow(lifecycle.isForeground)
         val preferences = application.getSharedPreferences("shopping", Context.MODE_PRIVATE)
         return ShoppingPlatform(
             directory = File(application.filesDir, "shopping").absolutePath,
@@ -36,9 +37,13 @@ object AndroidPlatformBindings {
             secrets = { KeystoreSecretStore(application, preferences.getString(SECRETS_ALIAS, null) ?: KeystoreSecretStore.DEFAULT_ALIAS) },
             commands = ::publicCoordination,
             opened = { database ->
-                lifecycle.follow(database) { foreground -> Log.i(TAG, if (foreground) "sync foreground" else "sync background") }
+                lifecycle.follow(database) { foreground ->
+                    visible.value = foreground
+                    Log.i(TAG, if (foreground) "sync foreground" else "sync background")
+                }
             },
             closed = lifecycle::unfollow,
+            foreground = visible,
             // Fresh credentials: the old secrets go, and the next installation uses a new Keystore alias.
             erase = {
                 withContext(Dispatchers.IO) {

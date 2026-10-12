@@ -14,7 +14,6 @@ import org.example.examples.shopping.data.db.entity.ShoppingList
 import org.example.examples.shopping.data.db.list
 import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.session.ShoppingSession
-import org.example.examples.shopping.data.session.serving
 import org.example.examples.shopping.presentation.component.SyncBadgeState
 import org.example.examples.shopping.presentation.screen.NodeViewModel
 import rocky.*
@@ -31,13 +30,11 @@ data class SyncState(
     val self: SessionStatus? = null,
     val kind: NodeKind? = null,
     val domain: String = "",
-    /** Other devices synced with this one recently, as on a trusted device that only serves. */
-    val serving: Boolean = false,
     val holdings: List<ListHolding> = emptyList(),
     val entries: List<ActivityEntry> = emptyList(),
     val peers: List<Peer> = emptyList(),
 ) {
-    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, serving, peers.any { it.link.state == LinkState.Open })
+    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, peers.any { it.link.state == LinkState.Open })
 }
 
 @Inject
@@ -62,7 +59,7 @@ class SyncViewModel(private val session: ShoppingSession) : NodeViewModel(sessio
             .runningFold(emptyList<Entry>()) { kept, entry -> (listOf(entry) + kept).take(KEPT) }
         // Readiness does not emit for path measurements: read them again with the identity on each tick.
         val identity = ticks.map { rocky.session() to runCatching { rocky.network().peers }.getOrDefault(emptyList()) }
-        combine(rocky.observeReadiness(), combine(rocky.status, rocky.serving(), ::Pair), holdings, combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), identity, ::Triple)) { readiness, (connection, served), held, (entries, devices, identified) ->
+        combine(rocky.observeReadiness(), rocky.status, holdings, combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), identity, ::Triple)) { readiness, connection, held, (entries, devices, identified) ->
             val (self, measured) = identified
             val lists = held.flatMap { holding -> holding.status?.tables.orEmpty().map { it.partition to holding.list.title } }.toMap()
             val paths = measured.associate { it.node to it.link }
@@ -76,7 +73,7 @@ class SyncViewModel(private val session: ShoppingSession) : NodeViewModel(sessio
                 readiness, connection,
                 entries.filterIsInstance<Entry.Event>().firstOrNull { it.event is RockyEvent.Synced }?.event?.atEpochMillis,
                 self, node.kind,
-                shortDomain(rocky.domain), served, held,
+                shortDomain(rocky.domain), held,
                 entries.map { entry ->
                     when (entry) {
                         is Entry.Event -> describe(entry.event, lists, titles, names)

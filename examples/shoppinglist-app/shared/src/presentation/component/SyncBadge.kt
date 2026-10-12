@@ -17,12 +17,11 @@ import rocky.ConnectionState
 import rocky.ConnectionStatus
 import rocky.ReadinessState
 
-/** What the sync badge needs: the connection, bootstrapping, the last transfer and whether other devices sync here. */
+/** What the sync badge needs: the connection, bootstrapping and the last transfer. */
 data class SyncBadgeState(
     val connection: ConnectionStatus = ConnectionStatus(ConnectionState.Unavailable),
     val readiness: ReadinessState? = null,
     val lastTransferAtEpochMillis: Long? = null,
-    val serving: Boolean = false,
     val live: Boolean = false,
 )
 
@@ -46,7 +45,6 @@ fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
         readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to "Bootstrapping"
         connection.state == ConnectionState.Offline -> Color(0xFF9E9E9E) to "Offline"
         connection.state == ConnectionState.Connected && connection.peers > 0 -> Color(0xFF43A047) to (if (moving) "Syncing" else "Synced")
-        state.serving -> Color(0xFF43A047) to "Serving devices"
         connection.state == ConnectionState.Connected -> Color(0xFF9E9E9E) to "No peers"
         connection.atEpochMillis == null -> Color(0xFF9E9E9E) to "Starting"
         else -> Color(0xFFE53935) to "Unreachable"

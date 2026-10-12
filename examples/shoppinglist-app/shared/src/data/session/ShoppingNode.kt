@@ -54,6 +54,8 @@ class ShoppingNode private constructor(
     private val kindPath: String,
     initialKind: NodeKind?,
     private val closed: (RockyDatabase) -> Unit,
+    internal val failure: Deferred<Throwable>,
+    private val backgroundErrors: CoroutineExceptionHandler,
 ) {
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self)
@@ -66,7 +68,7 @@ class ShoppingNode private constructor(
         replaceText(kindPath, kind.name)
         this.kind = kind
     }
-    private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+    private val work = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundErrors).launch {
         foreground.distinctUntilChanged().collectLatest { visible ->
             if (visible) {
                 coroutineScope {
@@ -128,19 +130,27 @@ class ShoppingNode private constructor(
                 return withContext(Dispatchers.IO) {
                     val commands = platform.commands()
                     val rocky = open(commands)
+                    var room: RockyRoom<ShoppingDatabase>? = null
                     try {
                         platform.opened(rocky)
                         val self = rocky.session().node
                         // Room keeps only a lock file next to Rocky's.
-                        val room = platform.room("${platform.directory}/shopping").buildOnRocky(rocky)
+                        val failure = CompletableDeferred<Throwable>()
+                        val backgroundErrors = CoroutineExceptionHandler { _, error -> failure.complete(error) }
+                        val openedRoom = platform.room("${platform.directory}/shopping").buildOnRocky(rocky, Dispatchers.IO + backgroundErrors)
+                        room = openedRoom
                         val contacts = ContactLabels.open("${platform.directory}/contact-labels.json")
                         val kindPath = "${platform.directory}/device-kind"
                         val kind = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
-                        ShoppingNode(rocky, room, self, commands, platform.foreground, contacts, kindPath, kind, platform.closed).also { opened = it }
+                        ShoppingNode(rocky, openedRoom, self, commands, platform.foreground, contacts, kindPath, kind, platform.closed, failure, backgroundErrors).also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) {
-                            platform.closed(rocky)
-                            rocky.close()
+                            try {
+                                platform.closed(rocky)
+                                room?.close()
+                            } finally {
+                                rocky.close()
+                            }
                         }
                         throw error
                     }

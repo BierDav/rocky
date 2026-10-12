@@ -6,26 +6,28 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.retryWhen
 import rocky.RockyDatabase
 import rocky.sqlite.RockySQLiteDriver
+import kotlin.coroutines.CoroutineContext
 
 /** The Room version whose statements the driver answers; see `docs/runtime/room-integration.md`. */
 const val ROOM_PROFILE = "room-2.8.4"
 
 /**
  * Room on Rocky's own file: every DAO reads and writes the typed tables of [database], one Room transaction is one
- * commit and one signed bundle. Queries run on the IO dispatcher. Call [followRocky] so that sync writes reach DAO
+ * commit and one signed bundle. [queryContext] defaults to IO; include an exception handler for Room background
+ * failures. Call [followRocky] so that sync writes reach DAO
  * observers, or use [buildOnRocky], which does both.
  */
-fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyDatabase): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE)).setQueryCoroutineContext(Dispatchers.IO)
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.setRockyDatabase(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RoomDatabase.Builder<T> = setDriver(RockySQLiteDriver(database, ROOM_PROFILE)).setQueryCoroutineContext(queryContext)
 
-/** Builds Room on [database]'s file and follows its sync until [RockyRoom.close]. */
-fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase): RockyRoom<T> = RockyRoom(setRockyDatabase(database).build(), database)
+/** Builds Room on [database]'s file and follows its sync in [queryContext] until [RockyRoom.close]. */
+fun <T : RoomDatabase> RoomDatabase.Builder<T>.buildOnRocky(database: RockyDatabase, queryContext: CoroutineContext = Dispatchers.IO): RockyRoom<T> = RockyRoom(setRockyDatabase(database, queryContext).build(), database, queryContext)
 
 /**
  * A Room database on Rocky's file whose observers see sync writes. Closing it closes Room, not [rocky]: the
  * application closes that after.
  */
-class RockyRoom<T : RoomDatabase> internal constructor(val room: T, val rocky: RockyDatabase) {
-    private val following = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { room.followRocky(rocky) }
+class RockyRoom<T : RoomDatabase> internal constructor(val room: T, val rocky: RockyDatabase, queryContext: CoroutineContext) {
+    private val following = CoroutineScope(queryContext + SupervisorJob()).launch { room.followRocky(rocky) }
     suspend fun close() = withContext(NonCancellable) {
         following.cancelAndJoin()
         room.close()

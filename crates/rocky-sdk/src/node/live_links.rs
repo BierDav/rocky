@@ -636,54 +636,68 @@ impl Node {
                 )
             })
             .collect();
-        for (peer, id, handle, old, cursors, auxiliary) in holdings {
-            let mut frontiers = old.clone();
-            let mut next = cursors.clone();
-            let mut aux = auxiliary.clone();
-            let mut scopes = BTreeSet::new();
-            for (scope, cursor) in &cursors {
-                let token = self.link_scope_state(*scope).await?;
-                if old.get(scope) == Some(&token) {
-                    continue;
-                }
-                // Capture the cursor before export; a later commit must remain pending.
-                let frontier = self.replica.frontier(*scope).await?;
-                let metadata = self.link_auxiliary(*scope).await?;
-                let rows_changed = frontier != *cursor;
-                let pushed = rows_changed && handle.push_committed(&self.replica, cursor).await?;
-                if !pushed || auxiliary.get(scope) != Some(&metadata) {
-                    scopes.insert(*scope);
-                }
-                frontiers.insert(*scope, token);
-                next.insert(*scope, frontier);
-                aux.insert(*scope, metadata);
-            }
-            self.replica.flush().await?;
-            let mut entries = service
-                .live
-                .entries
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let Some(entry) = entries.get_mut(&peer).filter(|entry| entry.id == id) else {
-                continue;
-            };
-            entry.frontiers = frontiers;
-            entry.cursors = next;
-            entry.auxiliary = aux;
-            if !scopes.is_empty() {
-                if let Some(pending) = entry.changed.borrow().as_ref() {
-                    scopes.extend(pending);
-                }
-                // Unsent scopes keep their old token so the next publication can send them.
-                for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
-                    if let Some(token) = old.get(scope) {
-                        entry.frontiers.insert(*scope, *token);
+        let attempts = stream::iter(holdings)
+            .map(|(peer, id, handle, old, cursors, auxiliary)| async move {
+                let mut frontiers = old.clone();
+                let mut next = cursors.clone();
+                let mut aux = auxiliary.clone();
+                let mut scopes = BTreeSet::new();
+                for (scope, cursor) in &cursors {
+                    let token = self.link_scope_state(*scope).await?;
+                    if old.get(scope) == Some(&token) {
+                        continue;
                     }
+                    // Capture the cursor before export; a later commit must remain pending.
+                    let frontier = self.replica.frontier(*scope).await?;
+                    let metadata = self.link_auxiliary(*scope).await?;
+                    let rows_changed = frontier != *cursor;
+                    let pushed =
+                        rows_changed && handle.push_committed(&self.replica, cursor).await?;
+                    if !pushed || auxiliary.get(scope) != Some(&metadata) {
+                        scopes.insert(*scope);
+                    }
+                    frontiers.insert(*scope, token);
+                    next.insert(*scope, frontier);
+                    aux.insert(*scope, metadata);
                 }
-                entry
-                    .changed
-                    .send_replace(Some(scopes.into_iter().take(link::SIGNAL_SCOPES).collect()));
+                self.replica.flush().await?;
+                let mut entries = service
+                    .live
+                    .entries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let Some(entry) = entries.get_mut(&peer).filter(|entry| entry.id == id) else {
+                    return Ok::<_, Failure>(());
+                };
+                entry.frontiers = frontiers;
+                entry.cursors = next;
+                entry.auxiliary = aux;
+                if !scopes.is_empty() {
+                    if let Some(pending) = entry.changed.borrow().as_ref() {
+                        scopes.extend(pending);
+                    }
+                    // Unsent scopes keep their old token so the next publication can send them.
+                    for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
+                        if let Some(token) = old.get(scope) {
+                            entry.frontiers.insert(*scope, *token);
+                        }
+                    }
+                    entry
+                        .changed
+                        .send_replace(Some(scopes.into_iter().take(link::SIGNAL_SCOPES).collect()));
+                }
+                Ok::<_, Failure>(())
+            })
+            .buffer_unordered(4);
+        tokio::pin!(attempts);
+        let mut first = None;
+        while let Some(result) = attempts.next().await {
+            if let Err(error) = result {
+                first.get_or_insert(error);
             }
+        }
+        if let Some(error) = first {
+            return Err(error);
         }
         Ok(())
     }

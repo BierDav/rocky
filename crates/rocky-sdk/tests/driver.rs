@@ -737,6 +737,40 @@ fn engine_pragma(directory: &Path, pragma: &str) -> Result<Vec<Vec<SqlValue>>, F
 }
 
 #[tokio::test]
+async fn room_schema_reads_refresh_authority_before_a_deferred_transaction_uses_the_file()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let database = create(open(root.path(), None), None).await?.database;
+    let writer = database
+        .connect(ConnectionOptions {
+            profile: Some(Profile::Room284),
+            ..WRITER
+        })
+        .await?;
+    run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
+    call(&database, json!({"type": "renew"})).await?;
+    assert!(
+        !all(&writer, "PRAGMA table_info(`items`)", vec![])
+            .await?
+            .is_empty()
+    );
+    assert!(
+        !all(&writer, "PRAGMA index_list(`items`)", vec![])
+            .await?
+            .is_empty()
+    );
+    run(&writer, "ROLLBACK").await?;
+    // The first real statement must use the refreshed session too.
+    run(&writer, "BEGIN DEFERRED TRANSACTION").await?;
+    call(&database, json!({"type": "renew"})).await?;
+    assert_eq!(count(&writer, "items").await?, 0);
+    run(&writer, "ROLLBACK").await?;
+    writer.close().await;
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let database = create(open(root.path(), None), None).await?.database;

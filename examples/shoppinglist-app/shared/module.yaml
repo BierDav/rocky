@@ -28,6 +28,9 @@ dependencies:
   - org.jetbrains.androidx.navigation3:navigation3-ui:1.1.1
   - org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0
 
+test-dependencies@jvm:
+  - org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0
+
 dependencies@mobile:
   - io.github.kalinjul.easyqrscan:scanner:0.7.2
 

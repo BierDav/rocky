@@ -12,7 +12,7 @@ import org.example.examples.shopping.util.removeDirectory
 import rocky.ReadinessState
 import rocky.RockyDatabase
 
-/** Where the app stands: setting up, opening, open, revoked, resetting, or failed to open. */
+/** Where the app stands: setting up, opening, open, revoked, resetting, or failed. */
 sealed interface SessionState {
     data object Opening : SessionState
 
@@ -102,8 +102,29 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
                 SessionState.Failed(error, RockyDatabase.exists(platform.directory))
             }
             val node = (state.value as? SessionState.Open)?.node ?: return@launch
-            node.rocky.observeReadiness().first { it.state == ReadinessState.Revoked }
-            if ((state.value as? SessionState.Open)?.node === node) mutableState.value = SessionState.Revoked(node)
+            val failure = try {
+                merge(
+                    flow<Throwable?> { emit(node.failure.await()) },
+                    node.rocky.observeReadiness().filter { it.state == ReadinessState.Revoked }.map { null },
+                ).first()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                error
+            }
+            if ((state.value as? SessionState.Open)?.node !== node) return@launch
+            if (failure == null) {
+                mutableState.value = SessionState.Revoked(node)
+            } else {
+                // Leave Open before closing so screens stop using the failed installation.
+                mutableState.value = SessionState.Opening
+                try {
+                    node.close()
+                } catch (closing: Exception) {
+                    failure.addSuppressed(closing)
+                }
+                mutableState.value = SessionState.Failed(failure, RockyDatabase.exists(platform.directory))
+            }
         }
     }
 

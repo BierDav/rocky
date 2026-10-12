@@ -30,6 +30,25 @@ so a delayed enrollment keeps its chosen name and kind. Closing that invitation
 checks its code and cannot delete a newer invitation. The pending choices share
 the activity feed's 512-event lifetime; they are discarded when the app closes.
 
+## Android foreground recovery
+
+Register `RockyLifecycle` in `ShoppingApplication.onCreate` and pass it into the
+platform graph. Registering inside a lazy platform provider can miss the first
+activity-start callback: the visible app is then put in the background, which
+stops automatic sync and refuses live links until a later stop/start cycle.
+Application upkeep follows the same visibility flow. The badge uses authenticated
+link state and sync results; raw inbound connection counters never make it green.
+
+On 2026-10-12, the physical Pixel 11 Pro reproduced this failure while a desktop
+peer was on its hotspot with cellular data enabled. The old process logged only
+`sync background` after startup; a home/reopen cycle produced `sync foreground`
+and restarted peer dialing. After updating the APK without clearing data, the
+new process logged `sync foreground` on startup and showed Live with its existing
+lists. A subsequent home/reopen cycle logged background followed by foreground;
+the Sync tab then showed two authenticated Live peers and a selected direct path
+with a 12.2 ms round trip. This verifies startup registration on that phone; it does not qualify all
+network handovers or peer topologies.
+
 ## Two-phone procedure
 
 The [Compose app](../../examples/shoppinglist-app/androidApp) opens drive

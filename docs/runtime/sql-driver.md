@@ -133,6 +133,12 @@ stores it. A failure carries SQLite's result code and a message:
 | 18 `SQLITE_TOOBIG` | A quota, such as the bundle limits |
 | 21 `SQLITE_MISUSE` | A closed connection or a statement without further rows |
 
+A deferred transaction pins its session only when it acquires the writer or
+reader snapshot. Before that, an authority change refreshes the session, including
+Room's schema validation statements. Outside a pinned transaction, housekeeping
+retries one authority-change race with a fresh session; active transactions are
+never replayed.
+
 ## Room 2.8.4
 
 With `profile: Some(Profile::Room284)` (`"room-2.8.4"` natively) a

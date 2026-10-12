@@ -355,11 +355,18 @@ impl State {
             self.begin.is_some() || self.open
         }
     }
+    fn authority_pinned(&self) -> bool {
+        self.open
+            || self
+                .reading
+                .as_ref()
+                .is_some_and(|reading| reading.snapshot.is_some())
+    }
     /// The connection's session; a new one once the old one lost its
     /// authority outside a transaction.
     async fn sql(&mut self) -> Result<&SecureSql<TypedCommands>, Failure> {
         let current = match &self.opened {
-            Some(opened) => self.active() || opened.session.status().await.is_ok(),
+            Some(opened) => self.authority_pinned() || opened.session.status().await.is_ok(),
             None => false,
         };
         if !current {
@@ -438,13 +445,31 @@ impl State {
         sql: &str,
         params: &[SqlValue],
     ) -> Result<Option<Pending>, Failure> {
+        let answer = self.room_answer_once(sql, params).await;
+        if !self.authority_pinned()
+            && answer
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().contains("session authority changed"))
+        {
+            // Schema reads may race a key install after the status check.
+            self.opened = None;
+            return self.room_answer_once(sql, params).await;
+        }
+        answer
+    }
+    async fn room_answer_once(
+        &mut self,
+        sql: &str,
+        params: &[SqlValue],
+    ) -> Result<Option<Pending>, Failure> {
         if self.options.profile.is_none() {
             return Ok(None);
         }
         let read_only = self.read_only;
         let timeout = self.options.sql().transaction_timeout.as_millis();
         // The session of an idle connection may have lost its authority.
-        if !self.active() {
+        if !self.authority_pinned() {
             self.version = self.node.settings.lock().await.schema.version;
             self.sql().await?;
         }

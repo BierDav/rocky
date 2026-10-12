@@ -71,6 +71,19 @@ What changed between the first two rows:
 - **Sync waits 20 ms.** With a peer connected the pass started at the commit
   and the observer's read queued behind it: 10.2 / 14.6 / 17.9 ms before.
 
+## Offline-peer regression
+
+`LocalAvailabilityTest` opens two trusted shopping nodes and one full node, takes the full node
+offline and checks an item ten times through `ListsViewModel`, the real Room DAO,
+its local flow and the displayed screen state.
+Each write plus observation must finish within two seconds, independently of
+remote retry deadlines. The 2026-10-12 JVM screen-state run measured 10–77 ms; this is a
+regression bound, not a two-second UX target or a physical Android measurement.
+A paused-clock native regression also proves that the remaining link transfers
+a local commit without redialing or changing either node's authority after the
+third peer goes offline. Neither local commits nor local observation should
+wait for a peer's network timeout.
+
 ## What still costs
 
 - Sealing is about 1.5 ms of a commit: the author's chain is verified twice,

@@ -2414,6 +2414,7 @@ impl Node {
                     failed(result)
                         && !result.as_ref().is_err_and(|error| {
                             matches!(error.downcast_ref::<Error>(), Some(Error::Io(_)))
+                                || matches!(error.downcast_ref::<Error>(), Some(Error::Rejected(reason)) if reason.starts_with("link "))
                         })
                 })
                 .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))

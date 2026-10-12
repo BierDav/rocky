@@ -28,7 +28,8 @@ then build again. Keep the published `.aar`, POM and module metadata.
 The desktop keeps its household in `~/.rocky-shopping`, or
 `ROCKY_SHOPPING_DATA`. Install the Android debug APK with `adb install -r`;
 Android keeps secrets in the Keystore and pauses automatic sync in the
-background.
+background. The Android lifecycle tracker is registered in `Application.onCreate`,
+before any activity starts, so a lazily created graph cannot miss foreground entry.
 
 For a desktop reached over SSH, the running trusted app can write a one-use
 pairing code to a private file, and the new instance can read that file:
@@ -148,12 +149,14 @@ Its partner list shows each known peer's source, ranking reason and last connect
 Its activity feed shows transfers, checkpoint imports, bootstrap, horizon
 finalization, author installation, enrollment and key delivery. The feed is
 bounded and lasts for the open database's lifetime; see
-[SDK activity](../../docs/runtime/activity.md). The top badge also reflects
-inbound sync on a trusted device that serves the phone.
+[SDK activity](../../docs/runtime/activity.md). The top badge shows **Live** only while an authenticated link is open. Raw
+inbound connection counts do not imply successful synchronization.
 
 The current Room schema is version 6. Earlier application schemas are refused;
 there is no migration or fallback. An existing household that cannot open
-shows **Retry** and preserves its data.
+shows **Retry** and preserves its data. A failure in Room’s background invalidation
+tracker also closes the open node and shows **Retry**; retry opens fresh SQL
+sessions without deleting the household.
 
 ## Code and SDK usage
 

@@ -47,6 +47,13 @@ native engine, enrollment and sync; close Room before it. The
 [shopping example](../../examples/shoppinglist-app/README.md) is a complete
 desktop and Android consumer.
 
+`buildOnRocky` and `setRockyDatabase` accept a `queryContext` (IO by default).
+Include a `CoroutineExceptionHandler` to handle failures of Room's supervised
+background invalidation work; DAO flow retries do not catch those failures.
+`buildOnRocky` also uses that context for the committed-event follower. The
+shopping app closes a failed node and shows Retry, which reopens fresh sessions
+without removing household data.
+
 ## Libraries and ownership
 
 | Module | Owns |

@@ -561,6 +561,15 @@ async fn iroh_reverse_gate() -> Result<(), Failure> {
     real_reverse_gate("iroh").await
 }
 
+// Stop both workers before either endpoint closes, so neither redials a closing peer.
+async fn detach_real_pair(a: &Node, b: &Node) -> Result<(), Failure> {
+    let (stopped_a, stopped_b) = tokio::join!(start(a, false), start(b, false));
+    stopped_a?;
+    stopped_b?;
+    tokio::join!(a.detach(None), b.detach(None));
+    Ok(())
+}
+
 async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
@@ -615,8 +624,7 @@ async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
             tokio::time::advance(Duration::from_secs(1)).await;
             until(|| sa.live.len() == 1 && sb.live.len() == 1).await;
             assert!(hub.protocol_dials("a", &ab, Protocol::Link) > dials);
-            a.detach(None).await;
-            b.detach(None).await;
+            detach_real_pair(&a, &b).await?;
             Ok(())
         }))
         .await
@@ -652,8 +660,7 @@ async fn real_authority_gate(kind: &str) -> Result<(), Failure> {
             learn_revocation(&a, peer).await?;
             until(|| !sa.live.contains(peer)).await;
             assert!(a.replica.revocations().await.revokes(&peer));
-            a.detach(None).await;
-            b.detach(None).await;
+            detach_real_pair(&a, &b).await?;
             Ok(())
         }))
         .await

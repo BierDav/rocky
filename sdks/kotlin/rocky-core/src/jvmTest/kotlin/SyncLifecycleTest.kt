@@ -48,7 +48,7 @@ class SyncLifecycleTest {
     }
 
     @Test
-    fun backgroundClosesLiveLinksAndForegroundReopensThroughReadiness() = runBlocking {
+    fun backgroundClosesLiveLinksAndForegroundReopensThroughReadiness() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-live-lifecycle").toFile()
         val definition = schema("livelifecycle") {
             table("items") {
@@ -80,7 +80,7 @@ class SyncLifecycleTest {
     }
 
     @Test
-    fun backgroundCancelsNativeDialAndForegroundStartsImmediately() = runBlocking {
+    fun backgroundCancelsNativeDialAndForegroundStartsImmediately() = runBlocking<Unit> {
         val root = Files.createTempDirectory("rocky-sync-lifecycle").toFile()
         val schema = schema("lifecycle") {
             table("items") {

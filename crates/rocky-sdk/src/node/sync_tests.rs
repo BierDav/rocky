@@ -161,10 +161,11 @@ async fn enrolled_schema(
 }
 async fn enable(node: &Node) -> Result<(), Failure> {
     let mut statuses = node.sync_status.subscribe();
+    let before = statuses.borrow_and_update()["token"].clone();
     node.automatic.store(true, Ordering::SeqCst);
     node.wake_sync();
     statuses
-        .wait_for(|status| status["state"] == "connected")
+        .wait_for(|status| status["token"] != before && status["state"] == "connected")
         .await?;
     assert_eq!(statuses.borrow()["state"], "connected");
     assert_eq!(statuses.borrow()["retry"], false);
@@ -335,10 +336,12 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
                 "custody cannot apply rows"
             );
             let mut statuses = relay.sync_status.subscribe();
+            let before = statuses.borrow_and_update()["token"].clone();
             hub.network_changed();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                statuses.wait_for(|status| status["state"] == "connected"),
+                statuses
+                    .wait_for(|status| status["token"] != before && status["state"] == "connected"),
             )
             .await??;
             for node in [&a, &relay, &b] {
@@ -397,10 +400,12 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             // Explicit connectivity wakes the retry now, despite its two-second deadline.
             tokio::time::resume();
             b.attach(Network::Owned(hub.connector("b"))).await?;
+            let before = status.borrow_and_update()["token"].clone();
             hub.network_changed();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                status.wait_for(|status| status["state"] == "connected"),
+                status
+                    .wait_for(|status| status["token"] != before && status["state"] == "connected"),
             )
             .await??;
             assert_eq!(status.borrow()["state"], "connected");

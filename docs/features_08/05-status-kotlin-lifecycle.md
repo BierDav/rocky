@@ -51,7 +51,7 @@ On 2026-10-12:
 - `cargo test -p rocky-sdk --lib node::sync_tests::change_driven::live_links --locked`: 30 passed, 4.46 s. Existing authority, simultaneous dial, transport, push and retry regressions remain green.
 - `cargo test -p rocky-sdk --lib background_refuses_new_links_until_foreground --locked`: one passed, 0.21 s; pause closes links under one second, rejects new inbound links, and foreground reopens.
 - `./scripts/check --unit`: 149 passed; unit wall 78.3 ms, budget 10 s.
-- `./scripts/lint`: exit 0. Full `./scripts/check` is being rerun after repairing test synchronization.
+- `./scripts/lint`: exit 0. Final `./scripts/check`: exit 0; strict Clippy and formatting passed, 165 unit tests passed (117.0 ms), and 921 integration tests passed (698 default + 223 no-iroh, 164.99 s within 300 s).
 
 The first full check exposed three tests in both feature configurations that
 mistook a link transition notification for a completed sync pass. Their waits

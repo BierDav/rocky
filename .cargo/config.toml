@@ -1,0 +1,10 @@
+[profile.test.package.rocky-core]
+opt-level = 3
+[profile.test.package.rocky-credentials]
+opt-level = 3
+[profile.test.package.rocky-storage]
+opt-level = 3
+[profile.test.package.rocky-runtime]
+opt-level = 3
+[profile.test.package.rocky-sdk]
+opt-level = 3

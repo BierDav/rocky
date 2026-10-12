@@ -1,0 +1,16 @@
+#!/bin/sh
+# Optimize CPU-heavy test binaries on the ARM CI hosts; retain debug assertions.
+set -eu
+mkdir -p .cargo
+cat > .cargo/config.toml <<'EOF'
+[profile.test.package.rocky-core]
+opt-level = 3
+[profile.test.package.rocky-credentials]
+opt-level = 3
+[profile.test.package.rocky-storage]
+opt-level = 3
+[profile.test.package.rocky-runtime]
+opt-level = 3
+[profile.test.package.rocky-sdk]
+opt-level = 3
+EOF

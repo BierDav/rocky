@@ -32,4 +32,5 @@ tasks.register<QualifyIosPackage>("qualifyIosPackage") {
     entitlements.set(repositoryRoot.file("sdks/native/qualification/keychain-entitlements.plist"))
     version.set(rockyVersion)
     javaHome.set(providers.systemProperty("java.home"))
+    developerDirectory.set(providers.environmentVariable("DEVELOPER_DIR"))
 }

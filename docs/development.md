@@ -289,6 +289,11 @@ workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. The iOS job reads that file for its official
 rustup toolchain and target installation. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
+Before archiving, `scripts/ci/test-profile` optimizes the CPU-heavy workspace
+test crates while retaining debug assertions and overflow checks. Artifact
+fallback builds use the same test profile. Production profiles and test budgets
+are unchanged.
+
 `check` downloads both test archives and runs `scripts/check --from` them:
 `cargo fmt --all -- --check` and the unit and integration tiers, without
 compiling. `e2e` downloads both for the end-to-end tier. GitHub `shopping`
@@ -323,6 +328,11 @@ reuse it.
 
 The `e2e` job runs `./scripts/check --e2e` on pushes to `main`; releases do not
 wait for it.
+The shopping job restores the Android job's Gradle toolchain cache. Cold Gradle
+distribution downloads retry transient network failures. The artifact-only iOS
+consumer retains `DEVELOPER_DIR` when restricting its environment to non-Rust
+tools, so a runner's selected full Xcode remains available. iOS keeps compiled
+workspace crates in its Rust cache even when a later qualification fails.
 Linux shopping checks publish only the common metadata, JVM and Android
 artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
 iOS builds while assembling that metadata. `scripts/ci/local-maven` removes

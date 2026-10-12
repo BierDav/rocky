@@ -188,6 +188,7 @@ jobs:
         timeout-minutes: 300
         run: |
           set -euo pipefail
+          ./scripts/ci/test-profile
           ./scripts/check --build "$RUNNER_TEMP/build"
 
       # One artifact per consumer so a failure to finalize the large shared
@@ -410,6 +411,15 @@ jobs:
           restore-keys: |
             android-native-${{ runner.os }}-
 
+      - name: Restore the shared Gradle toolchain cache
+        if: steps.reuse.outputs.passed != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.gradle
+          key: android-tooling-${{ runner.os }}-${{ hashFiles('source/sdks/kotlin/**/*.gradle.kts', 'source/sdks/kotlin/**/*.properties', 'source/sdks/kotlin/gradle/libs.versions.toml') }}
+          restore-keys: |
+            android-tooling-${{ runner.os }}-
+
       - name: Run the shopping qualification
         if: steps.reuse.outputs.passed != 'true'
         working-directory: source
@@ -585,6 +595,8 @@ jobs:
         with:
           workspaces: source/sdks/native -> target
           shared-key: ios
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Qualify the iOS matrix and binding
         working-directory: source

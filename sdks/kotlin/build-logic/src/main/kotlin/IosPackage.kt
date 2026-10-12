@@ -83,17 +83,21 @@ abstract class QualifyIosPackage : DefaultTask() {
 
     @get:Input abstract val javaHome: Property<String>
 
+    @get:Optional @get:Input
+    abstract val developerDirectory: Property<String>
+
     @TaskAction
     fun qualify() {
         val packaged = packaged.get().asFile.toPath()
         verifyInventory(packaged)
         logger.lifecycle("iOS inventory verified")
-        val environment = mapOf(
+        val environment = mutableMapOf(
             // Standard macOS/Xcode tools only; Gradle provisions Kotlin/Native itself.
             "PATH" to "/usr/bin:/bin:/usr/sbin:/sbin",
             "JAVA_HOME" to javaHome.get(),
             "HOME" to System.getProperty("user.home"),
         )
+        developerDirectory.orNull?.let { environment["DEVELOPER_DIR"] = it }
         check(listOf("cargo", "rustup").none { name -> environment.getValue("PATH").split(':').any { Path(it, name).exists() } }) {
             "qualification PATH contains Rust tooling"
         }

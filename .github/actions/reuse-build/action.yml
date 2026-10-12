@@ -58,6 +58,12 @@ runs:
       working-directory: source
       run: ./scripts/ci/install-system-deps
 
+    - name: Configure optimized test binaries when rebuilding
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true'
+      shell: sh
+      working-directory: source
+      run: ./scripts/ci/test-profile
+
     - uses: dtolnay/rust-toolchain@1.99.0
       if: steps.passed.outputs.cache-hit != 'true'
       with:

@@ -277,19 +277,12 @@ mod tests {
             .unwrap();
         let client_chain = client.inner.lock().await.config.credentials.clone();
         let server_chain = server.inner.lock().await.config.credentials.clone();
-        let (c, s) = tokio::io::duplex(64 * 1024);
-        let (c, s) = tokio::join!(
-            NativeSession::authenticate(
-                c,
-                &client,
-                client_key,
-                client_chain,
-                server_key.public_key(),
-                MAX_SECURE_BYTES
-            ),
-            NativeSession::accept(s, &server, server_key, server_chain, MAX_SECURE_BYTES),
-        );
-        let (mut c, mut s) = (c.unwrap(), s.unwrap());
+        let (mut c, mut s) = super::link::testing::sessions(
+            (&client, client_key, client_chain),
+            (&server, server_key, server_chain),
+        )
+        .await
+        .unwrap();
         let handler = Unknown(AtomicUsize::new(0));
         let ((), error) = tokio::join!(
             async {

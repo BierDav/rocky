@@ -1,7 +1,5 @@
 use super::*;
-use rocky_secure::network::{
-    ContactFuture, ContactHandler, ContactRequest, ContactResponse, NativeSession,
-};
+use rocky_secure::network::{ContactFuture, ContactHandler, ContactRequest, ContactResponse};
 
 impl ContactHandler for Node {
     fn answer(&self, _peer: PublicKey, request: ContactRequest) -> ContactFuture<'_> {
@@ -85,32 +83,13 @@ impl Node {
                 Ok(link) => link,
                 Err(_) => continue,
             };
-            let credentials = self.settings.lock().await.credentials.clone();
-            let mut session = match &link {
-                Some(handle) => handle.open().await?,
-                None => {
-                    let addresses = contact.addresses(transport.kind());
-                    let stream =
-                        crate::enrollment::dial(transport, &addresses, Protocol::Sync).await?;
-                    NativeSession::authenticate(
-                        stream,
-                        &self.replica,
-                        PrivateKey::from_bytes(&self.vault.get("node")?),
-                        credentials,
-                        peer,
-                        rocky_secure::MAX_SECURE_BYTES,
-                    )
-                    .await?
-                }
-            };
+            let mut session = link.open().await?;
             let response = async {
                 let response = session
                     .exchange_contacts(ContactRequest::Request { node: id })
                     .await?;
                 session.close().await?;
-                if let Some(handle) = link {
-                    handle.drain().await?;
-                }
+                link.drain().await?;
                 Ok::<_, Failure>(response)
             }
             .await;

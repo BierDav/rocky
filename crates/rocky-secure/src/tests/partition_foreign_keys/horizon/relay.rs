@@ -1,5 +1,5 @@
 use super::*;
-use crate::network::NativeSession;
+use crate::network::link;
 use rocky_credentials::{HorizonAck, Revocation, SignedRevocation};
 type Replica = EncryptedReplica<TypedRows>;
 fn partition() -> i64 {
@@ -7,7 +7,6 @@ fn partition() -> i64 {
 }
 
 async fn exchange(from: &Replica, to: &Replica, scope: ResourceScope) {
-    let (c, s) = tokio::io::duplex(1024 * 1024);
     let (cn, cc) = {
         let i = from.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
@@ -16,18 +15,18 @@ async fn exchange(from: &Replica, to: &Replica, scope: ResourceScope) {
         let i = to.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
     };
-    let (c, s) = tokio::join!(
-        NativeSession::authenticate(c, from, cn, cc, sn.public_key(), MAX_SECURE_BYTES),
-        NativeSession::accept(s, to, sn, sc, MAX_SECURE_BYTES)
-    );
-    let mut c = c.unwrap();
-    let mut s = s.unwrap();
+    let (mut c, mut s) = link::testing::sessions((from, cn, cc), (to, sn, sc))
+        .await
+        .unwrap();
     let (result, served) = tokio::join!(
         async {
             c.relay_mergeable_horizon(from, scope).await?;
             c.close().await
         },
-        s.serve(to)
+        async {
+            s.serve(to).await?;
+            s.close().await
+        }
     );
     result.unwrap();
     served.unwrap();
@@ -521,7 +520,6 @@ async fn a_read_only_participant_imports_the_finalized_checkpoint_from_restarted
             .await
             .unwrap()
     );
-    let (c, s) = tokio::io::duplex(1024 * 1024);
     let (cn, cc) = {
         let i = participant.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
@@ -530,19 +528,19 @@ async fn a_read_only_participant_imports_the_finalized_checkpoint_from_restarted
         let i = relay.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
     };
-    let (c, s) = tokio::join!(
-        NativeSession::authenticate(c, &participant, cn, cc, sn.public_key(), MAX_SECURE_BYTES),
-        NativeSession::accept(s, &relay, sn, sc, MAX_SECURE_BYTES)
-    );
-    let mut c = c.unwrap();
-    let mut s = s.unwrap();
+    let (mut c, mut s) = link::testing::sessions((&participant, cn, cc), (&relay, sn, sc))
+        .await
+        .unwrap();
     let (imported, served) = tokio::join!(
         async {
             c.rebootstrap(&participant, scope, MAX_SECURE_FRAME - 8192)
                 .await?;
             c.close().await
         },
-        s.serve(&relay)
+        async {
+            s.serve(&relay).await?;
+            s.close().await
+        }
     );
     assert!(
         imported.is_ok() && served.is_ok(),

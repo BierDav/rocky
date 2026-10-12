@@ -2633,7 +2633,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<Option<rocky_secure::network::link::channels::Handle>, Failure> {
+    ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
         let addresses = contact.addresses(transport.kind());
         let service = self
             .current()
@@ -2645,13 +2645,10 @@ impl Node {
             }
             .into());
         }
-        let mut link = None;
-        let mut busy_refused = false;
         for _ in 0..4 {
             service.live.wait_inbound_short(peer).await?;
             if let Some(open) = service.live.handle(peer) {
-                link = Some(open);
-                break;
+                return Ok(open);
             }
             let stream = crate::enrollment::dial(transport, &addresses, Protocol::Link).await?;
             let owner = self
@@ -2676,20 +2673,11 @@ impl Node {
                     self.absorb_revocations(Some(&error)).await?;
                     continue;
                 }
-                let busy = error.downcast_ref::<rocky_secure::Error>().is_some_and(|error| {
-                    matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::Busy>())
-                });
-                if !busy {
-                    return Err(error);
-                }
-                busy_refused = true;
-                break;
+                // A refusal, a full link budget included, backs off; nothing else syncs.
+                return Err(error);
             }
         }
-        if link.is_none() && !busy_refused {
-            return Err("link admission kept changing before reconcile".into());
-        }
-        Ok(link)
+        Err("link admission kept changing before reconcile".into())
     }
     async fn exchange(
         &self,
@@ -2697,36 +2685,25 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
-        let addresses = contact.addresses(transport.kind());
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
         let link = self.request_link(transport, peer, contact).await?;
-        let (credentials, renewable) = {
+        let renewable = {
             let settings = self.settings.lock().await;
-            (
-                settings.credentials.clone(),
-                !settings.issuer() || !settings.issuers.is_empty(),
-            )
+            !settings.issuer() || !settings.issuers.is_empty()
         };
         let upstream = Upstream {
             link,
-            transport,
-            addresses: &addresses,
             peer,
-            node: PrivateKey::from_bytes(&self.vault.get("node")?),
-            credentials,
             contacts: Some(self),
             renew_from: match renewable {
                 true => Some(revocations),
                 false => None,
             },
         };
-        let reconcile = match &upstream.link {
-            Some(handle) => Some(handle.begin_reconcile().await?),
-            None => None,
-        };
+        let reconcile = upstream.link.begin_reconcile().await?;
         let coordinator = self
             .coordinator
             .as_deref()
@@ -2821,45 +2798,18 @@ impl Node {
         )
         .await?;
         bootstrapped.extend(transfer);
-        if let Some(reconcile) = reconcile {
-            reconcile.close().await?;
-        }
-        if let Some(handle) = &upstream.link {
-            handle.drain().await?;
-        }
+        reconcile.close().await?;
+        upstream.link.drain().await?;
         service.live.close_short(peer);
         Ok((newer, retry, bootstrapped))
     }
-    /// Serves one inbound stream: sync for any peer its chain and the
-    /// revocation set admit, pairing and renewal on an issuer.
+    /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
+    /// and commands. Synchronization runs on live links.
     pub async fn serve(&self, protocol: Protocol, stream: Stream) -> Result<(), Failure> {
         if !self.online.load(Ordering::SeqCst) || self.ended.lock().await.is_some() {
             return Err("this node is offline".into());
         }
         match protocol {
-            Protocol::Sync => {
-                let settings = self.settings.lock().await.clone();
-                self.replica.configure_peers(settings.kept()).await;
-                let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-                let served = sync::serve_contacts(
-                    stream,
-                    &self.replica,
-                    node,
-                    settings.credentials,
-                    self.coordinator.as_deref(),
-                    &delivery::Port {
-                        node: self,
-                        serving: true,
-                    },
-                    |peer| self.inbound_sync(peer),
-                    self,
-                )
-                .await;
-                let absorbed = self.absorb_revocations(served.as_ref().err()).await;
-                self.topics_changed();
-                served?;
-                absorbed
-            }
             Protocol::Pair => {
                 let mut enrolled = false;
                 let answered = answer(stream, async |request| {

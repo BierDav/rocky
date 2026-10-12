@@ -1,15 +1,15 @@
-//! Mutually authenticated native sessions with per-frame and per-session
-//! byte limits, over any reliable ordered byte stream: TCP, a QUIC stream or
-//! an in-memory pipe. A peer is admitted by its credential chain and the
-//! revocation set, which the handshake exchanges; see
-//! `docs/decisions/0051-roster-free-admission.md`.
+//! Mutually authenticated sessions with per-frame and per-session byte
+//! limits. The [live link](link) handshake runs over any reliable ordered
+//! byte stream; every request runs on one of its channels. A peer is admitted
+//! by its credential chain and the revocation set, which the handshake
+//! exchanges; see `docs/decisions/0051-roster-free-admission.md`.
 //!
 //! Each message family has its module, with its requests, the client calls
 //! that send them and the answers that serve them.
 use super::*;
 use p2panda_core::Signature;
 use rand::{RngCore, rngs::OsRng};
-use rocky_core::{Commitment, ResourceScope, RowApplication, net::NATIVE_SESSION_VERSION};
+use rocky_core::{Commitment, ResourceScope, RowApplication};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::{
@@ -69,8 +69,10 @@ impl std::fmt::Display for Revoked {
     }
 }
 impl std::error::Error for Revoked {}
-/// Every failed proof of the peer's key, another session version included.
-const AUTHENTICATION_FAILED: &str = "native session authentication failed";
+/// Every failed proof of the peer's key, another handshake version included.
+const AUTHENTICATION_FAILED: &str = "link authentication failed";
+/// The version of a pinned contact reference's proof.
+const RESOLUTION_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct Hello {
@@ -82,11 +84,7 @@ struct Hello {
 }
 /// The label both sides sign the two hellos under.
 fn session_label(version: u32) -> String {
-    if version == link::HANDSHAKE_VERSION {
-        "rocky.link.v1".into()
-    } else {
-        format!("rocky.native-session.v{version}")
-    }
+    format!("rocky.link.v{version}")
 }
 /// What a session signs of each message is
 /// `signing_bytes("rocky.native-frame.v1", &(binding, sequence, bytes))`.
@@ -245,85 +243,51 @@ struct ResolvedPeer {
     node: PublicKey,
     signature: Signature,
 }
+/// A challenge for the node behind a pinned contact reference, and the
+/// request carrying it. The answer proves the key without opening a session.
+fn peer_resolution_request() -> Result<(Vec<u8>, Commitment), Error> {
+    let mut challenge = [0; 32];
+    OsRng.fill_bytes(&mut challenge);
+    let request = encode(&ResolvePeer {
+        version: RESOLUTION_VERSION,
+        challenge,
+    })?;
+    Ok((request, challenge))
+}
+/// The node key a resolution answer proves for `expected`.
+fn resolved_peer(
+    reply: &[u8],
+    challenge: Commitment,
+    expected: rocky_credentials::PeerId,
+) -> Result<PublicKey, Error> {
+    let proof: ResolvedPeer = decode(reply)?;
+    let bytes = signing_bytes(
+        "rocky.peer-resolution.v1",
+        &(proof.version, proof.challenge, proof.node),
+    )?;
+    if proof.version != RESOLUTION_VERSION
+        || proof.challenge != challenge
+        || rocky_credentials::PeerId::of(proof.node) != expected
+        || !proof.node.verify(&bytes, &proof.signature)
+    {
+        return Err(denied(
+            "peer resolution does not prove the pinned reference",
+        ));
+    }
+    Ok(proof.node)
+}
 impl NativeSession {
-    /// Authenticates `expected_peer` over `stream`, admits it by its chain
-    /// and the merged revocation set, and leaves `replica` holding the
-    /// statements the peer sent.
-    pub async fn authenticate<A: RowApplication>(
-        stream: impl SessionStream + 'static,
-        replica: &EncryptedReplica<A>,
-        local: PrivateKey,
-        credentials: CredentialChain,
-        expected_peer: PublicKey,
-        byte_budget: usize,
-    ) -> Result<Self, Error> {
-        if expected_peer == local.public_key() {
-            return Err(denied("native session peer/budget"));
-        }
-        Self::handshake(
-            Box::new(stream),
-            replica,
-            (local, credentials),
-            (Side::Initiator, Some(expected_peer)),
-            byte_budget,
-            NATIVE_SESSION_VERSION,
-        )
-        .await?
-        .ok_or_else(|| denied("peer resolution did not open a session"))
-    }
-    /// Authenticates whichever peer dialed, for a node that learns its peer
-    /// only from the handshake. The peer is admitted when its chain verifies
-    /// for this domain and no statement of the merged set revokes it; every
-    /// request is still authorized by its grants.
-    pub async fn accept<A: RowApplication>(
-        stream: impl SessionStream + 'static,
-        replica: &EncryptedReplica<A>,
-        local: PrivateKey,
-        credentials: CredentialChain,
-        byte_budget: usize,
-    ) -> Result<Self, Error> {
-        Self::handshake(
-            Box::new(stream),
-            replica,
-            (local, credentials),
-            (Side::Acceptor, None),
-            byte_budget,
-            NATIVE_SESSION_VERSION,
-        )
-        .await?
-        .ok_or_else(|| denied("peer resolution did not open a session"))
-    }
-    /// Resolves a pinned one-way contact reference without granting a session.
+    /// Proves which node answers `stream`, a link dialed to a pinned contact
+    /// reference, without opening the link or revealing credentials.
     pub async fn resolve_peer(
         mut stream: rocky_core::net::Stream,
         expected: rocky_credentials::PeerId,
     ) -> Result<PublicKey, Error> {
-        let mut challenge = [0; 32];
-        OsRng.fill_bytes(&mut challenge);
-        write_frame(
-            &mut stream,
-            &encode(&ResolvePeer {
-                version: NATIVE_SESSION_VERSION,
-                challenge,
-            })?,
-        )
-        .await?;
-        let proof: ResolvedPeer = decode(&read_frame(&mut stream).await?)?;
-        let bytes = signing_bytes(
-            "rocky.peer-resolution.v1",
-            &(proof.version, proof.challenge, proof.node),
-        )?;
-        if proof.version != NATIVE_SESSION_VERSION
-            || proof.challenge != challenge
-            || rocky_credentials::PeerId::of(proof.node) != expected
-            || !proof.node.verify(&bytes, &proof.signature)
-        {
-            return Err(denied(
-                "peer resolution does not prove the pinned reference",
-            ));
-        }
+        let (request, challenge) = peer_resolution_request()?;
+        write_frame(&mut stream, &request).await?;
+        let node = resolved_peer(&read_frame(&mut stream).await?, challenge, expected)?;
         stream.shutdown().await.map_err(Error::Io)?;
-        Ok(proof.node)
+        Ok(node)
     }
     /// Answers a node-reference challenge without opening a session or revealing credentials.
     pub fn peer_resolution_reply(
@@ -333,7 +297,7 @@ impl NativeSession {
         let Ok(request) = decode::<ResolvePeer>(bytes) else {
             return Ok(None);
         };
-        if request.version != NATIVE_SESSION_VERSION {
+        if request.version != RESOLUTION_VERSION {
             return Err(denied("unsupported peer resolution version"));
         }
         let node = local.public_key();
@@ -348,24 +312,6 @@ impl NativeSession {
             signature: local.sign(&bytes),
         })?))
     }
-    /// Serves either an authenticated session or a bounded node-reference proof.
-    pub async fn accept_or_resolve<A: RowApplication>(
-        stream: impl SessionStream + 'static,
-        replica: &EncryptedReplica<A>,
-        local: PrivateKey,
-        credentials: CredentialChain,
-        byte_budget: usize,
-    ) -> Result<Option<Self>, Error> {
-        Self::handshake(
-            Box::new(stream),
-            replica,
-            (local, credentials),
-            (Side::Acceptor, None),
-            byte_budget,
-            NATIVE_SESSION_VERSION,
-        )
-        .await
-    }
     /// The initiator's hello, then the acceptor's once it verified the
     /// initiator's chain, then both signatures; the initiator then verifies
     /// the acceptor's chain. Both exchange the revocation statements the
@@ -376,10 +322,10 @@ impl NativeSession {
         (local, credentials): (PrivateKey, CredentialChain),
         (side, expected): (Side, Option<PublicKey>),
         byte_budget: usize,
-        version: u32,
+        (version, resolve): (u32, bool),
     ) -> Result<Option<Self>, Error> {
         if byte_budget == 0 || byte_budget > MAX_SECURE_BYTES {
-            return Err(denied("native session peer/budget"));
+            return Err(denied("session peer/budget"));
         }
         let own = local.public_key();
         let mut challenge = [0; 32];
@@ -401,7 +347,7 @@ impl NativeSession {
             Side::Acceptor => read_frame(&mut stream).await?,
         };
         if side == Side::Acceptor
-            && version == NATIVE_SESSION_VERSION
+            && resolve
             && let Some(proof) = Self::peer_resolution_reply(&peer_bytes, &local)?
         {
             write_frame(&mut stream, &proof).await?;
@@ -413,7 +359,7 @@ impl NativeSession {
             return Err(denied(AUTHENTICATION_FAILED));
         }
         if peer.node == own || expected.is_some_and(|expected| peer.node != expected) {
-            return Err(denied("unexpected native peer"));
+            return Err(denied("unexpected link peer"));
         }
         if side == Side::Acceptor {
             // An outsider is shown no chain: the acceptor speaks only once
@@ -481,33 +427,27 @@ impl NativeSession {
         }
         Ok(Some(session))
     }
-    /// A handshake under another session version, as another build runs.
-    #[cfg(test)]
-    pub(crate) async fn authenticate_as_version<A: RowApplication>(
-        stream: impl SessionStream + 'static,
-        replica: &EncryptedReplica<A>,
-        (local, credentials): (PrivateKey, CredentialChain),
-        expected_peer: PublicKey,
-        version: u32,
-    ) -> Result<Self, Error> {
-        Self::handshake(
-            Box::new(stream),
-            replica,
-            (local, credentials),
-            (Side::Initiator, Some(expected_peer)),
-            MAX_SECURE_BYTES,
-            version,
-        )
-        .await?
-        .ok_or_else(|| denied("peer resolution did not open a session"))
-    }
     pub fn peer(&self) -> PublicKey {
         self.peer
     }
-    /// What remains of the byte budget.
+    /// Serves until the peer ends the channel, then ends this side too, so
+    /// a peer awaiting `close` returns.
     #[cfg(test)]
-    pub(crate) fn remaining(&self) -> usize {
-        self.remaining
+    pub(crate) async fn serve_to_end<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> Result<(), Error> {
+        let served = self.serve(replica).await;
+        if let SessionIo::Channel(channel) = &mut self.stream {
+            channel.close().await?;
+        }
+        served
+    }
+    /// The same session with a smaller byte budget.
+    #[cfg(test)]
+    pub(crate) fn with_budget(mut self, bytes: usize) -> Self {
+        self.remaining = self.remaining.min(bytes);
+        self
     }
     /// Ends the session: the peer reads the end of the stream after the
     /// last message. Transports that reset unfinished streams need this.
@@ -685,18 +625,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_version_names_the_transport_and_the_label() {
-        let name = rocky_core::net::Protocol::Sync.name();
-        assert_eq!(
-            name,
-            format!("rocky/native-session/{NATIVE_SESSION_VERSION}").as_bytes()
-        );
-        assert_eq!(
-            session_label(NATIVE_SESSION_VERSION),
-            format!("rocky.native-session.v{NATIVE_SESSION_VERSION}")
-        );
     }
 }

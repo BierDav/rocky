@@ -7,6 +7,49 @@ use crate::{
 
 const SCHEMA: &str = r#"{"application":"sync","version":1,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
+/// A request session of `dialer` and the session of `acceptor` answering it,
+/// on a link over an in-memory pipe that the test drives instead of a service.
+async fn link_sessions(
+    dialer: &Node,
+    acceptor: &Node,
+) -> Result<
+    (
+        rocky_secure::network::NativeSession,
+        rocky_secure::network::NativeSession,
+    ),
+    Failure,
+> {
+    use rocky_secure::network::link::Link;
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let accepting = PrivateKey::from_bytes(&acceptor.vault.get("node")?);
+    let expected = accepting.public_key();
+    let (near_credentials, far_credentials) = (
+        dialer.settings.lock().await.credentials.clone(),
+        acceptor.settings.lock().await.credentials.clone(),
+    );
+    let (dialed, accepted) = tokio::join!(
+        Link::open(
+            near,
+            &dialer.replica,
+            PrivateKey::from_bytes(&dialer.vault.get("node")?),
+            near_credentials,
+            Some(expected),
+        ),
+        Link::open(far, &acceptor.replica, accepting, far_credentials, None),
+    );
+    let (mut dialed, mut accepted) = (dialed?, accepted?);
+    let (near, far) = tokio::join!(dialed.ready(false), accepted.ready(false));
+    near?;
+    far?;
+    let handle = dialed.channels.handle.clone();
+    let (served, mut incoming) = tokio::sync::mpsc::channel(1);
+    tokio::task::spawn_local(dialed.drive(tokio::sync::mpsc::channel(1).0));
+    tokio::task::spawn_local(accepted.drive(served));
+    let session = handle.open().await?;
+    let answering = incoming.recv().await.ok_or("link ended")?;
+    Ok((session, answering))
+}
+
 async fn node(
     root: &std::path::Path,
     settings: Settings,

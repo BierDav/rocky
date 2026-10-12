@@ -594,8 +594,6 @@ async fn command_outputs_jobs_blobs_and_checkpoints_are_filtered_together() {
 
 #[tokio::test]
 async fn native_encrypted_invocation_and_result_application() {
-    use network::NativeSession;
-    use tokio::net::{TcpListener, TcpStream};
     let fixture = Fixture::new();
     let dir = TempDir::new().unwrap();
     let executor_key = PrivateKey::new();
@@ -647,36 +645,22 @@ async fn native_encrypted_invocation_and_result_application() {
         )
         .await
         .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (near, far) = crate::network::link::testing::tcp().await;
+    let (mut session, mut served) = crate::network::link::testing::sessions_over(
+        near,
+        far,
+        (&caller, caller_key.clone(), caller_credentials),
+        (&executor, executor_key.clone(), executor_credentials),
+    )
+    .await
+    .unwrap();
     let serve = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::accept(
-            stream,
-            &executor,
-            executor_key.clone(),
-            executor_credentials,
-            1024 * 1024,
-        )
-        .await
-        .unwrap();
-        session
+        served
             .serve_command_once(&executor, &coordinator)
             .await
             .unwrap();
     };
     let invoke = async {
-        let stream = TcpStream::connect(address).await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            &caller,
-            caller_key.clone(),
-            caller_credentials,
-            executor_key.public_key(),
-            1024 * 1024,
-        )
-        .await
-        .unwrap();
         let result = session
             .execute_command(
                 &caller,

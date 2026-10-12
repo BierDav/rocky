@@ -1,7 +1,7 @@
 //! A SQL writer beside a replica that receives a long catch-up. See
 //! `docs/runtime/sql-driver.md#the-writer`.
 use super::*;
-use crate::network::NativeSession;
+use crate::network::link::Link;
 use rocky_core::{RowChange, RowIdentity, RowWrite};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -115,36 +115,42 @@ async fn pull_once(
                     let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                     let (stream, _) = listener.accept().await.unwrap();
                     stream.set_nodelay(true).unwrap();
-                    let mut session = NativeSession::accept(
-                        stream,
-                        &source,
-                        source_node,
-                        source_credentials,
-                        MAX_SECURE_BYTES,
-                    )
-                    .await
-                    .unwrap();
+                    let mut link =
+                        Link::open(stream, &source, source_node, source_credentials, None)
+                            .await
+                            .unwrap();
+                    link.ready(false).await.unwrap();
+                    let (served, mut incoming) = tokio::sync::mpsc::channel(1);
+                    let driven = tokio::spawn(link.drive(served));
+                    let mut session = incoming.recv().await.unwrap();
                     session.serve(&source).await.unwrap();
+                    session.close().await.unwrap();
+                    // The client ends the link once its channel closed.
+                    driven.await.unwrap().unwrap();
                 })
         })
     };
     let stream = tokio::net::TcpStream::connect(address).await.unwrap();
     stream.set_nodelay(true).unwrap();
-    let mut session = NativeSession::authenticate(
+    let mut link = Link::open(
         stream,
         target,
         target_node,
         target_credentials,
-        source_node_key(source).await,
-        MAX_SECURE_BYTES,
+        Some(source_node_key(source).await),
     )
     .await
     .unwrap();
+    link.ready(false).await.unwrap();
+    let handle = link.channels.handle.clone();
+    let driven = tokio::spawn(link.drive(tokio::sync::mpsc::channel(1).0));
+    let mut session = handle.open().await.unwrap();
     let report = session
         .catch_up(target, scope, MAX_SECURE_FRAME / 2)
         .await
         .unwrap();
     session.close().await.unwrap();
+    driven.abort();
     tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();

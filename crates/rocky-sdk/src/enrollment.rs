@@ -4063,7 +4063,7 @@ impl Settings {
                 None => return Ok(None),
             }
         } else {
-            (&entry.contact, Protocol::Sync)
+            (&entry.contact, Protocol::Link)
         };
         let addresses = contact.addresses(transport.kind());
         if addresses.is_empty() {

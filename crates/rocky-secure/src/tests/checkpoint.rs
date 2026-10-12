@@ -5,7 +5,6 @@ use crate::storage::rows;
 use network::NativeSession;
 use std::collections::BTreeMap;
 use std::path::Path;
-use tokio::net::{TcpListener, TcpStream};
 
 type Replica = EncryptedReplica<Employees>;
 
@@ -552,13 +551,7 @@ async fn handles_beyond_the_window_are_forgotten_once_pruned() {
     assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_operations").await, 1);
 }
 
-async fn serve(listener: TcpListener, source: &Replica, identity: (PrivateKey, CredentialChain)) {
-    let (stream, _) = listener.accept().await.unwrap();
-    stream.set_nodelay(true).unwrap();
-    let mut session =
-        NativeSession::accept(stream, source, identity.0, identity.1, MAX_SECURE_BYTES)
-            .await
-            .unwrap();
+async fn serve(mut session: NativeSession, source: &Replica) {
     while session.serve_once(source).await.is_ok() {}
 }
 
@@ -637,25 +630,21 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
     );
     assert_eq!(all_rows(&f, &a).await, all_rows(&f, &b).await);
     assert!(c.behind_horizon(&horizon).await.unwrap());
-    // Over the native session C is told so, and no frame is received into a gap.
+    // Over the link C is told so, and no frame is received into a gap.
     let quota = 8192;
     let before = all_rows(&f, &c).await;
     for fault in [Some((Stage::Import, 1)), Some((Stage::Switch, 0)), None] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let (near, far) = network::link::testing::tcp().await;
+        let (session, served) = network::link::testing::sessions_over(
+            near,
+            far,
+            (&c, keys[2].clone(), c_credentials.clone()),
+            (&a, keys[0].clone(), a_credentials.clone()),
+        )
+        .await
+        .unwrap();
         let client = async {
-            let stream = TcpStream::connect(address).await.unwrap();
-            stream.set_nodelay(true).unwrap();
-            let mut session = NativeSession::authenticate(
-                stream,
-                &c,
-                keys[2].clone(),
-                c_credentials.clone(),
-                keys[0].public_key(),
-                MAX_SECURE_BYTES,
-            )
-            .await
-            .unwrap();
+            let mut session = session;
             assert!(
                 session
                     .pull(&c, vec![f.public], None, MAX_SECURE_FRAME / 2)
@@ -673,10 +662,7 @@ async fn offline_replica_learns_it_is_behind_and_rebootstraps_with_its_local_edi
             }
             session.rebootstrap(&c, f.public, quota).await
         };
-        let (report, ()) = tokio::join!(
-            client,
-            serve(listener, &a, (keys[0].clone(), a_credentials.clone()),)
-        );
+        let (report, ()) = tokio::join!(client, serve(served, &a));
         let Some(_) = fault else {
             let report = report.unwrap();
             assert_eq!(report.checkpoint, signed.id().unwrap());

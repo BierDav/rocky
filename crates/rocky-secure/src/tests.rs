@@ -674,9 +674,7 @@ fn row_and_field_pairing_cannot_be_combined_and_mixed_patches_are_atomic() {
 }
 
 #[tokio::test]
-async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments() {
-    use network::NativeSession;
-    use tokio::net::{TcpListener, TcpStream};
+async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments() {
     let fixture = Fixture::new();
     let dir = TempDir::new().unwrap();
     let a = PrivateKey::new();
@@ -704,29 +702,20 @@ async fn native_tcp_sessions_forward_original_ciphertext_and_named_acknowledgmen
         )
         .await
         .unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (near, far) = network::link::testing::tcp().await;
+    let (mut session, mut served) = network::link::testing::sessions_over(
+        near,
+        far,
+        (&target, b.clone(), bcred),
+        (&source, a.clone(), acred),
+    )
+    .await
+    .unwrap();
     let server = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session =
-            NativeSession::accept(stream, &source, a.clone(), acred, MAX_SECURE_FRAME * 4)
-                .await
-                .unwrap();
-        session.serve_once(&source).await.unwrap();
-        session.serve_once(&source).await.unwrap();
+        served.serve_once(&source).await.unwrap();
+        served.serve_once(&source).await.unwrap();
     };
     let client = async {
-        let stream = TcpStream::connect(address).await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            &target,
-            b.clone(),
-            bcred,
-            a.public_key(),
-            MAX_SECURE_FRAME * 4,
-        )
-        .await
-        .unwrap();
         assert_eq!(
             session
                 .pull(&target, vec![fixture.public], None, MAX_SECURE_FRAME / 2)
@@ -1186,37 +1175,21 @@ async fn native_pull(
     scopes: Vec<ResourceScope>,
     count: usize,
 ) {
-    use network::NativeSession;
-    use tokio::net::{TcpListener, TcpStream};
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (near, far) = network::link::testing::tcp().await;
+    let (mut session, mut served) = network::link::testing::sessions_over(
+        near,
+        far,
+        (target, target_identity.0.clone(), target_identity.1),
+        (source, source_identity.0.clone(), source_identity.1),
+    )
+    .await
+    .unwrap();
     let server = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session = NativeSession::accept(
-            stream,
-            source,
-            source_identity.0.clone(),
-            source_identity.1,
-            MAX_SECURE_FRAME * 8,
-        )
-        .await
-        .unwrap();
         for _ in 0..=count {
-            session.serve_once(source).await.unwrap();
+            served.serve_once(source).await.unwrap();
         }
     };
     let client = async {
-        let stream = TcpStream::connect(address).await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            target,
-            target_identity.0.clone(),
-            target_identity.1,
-            source_identity.0.public_key(),
-            MAX_SECURE_FRAME * 8,
-        )
-        .await
-        .unwrap();
         assert!(
             session
                 .pull(target, scopes, None, MAX_SECURE_FRAME / 2)

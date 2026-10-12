@@ -3,7 +3,10 @@
 //! (`docs/decisions/0051-roster-free-admission.md`).
 use super::revocations::{hello, insert, open};
 use super::*;
-use crate::network::{NativeSession, PEER_REVOKED, REVOKED, Revoked};
+use crate::network::{
+    PEER_REVOKED, REVOKED, Revoked,
+    link::{Link, testing},
+};
 use rocky_credentials::DAY;
 use std::{
     pin::Pin,
@@ -115,23 +118,13 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
             stream: near,
             read: read.clone(),
         };
-        let (accepted, dialed) = tokio::join!(
-            NativeSession::accept(
-                far,
-                &a,
-                alice.clone(),
-                f.credentials(&alice, f.full()),
-                MAX_SECURE_BYTES,
-            ),
-            NativeSession::authenticate(
-                near,
-                &b,
-                stranger.clone(),
-                chain,
-                alice.public_key(),
-                MAX_SECURE_BYTES,
-            )
-        );
+        let (dialed, accepted) = testing::links(
+            near,
+            far,
+            (&b, stranger.clone(), chain),
+            (&a, alice.clone(), f.credentials(&alice, f.full())),
+        )
+        .await;
         assert!(
             matches!(accepted, Err(Error::Rejected(_))),
             "{case}: {:?}",
@@ -145,7 +138,9 @@ async fn foreign_expired_and_self_signed_chains_are_refused_before_anything_is_r
     // A member is recorded once it is served.
     insert(&a, &f, 1, "served").await;
     let (left, right) = hello((&alice, &a), (&bob, &b), &f).await;
-    let (mut server, mut client) = (left.unwrap(), right.unwrap());
+    let (mut client, mut server) = testing::requests(right.unwrap(), left.unwrap())
+        .await
+        .unwrap();
     let (served, pulled) = tokio::join!(server.serve_once(&a), client.peer_frontier(&b, f.public));
     served.unwrap();
     pulled.unwrap();
@@ -163,13 +158,13 @@ async fn a_revoked_peer_learns_its_statement_and_both_sides_end_the_session() {
     let e = open(&f, &dir, "e.db", &erin).await;
     let revoked = statements(&f, 2, &[dave.public_key(), erin.public_key()]);
     a.learn_revocations(&revoked).await.unwrap();
-    let rejected = |result: Result<NativeSession, Error>| match result {
+    let rejected = |result: Result<Link, Error>| match result {
         Err(Error::Rejected(message)) => message,
         other => panic!("expected a refusal, got {:?}", other.err()),
     };
     // The revoked side ends with the statement that revokes it, which its
     // replica does not keep.
-    let told = |result: Result<NativeSession, Error>, node: &PrivateKey| match result {
+    let told = |result: Result<Link, Error>, node: &PrivateKey| match result {
         Err(Error::Application(error)) => {
             let Revoked(statement) = error.downcast_ref::<Revoked>().unwrap();
             assert!(
@@ -211,24 +206,24 @@ async fn another_session_version_is_refused_with_the_authentication_error() {
     let b = open(&f, &dir, "b.db", &bob).await;
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
     let (accepted, dialed) = tokio::join!(
-        NativeSession::accept(
+        Link::open(
             far,
             &a,
             alice.clone(),
             f.credentials(&alice, f.full()),
-            MAX_SECURE_BYTES,
+            None
         ),
-        NativeSession::authenticate_as_version(
+        Link::open_as_version(
             near,
             &b,
             (bob.clone(), f.credentials(&bob, f.full())),
-            alice.public_key(),
-            rocky_core::net::NATIVE_SESSION_VERSION + 1,
+            Some(alice.public_key()),
+            2,
         )
     );
     match accepted {
         Err(Error::Rejected(message)) => {
-            assert_eq!(message, "native session authentication failed");
+            assert_eq!(message, "link authentication failed");
         }
         other => panic!("expected the authentication error, got {:?}", other.err()),
     }
@@ -251,8 +246,8 @@ async fn a_full_set_costs_two_digests_when_equal_and_fits_its_pages_when_missing
     let started = std::time::Instant::now();
     let (left, right) = hello((&alice, &a), (&bob, &b), &f).await;
     let elapsed = started.elapsed();
-    let spent = MAX_SECURE_BYTES - right.unwrap().remaining();
-    assert_eq!(MAX_SECURE_BYTES - left.unwrap().remaining(), spent);
+    let spent = right.unwrap().handshake_bytes;
+    assert_eq!(left.unwrap().handshake_bytes, spent);
     eprintln!("1,024 equal statements: {spent} bytes after the hellos, handshake {elapsed:?}");
     assert!(spent < 1024, "{spent}");
 
@@ -260,7 +255,7 @@ async fn a_full_set_costs_two_digests_when_equal_and_fits_its_pages_when_missing
     let started = std::time::Instant::now();
     let (left, right) = hello((&alice, &a), (&carol, &c), &f).await;
     let elapsed = started.elapsed();
-    let spent = MAX_SECURE_BYTES - right.unwrap().remaining();
+    let spent = right.unwrap().handshake_bytes;
     left.unwrap();
     eprintln!("1,024 statements against none: {spent} bytes, handshake {elapsed:?}");
     assert_eq!(c.revocations().await, full);

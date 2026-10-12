@@ -1,11 +1,11 @@
-//! Credentialed strangers against the inbound limit
+//! Credentialed strangers against the inbound link budget
 //! (`docs/decisions/0051-roster-free-admission.md`).
 use super::*;
 use rocky_credentials::{Authority, device_chain};
-use rocky_secure::{MAX_SECURE_BYTES, network::NativeSession};
+use rocky_secure::network::link::Link;
 
 #[tokio::test]
-async fn credentialed_strangers_over_the_inbound_limit_are_refused_and_a_configured_peer_syncs_after()
+async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configured_peer_syncs_after()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -61,40 +61,24 @@ async fn credentialed_strangers_over_the_inbound_limit_are_refused_and_a_configu
                 link.served.load(Ordering::Relaxed),
                 link.refused.load(Ordering::Relaxed),
             );
-            // All 64 are open at once; each served one holds its slot. The hub
-            // queues few dials, so each waits until A took the one before.
-            let mut attempts = Vec::new();
-            for (index, (node, chain)) in strangers.into_iter().enumerate() {
-                let stream = dialer.connect("a", Protocol::Sync).await?;
-                while link.served.load(Ordering::Relaxed) + link.refused.load(Ordering::Relaxed)
-                    <= served + refused + index as u64
-                {
-                    tokio::task::yield_now().await;
-                }
-                let replica = replica.clone();
-                attempts.push(tokio::task::spawn_local(async move {
-                    NativeSession::authenticate(
-                        stream,
-                        &replica,
-                        node,
-                        chain,
-                        own,
-                        MAX_SECURE_BYTES,
-                    )
-                    .await
-                }));
+            // One after another, each kept open: an admitted link holds its
+            // slot, so the 33rd and later are refused as busy.
+            let mut links = Vec::new();
+            for (node, chain) in strangers {
+                let stream = dialer.connect("a", Protocol::Link).await?;
+                let mut opened = Link::open(stream, &replica, node, chain, Some(own)).await?;
+                links.push(opened.ready(false).await.map(|_| opened));
             }
-            let mut sessions = Vec::new();
-            for attempt in attempts {
-                sessions.push(attempt.await?);
+            assert_eq!(links.iter().filter(|link| link.is_ok()).count(), 32);
+            for refused in links.iter().skip(32) {
+                let Err(rocky_secure::Error::Application(cause)) = refused else {
+                    return Err("an over-budget link was not refused".into());
+                };
+                assert!(cause.is::<rocky_secure::network::link::Busy>());
             }
-            assert_eq!(
-                sessions.iter().filter(|session| session.is_ok()).count(),
-                32
-            );
-            assert_eq!(link.served.load(Ordering::Relaxed), served + 32);
+            assert_eq!(link.served.load(Ordering::Relaxed), served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
-            assert_eq!(link.active.available_permits(), 0);
+            assert_eq!(link.live_budget.available_permits(), 0);
             // `peers` lists the served strangers, met without a contact.
             let peers = a.peers().await;
             assert_eq!(
@@ -104,15 +88,15 @@ async fn credentialed_strangers_over_the_inbound_limit_are_refused_and_a_configu
                     .count(),
                 32
             );
-            drop(sessions);
-            while link.active.available_permits() < INBOUND {
+            drop(links);
+            while link.live_budget.available_permits() < live_links::BUDGET {
                 tokio::task::yield_now().await;
             }
             // A configured peer syncs afterwards.
             let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
             assert_eq!(synced["state"], "connected");
             assert_eq!(synced["peers"], 1);
-            assert!(link.served.load(Ordering::Relaxed) > served + 32);
+            assert!(link.served.load(Ordering::Relaxed) > served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
             dialer.close().await;
             b.detach(None).await;

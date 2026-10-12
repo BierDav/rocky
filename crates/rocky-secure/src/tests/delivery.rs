@@ -1,6 +1,6 @@
 //! The delivery family over a real session, against an in-memory owner.
 use super::*;
-use network::{Deliveries, DeliveryFuture, Held, NativeSession, Outgoing};
+use network::{Deliveries, DeliveryFuture, Held, Outgoing};
 use rocky_credentials::{DeliveryReceipt, SealedDelivery};
 use std::sync::{Arc, Mutex};
 
@@ -154,29 +154,19 @@ async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
         deposits: (20..24).map(|tag| large(&c, tag)).collect(),
         ..Port::default()
     };
-    let (dialer, acceptor) = tokio::io::duplex(1 << 20);
+    let (mut session, mut serving) =
+        network::link::testing::sessions((&sender, b.clone(), bcred), (&mailbox, a.clone(), acred))
+            .await
+            .unwrap();
     let served = mailbox_port.clone();
     let server = async {
-        let mut session =
-            NativeSession::accept(acceptor, &mailbox, a.clone(), acred, MAX_SECURE_BYTES)
-                .await
-                .unwrap();
-        session
+        serving
             .serve_all(&mailbox, None, &*served, None)
             .await
             .unwrap();
+        serving.close().await.unwrap();
     };
     let client = async {
-        let mut session = NativeSession::authenticate(
-            dialer,
-            &sender,
-            b.clone(),
-            bcred,
-            a.public_key(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
         let report = session.deliver(&sender_port).await.unwrap();
         session.close().await.unwrap();
         report
@@ -220,27 +210,16 @@ async fn a_session_without_an_owner_refuses_delivery() {
     let dialing = EncryptedReplica::open(dir.path().join("b.db"), fixture.app(), bc)
         .await
         .unwrap();
-    let (dialer, acceptor) = tokio::io::duplex(1 << 16);
+    let (mut session, mut serving) =
+        network::link::testing::sessions((&dialing, b, bcred), (&served, a.clone(), acred))
+            .await
+            .unwrap();
     let server = async {
-        let mut session =
-            NativeSession::accept(acceptor, &served, a.clone(), acred, MAX_SECURE_BYTES)
-                .await
-                .unwrap();
-        session.serve(&served).await
+        let result = serving.serve(&served).await;
+        drop(serving);
+        result
     };
-    let client = async {
-        let mut session = NativeSession::authenticate(
-            dialer,
-            &dialing,
-            b,
-            bcred,
-            a.public_key(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
-        session.deliver(&Port::default()).await
-    };
+    let client = async { session.deliver(&Port::default()).await };
     let (served, delivered) = tokio::join!(server, client);
     assert!(
         served

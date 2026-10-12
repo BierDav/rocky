@@ -231,26 +231,6 @@ impl rocky_sdk::transport::Transport for Gate {
         protocol: rocky_sdk::transport::Protocol,
     ) -> rocky_sdk::transport::BoxFuture<'a, Result<rocky_sdk::transport::Stream, Failure>> {
         Box::pin(async move {
-            if protocol == rocky_sdk::transport::Protocol::Sync {
-                self.attempts.send_modify(|count| *count += 1);
-                if self.refuse.load(std::sync::atomic::Ordering::SeqCst)
-                    || *self.attempts.borrow()
-                        > self.max_attempts.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    return Err("injected sync refusal".into());
-                }
-                if *self.attempts.borrow()
-                    == self
-                        .pause_on_attempt
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    self.allowed.send_replace(false);
-                }
-                self.allowed
-                    .subscribe()
-                    .wait_for(|allowed| *allowed)
-                    .await?;
-            }
             let stream = self.inner.connect(address, protocol).await?;
             if protocol == rocky_sdk::transport::Protocol::Link {
                 return Ok(Box::new(link_gate::LinkGate::new(stream, self))
@@ -494,8 +474,9 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         .sync()
         .await
         .expect("resume only the remaining scope");
-    // Resolve the saved route, resume one scope, then reconcile normally.
-    assert_eq!(*attempts.borrow() - before, 3);
+    // Resume one scope, then reconcile normally. Resolving the saved route
+    // answers on the link stream before any channel opens.
+    assert_eq!(*attempts.borrow() - before, 2);
     assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
     assert!(!path.join("bootstrap.json").exists());
     member.close().await;

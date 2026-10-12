@@ -2,10 +2,9 @@
 //! scopes on devices that hold the child only. See
 //! `docs/runtime/existence-logs.md`.
 use super::*;
-use crate::network::NativeSession;
 use crate::sql::{SqlError, SqlOptions};
 use crate::storage::collect_rows;
-use crate::{ExistenceEvent, ExistenceRecord, MAX_SECURE_BYTES, ReceiveStatus, SecureSql};
+use crate::{ExistenceEvent, ExistenceRecord, ReceiveStatus, SecureSql};
 use rocky_core::{DomainId, LogicalSchema, Scope, SqlValue, TypedRows};
 
 const DEFINITION: &str = r#"{
@@ -865,8 +864,7 @@ async fn a_keyless_replica_verifies_signatures_and_author_rights() {
 }
 
 #[tokio::test]
-async fn native_sessions_exchange_existence_logs() {
-    use tokio::net::{TcpListener, TcpStream};
+async fn link_sessions_exchange_existence_logs() {
     let erp = Erp::new();
     let dir = TempDir::new().unwrap();
     let a = erp
@@ -884,27 +882,17 @@ async fn native_sessions_exchange_existence_logs() {
         )],
     )
     .await;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (key, credentials, replica) = (a.node.clone(), a.credentials.clone(), a.replica.clone());
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session =
-            NativeSession::accept(stream, &replica, key, credentials, MAX_SECURE_BYTES)
-                .await
-                .unwrap();
-        while session.serve_once(&replica).await.is_ok() {}
-    });
-    let mut session = NativeSession::authenticate(
-        TcpStream::connect(address).await.unwrap(),
-        &b.replica,
-        b.node.clone(),
-        b.credentials.clone(),
-        a.node.public_key(),
-        MAX_SECURE_BYTES,
+    let (near, far) = network::link::testing::tcp().await;
+    let (mut session, mut served) = network::link::testing::sessions_over(
+        near,
+        far,
+        (&b.replica, b.node.clone(), b.credentials.clone()),
+        (&a.replica, a.node.clone(), a.credentials.clone()),
     )
     .await
     .unwrap();
+    let replica = a.replica.clone();
+    let server = tokio::spawn(async move { while served.serve_once(&replica).await.is_ok() {} });
     let lists = erp.scope("lists");
     assert_eq!(
         session.sync_existence(&b.replica, lists).await.unwrap(),
@@ -2284,7 +2272,6 @@ async fn horizon_base_conflicts_drop_but_fresh_concurrent_inserts_and_causal_reu
 async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_keys_or_resurrection()
 {
     use crate::credentials::{HORIZON_WAIT_SECONDS, SignedHorizon};
-    use tokio::net::{TcpListener, TcpStream};
     let erp = Erp::new();
     let dir = TempDir::new().unwrap();
     let full = erp
@@ -2388,32 +2375,21 @@ async fn horizon_expired_child_rebootstraps_authenticated_base_without_parent_ke
                 vec![vec![integer(0)]]
             );
         }
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let source = full.replica.clone();
-        let key = full.node.clone();
-        let credentials = full.credentials.clone();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            stream.set_nodelay(true).unwrap();
-            let mut session =
-                NativeSession::accept(stream, &source, key, credentials, MAX_SECURE_BYTES)
-                    .await
-                    .unwrap();
-            while session.serve_once(&source).await.is_ok() {}
-        });
-        let stream = TcpStream::connect(addr).await.unwrap();
-        stream.set_nodelay(true).unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            &child.replica,
-            child.node.clone(),
-            child.credentials.clone(),
-            full.node.public_key(),
-            MAX_SECURE_BYTES,
+        let (near, far) = network::link::testing::tcp().await;
+        let (mut session, mut served) = network::link::testing::sessions_over(
+            near,
+            far,
+            (
+                &child.replica,
+                child.node.clone(),
+                child.credentials.clone(),
+            ),
+            (&full.replica, full.node.clone(), full.credentials.clone()),
         )
         .await
         .unwrap();
+        let source = full.replica.clone();
+        let server = tokio::spawn(async move { while served.serve_once(&source).await.is_ok() {} });
         if is_offline {
             assert!(
                 session

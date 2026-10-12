@@ -1,6 +1,6 @@
 [package]
 name = "rocky-secure"
-description = "Signed capabilities, encrypted replicas and authenticated native sessions"
+description = "Signed capabilities, encrypted replicas and authenticated live links"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -259,17 +259,33 @@ impl Node {
         let mut authority = self.replica.observe_authority().await;
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
-        let mut opened = match Box::pin(link::Link::open(
-            stream,
-            &self.replica,
-            local,
-            settings.credentials,
-            expected,
-        ))
-        .await
-        {
+        let opened = match expected {
+            Some(_) => Box::pin(link::Link::open(
+                stream,
+                &self.replica,
+                local,
+                settings.credentials,
+                expected,
+            ))
+            .await
+            .map(Some),
+            // An inbound stream may only resolve a pinned contact reference.
+            None => {
+                Box::pin(link::Link::accept_or_resolve(
+                    stream,
+                    &self.replica,
+                    local,
+                    settings.credentials,
+                ))
+                .await
+            }
+        };
+        let mut opened = match opened {
             Err(_) if expected.is_some_and(|peer| service.live.contains(peer)) => return Ok(()),
-            other => other?,
+            other => match other? {
+                Some(opened) => opened,
+                None => return Ok(()),
+            },
         };
         if !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open

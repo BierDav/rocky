@@ -1,8 +1,5 @@
 use super::*;
-use rocky_secure::{
-    MAX_SECURE_BYTES,
-    network::{ContactHandler, ContactHint, ContactRequest, ContactResponse, NativeSession},
-};
+use rocky_secure::network::{ContactHandler, ContactHint, ContactRequest, ContactResponse};
 
 async fn contact(from: &Node, to: &Node) -> Result<PublicKey, Failure> {
     let link = to.network.read().await;
@@ -185,17 +182,16 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
                 .as_ref()
                 .ok_or("link")?
                 .transport
-                .connect("a", Protocol::Sync)
+                .connect("a", Protocol::Link)
                 .await?;
             let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             assert!(
-                NativeSession::authenticate(
+                rocky_secure::network::link::Link::open(
                     stream,
                     &c.replica,
                     PrivateKey::from_bytes(&c.vault.get("node")?),
                     c.settings.lock().await.credentials.clone(),
-                    a_key,
-                    MAX_SECURE_BYTES
+                    Some(a_key),
                 )
                 .await
                 .is_err()
@@ -345,39 +341,20 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
             let a_key = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
             for misleading in [false, true] {
-                let (client, server) = tokio::io::duplex(64 * 1024);
+                let (mut session, mut serving) = link_sessions(&b, &a).await?;
                 let node = a.clone();
                 let task = tokio::task::spawn_local(async move {
-                    let credentials = node.settings.lock().await.credentials.clone();
-                    let mut session = NativeSession::accept(
-                        server,
-                        &node.replica,
-                        PrivateKey::from_bytes(&node.vault.get("node")?),
-                        credentials,
-                        MAX_SECURE_BYTES,
-                    )
-                    .await?;
                     if misleading {
-                        session
+                        serving
                             .serve_with_contacts(&node.replica, None, &Misleading(a_key))
                             .await?;
                     } else {
-                        session
+                        serving
                             .serve_with_contacts(&node.replica, None, &*node)
                             .await?;
                     }
                     Ok::<_, Failure>(())
                 });
-                let credentials = b.settings.lock().await.credentials.clone();
-                let mut session = NativeSession::authenticate(
-                    client,
-                    &b.replica,
-                    PrivateKey::from_bytes(&b.vault.get("node")?),
-                    credentials,
-                    a_key,
-                    MAX_SECURE_BYTES,
-                )
-                .await?;
                 if misleading {
                     assert!(
                         session

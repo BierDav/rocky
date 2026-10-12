@@ -13,21 +13,11 @@ pub trait SessionStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> SessionStream for T {}
 pub type Stream = Box<dyn SessionStream>;
 
-/// The native session's version. It names the session's transport
-/// (`rocky/native-session/N`) and its signing label; a session change adds
-/// a message module and raises it. Another version is refused, never
-/// negotiated. See `docs/decisions/0051-roster-free-admission.md`.
-pub const NATIVE_SESSION_VERSION: u32 = 14;
-static NATIVE_SESSION: std::sync::LazyLock<String> =
-    std::sync::LazyLock::new(|| format!("rocky/native-session/{NATIVE_SESSION_VERSION}"));
-
 /// The protocols a stream can carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Protocol {
     /// Enrollment of a device with an invitation.
     Pair,
-    /// An authenticated native session of the secure runtime.
-    Sync,
     /// An authenticated, symmetric live link.
     Link,
     /// Renewal of an enrolled device's credentials.
@@ -40,19 +30,12 @@ pub enum Protocol {
 }
 impl Protocol {
     /// The protocols a database serves.
-    pub const ALL: [Self; 5] = [
-        Self::Pair,
-        Self::Sync,
-        Self::Link,
-        Self::Renew,
-        Self::Command,
-    ];
+    pub const ALL: [Self; 4] = [Self::Pair, Self::Link, Self::Renew, Self::Command];
     /// The protocol's versioned name: an ALPN for QUIC, a preamble or a
     /// label elsewhere. A changed wire format takes a new name.
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Sync => NATIVE_SESSION.as_bytes(),
             Self::Link => b"rocky/link/1",
             Self::Renew => b"rocky/sdk-renew/2",
             Self::Command => b"rocky/command/2",

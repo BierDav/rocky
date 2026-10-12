@@ -127,24 +127,22 @@ async fn inbound_streams_over_budget_are_dropped_and_served_again_later() -> Res
     let stranger = hub.connector("x").start(false, [0; 32]).await?;
     let mut held = Vec::new();
     for open in 1..=limit {
-        held.push(stranger.connect("a", Protocol::Sync).await?);
+        held.push(stranger.connect("a", Protocol::Renew).await?);
         until(&a, "active", open).await?;
     }
     for dropped in 1..=3 {
-        held.push(stranger.connect("a", Protocol::Sync).await?);
+        held.push(stranger.connect("a", Protocol::Renew).await?);
         until(&a, "refused", dropped).await?;
     }
     assert_eq!(inbound(&a, "active").await, limit);
     // The database is as usable as before, and nothing was stored.
     assert_eq!(a.items().await, own('a'));
-    // An enrolled device is dropped too while the slots are taken.
-    assert!(b.sync().await.is_err());
+    // Links have their own budget: an enrolled device still syncs.
+    b.sync().await.map_err(|error| error.to_string())?;
+    assert_eq!(a.items().await, union());
 
     drop(held);
     until(&a, "active", 0).await?;
-    b.ok(json!({"type": "connection", "online": true})).await;
-    b.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(a.items().await, union());
     stranger.close().await;
     a.close().await;
     b.close().await;

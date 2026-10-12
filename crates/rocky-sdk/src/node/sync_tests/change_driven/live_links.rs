@@ -56,7 +56,6 @@ async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
             assert_eq!(reply["node"], requested.to_hex());
             assert!(b.settings.lock().await.peers.contains_key(&requested));
             assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
-            assert_eq!(hub.protocol_dials("b", "a", Protocol::Sync), 0);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -164,6 +163,51 @@ async fn reverse_opened_link_delivers_when_receiver_cannot_be_dialed() -> Result
 }
 
 #[tokio::test(start_paused = true)]
+async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            add(&a, 1).await?;
+            let links = hub.protocol_dials("b", "a", Protocol::Link);
+            let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
+            assert_eq!(synced["state"], "connected");
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(hub.protocol_dials("b", "a", Protocol::Link), links + 1);
+            // The reconcile ended the short link on both sides.
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 0)
+                    && b.current().is_some_and(|s| s.live.len() == 0)
+            })
+            .await;
+            let counts = hub.counts();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(hub.counts(), counts);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
@@ -219,6 +263,34 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
             b.detach(None).await;
             c.detach(None).await;
             assert_eq!(service.live.len(), 0);
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_linked_pair_dials_nothing_for_an_hour() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let (sa, sb) = (a.current().ok_or("service")?, b.current().ok_or("service")?);
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let link = sa.live.id(peer);
+            let before = [hub.dials_to("a"), hub.dials_to("b")];
+            // Pings keep the link; nothing dials, polls or replaces it.
+            for _ in 0..240 {
+                tokio::time::advance(Duration::from_secs(15)).await;
+                for _ in 0..100 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
+            assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
+            assert_eq!(sa.live.id(peer), link);
+            a.detach(None).await;
+            b.detach(None).await;
             Ok(())
         }))
         .await
@@ -347,38 +419,6 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
             until(|| sa.live.dialed(kb) == Some(ka < kb) && sb.live.dialed(ka) == Some(kb < ka))
                 .await;
             assert_eq!((sa.live.len(), sb.live.len()), (1, 1));
-            a.detach(None).await;
-            b.detach(None).await;
-            Ok(())
-        }))
-        .await
-}
-
-#[tokio::test(start_paused = true)]
-async fn link_handshake_refuses_native_session_identity() -> Result<(), Failure> {
-    tokio::task::LocalSet::new()
-        .run_until(frozen(async {
-            let root = tempfile::tempdir()?;
-            let hub = Arc::new(Hub::default());
-            let (a, b) = pair(root.path(), &hub).await?;
-            let ca = a.settings.lock().await.credentials.clone();
-            let cb = b.settings.lock().await.credentials.clone();
-            let ka = PrivateKey::from_bytes(&a.vault.get("node")?);
-            let kb = PrivateKey::from_bytes(&b.vault.get("node")?);
-            let (near, far) = tokio::io::duplex(4096);
-            let (dialer, acceptor) = tokio::join!(
-                rocky_secure::network::NativeSession::authenticate(
-                    near,
-                    &a.replica,
-                    ka,
-                    ca,
-                    kb.public_key(),
-                    1024 * 1024
-                ),
-                rocky_secure::network::link::Link::open(far, &b.replica, kb, cb, None),
-            );
-            assert!(dialer.is_err());
-            assert!(acceptor.is_err());
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -730,7 +770,8 @@ async fn iroh_budget_gate() -> Result<(), Failure> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn busy_links_keep_native_sync_and_reopen_when_a_slot_frees() -> Result<(), Failure> {
+async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot_frees()
+-> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
@@ -756,28 +797,27 @@ async fn busy_links_keep_native_sync_and_reopen_when_a_slot_frees() -> Result<()
             .await?;
             start(&c, true).await?;
             let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
-            until(|| {
-                c.current().is_some_and(|s| !s.live.contains(peer))
-                    && c.retries
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .get(&peer)
-                        .is_some_and(|retry| retry.link && retry.link_retry.deadline().is_some())
-            })
-            .await;
-            assert!(
+            let backoff = || {
                 c.retries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&peer)
-                    .is_some_and(|retry| retry.retry.ready())
-            );
+                    .and_then(|retry| retry.retry.deadline().max(retry.link_retry.deadline()))
+            };
+            until(|| c.current().is_some_and(|s| !s.live.contains(peer)) && backoff().is_some())
+                .await;
+            // Explicit sync fails too; nothing else carries the row.
             add(&a, 1).await?;
-            c.sync(&*transport(&c).await?).await?;
-            assert_eq!(rows(&c).await?, ["1"]);
+            let transport = transport(&c).await?;
+            assert!(c.sync(&*transport).await.is_err());
+            assert!(rows(&c).await?.is_empty());
             drop(full);
-            tokio::time::advance(Duration::from_secs(1)).await;
+            let deadline = backoff().ok_or("back-off")?;
+            tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await;
             until(|| c.current().is_some_and(|s| s.live.contains(peer))).await;
+            c.sync(&*transport).await?;
+            assert_eq!(rows(&c).await?, ["1"]);
             a.detach(None).await;
             b.detach(None).await;
             c.detach(None).await;

@@ -3,9 +3,7 @@
 use super::*;
 use network::NativeSession;
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::path::Path;
-use tokio::net::{TcpListener, TcpStream};
 
 type Replica = EncryptedReplica<Employees>;
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
@@ -171,25 +169,33 @@ async fn stored_rows(replica: &Replica, scope: ResourceScope) -> i64 {
         .unwrap();
     result.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
-/// Serves `node` to one peer until the peer disconnects.
-async fn serve(node: &Node) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (key, credentials, replica) = (
-        node.key.clone(),
-        node.credentials.clone(),
-        node.replica.clone(),
-    );
+async fn connect(node: &Node, server: &Node) -> (NativeSession, tokio::task::JoinHandle<()>) {
+    connect_with(node, server, MAX_SECURE_BYTES).await
+}
+/// A client session with its own byte budget; `server` answers it until the
+/// client ends the channel.
+async fn connect_with(
+    node: &Node,
+    server: &Node,
+    budget: usize,
+) -> (NativeSession, tokio::task::JoinHandle<()>) {
+    let (near, far) = network::link::testing::tcp().await;
+    let (session, mut served) = network::link::testing::sessions_over(
+        near,
+        far,
+        (&node.replica, node.key.clone(), node.credentials.clone()),
+        (
+            &server.replica,
+            server.key.clone(),
+            server.credentials.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    let replica = server.replica.clone();
     let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        stream.set_nodelay(true).unwrap();
-        let Ok(mut session) =
-            NativeSession::accept(stream, &replica, key, credentials, MAX_SECURE_BYTES).await
-        else {
-            return;
-        };
         loop {
-            if let Err(error) = session.serve_once(&replica).await {
+            if let Err(error) = served.serve_once(&replica).await {
                 // A disconnect ends the session; anything else is printed for the failing test.
                 if !matches!(error, Error::Io(_)) {
                     eprintln!("server: {error}");
@@ -198,31 +204,7 @@ async fn serve(node: &Node) -> (SocketAddr, tokio::task::JoinHandle<()>) {
             }
         }
     });
-    (address, task)
-}
-async fn connect(node: &Node, server: &Node) -> (NativeSession, tokio::task::JoinHandle<()>) {
-    connect_with(node, server, MAX_SECURE_BYTES).await
-}
-/// A client session with its own byte budget.
-async fn connect_with(
-    node: &Node,
-    server: &Node,
-    budget: usize,
-) -> (NativeSession, tokio::task::JoinHandle<()>) {
-    let (address, task) = serve(server).await;
-    let stream = TcpStream::connect(address).await.unwrap();
-    stream.set_nodelay(true).unwrap();
-    let session = NativeSession::authenticate(
-        stream,
-        &node.replica,
-        node.key.clone(),
-        node.credentials.clone(),
-        server.key.public_key(),
-        budget,
-    )
-    .await
-    .unwrap();
-    (session, task)
+    (session.with_budget(budget), task)
 }
 fn partial(full: &[&Node], custody: usize) -> RoleConfig {
     RoleConfig {

@@ -723,8 +723,8 @@ async fn checkpoints_prune_held_partitions_and_a_late_partition_still_applies() 
 }
 
 #[tokio::test]
-async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
-    use network::NativeSession;
+async fn link_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
+    use network::{NativeSession, link};
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let both = [f.public, f.private];
@@ -749,31 +749,22 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         .await
         .unwrap();
 
-    // The hub learns its peer from the handshake; the stream is an
+    // The hub learns its peer from the link handshake; the stream is an
     // in-memory pipe, as any reliable ordered transport would be.
-    let serve = |stream| {
-        let (source, hub, credentials) = (source.clone(), hub.clone(), hub_credentials.clone());
-        async move {
-            let mut session =
-                NativeSession::accept(stream, &source, hub, credentials, MAX_SECURE_BYTES).await?;
-            session.serve(&source).await
-        }
+    let hub_end = || (&source, hub.clone(), hub_credentials.clone());
+    let serve = |mut session: NativeSession| {
+        let source = source.clone();
+        async move { session.serve(&source).await }
     };
 
     // A full reader pulls the public partition first; nothing shows until
     // the private member arrives, then both apply in one commit.
-    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (session, served) =
+        link::testing::sessions((&full, carol.clone(), carol_credentials.clone()), hub_end())
+            .await
+            .unwrap();
     let client = async {
-        let mut session = NativeSession::authenticate(
-            near,
-            &full,
-            carol.clone(),
-            carol_credentials.clone(),
-            hub.public_key(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
+        let mut session = session;
         let public = session
             .sync_scope(&full, f.public, MAX_SECURE_FRAME / 2)
             .await
@@ -787,7 +778,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             .unwrap();
         assert_eq!(private.catch_up.frames, 1);
     };
-    let (served, ()) = tokio::join!(serve(far), client);
+    let (served, ()) = tokio::join!(serve(served), client);
     served.unwrap();
     let page = full.snapshot(f.public).await.unwrap();
     assert_eq!((page.rows.len(), page.complete), (40, true));
@@ -804,18 +795,14 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
 
     // A public reader receives and applies its partition alone; the hub
     // never sends it the private member.
-    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (session, served) = link::testing::sessions(
+        (&public_only, bob.clone(), bob_credentials.clone()),
+        hub_end(),
+    )
+    .await
+    .unwrap();
     let client = async {
-        let mut session = NativeSession::authenticate(
-            near,
-            &public_only,
-            bob.clone(),
-            bob_credentials.clone(),
-            hub.public_key(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
+        let mut session = session;
         session
             .sync_scope(&public_only, f.public, MAX_SECURE_FRAME / 2)
             .await
@@ -827,7 +814,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
                 .is_err()
         );
     };
-    let (served, ()) = tokio::join!(serve(far), client);
+    let (served, ()) = tokio::join!(serve(served), client);
     assert!(served.is_err());
     let page = public_only.snapshot(f.public).await.unwrap();
     assert_eq!((page.rows.len(), page.complete), (40, true));
@@ -850,18 +837,12 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
         Some(f.app().salary("123")),
     )));
     full.author_bundle([2; 32], raise, vec![]).await.unwrap();
-    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
+    let (session, served) =
+        link::testing::sessions((&full, carol.clone(), carol_credentials.clone()), hub_end())
+            .await
+            .unwrap();
     let client = async {
-        let mut session = NativeSession::authenticate(
-            near,
-            &full,
-            carol.clone(),
-            carol_credentials.clone(),
-            hub.public_key(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        .unwrap();
+        let mut session = session;
         for scope in both {
             assert_eq!(
                 session
@@ -873,7 +854,7 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
             );
         }
     };
-    let (served, ()) = tokio::join!(serve(far), client);
+    let (served, ()) = tokio::join!(serve(served), client);
     served.unwrap();
     assert_eq!(live(&source, f.public).await, 41);
     assert_eq!(
@@ -884,14 +865,8 @@ async fn native_sessions_carry_bundles_and_each_peer_applies_its_partitions() {
     // A peer the hub does not admit fails the handshake.
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
     let stranger = PrivateKey::new();
-    let client = NativeSession::authenticate(
-        near,
-        &full,
-        stranger,
-        carol_credentials,
-        hub.public_key(),
-        MAX_SECURE_BYTES,
-    );
-    let (served, _) = tokio::join!(serve(far), client);
-    assert!(served.is_err());
+    let (dialed, accepted) =
+        link::testing::links(near, far, (&full, stranger, carol_credentials), hub_end()).await;
+    assert!(accepted.is_err());
+    assert!(dialed.is_err());
 }

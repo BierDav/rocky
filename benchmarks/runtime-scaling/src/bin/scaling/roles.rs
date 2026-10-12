@@ -3,7 +3,7 @@
 use super::{Failure, lifetime, line, resident_mib};
 use employees_app::Employees;
 use rocky_core::*;
-use rocky_secure::network::NativeSession;
+use rocky_secure::network::{NativeSession, link::Link};
 use rocky_secure::*;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -166,57 +166,74 @@ fn handle(node: &Node, label: &str, index: usize) -> Commitment {
     bytes.extend((index as u64).to_le_bytes());
     commitment("roles.handle.v1", &bytes)
 }
-/// Serves `node` to one peer until it disconnects or the task is aborted.
-async fn serve(
-    node: &Node,
-) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), Failure> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let node = node.clone();
-    let task = tokio::spawn(async move {
-        let Ok((stream, _)) = listener.accept().await else {
-            return;
-        };
-        let Ok(mut session) = NativeSession::accept(
-            stream,
-            &node.replica,
-            node.key.clone(),
-            node.credentials.clone(),
-            MAX_SECURE_BYTES,
-        )
-        .await
-        else {
-            return;
-        };
-        loop {
-            match session.serve_once(&node.replica).await {
-                Ok(()) => {}
-                // The peer hung up.
-                Err(rocky_runtime::Error::Io(_)) => return,
-                Err(error) => {
-                    eprintln!("roles server: {error}");
-                    return;
-                }
-            }
-        }
-    });
-    Ok((address, task))
-}
+/// A request session of `client` on a loopback link to `server`, and the
+/// task answering it until the client hangs up or the task is aborted.
 async fn connect(
     client: &Node,
     server: &Node,
 ) -> Result<(NativeSession, tokio::task::JoinHandle<()>), Failure> {
-    let (address, task) = serve(server).await?;
-    let session = NativeSession::authenticate(
-        TcpStream::connect(address).await?,
-        &client.replica,
-        client.key.clone(),
-        client.credentials.clone(),
-        server.key.public_key(),
-        MAX_SECURE_BYTES,
-    )
-    .await?;
-    Ok((session, task))
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let (accepted, dialed) = tokio::join!(
+        async {
+            let (stream, _) = listener.accept().await?;
+            let key = server.key.clone();
+            Ok::<_, Failure>(
+                Link::open(
+                    stream,
+                    &server.replica,
+                    key,
+                    server.credentials.clone(),
+                    None,
+                )
+                .await?,
+            )
+        },
+        async {
+            Ok::<_, Failure>(
+                Link::open(
+                    TcpStream::connect(address).await?,
+                    &client.replica,
+                    client.key.clone(),
+                    client.credentials.clone(),
+                    Some(server.key.public_key()),
+                )
+                .await?,
+            )
+        },
+    );
+    let (mut accepted, mut dialed) = (accepted?, dialed?);
+    let (near, far) = tokio::join!(dialed.ready(false), accepted.ready(false));
+    near?;
+    far?;
+    let handle = dialed.channels.handle.clone();
+    let (served, mut incoming) = tokio::sync::mpsc::channel::<NativeSession>(1);
+    let node = server.clone();
+    let task = tokio::spawn(async move {
+        let serve = async {
+            let Some(mut session) = incoming.recv().await else {
+                return;
+            };
+            loop {
+                match session.serve_once(&node.replica).await {
+                    Ok(()) => {}
+                    // The peer hung up.
+                    Err(rocky_runtime::Error::Io(_)) => return,
+                    Err(error) => {
+                        eprintln!("roles server: {error}");
+                        return;
+                    }
+                }
+            }
+        };
+        // Ending the exchange drops both ends of the link.
+        tokio::select! {
+            () = serve => {}
+            _ = accepted.drive(served) => {}
+            _ = dialed.drive(tokio::sync::mpsc::channel(1).0) => {}
+        }
+    });
+    Ok((handle.open().await?, task))
 }
 async fn finish(session: NativeSession, task: tokio::task::JoinHandle<()>) -> Result<(), Failure> {
     drop(session);

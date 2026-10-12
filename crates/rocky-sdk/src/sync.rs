@@ -1,39 +1,29 @@
 //! Synchronization with one authorized peer: a device pushes and pulls
-//! every collection over an authenticated native session, and serves every
-//! peer whose chain and the revocation set admit it. See
-//! `docs/runtime/sdk-enrollment.md`.
-use crate::{
-    Failure,
-    enrollment::dial,
-    transport::{Protocol, Stream, Transport},
-};
+//! every collection over request channels of its live link with that peer.
+//! See `docs/runtime/live-links.md`.
+use crate::Failure;
 use rocky_core::{Coordinator, ResourceScope, TypedCommands};
 use rocky_secure::{
-    CredentialChain, EncryptedReplica, MAX_SECURE_BYTES, MAX_SECURE_FRAME, PrivateKey, PublicKey,
-    network::NativeSession,
+    EncryptedReplica, MAX_SECURE_FRAME, PublicKey,
+    network::{NativeSession, link::channels::Handle},
 };
 
 /// Bytes of frames per page.
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
-/// Sessions one sync may use when each exhausts its byte budget.
+/// Request channels one sync may open when each exhausts its byte budget.
 const SESSIONS: usize = 16;
 /// Command results one sync pulls from a peer.
 const RESULTS: usize = 64;
 /// How long result sync waits for the coordinator's head.
 const HEAD: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One device's view of a peer. `addresses` are hints: the session only
-/// proceeds with whoever proves the `peer` key.
+/// One device's view of a peer: the link that proved the `peer` key.
 pub struct Upstream<'a> {
-    pub link: Option<rocky_secure::network::link::channels::Handle>,
-    pub transport: &'a dyn Transport,
-    pub addresses: &'a [String],
+    pub link: Handle,
     pub peer: PublicKey,
-    pub node: PrivateKey,
-    pub credentials: CredentialChain,
+    pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
-    pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
     pub renew_from: Option<rocky_core::Commitment>,
 }
 
@@ -225,26 +215,14 @@ pub(crate) async fn bootstrap(
     }
     Err("bootstrap exceeded its session budget; it continues on the next sync".into())
 }
-/// A session with the upstream peer. The handshake leaves `replica`
-/// holding every revocation statement the peer sent; see `Learned`.
+/// A request channel on the link with the upstream peer. The link handshake
+/// left `replica` holding every revocation statement the peer sent; see
+/// `Learned`.
 pub(crate) async fn session(
     replica: &EncryptedReplica<TypedCommands>,
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
-    let mut session = if let Some(link) = &upstream.link {
-        link.open().await?
-    } else {
-        let stream = dial(upstream.transport, upstream.addresses, Protocol::Sync).await?;
-        NativeSession::authenticate(
-            stream,
-            replica,
-            upstream.node.clone(),
-            upstream.credentials.clone(),
-            upstream.peer,
-            MAX_SECURE_BYTES,
-        )
-        .await?
-    };
+    let mut session = upstream.link.open().await?;
     if let Some(handler) = upstream.contacts {
         crate::mesh::exchange(&mut session, handler).await?;
     }
@@ -451,27 +429,4 @@ async fn results(
     }
     session.close().await?;
     Ok(retry)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn serve_contacts(
-    stream: Stream,
-    replica: &EncryptedReplica<TypedCommands>,
-    node: PrivateKey,
-    credentials: CredentialChain,
-    coordinator: Option<&dyn Coordinator>,
-    deliveries: &dyn rocky_secure::network::Deliveries,
-    admitted_peer: impl FnOnce(PublicKey),
-    handler: &dyn rocky_secure::network::ContactHandler,
-) -> Result<(), Failure> {
-    let Some(mut session) =
-        NativeSession::accept_or_resolve(stream, replica, node, credentials, MAX_SECURE_BYTES)
-            .await?
-    else {
-        return Ok(());
-    };
-    admitted_peer(session.peer());
-    Ok(session
-        .serve_all(replica, coordinator, deliveries, Some(handler))
-        .await?)
 }

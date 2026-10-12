@@ -7,7 +7,6 @@ use rocky_core::{
 use rocky_credentials::{AuthorRange, Authority, PartitionGrant};
 use std::path::Path;
 
-use crate::network::NativeSession;
 use crate::replica::roles::FrontierReply;
 use std::time::{Duration, Instant};
 
@@ -45,38 +44,25 @@ async fn sync(
         let inner = reader.inner.lock().await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
-    let writer_peer = writer_node.public_key();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
     let mut visited = BTreeSet::new();
     for attempt in 1..=16 {
+        let (near, far) = crate::network::link::testing::tcp().await;
+        near.set_nodelay(true).unwrap();
+        far.set_nodelay(true).unwrap();
+        let (session, mut served) = crate::network::link::testing::sessions_over(
+            near,
+            far,
+            (reader, reader_node.clone(), reader_credentials.clone()),
+            (writer, writer_node.clone(), writer_credentials.clone()),
+        )
+        .await
+        .unwrap();
         let server = async {
-            let (stream, _) = listener.accept().await.unwrap();
-            stream.set_nodelay(true).unwrap();
-            let mut session = NativeSession::accept(
-                stream,
-                writer,
-                writer_node.clone(),
-                writer_credentials.clone(),
-                MAX_SECURE_BYTES,
-            )
-            .await
-            .unwrap();
-            session.serve(writer).await.unwrap();
+            served.serve(writer).await.unwrap();
+            served.close().await.unwrap();
         };
         let client = async {
-            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            stream.set_nodelay(true).unwrap();
-            let mut session = NativeSession::authenticate(
-                stream,
-                reader,
-                reader_node.clone(),
-                reader_credentials.clone(),
-                writer_peer,
-                MAX_SECURE_BYTES,
-            )
-            .await
-            .unwrap();
+            let mut session = session;
             let changed = session
                 .changed_scopes(reader, scopes)
                 .await

@@ -1,4 +1,4 @@
-//! Development employees composition using authenticated loopback TCP and an opaque relay.
+//! Development employees composition over authenticated loopback links and an opaque relay.
 use employees_app::Employees;
 use rocky_coordinator::MemoryCoordinator;
 use rocky_core::{
@@ -6,8 +6,9 @@ use rocky_core::{
 };
 use rocky_secure::{
     Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet,
-    SecureConfig, SignedCapability, SignedManifest, network::NativeSession, secure_node_id,
-    secure_principal_id,
+    SecureConfig, SignedCapability, SignedManifest,
+    network::{NativeSession, link::Link},
+    secure_node_id, secure_principal_id,
 };
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 use tokio::net::{TcpListener, TcpStream};
@@ -240,14 +241,14 @@ impl SecureDemo {
             let Some(result) = result else {
                 break;
             };
-            let (mut admin, mut relay) = self.sessions(0, 2).await?;
+            let (mut admin, mut relay, _link) = self.channel(0, 2).await?;
             let (send, receive) = tokio::join!(
                 admin.push_result(&self.admin, result),
                 relay.serve_command_once(&self.relay, self.coordinator.as_ref())
             );
             send?;
             receive?;
-            let (mut relay, mut editor) = self.sessions(2, 1).await?;
+            let (mut editor, mut relay, _link) = self.channel(1, 2).await?;
             let (receive, send) = tokio::join!(
                 editor.pull_result(
                     &self.editor,
@@ -274,25 +275,19 @@ impl SecureDemo {
     ) -> Result<(), Error> {
         let mut cursor = None;
         loop {
-            let page = self
-                .replica(source)
-                .transfer_page(
-                    self.identities[target].0.public_key(),
-                    &self.identities[target].1,
-                    &scopes,
-                    cursor,
-                    128 * 1024,
-                )
-                .await?;
-            let (mut source_session, mut target_session) = self.sessions(source, target).await?;
+            let (mut target_session, mut source_session, _link) =
+                self.channel(target, source).await?;
             let serve = async {
-                for _ in 0..=page.frames.len() {
-                    source_session.serve_once(self.replica(source)).await?;
-                }
-                Ok::<_, Error>(())
+                source_session.serve(self.replica(source)).await?;
+                source_session.close().await
             };
-            let pull =
-                target_session.pull(self.replica(target), scopes.clone(), cursor, 128 * 1024);
+            let pull = async {
+                let pulled = target_session
+                    .pull(self.replica(target), scopes.clone(), cursor, 128 * 1024)
+                    .await;
+                target_session.close().await?;
+                pulled
+            };
             let (serve, pull) = tokio::join!(serve, pull);
             serve?;
             cursor = pull?;
@@ -301,38 +296,64 @@ impl SecureDemo {
             }
         }
     }
-    async fn sessions(
+    /// A request channel `opener` opens on a loopback link to `answerer`,
+    /// with the session answering it. Dropping the guard ends the link.
+    async fn channel(
         &self,
-        source: usize,
-        target: usize,
-    ) -> Result<(NativeSession, NativeSession), Error> {
+        opener: usize,
+        answerer: usize,
+    ) -> Result<(NativeSession, NativeSession, Driven), Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(Error::Io)?;
         let address = listener.local_addr().map_err(Error::Io)?;
-        let server = async {
+        let accepted = async {
             let (stream, _) = listener.accept().await.map_err(Error::Io)?;
-            NativeSession::accept(
+            Link::open(
                 stream,
-                self.replica(source),
-                self.identities[source].0.clone(),
-                self.identities[source].1.clone(),
-                4 * 1024 * 1024,
+                self.replica(answerer),
+                self.identities[answerer].0.clone(),
+                self.identities[answerer].1.clone(),
+                None,
             )
             .await
         };
-        let client = async {
+        let dialed = async {
             let stream = TcpStream::connect(address).await.map_err(Error::Io)?;
-            NativeSession::authenticate(
+            Link::open(
                 stream,
-                self.replica(target),
-                self.identities[target].0.clone(),
-                self.identities[target].1.clone(),
-                self.identities[source].0.public_key(),
-                4 * 1024 * 1024,
+                self.replica(opener),
+                self.identities[opener].0.clone(),
+                self.identities[opener].1.clone(),
+                Some(self.identities[answerer].0.public_key()),
             )
             .await
         };
-        let (server, client) = tokio::join!(server, client);
-        Ok((server?, client?))
+        let (accepted, dialed) = tokio::join!(accepted, dialed);
+        let (mut accepted, mut dialed) = (accepted?, dialed?);
+        let (near, far) = tokio::join!(dialed.ready(false), accepted.ready(false));
+        near?;
+        far?;
+        let handle = dialed.channels.handle.clone();
+        let (served, mut incoming) = tokio::sync::mpsc::channel(1);
+        let driven = Driven([
+            tokio::spawn(dialed.drive(tokio::sync::mpsc::channel(1).0)),
+            tokio::spawn(accepted.drive(served)),
+        ]);
+        let session = handle.open().await?;
+        let answering = incoming
+            .recv()
+            .await
+            .ok_or_else(|| Error::Rejected("link ended".into()))?;
+        Ok((session, answering, driven))
+    }
+}
+
+/// Both ends of a demo link; neither outlives the exchange.
+struct Driven([tokio::task::JoinHandle<Result<(), Error>>; 2]);
+impl Drop for Driven {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
     }
 }
 

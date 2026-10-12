@@ -41,10 +41,10 @@ async fn echo(from: &Endpoint, to: EndpointAddr) -> Result<Vec<u8>, Failure> {
 /// One request and reply over a Rocky stream between two transports.
 async fn rocky(from: &dyn Transport, to: &dyn Transport) -> Result<(), Failure> {
     let address = to.address().await?;
-    let mut near = from.connect(&address, Protocol::Sync).await?;
+    let mut near = from.connect(&address, Protocol::Renew).await?;
     near.write_all(b"ping").await?;
     let (protocol, mut far) = to.accept().await.ok_or("closed")?;
-    assert_eq!(protocol, Protocol::Sync);
+    assert_eq!(protocol, Protocol::Renew);
     let mut request = [0; 4];
     far.read_exact(&mut request).await?;
     far.write_all(b"pong").await?;
@@ -57,7 +57,7 @@ async fn rocky(from: &dyn Transport, to: &dyn Transport) -> Result<(), Failure> 
 /// Whether a Rocky stream to `address` fails before any reply.
 async fn refused(from: &dyn Transport, address: &str) -> bool {
     let attempt = async {
-        let mut stream = from.connect(address, Protocol::Sync).await?;
+        let mut stream = from.connect(address, Protocol::Renew).await?;
         stream.write_all(b"ping").await?;
         let mut reply = [0; 4];
         stream.read_exact(&mut reply).await?;

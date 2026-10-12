@@ -2,7 +2,6 @@
 //! chain table, stored chains and the chains beside a checkpoint page
 //! (`docs/decisions/0053-chains-by-reference.md`).
 use super::commands::command_grants;
-use super::revocations::hello;
 use super::*;
 use crate::network::NativeSession;
 use crate::replica::checkpoint::Stage;
@@ -68,25 +67,21 @@ async fn sessions(
     (server_key, server, server_chain): (&PrivateKey, &Replica, &Chain),
     (client_key, client, client_chain): (&PrivateKey, &Replica, &Chain),
 ) -> (NativeSession, NativeSession) {
-    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
-    let (accepted, dialed) = tokio::join!(
-        NativeSession::accept(
-            far,
-            server,
-            server_key.clone(),
-            server_chain.credentials().clone(),
-            MAX_SECURE_BYTES,
-        ),
-        NativeSession::authenticate(
-            near,
+    let (dialed, accepted) = crate::network::link::testing::sessions(
+        (
             client,
             client_key.clone(),
             client_chain.credentials().clone(),
-            server_key.public_key(),
-            MAX_SECURE_BYTES,
-        )
-    );
-    (accepted.unwrap(), dialed.unwrap())
+        ),
+        (
+            server,
+            server_key.clone(),
+            server_chain.credentials().clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    (accepted, dialed)
 }
 
 #[tokio::test]
@@ -105,7 +100,7 @@ async fn a_session_carries_an_authors_chain_once_across_its_pages() {
     let chain = encode(&a_chain).unwrap().len();
     let quota = MAX_SECURE_FRAME / 2;
     let (mut server, mut client) = sessions((&alice, &a, &a_chain), (&bob, &b, &b_chain)).await;
-    let (served, report) = tokio::join!(server.serve(&a), async {
+    let (served, report) = tokio::join!(server.serve_to_end(&a), async {
         let report = client.catch_up(&b, f.public, quota).await.unwrap();
         let carried = client.carried_chain_bytes();
         client.close().await.unwrap();
@@ -148,7 +143,7 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
     // A peer that claims to have carried the chain sends the frame bare.
     let (mut server, mut client) = sessions((&alice, &a, &a_chain), (&bob, &b, &b_chain)).await;
     server.withhold_chains();
-    let (served, report) = tokio::join!(server.serve(&a), async {
+    let (served, report) = tokio::join!(server.serve_to_end(&a), async {
         let report = client.catch_up(&b, f.public, MAX_SECURE_FRAME / 2).await;
         client.close().await.unwrap();
         report.unwrap()
@@ -162,7 +157,7 @@ async fn a_frame_whose_chain_the_receiver_lacks_is_refused_and_arrives_on_the_ne
     assert!(b.snapshot(f.public).await.unwrap().rows.is_empty());
     // The next pass, on its own session, carries the chain and the frame.
     let (mut server, mut client) = sessions((&alice, &a, &a_chain), (&bob, &b, &b_chain)).await;
-    let (served, report) = tokio::join!(server.serve(&a), async {
+    let (served, report) = tokio::join!(server.serve_to_end(&a), async {
         let report = client.catch_up(&b, f.public, MAX_SECURE_FRAME / 2).await;
         client.close().await.unwrap();
         report.unwrap()
@@ -185,7 +180,7 @@ async fn a_pushed_frame_without_its_chain_is_not_received() {
         if withhold {
             client.withhold_chains();
         }
-        let (served, pushed) = tokio::join!(server.serve(&b), async {
+        let (served, pushed) = tokio::join!(server.serve_to_end(&b), async {
             let pushed = client.push(&a, f.public, MAX_SECURE_FRAME / 2).await;
             client.close().await.unwrap();
             pushed.unwrap()
@@ -212,7 +207,7 @@ async fn a_chain_revoked_during_a_session_admits_no_later_frame_of_it() {
     b.receive(insert(&a, &f, 1).await).await.unwrap();
     let (mut server, mut client) = sessions((&bob, &b, &b_chain), (&carol, &c, &c_chain)).await;
     let quota = MAX_SECURE_FRAME / 2;
-    let (served, ()) = tokio::join!(server.serve(&b), async {
+    let (served, ()) = tokio::join!(server.serve_to_end(&b), async {
         client.pull(&c, vec![f.public], None, quota).await.unwrap();
         let carried = client.carried_chain_bytes();
         assert!(carried > 0);
@@ -324,40 +319,6 @@ async fn a_horizon_credential_keeps_its_chain_until_a_renewal_replaces_it() {
     );
 }
 
-#[tokio::test]
-async fn an_earlier_session_version_is_refused() {
-    let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
-    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
-    let (a, a_chain) = open(&f, &dir, &alice, 2).await;
-    let (b, b_chain) = open(&f, &dir, &bob, 2).await;
-    assert_eq!(rocky_core::net::NATIVE_SESSION_VERSION, 14);
-    let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
-    let (accepted, dialed) = tokio::join!(
-        NativeSession::accept(
-            far,
-            &a,
-            alice.clone(),
-            a_chain.credentials().clone(),
-            MAX_SECURE_BYTES,
-        ),
-        NativeSession::authenticate_as_version(
-            near,
-            &b,
-            (bob.clone(), b_chain.credentials().clone()),
-            alice.public_key(),
-            10,
-        )
-    );
-    assert!(matches!(
-        accepted,
-        Err(Error::Rejected(message)) if message == "native session authentication failed"
-    ));
-    assert!(dialed.is_err());
-    // The working pair of the same replicas still connects.
-    let _ = hello((&alice, &a), (&bob, &b), &f).await;
-}
-
 /// A command table whose latest command was called and executed under
 /// chains of `grants` scope grants. Forty grants of the fixture's full shape
 /// exceed the command envelope itself, so beyond 20 the others only read.
@@ -427,7 +388,7 @@ async fn an_installed_checkpoint_is_not_imported_again() {
         (&c.target_key, &c.target, &c.target_chain),
     )
     .await;
-    let (served, revisions) = tokio::join!(server.serve(&c.source), async {
+    let (served, revisions) = tokio::join!(server.serve_to_end(&c.source), async {
         let mut revisions = Vec::new();
         for _ in 0..2 {
             let sync = client
@@ -464,7 +425,7 @@ async fn a_command_table_bootstraps_by_checkpoint_under_20_and_40_grant_chains()
             (&c.target_key, &c.target, &c.target_chain),
         )
         .await;
-        let (served, ()) = tokio::join!(server.serve(&c.source), async {
+        let (served, ()) = tokio::join!(server.serve_to_end(&c.source), async {
             for scope in [c.f.public, c.f.private] {
                 let sync = client
                     .bootstrap_scope(&c.target, scope, MAX_SECURE_FRAME / 2)

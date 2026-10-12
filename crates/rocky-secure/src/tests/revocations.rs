@@ -2,7 +2,7 @@
 //! (`docs/decisions/0049-mergeable-revocation-set.md`), and the statements
 //! a handshake exchanges (`docs/decisions/0051-roster-free-admission.md`).
 use super::*;
-use crate::network::NativeSession;
+use crate::network::link::Link;
 
 pub(super) async fn open(
     f: &Fixture,
@@ -93,25 +93,16 @@ pub(super) async fn hello(
     (left_key, left): (&PrivateKey, &EncryptedReplica<Employees>),
     (right_key, right): (&PrivateKey, &EncryptedReplica<Employees>),
     f: &Fixture,
-) -> (Result<NativeSession, Error>, Result<NativeSession, Error>) {
+) -> (Result<Link, Error>, Result<Link, Error>) {
     let (near, far) = tokio::io::duplex(MAX_SECURE_FRAME * 2);
-    tokio::join!(
-        NativeSession::accept(
-            far,
-            left,
-            left_key.clone(),
-            f.credentials(left_key, f.full()),
-            MAX_SECURE_BYTES,
-        ),
-        NativeSession::authenticate(
-            near,
-            right,
-            right_key.clone(),
-            f.credentials(right_key, f.full()),
-            left_key.public_key(),
-            MAX_SECURE_BYTES,
-        )
+    let (dialed, accepted) = crate::network::link::testing::links(
+        near,
+        far,
+        (right, right_key.clone(), f.credentials(right_key, f.full())),
+        (left, left_key.clone(), f.credentials(left_key, f.full())),
     )
+    .await;
+    (accepted, dialed)
 }
 
 #[tokio::test]
@@ -133,11 +124,14 @@ async fn statements_travel_inside_the_handshake_and_both_sides_end_with_the_unio
     // Each side sends the statement the other lacks; neither refuses.
     insert(&x, &f, 1, "after").await;
     let (left, right) = hello((&xavier, &x), (&yara, &y), &f).await;
-    let (mut server, mut client) = (left.unwrap(), right.unwrap());
+    let (left, right) = (left.unwrap(), right.unwrap());
     let union = x.revocations().await;
     assert_eq!(union.len(), 2);
     assert_eq!(y.revocations().await, union);
-    // Rows flow in the same session.
+    // Rows flow over the same link.
+    let (mut client, mut server) = crate::network::link::testing::requests(right, left)
+        .await
+        .unwrap();
     let (served, pulled) = tokio::join!(
         async {
             server.serve_once(&x).await.unwrap();

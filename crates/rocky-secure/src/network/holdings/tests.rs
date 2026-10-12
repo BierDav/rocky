@@ -9,7 +9,6 @@ async fn pair<C: RowApplication, S: RowApplication>(
     client: &EncryptedReplica<C>,
     server: &EncryptedReplica<S>,
 ) -> (NativeSession, NativeSession) {
-    let (c, s) = tokio::io::duplex(1024 * 1024);
     let (cn, cc) = {
         let i = client.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
@@ -18,11 +17,9 @@ async fn pair<C: RowApplication, S: RowApplication>(
         let i = server.inner.lock().await;
         (i.config.node.clone(), i.config.credentials.clone())
     };
-    let (dialer, acceptor) = tokio::join!(
-        NativeSession::authenticate(c, client, cn, cc, sn.public_key(), MAX_SECURE_BYTES),
-        NativeSession::accept(s, server, sn, sc, MAX_SECURE_BYTES),
-    );
-    (dialer.unwrap(), acceptor.unwrap())
+    super::link::testing::sessions((client, cn, cc), (server, sn, sc))
+        .await
+        .unwrap()
 }
 
 async fn open(f: &Fixture, dir: &std::path::Path, name: &str, rights: &[Right]) -> Replica {
@@ -42,11 +39,19 @@ async fn refusal(client: &Replica, server: &Replica, message: Message) -> (Strin
     let before = s.sent;
     let error = s.serve(server).await.unwrap_err().to_string();
     let messages = s.sent - before;
-    s.close().await.unwrap();
+    let (closed, (received, count)) = tokio::join!(s.close(), async {
+        let received = c.receive().await;
+        let count = c.received;
+        c.close().await.unwrap();
+        (received, count)
+    });
+    closed.unwrap();
     assert!(
-        matches!(c.receive().await, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+        matches!(&received, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof),
+        "{:?}",
+        received.map(|_| ())
     );
-    (error, messages, c.received)
+    (error, messages, count)
 }
 
 fn requests(
@@ -223,11 +228,15 @@ async fn transcript_case(custody: bool) {
     }
     server.subscribe(scope).await.unwrap();
     server.subscribe(f.scope("products", 0)).await.unwrap();
-    // The member even knows the tuple: it still lacks the reader key.
-    member
-        .register_partition(scope, f.tuple("customers", 1))
-        .await
-        .unwrap();
+    // A reader server: the member even knows the tuple, yet lacks the reader
+    // key. Keyless custody accepts the tuple as proof, which a link offers at
+    // open, so there the member must not know it.
+    if !custody {
+        member
+            .register_partition(scope, f.tuple("customers", 1))
+            .await
+            .unwrap();
+    }
     let unknown = ResourceScope {
         encryption: [203; 32],
         ..scope
@@ -339,9 +348,14 @@ async fn transcript_case(custody: bool) {
                         .unwrap_err()
                 };
                 transcripts.push((error.to_string(), s.sent - before));
-                s.close().await.unwrap();
+                let (closed, received) = tokio::join!(s.close(), async {
+                    let received = c.receive().await;
+                    c.close().await.unwrap();
+                    received
+                });
+                closed.unwrap();
                 assert!(
-                    matches!(c.receive().await, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
+                    matches!(received, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
                 );
             }
             assert_eq!(transcripts[0], transcripts[1]);
@@ -368,12 +382,15 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
     let member = open(&f, root.path(), "member.db", &[Right::Read]).await;
     let scope = f.scope("customers", 1);
     f.keys(&server, 1, &["customers"]).await;
+    // Opened before the member holds the partition, so its open proves nothing.
+    let second = pair(&member, &server).await;
     f.keys(&member, 1, &["customers"]).await;
     server.subscribe(scope).await.unwrap();
     f.keys(&server, 2, &["customers"]).await;
     server.subscribe(f.scope("customers", 2)).await.unwrap();
     let (mut c, mut s) = pair(&member, &server).await;
     let captured = member.holding_proofs(c.binding, &[scope]).await.unwrap();
+    let (mut c2, mut s2) = second;
     let query = |proofs| FrontierMessage::FrontiersQuery {
         frontiers: vec![ScopeFrontier {
             scope,
@@ -406,7 +423,6 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
     };
     assert_eq!(scopes, vec![scope]);
     assert!(next.is_none());
-    let (mut c2, mut s2) = pair(&member, &server).await;
     c2.send(query(captured.clone())).await.unwrap();
     s2.serve_once(&server).await.unwrap();
     let FrontierMessage::Frontiers { states } = c2.reply().await.unwrap() else {
@@ -465,7 +481,7 @@ async fn retained_siblings_and_previous_generations_prove_but_fresh_peers_refuse
         }
         for (server, accepted) in [(&retained, true), (&fresh, false)] {
             let (mut c, mut s) = pair(&member, server).await;
-            let serve = s.serve(server);
+            let serve = s.serve_to_end(server);
             let ask = async {
                 let exchange = c.changed_scopes(&member, &[scope]).await.unwrap();
                 assert_eq!(exchange.refused.is_empty(), accepted);
@@ -516,7 +532,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
         .await
         .unwrap();
     let (mut c, mut s) = pair(&writer, &custody).await;
-    let serve = s.serve(&custody);
+    let serve = s.serve_to_end(&custody);
     let ask = async {
         c.changed_scopes(&writer, &[scope]).await.unwrap();
         assert_eq!(
@@ -533,7 +549,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
     assert!(custody.key_epochs(scope).await.is_empty());
     // Custody asks the reader with its tuple and grant, without any reader key.
     let (mut c, mut s) = pair(&custody, &writer).await;
-    let serve = s.serve(&writer);
+    let serve = s.serve_to_end(&writer);
     let ask = async {
         assert!(
             c.changed_scopes(&custody, &[scope])
@@ -547,7 +563,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
     let (served, ()) = tokio::join!(serve, ask);
     served.unwrap();
     let (mut c, mut s) = pair(&writer, &stranger).await;
-    let serve = s.serve(&stranger);
+    let serve = s.serve_to_end(&stranger);
     let ask = async {
         assert_eq!(
             c.changed_scopes(&writer, &[scope]).await.unwrap().refused,
@@ -637,7 +653,7 @@ async fn acknowledgments_cannot_probe_unserved_frame_ids() {
     // A reader that proves the partition can pull and acknowledge normally.
     f.keys(&member, 1, &["customers"]).await;
     let (mut c, mut s) = pair(&member, &writer).await;
-    let serve = s.serve(&writer);
+    let serve = s.serve_to_end(&writer);
     let ask = async {
         c.prove_scopes(&member, &[f.scope("customers", 1)])
             .await
@@ -695,12 +711,11 @@ async fn saved_peer_resolution_proves_the_pinned_reference_without_opening_a_ses
                 Box::new(client_stream),
                 rocky_credentials::PeerId::of(expected)
             ),
-            NativeSession::accept_or_resolve(
+            super::link::Link::accept_or_resolve(
                 server_stream,
                 &server,
                 node.clone(),
                 credentials.clone(),
-                MAX_SECURE_BYTES
             )
         );
         assert!(accepted.unwrap().is_none());

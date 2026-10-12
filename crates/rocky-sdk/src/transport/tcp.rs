@@ -24,7 +24,6 @@ const PENDING: usize = 32;
 fn tag(protocol: Protocol) -> u8 {
     match protocol {
         Protocol::Pair => 1,
-        Protocol::Sync => 2,
         Protocol::Link => 7,
         Protocol::Renew => 3,
         Protocol::Command => 6,

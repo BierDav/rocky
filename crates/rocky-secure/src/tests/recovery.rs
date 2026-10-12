@@ -599,8 +599,6 @@ async fn head_advance_during_import_is_visible_and_takeover_does_not_hide_it() {
 
 #[tokio::test]
 async fn native_phone_publication_recovers_after_executor_exit() {
-    use network::NativeSession;
-    use tokio::net::{TcpListener, TcpStream};
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let a = PrivateKey::new();
@@ -624,28 +622,20 @@ async fn native_phone_publication_recovers_after_executor_exit() {
         .await
         .unwrap();
     source.execute_encrypted(command, &c).await.unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let (near, far) = network::link::testing::tcp().await;
+    let (session, mut served) = network::link::testing::sessions_over(
+        near,
+        far,
+        (&phone, phone_key.clone(), pcred),
+        (&source, a.clone(), acred),
+    )
+    .await
+    .unwrap();
     let server = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut session =
-            NativeSession::accept(stream, &source, a.clone(), acred, MAX_SECURE_FRAME * 8)
-                .await
-                .unwrap();
-        session.serve_command_once(&source, &c).await.unwrap();
+        served.serve_command_once(&source, &c).await.unwrap();
     };
     let client = async {
-        let stream = TcpStream::connect(address).await.unwrap();
-        let mut session = NativeSession::authenticate(
-            stream,
-            &phone,
-            phone_key.clone(),
-            pcred,
-            a.public_key(),
-            MAX_SECURE_FRAME * 8,
-        )
-        .await
-        .unwrap();
+        let mut session = session;
         assert!(
             session
                 .pull_result(&phone, f.public.domain, 1, vec![f.public, f.private], &c)

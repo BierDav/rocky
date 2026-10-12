@@ -2,8 +2,8 @@
 use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
-// A distinct handshake identity prevents a native session being used as a link.
-pub(super) const HANDSHAKE_VERSION: u32 = 0x10001;
+/// The handshake's version; its signing label carries it, so another is refused.
+pub(super) const HANDSHAKE_VERSION: u32 = 1;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -97,6 +97,9 @@ impl Frame {
 
 pub struct Link {
     pub peer: PublicKey,
+    /// Bytes the handshake itself exchanged, before holdings.
+    #[cfg(test)]
+    pub(crate) handshake_bytes: usize,
     pub held: Vec<ResourceScope>,
     pub offered: Vec<ResourceScope>,
     pub direction: bool,
@@ -159,6 +162,8 @@ impl Link {
         }
     }
 
+    /// Authenticates the peer over `stream`: `expected` when dialing, whoever
+    /// dialed when accepting. Holdings and scope states follow the handshake.
     pub async fn open<A: RowApplication>(
         stream: impl SessionStream + 'static,
         replica: &EncryptedReplica<A>,
@@ -166,21 +171,78 @@ impl Link {
         credentials: CredentialChain,
         expected: Option<PublicKey>,
     ) -> Result<Self, Error> {
+        Self::open_as(
+            stream,
+            replica,
+            (local, credentials),
+            expected,
+            (HANDSHAKE_VERSION, false),
+        )
+        .await?
+        .ok_or_else(|| denied("link handshake required"))
+    }
+    /// Accepts a link, or answers a pinned contact reference's resolution
+    /// (`NativeSession::resolve_peer`) with `None`.
+    pub async fn accept_or_resolve<A: RowApplication>(
+        stream: impl SessionStream + 'static,
+        replica: &EncryptedReplica<A>,
+        local: PrivateKey,
+        credentials: CredentialChain,
+    ) -> Result<Option<Self>, Error> {
+        Self::open_as(
+            stream,
+            replica,
+            (local, credentials),
+            None,
+            (HANDSHAKE_VERSION, true),
+        )
+        .await
+    }
+    /// A handshake under another version, as another build runs.
+    #[cfg(test)]
+    pub(crate) async fn open_as_version<A: RowApplication>(
+        stream: impl SessionStream + 'static,
+        replica: &EncryptedReplica<A>,
+        (local, credentials): (PrivateKey, CredentialChain),
+        expected: Option<PublicKey>,
+        version: u32,
+    ) -> Result<Self, Error> {
+        Self::open_as(
+            stream,
+            replica,
+            (local, credentials),
+            expected,
+            (version, false),
+        )
+        .await?
+        .ok_or_else(|| denied("link handshake required"))
+    }
+    async fn open_as<A: RowApplication>(
+        stream: impl SessionStream + 'static,
+        replica: &EncryptedReplica<A>,
+        (local, credentials): (PrivateKey, CredentialChain),
+        expected: Option<PublicKey>,
+        version: (u32, bool),
+    ) -> Result<Option<Self>, Error> {
         let side = if expected.is_some() {
             Side::Initiator
         } else {
             Side::Acceptor
         };
-        let mut session = NativeSession::handshake(
+        let session = NativeSession::handshake(
             Box::new(stream),
             replica,
             (local, credentials.clone()),
             (side, expected),
             MAX_SECURE_BYTES,
-            HANDSHAKE_VERSION,
+            version,
         )
-        .await?
-        .ok_or_else(|| denied("link handshake required"))?;
+        .await?;
+        let Some(mut session) = session else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        let handshake_bytes = MAX_SECURE_BYTES - session.remaining;
         let mut scopes = Vec::new();
         let mut after = None;
         loop {
@@ -229,8 +291,10 @@ impl Link {
             return Err(denied("link handshake requires a transport"));
         };
         let (read, write) = tokio::io::split(stream);
-        Ok(Self {
+        Ok(Some(Self {
             peer: session.peer,
+            #[cfg(test)]
+            handshake_bytes,
             channels,
             states,
             held,
@@ -249,7 +313,80 @@ impl Link {
                 signing: session.signing,
                 sequence: session.sent,
             },
-        })
+        }))
+    }
+}
+impl Link {
+    /// Carries request channels until either side ends the link: sessions the
+    /// peer opens go to `incoming`, pings are answered. Signals and pushes are
+    /// ignored; an embedder that needs liveness or live changes drives the
+    /// link itself, as the SDK does.
+    pub async fn drive(
+        self,
+        incoming: tokio::sync::mpsc::Sender<NativeSession>,
+    ) -> Result<(), Error> {
+        let Self {
+            mut reader,
+            mut writer,
+            mut channels,
+            direction,
+            ..
+        } = self;
+        let mut outgoing =
+            std::mem::replace(&mut channels.outgoing, tokio::sync::mpsc::channel(1).1);
+        let (controls, mut control) = tokio::sync::mpsc::channel(4);
+        let receive = async {
+            loop {
+                let frame = match reader.receive().await {
+                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(());
+                    }
+                    frame => frame?,
+                };
+                match frame.message {
+                    Message::Channel(_) => {
+                        if let Some(session) = channels.accept(frame)? {
+                            incoming
+                                .send(session)
+                                .await
+                                .map_err(|_| denied("link ended"))?;
+                        }
+                    }
+                    Message::Reconcile {
+                        generation,
+                        started,
+                    } => channels.reconcile(frame.direction, generation, started)?,
+                    Message::Ping if frame.direction != direction => controls
+                        .try_send(Frame::new(frame.direction, Message::Pong))
+                        .map_err(|_| denied("link control quota"))?,
+                    Message::Close { .. } => return Ok(()),
+                    _ => {}
+                }
+            }
+        };
+        let send = async {
+            loop {
+                tokio::select! {
+                    biased;
+                    Some(frame) = control.recv() => writer.send(frame).await?,
+                    frame = outgoing.recv() => {
+                        let Some(frame) = frame else { return writer.finish().await };
+                        let finished = match frame.message {
+                            Message::Reconcile { generation, started: false } => Some(generation),
+                            _ => None,
+                        };
+                        writer.send(frame).await?;
+                        if let Some(generation) = finished {
+                            channels.handle.flushed_reconcile(generation);
+                        }
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            result = receive => result,
+            result = send => result,
+        }
     }
 }
 /// A scope's committed receipt state, flushed before its token can leave.
@@ -580,16 +717,13 @@ mod tests {
         );
     }
     #[test]
-    fn only_current_link_name_and_distinct_handshake_identity() {
+    fn only_current_link_name_and_handshake_label() {
         assert_eq!(
             rocky_core::net::Protocol::named(b"rocky/link/1"),
             Some(rocky_core::net::Protocol::Link)
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
-        assert_ne!(
-            session_label(HANDSHAKE_VERSION),
-            session_label(NATIVE_SESSION_VERSION)
-        );
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v1");
     }
 }
 
@@ -617,5 +751,67 @@ mod integration_tests {
                     .contains("link frame quota")
             );
         }
+    }
+}
+
+/// Request sessions on a link both of whose ends this process drives.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    pub(crate) type End<'a, A> = (&'a EncryptedReplica<A>, PrivateKey, CredentialChain);
+    /// A dialed and an accepted link over an in-memory pipe.
+    pub(crate) async fn sessions<A: RowApplication, B: RowApplication>(
+        client: End<'_, A>,
+        server: End<'_, B>,
+    ) -> Result<(NativeSession, NativeSession), Error> {
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        sessions_over(near, far, client, server).await
+    }
+    /// Both ends of a loopback TCP connection.
+    pub(crate) async fn tcp() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (near, far) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+        (near.unwrap(), far.unwrap().0)
+    }
+    /// The dialed and the accepted end of a link, each as its handshake ended.
+    pub(crate) async fn links<A: RowApplication, B: RowApplication>(
+        near: impl SessionStream + 'static,
+        far: impl SessionStream + 'static,
+        (client, client_key, client_chain): End<'_, A>,
+        (server, server_key, server_chain): End<'_, B>,
+    ) -> (Result<Link, Error>, Result<Link, Error>) {
+        let expected = server_key.public_key();
+        tokio::join!(
+            Link::open(near, client, client_key, client_chain, Some(expected)),
+            Link::open(far, server, server_key, server_chain, None),
+        )
+    }
+    /// Drives both ends and opens one request channel: the client's session
+    /// and the server's session answering it.
+    pub(crate) async fn requests(
+        mut dialed: Link,
+        mut accepted: Link,
+    ) -> Result<(NativeSession, NativeSession), Error> {
+        let (near, far) = tokio::join!(dialed.ready(false), accepted.ready(false));
+        near?;
+        far?;
+        let handle = dialed.channels.handle.clone();
+        let (served, mut incoming) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(dialed.drive(tokio::sync::mpsc::channel(1).0));
+        tokio::spawn(accepted.drive(served));
+        let session = handle.open().await?;
+        let answering = incoming.recv().await.ok_or_else(|| denied("link ended"))?;
+        Ok((session, answering))
+    }
+    /// The client's request session and the server's session answering it.
+    pub(crate) async fn sessions_over<A: RowApplication, B: RowApplication>(
+        near: impl SessionStream + 'static,
+        far: impl SessionStream + 'static,
+        client: End<'_, A>,
+        server: End<'_, B>,
+    ) -> Result<(NativeSession, NativeSession), Error> {
+        let (dialed, accepted) = links(near, far, client, server).await;
+        requests(dialed?, accepted?).await
     }
 }

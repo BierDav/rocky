@@ -8,6 +8,8 @@ pub(super) const BUDGET: usize = 32;
 const PING: Duration = Duration::from_secs(15);
 
 struct Entry {
+    opened_at: u64,
+    round_trip_ms: Option<u64>,
     id: u64,
     dialed: bool,
     persistent: bool,
@@ -22,6 +24,7 @@ struct Entry {
 pub(super) struct Registry {
     pub(super) publishing: Mutex<()>,
     entries: std::sync::Mutex<BTreeMap<PublicKey, Entry>>,
+    opening: std::sync::Mutex<BTreeMap<PublicKey, usize>>,
     next: AtomicU64,
     events: watch::Sender<()>,
     #[cfg(test)]
@@ -34,6 +37,7 @@ impl Default for Registry {
         Self {
             publishing: Mutex::new(()),
             entries: Default::default(),
+            opening: Default::default(),
             next: AtomicU64::new(0),
             events: watch::channel(()).0,
             #[cfg(test)]
@@ -43,7 +47,50 @@ impl Default for Registry {
         }
     }
 }
+pub(super) struct Opening<'a> {
+    node: &'a Node,
+    service: &'a Link,
+    peer: PublicKey,
+}
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        let mut opening = self
+            .service
+            .live
+            .opening
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = opening.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                opening.remove(&self.peer);
+            }
+        }
+        drop(opening);
+        self.node.link_status_changed();
+    }
+}
 impl Registry {
+    pub fn status(&self, peer: PublicKey) -> Value {
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries.get(&peer) {
+            return json!({"state": "open", "opened": entry.opened_at.to_string(), "round_trip_ms": entry.round_trip_ms.map(|ms| ms.to_string())});
+        }
+        let opening = self.opening.lock().unwrap_or_else(PoisonError::into_inner);
+        json!({"state": if opening.contains_key(&peer) { "opening" } else { "closed" }, "opened": null, "round_trip_ms": null})
+    }
+    pub fn pong(&self, peer: PublicKey, id: u64, round_trip: Duration) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&peer)
+            .filter(|entry| entry.id == id)
+        {
+            entry.round_trip_ms = Some(u64::try_from(round_trip.as_millis()).unwrap_or(u64::MAX));
+        }
+    }
+
     pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
         let mut events = self.events.subscribe();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -164,6 +211,27 @@ impl Registry {
     }
 }
 impl Node {
+    pub(super) fn opening<'a>(&'a self, service: &'a Link, peer: PublicKey) -> Opening<'a> {
+        *service
+            .live
+            .opening
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(peer)
+            .or_default() += 1;
+        self.link_status_changed();
+        Opening {
+            node: self,
+            service,
+            peer,
+        }
+    }
+    fn link_status_changed(&self) {
+        self.link_revision.fetch_add(1, Ordering::SeqCst);
+        let status = self.sync_status.borrow().clone();
+        self.synced(status);
+    }
+
     pub(super) async fn publish_links(self: Arc<Self>, service: Arc<Link>) {
         let mut stage = service.stage.subscribe();
         let mut frames = self.replica.observe_frames().await;
@@ -210,6 +278,7 @@ impl Node {
                     {
                         return;
                     }
+                    let _opening = node.opening(&service, peer);
                     let result = async {
                         let stream = crate::enrollment::dial(
                             &*service.transport,
@@ -253,7 +322,10 @@ impl Node {
         settings: Settings,
         handshake_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<(), Failure> {
-        if !self.online.load(Ordering::SeqCst) || *service.stage.borrow() != Stage::Open {
+        if !self.foreground.load(Ordering::SeqCst)
+            || !self.online.load(Ordering::SeqCst)
+            || *service.stage.borrow() != Stage::Open
+        {
             return Err("live links are disabled".into());
         }
         let mut authority = self.replica.observe_authority().await;
@@ -287,7 +359,8 @@ impl Node {
                 None => return Ok(()),
             },
         };
-        if !self.online.load(Ordering::SeqCst)
+        if !self.foreground.load(Ordering::SeqCst)
+            || !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open
             || authority.has_changed()?
         {
@@ -373,6 +446,9 @@ impl Node {
         }
         let accepted = {
             self.replica.flush().await?;
+            if !self.foreground.load(Ordering::SeqCst) {
+                return Err("live links are disabled in the background".into());
+            }
             let mut entries = service
                 .live
                 .entries
@@ -389,6 +465,8 @@ impl Node {
                 if let Some(old) = entries.insert(
                     peer,
                     Entry {
+                        opened_at: now()?,
+                        round_trip_ms: None,
                         id,
                         dialed,
                         persistent,
@@ -402,6 +480,10 @@ impl Node {
                     },
                 ) {
                     old.close.send_replace(Some(CloseReason::Duplicate));
+                    self.activity.record(
+                        "link_closed",
+                        json!({"peer":peer.to_hex(),"reason":"duplicate","error":null}),
+                    );
                 }
                 true
             }
@@ -449,8 +531,11 @@ impl Node {
             last.error = None;
         }
         service.live.events.send_replace(());
-        self.activity
-            .record("link_opened", json!({"peer":peer.to_hex()}));
+        self.activity.record(
+            "link_opened",
+            json!({"peer":peer.to_hex(),"reason": if dialed { "dialed" } else { "accepted" }}),
+        );
+        self.link_status_changed();
         let node = self.clone();
         // The stage watch owns cancellation even for outbound links.
         let close_rx = close.subscribe();
@@ -458,7 +543,7 @@ impl Node {
         tokio::task::spawn_local(async move {
             let _permit = permit;
             let result = node
-                .run_link(&service, opened, close_rx, changed_tx, authority)
+                .run_link(&service, opened, close_rx, changed_tx, authority, id)
                 .await;
             let removed = {
                 let mut entries = service
@@ -475,7 +560,8 @@ impl Node {
             };
             if removed {
                 service.live.events.send_replace(());
-                node.activity.record("link_closed", json!({"peer":peer.to_hex(),"error":result.as_ref().err().map(ToString::to_string)}));
+                node.activity.record("link_closed", json!({"peer":peer.to_hex(),"reason":result.as_ref().copied().unwrap_or("error"),"error":result.as_ref().err().map(ToString::to_string)}));
+                node.link_status_changed();
                 if result.is_ok() && !persistent && !dialed && node.automatic.load(Ordering::SeqCst)
                 {
                     node.link_pending(peer);

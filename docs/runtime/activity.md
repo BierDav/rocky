@@ -39,6 +39,11 @@ suppressed. Successful earlier parts of a sync that later fails may not appear
 as transfer events. Current readiness, holdings and network status remain the
 source for the current device state.
 
+`LinkOpened` (`link_opened`) records a peer with reason `dialed` or `accepted`.
+`LinkClosed` (`link_closed`) records `offline`, `detached`, `authority`,
+`duplicate`, or `error`; an error close includes the diagnostic error. Link
+transitions wake readiness; keepalive pings emit no activity.
+
 `ScopesRefused` (`scopes_refused`) lists the scopes a sync with a peer skipped
 because one side may not hold them, typically a list the peer has not been
 shared yet ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).

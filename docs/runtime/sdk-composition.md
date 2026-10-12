@@ -103,7 +103,9 @@ after logout:
 ```
 
 `state` is `unknown` before the first sync, then `connected` or `unreachable`
-with the last `error`. A checkpoint-first join reports `bootstrapping` until
+with the last `error`. Each peer also carries live `link` state and measurements
+([live links](live-links.md#status-and-lifecycle)); this distinguishes a current
+link from an earlier successful pass. A checkpoint-first join reports `bootstrapping` until
 its base is imported ([readiness](sdk-bootstrapping.md#readiness)).
 
 ## The starter engine

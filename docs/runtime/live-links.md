@@ -41,6 +41,23 @@ One registry entry exists per authenticated node. Simultaneous dials retain
 the stream initiated by the lower node key. Replacement cancels old requests;
 a bounded retry uses the surviving link without classifying it as unreachable.
 
+## Status and lifecycle
+
+Network status and readiness expose each peer's `link`: `state` is `open`,
+`opening` during a dial/admission, or `closed`; `opened` is Unix seconds and
+`round_trip_ms` the latest ping round trip, both decimal strings or null.
+Closed links have null measurements. Cancelling a dial clears `opening`.
+Opening and closing wake the existing sync-status and readiness waits. Ping
+measurements are available from a fresh status read but do not advance tokens.
+`link_opened` and `link_closed` activity includes the peer and reason; an error
+close also carries the error. Duplicate replacement closes the displaced link.
+
+Disabling the worker waits for its pass and links to drain. Android's
+`enterBackground` uses that operation and blocks further inbound or outbound
+link admission; foreground allows links and enables the worker again.
+The file, sessions and application-owned transport stay open. Desktop workers
+keep links open while online. See [Android](android.md#lifecycle).
+
 ## Requests and live push
 
 Connecting starts reconciliation. Rows, existence logs and bases, checkpoints,
@@ -97,4 +114,5 @@ another sync path.
 The iroh link ALPN keeps its independent connection and stream budgets. See
 [SDK transports](sdk-transports.md#bounds). The memory hub counts complete
 link messages and injects byte cuts, write muting and stalled dials under the
-paused clock. Internet traversal and mobile lifecycle belong to later phases.
+paused clock. Internet traversal qualification belongs to phase 6. Android device evidence
+is recorded in the [phase 5 brief](../features_08/05-status-kotlin-lifecycle.md).

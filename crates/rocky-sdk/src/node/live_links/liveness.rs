@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 const CLOSE: Duration = Duration::from_millis(100);
 enum Exit {
-    Finished(Result<(), Failure>),
+    Finished(Result<&'static str, Failure>),
     Close(CloseReason),
 }
 impl Node {
@@ -15,7 +15,8 @@ impl Node {
         mut close: watch::Receiver<Option<CloseReason>>,
         changed: watch::Sender<Option<Vec<ResourceScope>>>,
         mut authority: watch::Receiver<u64>,
-    ) -> Result<(), Failure> {
+        id: u64,
+    ) -> Result<&'static str, Failure> {
         let peer = opened.peer;
         let direction = opened.direction;
         let expires = opened.expires;
@@ -126,10 +127,9 @@ impl Node {
                             pongs.send_modify(|count| *count = count.wrapping_add(1));
                         }
                         Message::Close {
-                            reason:
-                                CloseReason::Duplicate | CloseReason::Detached | CloseReason::Offline,
-                        } => return Ok::<_, Failure>(()),
-                        Message::Close { .. } => return Err("peer closed link".into()),
+                            reason: CloseReason::Authority | CloseReason::Busy,
+                        } => return Err("peer closed link".into()),
+                        Message::Close { reason } => return Ok::<_, Failure>(close_reason(reason)),
                         _ => return Err("invalid link direction".into()),
                     }
                 }
@@ -137,6 +137,7 @@ impl Node {
             let send = async {
                 let mut deadline = tokio::time::Instant::now() + PING;
                 let mut missed = 0;
+                let mut ping_at = None;
                 changes.borrow_and_update();
                 let mut initial = take_signal(&changed);
                 loop {
@@ -145,10 +146,11 @@ impl Node {
                     }
                     tokio::select! {
                         biased;
-                        _ = pong.changed() => { pong.borrow_and_update(); missed = 0; }
+                        _ = pong.changed() => { pong.borrow_and_update(); missed = 0; if let Some(at) = ping_at.take() { service.live.pong(peer, id, tokio::time::Instant::now() - at); } }
                         Some(frame) = control.recv() => { opened.writer.send(frame).await?; }
                         _ = tokio::time::sleep_until(deadline) => {
                             if missed == 3 { return Err("three missed link pongs".into()); }
+                            ping_at = Some(tokio::time::Instant::now());
                             opened.writer.send(Frame::new(direction, Message::Ping)).await?;
                             missed += 1;
                             deadline = tokio::time::Instant::now() + PING;
@@ -202,7 +204,7 @@ impl Node {
                 if reason == CloseReason::Authority {
                     self.reopen_link(peer);
                 }
-                Ok(())
+                Ok(close_reason(reason))
             }
         }
     }
@@ -216,4 +218,14 @@ fn take_signal(changed: &watch::Sender<Option<Vec<ResourceScope>>>) -> Option<Ve
         false
     });
     pending
+}
+
+fn close_reason(reason: CloseReason) -> &'static str {
+    match reason {
+        CloseReason::Authority => "authority",
+        CloseReason::Duplicate => "duplicate",
+        CloseReason::Offline => "offline",
+        CloseReason::Detached => "detached",
+        CloseReason::Busy => "busy",
+    }
 }

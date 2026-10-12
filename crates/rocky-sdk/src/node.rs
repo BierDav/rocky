@@ -265,9 +265,11 @@ pub(crate) struct Node {
     worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<&'static str>,
     automatic: AtomicBool,
+    foreground: AtomicBool,
     sync_events: watch::Sender<u64>,
     link_events: watch::Sender<()>,
     sync_status: watch::Sender<Value>,
+    link_revision: AtomicU64,
     /// What the node did in the background, for applications to show.
     pub(crate) activity: crate::activity::Activity,
     backups: Mutex<()>,
@@ -336,8 +338,10 @@ impl Node {
             worker_running: watch::channel(false).0,
             sync_state: watch::channel("idle").0,
             automatic: AtomicBool::new(false),
+            foreground: AtomicBool::new(true),
             sync_events: watch::channel(0).0,
             link_events: watch::channel(()).0,
+            link_revision: AtomicU64::new(0),
             sync_status: watch::channel(json!({"token": "0", "state": "idle", "retry": false})).0,
             activity: crate::activity::Activity::new(),
             backups: Mutex::new(()),
@@ -832,12 +836,20 @@ impl Node {
                         .await
                         .map_err(|error| ServiceError::Unreachable(error.to_string()))?;
                 }
+                self.foreground.store(true, Ordering::SeqCst);
                 self.discovery_foreground(true).await;
                 self.reset_retry(None);
                 self.wake_sync();
                 Ok(json!({}))
             }
             "network_background" => {
+                self.foreground.store(false, Ordering::SeqCst);
+                if let Some(service) = self.current() {
+                    service
+                        .live
+                        .close(rocky_secure::network::link::CloseReason::Offline);
+                    service.live.wait_empty().await;
+                }
                 self.discovery_foreground(false).await;
                 Ok(json!({}))
             }
@@ -1229,6 +1241,7 @@ impl Node {
                     "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else { "session" }, |meta| meta.source.as_str()),
                     "choice": self.choices.lock().unwrap_or_else(PoisonError::into_inner).get(&node).copied().unwrap_or("not_considered"),
                     "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
+                    "link": self.current().map_or_else(|| json!({"state":"closed","opened":null,"round_trip_ms":null}), |service| service.live.status(node)),
                     "state": state,
                     "checked": checked.map(|at| at.to_string()),
                     "error": last.and_then(|last| last.error.clone()),
@@ -1495,10 +1508,16 @@ impl Node {
             },
             "key_epochs": settings.keys.iter().map(|(collection, epochs)| json!({"collection":collection,"epochs":epochs,"current":epochs.iter().max()})).collect::<Vec<_>>(),
             "tickets": tickets,
-            "network": {"attached": self.current().is_some(), "discovery": self.discovery_status()},
+            "network": {"attached": self.current().is_some(), "discovery": self.discovery_status(), "peers": self.peers().await, "link_revision": self.link_revision.load(Ordering::SeqCst).to_string()},
         });
+        let mut token_status = status.clone();
+        if let Some(peers) = token_status["network"]["peers"].as_array_mut() {
+            for peer in peers {
+                peer["link"]["round_trip_ms"] = Value::Null;
+            }
+        }
         let token = HEXLOWER
-            .encode(&commitment("rocky.sdk.status.v1", status.to_string().as_bytes())[..16]);
+            .encode(&commitment("rocky.sdk.status.v1", token_status.to_string().as_bytes())[..16]);
         status["token"] = json!(token);
         Ok(status)
     }
@@ -2634,6 +2653,9 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
+        if !self.foreground.load(Ordering::SeqCst) {
+            return Err("live links are disabled in the background".into());
+        }
         let addresses = contact.addresses(transport.kind());
         let service = self
             .current()
@@ -2650,6 +2672,7 @@ impl Node {
             if let Some(open) = service.live.handle(peer) {
                 return Ok(open);
             }
+            let _opening = self.opening(&service, peer);
             let stream = crate::enrollment::dial(transport, &addresses, Protocol::Link).await?;
             let owner = self
                 .owner

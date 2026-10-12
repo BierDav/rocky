@@ -249,10 +249,28 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
                     .all(|(peer, id)| service.live.id(*peer).is_some_and(|new| Some(new) != *id))
             })
             .await;
+            let before_pause = tokio::time::Instant::now();
             start(&a, false).await?;
-            until(|| service.live.len() == 0).await;
+            assert!(tokio::time::Instant::now() - before_pause < Duration::from_secs(1));
+            assert_eq!(
+                service.live.len(),
+                0,
+                "pause acknowledges only after every link closes"
+            );
+            assert!(
+                a.peers()
+                    .await
+                    .iter()
+                    .all(|peer| peer["link"]["state"] == "closed")
+            );
             start(&a, true).await?;
             until(|| peers.iter().all(|peer| service.live.contains(*peer))).await;
+            assert!(
+                a.peers()
+                    .await
+                    .iter()
+                    .all(|peer| peer["link"]["state"] == "open")
+            );
             a.dispatch(
                 &*a.client(1)?,
                 &json!({"type":"connection", "online":false}),
@@ -305,6 +323,28 @@ async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Fa
             let (a, b) = pair(root.path(), &hub).await?;
             let service = a.current().ok_or("service")?;
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let status = a.readiness().await?;
+            assert_eq!(status["network"]["peers"][0]["link"]["state"], "open");
+            assert!(status["network"]["peers"][0]["link"]["opened"].is_string());
+            let sync_token = a.sync_status.borrow()["token"].clone();
+            let pongs = service.live.pongs.load(Ordering::Relaxed);
+            tokio::time::advance(Duration::from_secs(15)).await;
+            until(|| service.live.pongs.load(Ordering::Relaxed) > pongs).await;
+            until(|| service.live.status(peer)["round_trip_ms"].is_string()).await;
+            assert_eq!(
+                a.readiness().await?["token"],
+                status["token"],
+                "pings do not change readiness"
+            );
+            assert_eq!(
+                a.sync_status.borrow()["token"],
+                sync_token,
+                "pings do not change sync status"
+            );
+            let client = a.client(1)?;
+            let token = status["token"].as_str().ok_or("readiness token")?;
+            let mut waiting = Box::pin(a.readiness_after(&client, token));
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
             hub.mute("b", Protocol::Link, true);
             for _ in 0..3 {
                 tokio::time::advance(Duration::from_secs(15)).await;
@@ -322,6 +362,19 @@ async fn three_missing_pongs_close_and_reconnect_with_backoff() -> Result<(), Fa
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&peer)
                     .is_some_and(|state| state.link_retry.deadline().is_some())
+            );
+            let closed = waiting.await?;
+            assert_eq!(closed["network"]["peers"][0]["link"]["state"], "closed");
+            assert_ne!(closed["token"], status["token"]);
+            assert_ne!(a.sync_status.borrow()["token"], sync_token);
+            assert!(
+                a.activity.after(0)["events"]
+                    .as_array()
+                    .ok_or("events")?
+                    .iter()
+                    .any(|event| event["kind"] == "link_closed"
+                        && event["reason"] == "error"
+                        && event["error"] == "three missed link pongs")
             );
             assert_eq!(hub.protocol_dials("a", "b", Protocol::Link), dials);
             hub.mute("b", Protocol::Link, false);
@@ -1103,6 +1156,80 @@ async fn unchanged_epoch_probe_ignores_contacts_changed_while_the_reply_was_in_f
                 !authority.has_changed()?,
                 "an unchanged epoch response must not invalidate admission"
             );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn link_status_reports_opening_and_clears_cancelled_dials() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            hub.stall_peer("b", true);
+            let transport = transport(&a).await?;
+            let contact = a.settings.lock().await.peers[&peer].clone();
+            let mut opening = Box::pin(a.request_link(&*transport, peer, &contact));
+            assert!(futures_util::poll!(opening.as_mut()).is_pending());
+            assert_eq!(a.peers().await[0]["link"]["state"], "opening");
+            let token = a.readiness().await?["token"].clone();
+            drop(opening);
+            assert_eq!(a.peers().await[0]["link"]["state"], "closed");
+            assert_ne!(a.readiness().await?["token"], token);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn background_refuses_new_links_until_foreground() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let client = a.client(1)?;
+            let before = tokio::time::Instant::now();
+            start(&a, false).await?;
+            a.dispatch(&client, &json!({"type":"network_background"}))
+                .await?;
+            assert!(tokio::time::Instant::now() - before < Duration::from_secs(1));
+            assert!(
+                a.peers()
+                    .await
+                    .iter()
+                    .all(|peer| peer["link"]["state"] == "closed")
+            );
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let service = b.current().ok_or("service")?;
+            until(|| !service.live.contains(peer)).await;
+            let contact = b.settings.lock().await.peers[&peer].clone();
+            assert!(
+                b.request_link(&*transport(&b).await?, peer, &contact)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(a.current().ok_or("service")?.live.len(), 0);
+            a.dispatch(&client, &json!({"type":"network_foreground"}))
+                .await?;
+            start(&a, true).await?;
+            until(|| a.current().is_some_and(|service| service.live.len() == 1)).await;
+            assert_eq!(a.peers().await[0]["link"]["state"], "open");
             a.detach(None).await;
             b.detach(None).await;
             Ok(())

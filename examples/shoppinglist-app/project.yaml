@@ -3,6 +3,4 @@ modules:
   - desktopApp
   - iosApp
   - qualification
-  - qualification/liveLinkAgent
-  - qualification/liveLinkPhone
   - shared

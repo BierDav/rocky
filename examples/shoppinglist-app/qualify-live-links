@@ -1,7 +1,8 @@
 #!/bin/sh
-# Phase 6 live-link qualification: `agent <port>` serves a desktop device; `prepare`, `pair`, `latency`, `lifecycle`,
+# JVM live-link qualification: `agent <port>` serves a desktop device; `prepare`, `pair`, `latency`, `lifecycle`,
 # `undialable`, `idle`, `mesh` and `finish` drive agents. Evidence goes to $ROCKY_EVIDENCE (default local/live-links).
-# See docs/features_08/06-qualification-evidence.md.
+# SDK lifecycle hooks are exercised directly; Android lifecycle and radio cost are not qualified.
+# See docs/runtime/shopping-qualification.md.
 set -eu
 app=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH='' cd -- "$app/../.." && pwd)

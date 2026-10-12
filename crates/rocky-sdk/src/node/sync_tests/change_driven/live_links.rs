@@ -461,6 +461,111 @@ async fn simultaneous_dials_keep_the_lower_nodes_stream() -> Result<(), Failure>
 }
 
 #[tokio::test(start_paused = true)]
+async fn simultaneous_short_syncs_reconcile_after_a_duplicate_stream_ends() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            add(&a, 1).await?;
+            let ta = transport(&a).await?;
+            let tb = transport(&b).await?;
+            let (first, second) = tokio::join!(a.sync(&*ta), b.sync(&*tb));
+            assert_eq!(first?.0["state"], "connected");
+            assert_eq!(second?.0["state"], "connected");
+            assert_eq!(rows(&b).await?, ["1"]);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let (lower, higher, lower_key, higher_key, lower_address, higher_address) = if ka < kb {
+                (&a, &b, ka, kb, "a", "b")
+            } else {
+                (&b, &a, kb, ka, "b", "a")
+            };
+            let low_service = lower.current().ok_or("service")?;
+            let high_service = higher.current().ok_or("service")?;
+            let stream = high_service
+                .transport
+                .connect(lower_address, Protocol::Link)
+                .await?;
+            let high_settings = higher.settings.lock().await.clone();
+            higher
+                .admit_link(
+                    high_service.clone(),
+                    stream,
+                    Some(lower_key),
+                    high_settings,
+                    None,
+                )
+                .await?;
+            until(|| low_service.live.contains(higher_key)).await;
+            let old_id = high_service.live.id(lower_key);
+            let cleanup = high_service.live.short(lower_key);
+            let stream = low_service
+                .transport
+                .connect(higher_address, Protocol::Link)
+                .await?;
+            let low_settings = lower.settings.lock().await.clone();
+            lower
+                .admit_link(
+                    low_service.clone(),
+                    stream,
+                    Some(higher_key),
+                    low_settings,
+                    None,
+                )
+                .await?;
+            until(|| high_service.live.id(lower_key) != old_id).await;
+            drop(cleanup);
+            assert!(high_service.live.contains(lower_key));
+            assert!(low_service.live.contains(higher_key));
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn learned_revocation_closes_the_revoked_peers_link() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {

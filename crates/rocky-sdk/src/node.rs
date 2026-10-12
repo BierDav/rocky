@@ -2087,6 +2087,11 @@ impl Node {
                 break;
             }
             control.borrow_and_update();
+            // Another watch may have won the select while explicit work was queued.
+            if events.has_changed().unwrap_or(false) {
+                self.pending_sync();
+                retry_only = false;
+            }
             events.borrow_and_update();
             if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) {
                 self.worker_running.send_replace(true);
@@ -2589,26 +2594,13 @@ impl Node {
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
-            let authority = self.replica.observe_authority().await;
             let revocations = self.replica.revocation_digest().await?;
-            let before = self.current().and_then(|service| service.live.id(peer));
             result = self.exchange(transport, peer, contact).await;
             self.absorb_revocations(result.as_ref().err()).await?;
             if result.is_err() && self.replica.revocation_digest().await? != revocations {
                 result = Err(Box::new(sync::Learned));
                 break;
             }
-            if result.is_err()
-                && let Some(service) = self.current()
-            {
-                service.live.close_short(peer);
-            }
-            let after = self.current().and_then(|service| service.live.id(peer));
-            let replaced = after != before
-                || ((before.is_some() || after.is_some())
-                    && self
-                        .current()
-                        .is_some_and(|service| !service.live.contains(peer)));
             let interrupted = result.as_ref().err().is_some_and(|error| match error
                 .downcast_ref::<rocky_secure::Error>(
             ) {
@@ -2619,9 +2611,12 @@ impl Node {
                         | std::io::ErrorKind::ConnectionReset
                 ),
                 Some(rocky_secure::Error::Rejected(reason)) => reason.starts_with("link ended"),
-                _ => error.to_string() == "link authority changed during handshake",
+                Some(rocky_secure::Error::Application(cause)) => {
+                    cause.is::<rocky_secure::network::link::AuthorityChanged>()
+                }
+                _ => false,
             });
-            if result.is_ok() || !interrupted || (!authority.has_changed()? && !replaced) {
+            if result.is_ok() || !interrupted {
                 break;
             }
         }
@@ -2692,7 +2687,9 @@ impl Node {
                 return Err(error);
             }
         }
-        Err("link admission kept changing before reconcile".into())
+        Err(Box::new(rocky_secure::Error::Application(Box::new(
+            rocky_secure::network::link::AuthorityChanged,
+        ))))
     }
     async fn exchange(
         &self,
@@ -2705,6 +2702,7 @@ impl Node {
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
         let link = self.request_link(transport, peer, contact).await?;
+        let _short = service.live.short(peer);
         let renewable = {
             let settings = self.settings.lock().await;
             !settings.issuer() || !settings.issuers.is_empty()
@@ -2815,7 +2813,6 @@ impl Node {
         bootstrapped.extend(transfer);
         reconcile.close().await?;
         upstream.link.drain().await?;
-        service.live.close_short(peer);
         Ok((newer, retry, bootstrapped))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,

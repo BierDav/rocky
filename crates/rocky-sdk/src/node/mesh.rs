@@ -83,6 +83,10 @@ impl Node {
                 Ok(link) => link,
                 Err(_) => continue,
             };
+            let service = self
+                .current()
+                .ok_or(ServiceError::NetworkRequired("contact"))?;
+            let _short = service.live.short(peer);
             let mut session = link.open().await?;
             let response = async {
                 let response = session
@@ -93,9 +97,6 @@ impl Node {
                 Ok::<_, Failure>(response)
             }
             .await;
-            if let Some(service) = self.current() {
-                service.live.close_short(peer);
-            }
             let response = response?;
             if let ContactResponse::Contact {
                 contact: Some(contact),

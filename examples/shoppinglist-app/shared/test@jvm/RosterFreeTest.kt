@@ -1,7 +1,8 @@
 package org.example.examples.shopping
 
 import androidx.room.useReaderConnection
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import org.example.examples.shopping.data.ShoppingRepository
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.ShoppingSchema
@@ -13,9 +14,9 @@ import java.io.File
 import java.nio.file.Files
 import kotlin.test.*
 
-/** Application privacy and sharing over contacts, with discovery disabled (TCP). */
+/** Application privacy and sharing over contacts, with isolated iroh and discovery disabled. */
 class RosterFreeTest {
-    // These regressions exercise SQLite and TCP; file-key fsync has separate coverage.
+    // These regressions exercise SQLite and iroh; file-key fsync has separate coverage.
     private fun keys(): SecretStore {
         val values = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         return object : SecretStore {
@@ -96,9 +97,18 @@ class RosterFreeTest {
         try {
             val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             val first = RockyDatabase.join(File(root, "first"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
+            val events = mutableListOf<RockyEvent>()
+            val recording = launch(start = CoroutineStart.UNDISPATCHED) { first.activity().collect { events += it } }
             issuer.addPeer(first.contact().uri)
-            issuer.syncOnce()
-            first.syncOnce()
+            try {
+                assertEquals(ConnectionState.Connected, issuer.syncOnce().state, issuer.peers().toString())
+                assertEquals(ConnectionState.Connected, first.syncOnce().state, first.peers().toString())
+            } catch (error: Throwable) {
+                println("first events=$events")
+                throw error
+            } finally {
+                recording.cancelAndJoin()
+            }
             val second = RockyDatabase.join(File(root, "second"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             // Enrollment supplies just the issuer. The first authenticated pass hands over its other contact.
             assertEquals(ConnectionState.Connected, second.syncOnce().state)

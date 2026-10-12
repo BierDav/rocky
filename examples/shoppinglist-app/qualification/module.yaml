@@ -1,11 +1,9 @@
-# Multi-process shopping qualification: devices run the app's Room repository in separate JVMs and the packaged
-# rocky-peer is the custody process. See docs/runtime/shopping-qualification.md.
+# One JVM qualification application: process driver and live-link agents.
 product: jvm/app
 apply:
   - //project.module-template.yaml
 dependencies:
   - //shared: exported
-  - ../liveLinkAgent
 settings:
   jvm:
     mainClass: org.example.examples.shopping.qualification.QualificationKt

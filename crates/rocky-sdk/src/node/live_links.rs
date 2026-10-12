@@ -66,6 +66,17 @@ impl Drop for Opening<'_> {
         self.node.link_status_changed();
     }
 }
+/// Cleanup belongs to the admitted stream, including when a duplicate replaces it.
+pub(super) struct ShortLink<'a> {
+    registry: &'a Registry,
+    peer: PublicKey,
+    id: Option<u64>,
+}
+impl Drop for ShortLink<'_> {
+    fn drop(&mut self) {
+        self.registry.close_short(self.peer, self.id);
+    }
+}
 impl Registry {
     pub fn status(&self, peer: PublicKey) -> Value {
         let source = {
@@ -126,12 +137,21 @@ impl Registry {
         }
     }
 
-    pub fn close_short(&self, peer: PublicKey) {
+    pub fn short(&self, peer: PublicKey) -> ShortLink<'_> {
+        ShortLink {
+            registry: self,
+            peer,
+            id: self.id(peer),
+        }
+    }
+
+    fn close_short(&self, peer: PublicKey, id: Option<u64>) {
         if let Some(entry) = self
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&peer)
+            && Some(entry.id) == id
             && !entry.persistent
         {
             entry.close.send_replace(Some(CloseReason::Detached));

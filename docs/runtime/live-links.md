@@ -133,3 +133,13 @@ link messages and injects byte cuts, severed links and stalled dials under the
 paused clock. Android lifecycle evidence is in the [phase 5 brief](../features_08/05-status-kotlin-lifecycle.md);
 desktop and phone runs over cellular and an iroh relay are in the
 [phase 6 evidence](../features_08/06-qualification-evidence.md).
+
+Short-link cleanup names the admitted link identity. When simultaneous dials
+replace a stream, a failed reconciliation on the losing stream cannot close
+the replacement. Both peers can retry on the surviving link. Stream interruptions retry within
+the existing four-attempt reconciliation bound, including when a remote
+replacement is not yet visible in the local registry.
+
+The automatic worker checks queued explicit work before each pass, even when
+a revision or link event won its previous wait. A key share cannot lose its
+wake-up to an unrelated notification on an already open link.

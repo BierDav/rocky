@@ -213,12 +213,23 @@ The multi-process qualification uses manual sync and a keyless custody peer;
 Android device qualification is documented in
 [shopping devices](../../docs/runtime/shopping-devices.md).
 
-`qualify-live-links` measures live links between a desktop process and a phone
-running the debug Android app; it is how the
-[live-link evidence](../../docs/features_08/06-qualification-evidence.md) was
-taken. The phone agent starts only in a debuggable build after `prepare` creates
-its flag through `adb shell run-as`; its households live under `files/live-links`,
-apart from the app's own.
+`qualification` is one JVM application containing the process driver and live-link agent.
+`qualify-live-links` measures links between independent JVM processes. Start two agents
+in separate terminals, then drive them from a third:
+
+```sh
+./qualify-live-links agent 47120
+./qualify-live-links agent 47110
+./qualify-live-links prepare
+./qualify-live-links pair /tmp/rocky-live-desktop /tmp/rocky-live-peer
+./qualify-live-links latency 10
+./qualify-live-links lifecycle 5
+./qualify-live-links finish
+```
+
+The lifecycle scenario calls the SDK's background/foreground hooks. It does not
+qualify Android activity handling, cellular connectivity, battery cost or radio
+wake-ups. The shopping Android app still builds separately.
 
 ## iOS
 

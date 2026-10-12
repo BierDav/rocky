@@ -5,6 +5,16 @@ the JVM desktop profile (macOS arm64, loopback TCP), with each device in its own
 process, and its sharing and move steps on two Android emulators. Phone runs are
 [outstanding](#outstanding). This is not an Internet, NAT or relay claim.
 
+The 2026-10-12 JVM consolidation uses isolated iroh. Household and contact-handover
+classes passed three consecutive complete runs (36 tests), and the full shopping
+check passed all 36 JVM tests and desktop/Android compilation. The three-process
+live-link mesh opened every pair, detected process death and reopened after restart.
+The custody harness passed exclusion/revocation, relink and creator loss, but its
+`gate` scenario still fails with `unexpected end of file` during sync, also when
+run alone. The earlier TCP evidence below does not qualify this current iroh gate.
+The JVM live-link harness exercises SDK lifecycle hooks; it does not measure
+Android activity handling, cellular connectivity, battery cost or radio wake-ups.
+
 ## Commands
 
 | Command | Runs |
@@ -14,7 +24,7 @@ process, and its sharing and move steps on two Android emulators. Phone runs are
 | `cd examples/shoppinglist-app && ./kotlin run -m qualification -- required-schema` | The required schema by hand and from Room, installed natively |
 | `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and every partitioned refusal |
 | `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
-| `./examples/shoppinglist-app/qualify-live-links <command>` | Live links between a desktop process and the debug Android app over iroh: latency, lifecycle, idle cost and a three-desktop mesh; see the [phase 6 evidence](../features_08/06-qualification-evidence.md) |
+| `./examples/shoppinglist-app/qualify-live-links <command>` | Live links between independent JVM processes over iroh: latency, SDK lifecycle hooks, process traffic and a three-process mesh; see the [commands](../../examples/shoppinglist-app/README.md#verify) |
 
 `ROCKY_SCENARIOS=gate,relink` selects harness scenarios. The application
 modules contain no Rust source; the custody process is the packaged launcher
@@ -47,7 +57,7 @@ its recipient alone, a packaged always-on custody peer that holds envelopes as
 a mailbox, and a second issuing device. Every scenario ends by querying the removed `keys` and `identities` tables
 and checking `no such table`; on members it also checks `devices`. Its lists merge; its approvals are strong
 commands the public coordination service orders, which this harness does not
-run: its devices open over TCP without a coordinator. Strong commands under
+run: its devices open over isolated iroh without a coordinator. Strong commands under
 contention, loss, takeover and voter faults are not qualified as processes.
 
 | Scenario | Evidence | Status |

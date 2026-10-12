@@ -44,6 +44,13 @@ class HouseholdTest {
     /** Waits until [list] reads [titles] here; its rows may arrive before it is held. */
     private suspend fun ShoppingNode.awaitTitles(list: Long, vararg titles: String, issuer: ShoppingNode? = null) = coroutineScope {
         val events = ArrayDeque<RockyEvent>()
+        val issuerEvents = ArrayDeque<RockyEvent>()
+        val issuerRecording = launch(start = CoroutineStart.UNDISPATCHED) {
+            issuer?.rocky?.activity()?.collect {
+                if (issuerEvents.size == 128) issuerEvents.removeFirst()
+                issuerEvents.addLast(it)
+            }
+        }
         var observed = emptyList<String>()
         val recording = launch(start = CoroutineStart.UNDISPATCHED) {
             rocky.activity().collect {
@@ -66,10 +73,11 @@ class HouseholdTest {
                         println("activity=${events.toList()}")
                         val parameter = buildJsonObject {
                             put("type", "integer")
-                            put("value", list)
+                            put("value", list.toString())
                         }
                         println("rows=${runCatching { rocky.read(query("SELECT title FROM items WHERE list = ? ORDER BY title", JsonArray(listOf(parameter)))) }}")
                         if (issuer != null) {
+                            println("issuer activity=${issuerEvents.toList()}")
                             println("issuer network=${issuer.rocky.network()}")
                             println("issuer devices=${issuer.rocky.devices().map { it.node to it.label?.decodeToString() }}")
                             println("issuer holding=${issuer.rocky.list(list).status()}")
@@ -81,6 +89,7 @@ class HouseholdTest {
             throw timeout
         } finally {
             recording.cancelAndJoin()
+            issuerRecording.cancelAndJoin()
         }
     }
     private suspend fun ShoppingNode.holds(list: Long) = rocky.list(list).status().isKeyed
@@ -340,7 +349,7 @@ class HouseholdTest {
             // Joining installed its authors: it edits the list it received.
             full.repository.add(weekly, "Bread")
             trusted.awaitTitles(weekly, "Bread", "Milk")
-            assertFalse(partial.holds(weekly))
+            assertFalse(partial.holds(weekly), "partial=${partial.rocky.list(weekly).status()} issuer=${trusted.rocky.list(weekly).status()} devices=${trusted.household.devices().first()}")
 
             trusted.household.share(weekly, partial.self)
             partial.awaitTitles(weekly, "Bread", "Milk")

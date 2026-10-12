@@ -108,7 +108,7 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
     private val input = process.outputStream.bufferedWriter()
     private val output = process.inputStream.bufferedReader()
     val directory = File(root, name)
-    val listen = "127.0.0.1:${freePort()}"
+    val listen = "127.0.0.1:0"
     lateinit var node: String
     val alive: Boolean get() = process.isAlive
 

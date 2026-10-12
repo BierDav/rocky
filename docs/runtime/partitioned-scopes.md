@@ -112,6 +112,11 @@ after it opens and the device reads every member in whole. A recipient without B
 request B's range or checkpoint, register its key or admit its frames. A key
 reveals a whole partition, including earlier ciphertext under that epoch.
 
+A member's wildcard partition grant does not request every group key during
+pairing or renewal. Members receive those keys through explicit sharing and
+rotation delivery. A finite partition selector can receive its selected keys;
+issuers receive every readable group through renewal.
+
 **Delivery.** An envelope reaches its recipient alone. Each sync's first
 session hands the peer the envelopes addressed to it and collects those the
 peer holds for this device; the recipient returns a receipt signed by its node

@@ -1292,13 +1292,20 @@ impl Settings {
             };
             if !partition.members.iter().all(|member| {
                 grants.iter().any(|grant| {
-                    grant
-                        .resolve(member.scope.domain, member.scope.table, &member.tuple)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|grant| {
-                            grant.rows == RowSelection::All && grant.rights.contains(&Right::Read)
-                        })
+                    // Wildcard members receive keys through explicit sharing, not renewal.
+                    let selected = reads(&capability.grants, domain.registry())
+                        || grant.selector.0.values().all(|selection| {
+                            matches!(selection, rocky_core::PartitionSelection::Only(_))
+                        });
+                    selected
+                        && grant
+                            .resolve(member.scope.domain, member.scope.table, &member.tuple)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|grant| {
+                                grant.rows == RowSelection::All
+                                    && grant.rights.contains(&Right::Read)
+                            })
                 })
             }) {
                 continue;

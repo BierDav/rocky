@@ -19,7 +19,7 @@ import java.io.File
 internal const val REPLY = "@@rocky-device@@ "
 
 /**
- * One shopping device in its own process: the app's Room repository on Rocky's file over TCP. It reads one JSON
+ * One shopping device in its own process: the app's Room repository on Rocky's file over isolated iroh. It reads one JSON
  * request per stdin line and answers each on a [REPLY] line. Closing stdin closes the device.
  */
 fun main() = runBlocking {

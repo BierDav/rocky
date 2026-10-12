@@ -211,7 +211,7 @@ class LiveLinkAgent(
         }
     }
 
-    /** Answers one connection at a time on loopback [port]; the phone's port is reached through `adb forward`. */
+    /** Answers one driver connection at a time on loopback [port]. */
     fun serve(port: Int) {
         ServerSocket(port, 4, InetAddress.getLoopbackAddress()).use { server ->
             log("serving on $port")

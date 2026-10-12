@@ -738,3 +738,53 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
     assert!(Settings::load(&path)?.unresolved_contacts().is_empty());
     Ok(())
 }
+
+#[test]
+fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), Failure> {
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = issuer.vault(&store);
+    let domain = issuer.domain()?;
+    let mut partition = GroupPartition::resolve(
+        &domain,
+        Some("list"),
+        None,
+        vec![rocky_core::SqlValue::Text("L".into())],
+    )?;
+    let secret = [19; 32];
+    let epoch = rocky_core::KeyEpoch::new(1, &secret);
+    partition.record.hold(epoch)?;
+    vault.put(&secret_role(&partition.record.address, epoch), &secret)?;
+    issuer.groups.insert(
+        crate::groups::record_key(&partition.record.address),
+        partition.record,
+    );
+    let node = PrivateKey::new();
+    let user = PrivateKey::new();
+    let profile = Profile::Reader {
+        scopes: ["lists".into()].into(),
+    };
+    let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+    let capability = issuer.issue(
+        &publisher,
+        &domain,
+        user.public_key(),
+        grants_of(&profile, &domain)?,
+        None,
+    )?;
+    let chain = device_chain(capability, &user, node.public_key())?;
+    let issuer_node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
+    let (request, exchange) = RenewRequest::sign(&node, issuer_node, chain, now()?)?;
+    for bytes in [
+        issuer.answer_epochs(&vault, &request.to_bytes()?, &Registry::default())?,
+        issuer
+            .renew(&vault, &request.to_bytes()?, &Registry::default())?
+            .0,
+    ] {
+        let renewal = Renewal::from_bytes(&bytes)?;
+        let payload = Sealed::parse(&renewal.open(issuer.publisher, &request, &exchange)?)?;
+        assert!(payload.groups.is_empty());
+    }
+    assert_eq!(issuer.groups.len(), 1);
+    Ok(())
+}

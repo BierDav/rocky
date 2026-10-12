@@ -29,23 +29,42 @@ async fn pair(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Arc<Node>, Arc<
 }
 
 #[tokio::test(start_paused = true)]
-async fn commit_signals_over_one_link_and_only_receiver_dials() -> Result<(), Failure> {
+async fn committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcile()
+-> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
             let hub = Arc::new(Hub::default());
             let (a, b) = pair(root.path(), &hub).await?;
             let before = [hub.dials_to("a"), hub.dials_to("b")];
+            let messages = [hub.link_messages("a"), hub.link_messages("b")];
+            let activity = b.activity.after(0)["token"]
+                .as_str()
+                .ok_or("activity token")?
+                .parse()?;
             add(&a, 1).await?;
             until(|| *b.replica.observe_revision().borrow() > 0).await;
             settled(&a).await;
             settled(&b).await;
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.dials_to("b"), before[1], "publisher must not dial");
+            assert_eq!(hub.dials_to("a"), before[0], "receiver must not dial");
             assert_eq!(
-                hub.dials_to("a"),
-                before[0] + 1,
-                "receiver opens one native pass"
+                hub.link_messages("a"),
+                messages[0] + 1,
+                "one committed push"
+            );
+            assert_eq!(
+                hub.link_messages("b"),
+                messages[1],
+                "no receipt or reconcile traffic"
+            );
+            assert!(
+                b.activity.after(activity)["events"]
+                    .as_array()
+                    .ok_or("events")?
+                    .iter()
+                    .all(|event| event["kind"] != "peer_reached" && event["kind"] != "rows_synced")
             );
             // An idle link advances only the ping clock, with no new streams.
             let idle = hub.counts();
@@ -414,7 +433,7 @@ async fn real_signal_gate(kind: &str) -> Result<(), Failure> {
             settled(&b).await;
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.dials_to(&ab), before[1]);
-            assert_eq!(hub.dials_to(&aa), before[0] + 1);
+            assert_eq!(hub.dials_to(&aa), before[0]);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -480,8 +499,18 @@ async fn real_liveness_gate(kind: &str) -> Result<(), Failure> {
             settled(&a).await;
             settled(&b).await;
             let before = hub.counts();
-            assert!(a.retry_deadline().is_none());
-            assert!(b.retry_deadline().is_none());
+            assert!(
+                a.retry_deadline().is_none(),
+                "retry while idle: {} {}",
+                *a.sync_status.borrow(),
+                a.activity.after(0)
+            );
+            assert!(
+                b.retry_deadline().is_none(),
+                "retry while idle: {} {}",
+                *b.sync_status.borrow(),
+                b.activity.after(0)
+            );
             for _ in 0..2 {
                 let pongs = [
                     sa.live.pongs.load(Ordering::Relaxed),
@@ -742,4 +771,146 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
         .learn_revocations(&RevocationSet::try_from(vec![statement])?)
         .await?;
     Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_burst_exceeds_push_bound_and_finishes_by_link_catch_up_in_log_order()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let before = hub.counts();
+            let reconcile = b.syncing.lock().await;
+            let service = a.current().ok_or("service")?;
+            let publish = service.live.publishing.lock().await;
+            for key in 1..=40 {
+                add(&a, key).await?;
+            }
+            drop(publish);
+            until(|| *b.replica.observe_revision().borrow() > 0).await;
+            let partial = rows(&b).await?;
+            assert!(
+                !partial.is_empty() && partial.len() < 40,
+                "the bounded push sends only a prefix"
+            );
+            let mut numbers = partial
+                .iter()
+                .map(|value| value.parse::<usize>())
+                .collect::<Result<Vec<_>, _>>()?;
+            numbers.sort();
+            assert_eq!(numbers, (1..=partial.len()).collect::<Vec<_>>());
+            let frontier = b.replica.frontier(b.app_scopes()[0]).await?;
+            let author = a.replica.frontier(a.app_scopes()[0]).await?.logs[0].author;
+            assert_eq!(
+                frontier.log(author).ok_or("author log")?.applied,
+                partial.len() as u64
+            );
+            drop(reconcile);
+            while rows(&b).await?.len() != 40 {
+                tokio::task::yield_now().await;
+            }
+            settled(&a).await;
+            settled(&b).await;
+            assert_eq!(rows(&a).await?, rows(&b).await?);
+            assert_eq!(hub.counts(), before, "push and catch-up reuse the stream");
+            let frontier = b.replica.frontier(b.app_scopes()[0]).await?;
+            assert_eq!(frontier.log(author).ok_or("author log")?.applied, 40);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn two_writers_push_concurrently_and_converge_on_the_same_scope() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            start(&a, true).await?;
+            start(&b, true).await?;
+            until(|| {
+                a.current().is_some_and(|s| s.live.len() == 1)
+                    && b.current().is_some_and(|s| s.live.len() == 1)
+            })
+            .await;
+            settled(&a).await;
+            settled(&b).await;
+            let before = hub.counts();
+            let (left, right) = tokio::join!(add(&a, 1), add(&b, 2));
+            left?;
+            right?;
+            while rows(&a).await? != ["1", "2"] || rows(&b).await? != ["1", "2"] {
+                tokio::task::yield_now().await;
+            }
+            settled(&a).await;
+            settled(&b).await;
+            assert_eq!(hub.counts(), before);
+            assert_eq!(
+                a.replica.frontier(a.app_scopes()[0]).await?,
+                b.replica.frontier(b.app_scopes()[0]).await?
+            );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let service = a.current().ok_or("service")?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let closing = service.live.closing.load(Ordering::SeqCst);
+            let mut written = hub.written();
+            let before = *written.borrow_and_update();
+            hub.hold_cut.store(true, Ordering::SeqCst);
+            hub.cut_after(Some(36));
+            add(&a, 1).await?;
+            written.wait_for(|bytes| *bytes == before + 36).await?;
+            assert!(
+                rows(&b).await?.is_empty(),
+                "an unfinished signed frame cannot apply"
+            );
+            learn_revocation(&a, peer).await?;
+            until(|| service.live.closing.load(Ordering::SeqCst) > closing).await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            until(|| service.live.len() == 0).await;
+            assert!(a.replica.revocations().await.revokes(&peer));
+            hub.cut_after(None);
+            hub.hold_cut.store(false, Ordering::SeqCst);
+            let error = b.sync(&*transport(&b).await?).await.unwrap_err();
+            assert!(
+                error.is::<crate::enrollment::Revoked>() || error.to_string().contains("revoked")
+            );
+            assert!(rows(&b).await?.is_empty());
+            assert_eq!(
+                rows(&a).await?,
+                ["1"],
+                "the local commit survives cancelled publication"
+            );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
 }

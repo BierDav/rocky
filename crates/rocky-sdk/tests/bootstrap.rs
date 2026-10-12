@@ -1,4 +1,6 @@
 mod common;
+#[path = "bootstrap/link_gate.rs"]
+mod link_gate;
 use common::{Device, Failure};
 use rocky_sdk::{Network, transport::memory::Hub};
 use serde_json::json;
@@ -212,9 +214,9 @@ struct Gate {
     inner: Arc<dyn rocky_sdk::transport::Transport>,
     allowed: tokio::sync::watch::Sender<bool>,
     attempts: tokio::sync::watch::Sender<u64>,
-    refuse: std::sync::atomic::AtomicBool,
-    max_attempts: std::sync::atomic::AtomicU64,
-    pause_on_attempt: std::sync::atomic::AtomicU64,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    max_attempts: Arc<std::sync::atomic::AtomicU64>,
+    pause_on_attempt: Arc<std::sync::atomic::AtomicU64>,
 }
 impl rocky_sdk::transport::Transport for Gate {
     fn kind(&self) -> &str {
@@ -249,7 +251,12 @@ impl rocky_sdk::transport::Transport for Gate {
                     .wait_for(|allowed| *allowed)
                     .await?;
             }
-            self.inner.connect(address, protocol).await
+            let stream = self.inner.connect(address, protocol).await?;
+            if protocol == rocky_sdk::transport::Protocol::Link {
+                return Ok(Box::new(link_gate::LinkGate::new(stream, self))
+                    as rocky_sdk::transport::Stream);
+            }
+            Ok(stream)
         })
     }
     fn accept(
@@ -283,9 +290,9 @@ async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_fa
         inner: hub.connector("member").start(false, [7; 32]).await?,
         allowed: tokio::sync::watch::channel(false).0,
         attempts: tokio::sync::watch::channel(0).0,
-        refuse: std::sync::atomic::AtomicBool::new(false),
-        max_attempts: std::sync::atomic::AtomicU64::new(u64::MAX),
-        pause_on_attempt: std::sync::atomic::AtomicU64::new(u64::MAX),
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");
@@ -322,9 +329,9 @@ async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_fa
         inner: hub.connector("retry").start(false, [8; 32]).await?,
         allowed: tokio::sync::watch::channel(true).0,
         attempts: tokio::sync::watch::channel(0).0,
-        refuse: std::sync::atomic::AtomicBool::new(true),
-        max_attempts: std::sync::atomic::AtomicU64::new(u64::MAX),
-        pause_on_attempt: std::sync::atomic::AtomicU64::new(u64::MAX),
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let path = root.path().join("retry");
     let retry = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone()))?;
@@ -434,9 +441,9 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         inner: hub.connector("member").start(false, [9; 32]).await?,
         allowed: tokio::sync::watch::channel(true).0,
         attempts: tokio::sync::watch::channel(0).0,
-        refuse: std::sync::atomic::AtomicBool::new(false),
-        max_attempts: std::sync::atomic::AtomicU64::new(1),
-        pause_on_attempt: std::sync::atomic::AtomicU64::new(u64::MAX),
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
     });
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");
@@ -522,9 +529,9 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         inner: hub.connector("member").start(false, [10; 32]).await?,
         allowed: tokio::sync::watch::channel(true).0,
         attempts: tokio::sync::watch::channel(0).0,
-        refuse: std::sync::atomic::AtomicBool::new(false),
-        max_attempts: std::sync::atomic::AtomicU64::new(u64::MAX),
-        pause_on_attempt: std::sync::atomic::AtomicU64::new(2),
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(2)),
     });
     let mut attempts = gate.attempts.subscribe();
     let path = root.path().join("member");

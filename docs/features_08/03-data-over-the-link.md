@@ -76,3 +76,28 @@ The large-row checkpoint regression `join_restores_large_rows_across_checkpoint_
 passed (1.61 s). The reverse-opened memory-link row regression passed (0.22 s).
 Concurrent issuer renewal invalidates inherited channels; reconciliation retries
 only when the observed authority changed. Full qualification remains pending.
+
+Slice 4 implements bounded committed-frame push. The memory gates
+`committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcile`,
+`a_burst_exceeds_push_bound_and_finishes_by_link_catch_up_in_log_order`,
+`two_writers_push_concurrently_and_converge_on_the_same_scope` and
+`revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority` have
+passed individually. The hub counts complete link frames across fragmented
+writes. Incoming frames retain normal receive, dependency and transaction rules;
+received author prefixes suppress echoes without hiding concurrent local writes.
+
+Short-link readiness distinguishes a disabled worker from a persistent peer.
+The worker does not repeatedly reopen a short link at idle. Reconcile markers
+protect the gaps between request channels; completion waits for the final marker
+to flush. A frame read survives completion of a concurrent handler. Channel
+reassembly, queue, direction and generation checks have six passing native-link
+checks. The eight representative cancellation offsets passed in 1.19 s, with
+an explicit 100 ms close deadline under the paused clock. Completion racing the
+requested byte cut is checked separately because link framing length can vary.
+The exhaustive ignored historical helper was not run.
+
+All nine SDK bootstrap regressions passed over link channels, including
+checkpoint page restoration, interrupted scope cursors, authority intent and
+missed-epoch renewal. The fault fixture pauses logical channel opens instead of
+per-pass dials, preserving its assertions. Workspace qualification is still in
+progress; the first full run exposed regressions and is not a passing gate.

@@ -10,39 +10,84 @@ const PING: Duration = Duration::from_secs(15);
 struct Entry {
     id: u64,
     dialed: bool,
-    held: Vec<ResourceScope>,
+    persistent: bool,
     handle: link::channels::Handle,
     authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
     changed: watch::Sender<Option<Vec<ResourceScope>>>,
     frontiers: BTreeMap<ResourceScope, [u8; 32]>,
+    cursors: BTreeMap<ResourceScope, rocky_secure::ScopeFrontier>,
+    auxiliary: BTreeMap<ResourceScope, [u8; 32]>,
 }
 pub(super) struct Registry {
+    pub(super) publishing: Mutex<()>,
     entries: std::sync::Mutex<BTreeMap<PublicKey, Entry>>,
     next: AtomicU64,
     events: watch::Sender<()>,
     #[cfg(test)]
     pub pongs: AtomicU64,
+    #[cfg(test)]
+    pub closing: AtomicU64,
 }
 impl Default for Registry {
     fn default() -> Self {
         Self {
+            publishing: Mutex::new(()),
             entries: Default::default(),
             next: AtomicU64::new(0),
             events: watch::channel(()).0,
             #[cfg(test)]
             pongs: AtomicU64::new(0),
+            #[cfg(test)]
+            closing: AtomicU64::new(0),
         }
     }
 }
 impl Registry {
+    pub async fn wait_inbound_short(&self, peer: PublicKey) -> Result<(), Failure> {
+        let mut events = self.events.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                events.borrow_and_update();
+                if !self.inbound_short(peer) {
+                    return Ok(());
+                }
+                events.changed().await.map_err(|_| "link registry ended")?;
+            }
+        })
+        .await
+        .map_err(|_| "incoming short reconcile did not finish")?
+    }
+
+    pub fn inbound_short(&self, peer: PublicKey) -> bool {
+        self.entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .is_some_and(|entry| !entry.persistent && !entry.dialed)
+    }
+
+    pub fn close_short(&self, peer: PublicKey) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            && !entry.persistent
+        {
+            entry.close.send_replace(Some(CloseReason::Detached));
+        }
+    }
+
     pub fn handle(&self, peer: PublicKey) -> Option<link::channels::Handle> {
         self.entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&peer)
             .filter(|entry| {
-                entry.close.borrow().is_none() && !entry.authority.has_changed().unwrap_or(true)
+                entry.close.borrow().is_none()
+                    && !entry.handle.is_closed()
+                    && !entry.authority.has_changed().unwrap_or(true)
             })
             .map(|entry| entry.handle.clone())
     }
@@ -79,7 +124,9 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&peer)
             .is_some_and(|entry| {
-                entry.close.borrow().is_none() && !entry.authority.has_changed().unwrap_or(true)
+                entry.close.borrow().is_none()
+                    && !entry.handle.is_closed()
+                    && !entry.authority.has_changed().unwrap_or(true)
             })
     }
     #[cfg(test)]
@@ -90,7 +137,6 @@ impl Registry {
             .get(&peer)
             .map(|entry| entry.dialed)
     }
-    #[cfg(test)]
     pub fn id(&self, peer: PublicKey) -> Option<u64> {
         self.entries
             .lock()
@@ -146,7 +192,9 @@ impl Node {
                             .unwrap_or_else(PoisonError::into_inner)
                             .get(&peer)
                             .is_none_or(|retry| {
-                                retry.link_retry.ready() && (retry.link || retry.retry.ready())
+                                !retry.short
+                                    && retry.link_retry.ready()
+                                    && (retry.link || retry.retry.ready())
                             })
                     {
                         return;
@@ -200,8 +248,18 @@ impl Node {
         let mut authority = self.replica.observe_authority().await;
         let local = PrivateKey::from_bytes(&self.vault.get("node")?);
         let own = local.public_key();
-        let mut opened =
-            link::Link::open(stream, &self.replica, local, settings.credentials, expected).await?;
+        let mut opened = match Box::pin(link::Link::open(
+            stream,
+            &self.replica,
+            local,
+            settings.credentials,
+            expected,
+        ))
+        .await
+        {
+            Err(_) if expected.is_some_and(|peer| service.live.contains(peer)) => return Ok(()),
+            other => other?,
+        };
         if !self.online.load(Ordering::SeqCst)
             || *service.stage.borrow() != Stage::Open
             || authority.has_changed()?
@@ -231,7 +289,10 @@ impl Node {
         } else {
             None
         };
-        opened.ready().await?;
+        let persistent = match opened.ready(self.automatic.load(Ordering::SeqCst)).await {
+            Err(_) if expected.is_some_and(|peer| service.live.contains(peer)) => return Ok(()),
+            other => other?,
+        };
         let peer = opened.peer;
         let dialed = expected.is_some();
         let preferred = own < peer;
@@ -239,7 +300,11 @@ impl Node {
         let close = watch::channel(None).0;
         let changed = watch::channel(None).0;
         let mut frontiers = BTreeMap::new();
+        let mut cursors = BTreeMap::new();
+        let mut auxiliary = BTreeMap::new();
         for scope in &opened.held {
+            cursors.insert(*scope, self.replica.frontier(*scope).await?);
+            auxiliary.insert(*scope, self.link_auxiliary(*scope).await?);
             frontiers.insert(*scope, self.link_scope_state(*scope).await?);
         }
         let initial: Vec<_> = frontiers
@@ -260,6 +325,7 @@ impl Node {
                 .unwrap_or_else(PoisonError::into_inner);
             if entries.get(&peer).is_some_and(|old| {
                 (old.dialed == preferred || old.dialed == dialed)
+                    && !old.handle.is_closed()
                     && old.close.borrow().is_none()
                     && !old.authority.has_changed().unwrap_or(true)
             }) {
@@ -270,12 +336,14 @@ impl Node {
                     Entry {
                         id,
                         dialed,
-                        held: opened.held.clone(),
+                        persistent,
                         handle: opened.channels.handle.clone(),
                         authority: authority.clone(),
                         close: close.clone(),
                         changed: changed.clone(),
                         frontiers,
+                        cursors,
+                        auxiliary,
                     },
                 ) {
                     old.close.send_replace(Some(CloseReason::Duplicate));
@@ -296,6 +364,11 @@ impl Node {
             let _ = opened.writer.finish().await;
             return Ok(());
         }
+        if persistent || dialed {
+            self.inbound_sync(peer);
+        } else {
+            self.reset_retry(Some(peer));
+        }
         {
             let mut met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
             met.insert(peer, now()?);
@@ -307,10 +380,11 @@ impl Node {
             let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
             let state = retries.entry(peer).or_default();
             state.link = false;
+            state.short = !persistent;
             state.link_retry.reset();
             state.retry.reset();
-            state.pending = true;
-            if state.pending {
+            state.pending |= persistent || dialed;
+            if state.pending && (persistent || dialed) {
                 self.link_events.send_replace(());
             }
         }
@@ -347,6 +421,10 @@ impl Node {
             if removed {
                 service.live.events.send_replace(());
                 node.activity.record("link_closed", json!({"peer":peer.to_hex(),"error":result.as_ref().err().map(ToString::to_string)}));
+                if result.is_ok() && !persistent && !dialed && node.automatic.load(Ordering::SeqCst)
+                {
+                    node.link_pending(peer);
+                }
                 if let Err(error) = &result
                     && *service.stage.borrow() == Stage::Open
                 {
@@ -362,8 +440,13 @@ impl Node {
                     }
                     let mut retries = node.retries.lock().unwrap_or_else(PoisonError::into_inner);
                     let state = retries.entry(peer).or_default();
-                    state.link = true;
-                    state.link_retry.failed();
+                    state.link = persistent;
+                    if persistent {
+                        state.link_retry.failed();
+                    } else {
+                        state.pending = true;
+                        state.retry.failed();
+                    }
                     drop(retries);
                     node.link_events.send_replace(());
                 }
@@ -372,18 +455,45 @@ impl Node {
         Ok(())
     }
     pub(super) async fn signal_links(&self, service: &Link) -> Result<(), Failure> {
+        let _publishing = service.live.publishing.lock().await;
         let holdings: Vec<_> = service
             .live
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .map(|(peer, entry)| (*peer, entry.id, entry.held.clone()))
+            .map(|(peer, entry)| {
+                (
+                    *peer,
+                    entry.id,
+                    entry.handle.clone(),
+                    entry.frontiers.clone(),
+                    entry.cursors.clone(),
+                    entry.auxiliary.clone(),
+                )
+            })
             .collect();
-        for (peer, id, held) in holdings {
-            let mut frontiers = BTreeMap::new();
-            for scope in held {
-                frontiers.insert(scope, self.link_scope_state(scope).await?);
+        for (peer, id, handle, old, cursors, auxiliary) in holdings {
+            let mut frontiers = old.clone();
+            let mut next = cursors.clone();
+            let mut aux = auxiliary.clone();
+            let mut scopes = BTreeSet::new();
+            for (scope, cursor) in &cursors {
+                let token = self.link_scope_state(*scope).await?;
+                if old.get(scope) == Some(&token) {
+                    continue;
+                }
+                // Capture the cursor before export; a later commit must remain pending.
+                let frontier = self.replica.frontier(*scope).await?;
+                let metadata = self.link_auxiliary(*scope).await?;
+                let rows_changed = frontier != *cursor;
+                let pushed = rows_changed && handle.push_committed(&self.replica, cursor).await?;
+                if !pushed || auxiliary.get(scope) != Some(&metadata) {
+                    scopes.insert(*scope);
+                }
+                frontiers.insert(*scope, token);
+                next.insert(*scope, frontier);
+                aux.insert(*scope, metadata);
             }
             self.replica.flush().await?;
             let mut entries = service
@@ -394,24 +504,75 @@ impl Node {
             let Some(entry) = entries.get_mut(&peer).filter(|entry| entry.id == id) else {
                 continue;
             };
-            let scopes: Vec<_> = frontiers
-                .iter()
-                .filter(|(scope, bytes)| entry.frontiers.get(scope) != Some(bytes))
-                .map(|(scope, _)| *scope)
-                .collect();
+            entry.frontiers = frontiers;
+            entry.cursors = next;
+            entry.auxiliary = aux;
             if !scopes.is_empty() {
-                // Retain all changed scopes until the writer takes its coalesced value.
-                let mut combined: BTreeSet<_> = scopes.into_iter().collect();
                 if let Some(pending) = entry.changed.borrow().as_ref() {
-                    combined.extend(pending);
+                    scopes.extend(pending);
                 }
-                entry.changed.send_replace(Some(
-                    combined.into_iter().take(link::SIGNAL_SCOPES).collect(),
-                ));
-                entry.frontiers = frontiers;
+                // Unsent scopes keep their old token so the next publication can send them.
+                for scope in scopes.iter().skip(link::SIGNAL_SCOPES) {
+                    if let Some(token) = old.get(scope) {
+                        entry.frontiers.insert(*scope, *token);
+                    }
+                }
+                entry
+                    .changed
+                    .send_replace(Some(scopes.into_iter().take(link::SIGNAL_SCOPES).collect()));
             }
         }
         Ok(())
+    }
+    async fn received_push(
+        &self,
+        service: &Link,
+        peer: PublicKey,
+        scope: ResourceScope,
+        received: Vec<(PublicKey, u64)>,
+    ) -> Result<(), Failure> {
+        let frontier = self.replica.frontier(scope).await?;
+        let token = self.link_scope_state(scope).await?;
+        let metadata = self.link_auxiliary(scope).await?;
+        let mut entries = service
+            .live
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = entries.get_mut(&peer) else {
+            return Ok(());
+        };
+        let Some(cursor) = entry.cursors.get_mut(&scope) else {
+            return Ok(());
+        };
+        for (author, sequence) in received {
+            if let Some(log) = frontier.log(author) {
+                let mut shared = *log;
+                shared.held = shared.held.min(sequence);
+                shared.applied = shared.applied.min(sequence);
+                if let Some(held) = cursor.logs.iter_mut().find(|held| held.author == author) {
+                    held.held = held.held.max(shared.held);
+                    held.applied = held.applied.max(shared.applied);
+                } else {
+                    cursor.logs.push(shared);
+                }
+            }
+        }
+        cursor.logs.sort_by_key(|log| log.author);
+        if *cursor == frontier && entry.auxiliary.get(&scope) == Some(&metadata) {
+            entry.frontiers.insert(scope, token);
+        }
+        Ok(())
+    }
+    async fn link_auxiliary(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {
+        Ok(commitment(
+            "rocky.link-auxiliary.v1",
+            &rocky_credentials::encode(&(
+                self.replica.known_result_head(scope.domain).await?,
+                self.replica.admitted_horizon(scope).await?,
+                self.replica.finalized_horizon(scope).await?,
+            ))?,
+        ))
     }
     async fn link_scope_state(&self, scope: ResourceScope) -> Result<[u8; 32], Failure> {
         Ok(link::scope_token(&self.replica, scope).await?)

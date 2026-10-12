@@ -32,9 +32,15 @@ impl Node {
                 >::new();
                 let mut seen = VecDeque::new();
                 loop {
-                    let frame = tokio::select! {
-                        result = opened.reader.receive() => result?,
-                        Some(result) = requests.next(), if !requests.is_empty() => { result?; continue; }
+                    let frame = {
+                        let receive = opened.reader.receive();
+                        tokio::pin!(receive);
+                        loop {
+                            tokio::select! {
+                                result = &mut receive => break result?,
+                                Some(result) = requests.next(), if !requests.is_empty() => { result?; }
+                            }
+                        }
                     };
                     if expires <= now()? {
                         return Err("link credentials expired".into());
@@ -64,6 +70,25 @@ impl Node {
                         continue;
                     }
                     match frame.message {
+                        Message::Reconcile { started } => {
+                            opened.channels.reconcile(frame.direction, started)?
+                        }
+                        Message::Push { scope, frames } if frame.direction != direction => {
+                            if requests.len() >= 8 {
+                                return Err("link request queue quota".into());
+                            }
+                            let handle = opened.channels.handle.clone();
+                            requests.push(Box::pin(async move {
+                                let _publishing = service.live.publishing.lock().await;
+                                let (complete, received) =
+                                    handle.receive_push(&self.replica, scope, frames).await?;
+                                self.received_push(service, peer, scope, received).await?;
+                                if !complete {
+                                    self.link_pending(peer);
+                                }
+                                Ok(())
+                            }));
+                        }
                         Message::Changed { scopes, token } if frame.direction != direction => {
                             if scopes.iter().any(|scope| !opened.offered.contains(scope)) {
                                 return Err("unproved link signal scope".into());
@@ -89,7 +114,8 @@ impl Node {
                             pongs.send_modify(|count| *count = count.wrapping_add(1));
                         }
                         Message::Close {
-                            reason: CloseReason::Duplicate,
+                            reason:
+                                CloseReason::Duplicate | CloseReason::Detached | CloseReason::Offline,
                         } => return Ok::<_, Failure>(()),
                         Message::Close { .. } => return Err("peer closed link".into()),
                         _ => return Err("invalid link direction".into()),
@@ -116,7 +142,9 @@ impl Node {
                             deadline = tokio::time::Instant::now() + PING;
                         }
                         Some(frame) = outgoing.recv() => {
+                            let finished = matches!(frame.message, Message::Reconcile { started: false });
                             opened.writer.send(frame).await?;
+                            if finished { opened.channels.handle.flushed_reconcile(); }
                             deadline = tokio::time::Instant::now() + PING;
                         }
                         _ = changes.changed() => {
@@ -148,6 +176,8 @@ impl Node {
         match exit {
             Exit::Finished(result) => result,
             Exit::Close(reason) => {
+                #[cfg(test)]
+                service.live.closing.fetch_add(1, Ordering::SeqCst);
                 // Cancellation also interrupts a blocked channel write.
                 let _ = tokio::time::timeout(CLOSE, async {
                     opened

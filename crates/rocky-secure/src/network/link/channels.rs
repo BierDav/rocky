@@ -63,6 +63,7 @@ struct Slot {
 struct State {
     next: u64,
     remote: u64,
+    reconciling: std::collections::BTreeSet<bool>,
     slots: BTreeMap<(bool, u16), Slot>,
 }
 #[derive(Clone)]
@@ -107,8 +108,29 @@ impl Channels {
             outgoing,
         }
     }
+    pub fn reconcile(&self, direction: bool, started: bool) -> Result<(), Error> {
+        if direction == self.handle.direction {
+            return Err(denied("link reconcile direction"));
+        }
+        let mut state = self
+            .handle
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let changed = if started {
+            state.reconciling.insert(direction)
+        } else {
+            state.reconciling.remove(&direction)
+        };
+        if !changed {
+            return Err(denied("link reconcile lifecycle"));
+        }
+        self.handle.events.send_replace(());
+        Ok(())
+    }
     /// Dispatches a data frame without awaiting a slow request handler.
     pub fn accept(&self, frame: Frame) -> Result<Option<NativeSession>, Error> {
+        frame.validate()?;
         let Message::Channel(packet) = frame.message else {
             return Err(denied("link channel message"));
         };
@@ -183,7 +205,130 @@ impl Channels {
         Ok(None)
     }
 }
+pub struct Reconcile {
+    handle: Handle,
+    closed: bool,
+}
+impl Reconcile {
+    pub async fn close(mut self) -> Result<(), Error> {
+        timeout(
+            TIMEOUT,
+            self.handle.send.send(Frame::new(
+                self.handle.direction,
+                Message::Reconcile { started: false },
+            )),
+        )
+        .await
+        .map_err(|_| denied("link reconcile close timeout"))?
+        .map_err(|_| denied("link ended"))?;
+        let mut events = self.handle.events.subscribe();
+        timeout(TIMEOUT, async {
+            loop {
+                events.borrow_and_update();
+                if self.handle.send.is_closed() {
+                    return Err(denied("link ended before reconcile finish"));
+                }
+                let pending = self
+                    .handle
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .reconciling
+                    .contains(&self.handle.direction);
+                if !pending {
+                    return Ok(());
+                }
+                events.changed().await.map_err(|_| denied("link ended"))?;
+            }
+        })
+        .await
+        .map_err(|_| denied("link reconcile finish timeout"))??;
+        self.mark_closed();
+        Ok(())
+    }
+    fn mark_closed(&mut self) {
+        self.closed = true;
+        self.handle
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconciling
+            .remove(&self.handle.direction);
+        self.handle.events.send_replace(());
+    }
+}
+impl Drop for Reconcile {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = self.handle.send.try_send(Frame::new(
+                self.handle.direction,
+                Message::Reconcile { started: false },
+            ));
+            self.mark_closed();
+        }
+    }
+}
 impl Handle {
+    pub fn is_closed(&self) -> bool {
+        self.send.is_closed()
+    }
+    /// Called only after the link writer flushes the final reconcile marker.
+    pub fn flushed_reconcile(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconciling
+            .remove(&self.direction);
+        self.events.send_replace(());
+    }
+
+    pub async fn begin_reconcile(&self) -> Result<Reconcile, Error> {
+        if !self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reconciling
+            .insert(self.direction)
+        {
+            return Err(denied("link reconcile already active"));
+        }
+        let lease = Reconcile {
+            handle: self.clone(),
+            closed: false,
+        };
+        timeout(
+            TIMEOUT,
+            self.send.send(Frame::new(
+                self.direction,
+                Message::Reconcile { started: true },
+            )),
+        )
+        .await
+        .map_err(|_| denied("link reconcile start timeout"))?
+        .map_err(|_| denied("link ended"))?;
+        Ok(lease)
+    }
+
+    /// Waits for both request directions to finish before ending a short link.
+    pub async fn drain(&self) -> Result<(), Error> {
+        let mut events = self.events.subscribe();
+        timeout(TIMEOUT, async {
+            loop {
+                events.borrow_and_update();
+                let drained = {
+                    let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    state.slots.is_empty() && state.reconciling.is_empty()
+                };
+                if drained {
+                    return Ok(());
+                }
+                events.changed().await.map_err(|_| denied("link ended"))?;
+            }
+        })
+        .await
+        .map_err(|_| denied("link drain timeout"))?
+    }
+
     /// Captures one bounded page after a committed cursor, without querying the peer.
     pub async fn push_committed<A: RowApplication>(
         &self,
@@ -244,7 +389,7 @@ impl Handle {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
-    ) -> Result<bool, Error> {
+    ) -> Result<(bool, Vec<(PublicKey, u64)>), Error> {
         if !self.admission.offered.contains(&scope)
             || frames.is_empty()
             || frames.len() > rows::MAX_SECURE_PAGE
@@ -260,11 +405,20 @@ impl Handle {
         {
             return Err(denied("phase-3 rebootstrap required before sync or write"));
         }
+        let mut received = Vec::new();
         for frame in &frames {
             if frame.scope()? != scope {
                 return Err(denied("pushed frame outside its scope"));
             }
             frame.chain()?;
+            let header = frame.operation()?.header;
+            received.push((
+                header.public_key,
+                header
+                    .seq_num
+                    .checked_add(1)
+                    .ok_or_else(|| denied("push log exhausted"))?,
+            ));
         }
         let mut complete = true;
         for status in replica.receive_all(frames).await {
@@ -273,7 +427,7 @@ impl Handle {
                 ReceiveStatus::PendingDependencies | ReceiveStatus::MissingKey
             );
         }
-        Ok(complete)
+        Ok((complete, received))
     }
 
     pub async fn open(&self) -> Result<NativeSession, Error> {
@@ -414,7 +568,26 @@ impl Io {
                 .await?;
             self.mark_closed();
         }
-        Ok(())
+        let mut events = self.handle.events.subscribe();
+        timeout(TIMEOUT, async {
+            loop {
+                events.borrow_and_update();
+                let pending = self
+                    .handle
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .slots
+                    .get(&self.key)
+                    .is_some_and(|slot| slot.generation == self.generation);
+                if !pending {
+                    return Ok(());
+                }
+                events.changed().await.map_err(|_| denied("link ended"))?;
+            }
+        })
+        .await
+        .map_err(|_| denied("link channel close timeout"))?
     }
     fn mark_closed(&mut self) {
         self.closed = true;
@@ -453,12 +626,193 @@ impl Drop for Io {
 
 impl Drop for Channels {
     fn drop(&mut self) {
-        self.handle
+        let mut state = self
+            .handle
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .slots
-            .clear();
+            .unwrap_or_else(PoisonError::into_inner);
+        state.slots.clear();
+        state.reconciling.clear();
         self.handle.events.send_replace(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn channels() -> Channels {
+        let credentials = CredentialChain(vec![]);
+        let (send, outgoing) = mpsc::channel(QUEUE);
+        Channels {
+            handle: Handle {
+                admission: Admission {
+                    local: PrivateKey::from_bytes(&[7; 32]),
+                    peer: PrivateKey::from_bytes(&[8; 32]).public_key(),
+                    peer_chain: crate::wire::Chain::new(credentials.clone()).unwrap(),
+                    credentials,
+                    binding: [1; 32],
+                    proved: Default::default(),
+                    offered: Default::default(),
+                    contact_key: [2; 32],
+                },
+                direction: false,
+                state: Default::default(),
+                send,
+                events: tokio::sync::watch::channel(()).0,
+            },
+            outgoing,
+        }
+    }
+    fn frame(channel: u16, packet: Packet) -> Frame {
+        Frame {
+            channel,
+            direction: true,
+            message: Message::Channel(packet),
+        }
+    }
+    #[tokio::test]
+    async fn fragments_close_and_generation_reuse_are_bounded() {
+        let mut channels = channels();
+        let mut session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        assert!(
+            channels
+                .accept(frame(2, Packet::Open { generation: 1 }))
+                .is_err()
+        );
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![1, 2],
+                    last: false,
+                },
+            ))
+            .unwrap();
+        channels
+            .accept(frame(
+                2,
+                Packet::Data {
+                    generation: 0,
+                    bytes: vec![3],
+                    last: true,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            session.channel.as_mut().unwrap().receive().await.unwrap(),
+            [1, 2, 3]
+        );
+        channels
+            .accept(frame(2, Packet::End { generation: 0 }))
+            .unwrap();
+        session.close().await.unwrap();
+        assert!(channels.handle.state.lock().unwrap().slots.is_empty());
+        assert!(matches!(
+            channels.outgoing.recv().await.unwrap().message,
+            Message::Channel(Packet::End { generation: 0 })
+        ));
+        assert!(
+            channels
+                .accept(frame(2, Packet::Open { generation: 0 }))
+                .is_err()
+        );
+        let _next = channels
+            .accept(frame(2, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![4],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+    }
+    #[test]
+    fn oversized_reassembly_and_slow_channel_queues_are_refused() {
+        let channels = channels();
+        let _session = channels
+            .accept(frame(2, Packet::Open { generation: 0 }))
+            .unwrap()
+            .unwrap();
+        for _ in 0..MAX_SECURE_FRAME / FRAGMENT {
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1; FRAGMENT],
+                        last: false,
+                    },
+                ))
+                .unwrap();
+        }
+        assert!(
+            channels
+                .accept(frame(
+                    2,
+                    Packet::Data {
+                        generation: 0,
+                        bytes: vec![1],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        let _other = channels
+            .accept(frame(3, Packet::Open { generation: 1 }))
+            .unwrap()
+            .unwrap();
+        for _ in 0..QUEUE {
+            channels
+                .accept(frame(
+                    3,
+                    Packet::Data {
+                        generation: 1,
+                        bytes: vec![1],
+                        last: true,
+                    },
+                ))
+                .unwrap();
+        }
+        assert!(
+            channels
+                .accept(frame(
+                    3,
+                    Packet::Data {
+                        generation: 1,
+                        bytes: vec![1],
+                        last: true
+                    }
+                ))
+                .is_err()
+        );
+        assert!(
+            Packet::Data {
+                generation: 2,
+                bytes: vec![0; FRAGMENT + 1],
+                last: true
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Packet::Data {
+                generation: 2,
+                bytes: vec![],
+                last: true
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

@@ -23,11 +23,16 @@ pub enum Message {
         scopes: Vec<ResourceScope>,
         token: [u8; 32],
     },
+    Reconcile {
+        started: bool,
+    },
     Push {
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
     },
-    Ready,
+    Ready {
+        persistent: bool,
+    },
     Channel(channels::Packet),
     Ping,
     Pong,
@@ -47,7 +52,7 @@ impl Frame {
     pub fn new(direction: bool, message: Message) -> Self {
         Self {
             channel: match message {
-                Message::Changed { .. } | Message::Push { .. } => 1,
+                Message::Changed { .. } | Message::Push { .. } | Message::Reconcile { .. } => 1,
                 _ => 0,
             },
             direction,
@@ -63,7 +68,7 @@ impl Frame {
                 }
                 self.channel
             }
-            Message::Changed { .. } | Message::Push { .. } => 1,
+            Message::Changed { .. } | Message::Push { .. } | Message::Reconcile { .. } => 1,
             _ => 0,
         };
         if self.channel >= CHANNELS || self.channel != channel {
@@ -122,15 +127,19 @@ impl std::fmt::Display for Busy {
 impl std::error::Error for Busy {}
 impl Link {
     /// Both ends confirm their independent link budget before any data channel opens.
-    pub async fn ready(&mut self) -> Result<(), Error> {
-        self.writer
-            .send(Frame::new(self.direction, Message::Ready))
-            .await?;
+    pub async fn ready(&mut self, persistent: bool) -> Result<bool, Error> {
+        let sent = self
+            .writer
+            .send(Frame::new(self.direction, Message::Ready { persistent }))
+            .await;
         let frame = timeout(TIMEOUT, self.reader.receive())
             .await
             .map_err(|_| denied("link ready timeout"))??;
         match frame.message {
-            Message::Ready if frame.direction != self.direction => Ok(()),
+            Message::Ready { persistent: remote } if frame.direction != self.direction => {
+                sent?;
+                Ok(persistent && remote)
+            }
             Message::Close {
                 reason: CloseReason::Busy,
             } => Err(Error::Application(Box::new(Busy))),

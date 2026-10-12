@@ -42,6 +42,7 @@ pub struct Hub {
     peer_dials: Mutex<HashMap<String, usize>>,
     muted: Mutex<HashSet<(String, Protocol)>>,
     protocol_dials: Mutex<HashMap<(String, String, Protocol), usize>>,
+    link_messages: Mutex<HashMap<String, usize>>,
     dial_events: tokio::sync::watch::Sender<()>,
     written: tokio::sync::watch::Sender<usize>,
     /// At the cut, hold the stream instead of disconnecting it.
@@ -75,6 +76,7 @@ impl Default for Hub {
             peer_dials: Mutex::default(),
             muted: Mutex::default(),
             protocol_dials: Mutex::default(),
+            link_messages: Mutex::default(),
             dial_events: tokio::sync::watch::channel(()).0,
             written: tokio::sync::watch::channel(0).0,
             hold_cut: AtomicBool::new(false),
@@ -86,6 +88,16 @@ impl Default for Hub {
     }
 }
 impl Hub {
+    /// Complete length-prefixed link messages written by this node, including its handshake.
+    pub fn link_messages(&self, node: &str) -> usize {
+        self.link_messages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(node)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// A connector for the node `name`, which is also its address.
     pub fn connector(self: &Arc<Self>, name: &str) -> Arc<Memory> {
         Arc::new(Memory {
@@ -269,7 +281,42 @@ impl Hub {
 }
 
 /// One end of a pipe, subject to the hub's cut.
+#[derive(Default)]
+struct MessageCounter {
+    header: [u8; 4],
+    filled: usize,
+    remaining: usize,
+}
+impl MessageCounter {
+    fn record(&mut self, mut bytes: &[u8]) -> usize {
+        let mut complete = 0;
+        while !bytes.is_empty() {
+            if self.remaining > 0 {
+                let count = self.remaining.min(bytes.len());
+                self.remaining -= count;
+                bytes = &bytes[count..];
+                if self.remaining == 0 {
+                    complete += 1;
+                }
+            } else {
+                let count = (4 - self.filled).min(bytes.len());
+                self.header[self.filled..self.filled + count].copy_from_slice(&bytes[..count]);
+                self.filled += count;
+                bytes = &bytes[count..];
+                if self.filled == 4 {
+                    self.remaining = u32::from_be_bytes(self.header) as usize;
+                    self.filled = 0;
+                    if self.remaining == 0 {
+                        complete += 1;
+                    }
+                }
+            }
+        }
+        complete
+    }
+}
 struct Pipe {
+    messages: MessageCounter,
     io: Stream,
     hub: Arc<Hub>,
     taps: Vec<Tap>,
@@ -312,6 +359,16 @@ impl AsyncWrite for Pipe {
         let written = Pin::new(&mut self.io).poll_write(cx, &buf[..allowed]);
         if let Poll::Ready(Ok(written)) = &written {
             self.hub.spend(*written);
+            if self.protocol == Protocol::Link {
+                let complete = self.messages.record(&buf[..*written]);
+                *self
+                    .hub
+                    .link_messages
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .entry(self.from.clone())
+                    .or_default() += complete;
+            }
             for tap in &self.taps {
                 tap.lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -496,6 +553,7 @@ impl Transport for Node {
                 .entry((self.name.clone(), address.into(), protocol))
                 .or_default() += 1;
             let pipe = |io, from: &str| Pipe {
+                messages: Default::default(),
                 io: Box::new(io),
                 hub: self.hub.clone(),
                 taps: taps.clone(),
@@ -536,6 +594,7 @@ struct Wrapped {
 impl Wrapped {
     fn pipe(&self, stream: Stream, protocol: Protocol) -> Stream {
         Box::new(Pipe {
+            messages: Default::default(),
             io: stream,
             hub: self.hub.clone(),
             taps: vec![],

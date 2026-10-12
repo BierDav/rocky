@@ -579,10 +579,32 @@ async fn cancellation_offsets(exhaustive: bool) -> Result<(), Failure> {
                         hub.cut_after(Some(offset));
                         start(&a, true).await?;
                         hub.wait_dials("b", dials + 1).await;
+                        let mut running = a.worker_running.subscribe();
                         while *written.borrow_and_update() < before + offset {
-                            written.changed().await?;
+                            tokio::select! {
+                                changed = written.changed() => changed?,
+                                changed = running.changed() => {
+                                    changed?;
+                                    if !*running.borrow() {
+                                        assert!(*written.borrow() < before + offset, "completion raced the requested byte cut");
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                        start(&a, false).await?;
+                        let service = a.current().ok_or("service")?;
+                        let closing = service.live.closing.load(Ordering::SeqCst);
+                        {
+                        let stop = start(&a, false);
+                        tokio::pin!(stop);
+                        tokio::select! {
+                            stopped = &mut stop => { stopped?; }
+                            () = until(|| service.live.closing.load(Ordering::SeqCst) > closing) => {
+                                tokio::time::advance(Duration::from_millis(100)).await;
+                                stop.await?;
+                            }
+                        }
+                        }
                         for scope in a.scopes() {
                             a.replica.audit(scope).await?;
                         }

@@ -207,6 +207,7 @@ impl Drop for SyncActivity {
 }
 #[derive(Default)]
 struct PeerRetry {
+    short: bool,
     retry: crate::scheduling::Retry,
     pending: bool,
     link: bool,
@@ -1951,6 +1952,7 @@ impl Node {
             if peer.is_none_or(|peer| peer == *node) {
                 state.retry.reset();
                 state.link_retry.reset();
+                state.short = false;
                 state.generation = state.generation.wrapping_add(1);
             }
         }
@@ -2107,14 +2109,6 @@ impl Node {
     /// what each attempt did is kept for `peers` and `network`.
     async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
         let result = self.sync_pass(transport, false, false).await;
-        if !self.automatic.load(Ordering::SeqCst)
-            && let Some(service) = self.current()
-        {
-            service
-                .live
-                .close(rocky_secure::network::link::CloseReason::Detached);
-            service.live.wait_empty().await;
-        }
         self.topics_changed();
         result
     }
@@ -2241,8 +2235,13 @@ impl Node {
                         pending: has_frames,
                         ..PeerRetry::default()
                     });
-                    (state.retry.ready() && (!automatic || !retry_only || state.pending))
-                        .then_some((peer, contact, state.generation))
+                    (state.retry.ready()
+                        && (!automatic || !retry_only || state.pending)
+                        && (!automatic
+                            || !self
+                                .current()
+                                .is_some_and(|service| service.live.inbound_short(peer))))
+                    .then_some((peer, contact, state.generation))
                 })
                 .collect()
         };
@@ -2554,9 +2553,37 @@ impl Node {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
             let authority = self.replica.observe_authority().await;
+            let before = self.current().and_then(|service| service.live.id(peer));
             result = self.exchange(transport, peer, contact).await;
             self.absorb_revocations(result.as_ref().err()).await?;
-            if result.is_ok() || !authority.has_changed()? || self.learned.load(Ordering::SeqCst) {
+            if result.is_err()
+                && let Some(service) = self.current()
+            {
+                service.live.close_short(peer);
+            }
+            let after = self.current().and_then(|service| service.live.id(peer));
+            let replaced = after != before
+                || ((before.is_some() || after.is_some())
+                    && self
+                        .current()
+                        .is_some_and(|service| !service.live.contains(peer)));
+            let interrupted = result.as_ref().err().is_some_and(|error| match error
+                .downcast_ref::<rocky_secure::Error>(
+            ) {
+                Some(rocky_secure::Error::Io(error)) => matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                ),
+                Some(rocky_secure::Error::Rejected(reason)) => reason.starts_with("link ended"),
+                _ => error.to_string() == "link authority changed during handshake",
+            });
+            if result.is_ok()
+                || !interrupted
+                || (!authority.has_changed()? && !replaced)
+                || self.learned.load(Ordering::SeqCst)
+            {
                 break;
             }
         }
@@ -2574,7 +2601,10 @@ impl Node {
         contact: &Contact,
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
         let addresses = contact.addresses(transport.kind());
-        if addresses.is_empty() {
+        let service = self
+            .current()
+            .ok_or(ServiceError::NetworkRequired("sync"))?;
+        if addresses.is_empty() && !service.live.contains(peer) {
             return Err(ServiceError::NoRoute {
                 peer: "the peer",
                 network: transport.kind().into(),
@@ -2586,10 +2616,14 @@ impl Node {
             let renewable = !settings.issuer() || !settings.issuers.is_empty();
             (settings.credentials.clone(), renewable)
         };
-        let service = self
-            .current()
-            .ok_or(ServiceError::NetworkRequired("sync"))?;
-        if !service.live.contains(peer) {
+        let mut link = None;
+        let mut busy_refused = false;
+        for _ in 0..4 {
+            service.live.wait_inbound_short(peer).await?;
+            if let Some(open) = service.live.handle(peer) {
+                link = Some(open);
+                break;
+            }
             let stream = crate::enrollment::dial(transport, &addresses, Protocol::Link).await?;
             let owner = self
                 .owner
@@ -2597,9 +2631,14 @@ impl Node {
                 .and_then(std::sync::Weak::upgrade)
                 .ok_or("network owner ended")?;
             let link_settings = self.settings.lock().await.clone();
-            let admitted = owner
-                .admit_link(service.clone(), stream, Some(peer), link_settings, None)
-                .await;
+            let admitted = Box::pin(owner.admit_link(
+                service.clone(),
+                stream,
+                Some(peer),
+                link_settings,
+                None,
+            ))
+            .await;
             if let Err(error) = admitted {
                 let busy = error.downcast_ref::<rocky_secure::Error>().is_some_and(|error| {
                     matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::Busy>())
@@ -2607,10 +2646,15 @@ impl Node {
                 if !busy {
                     return Err(error);
                 }
+                busy_refused = true;
+                break;
             }
         }
+        if link.is_none() && !busy_refused {
+            return Err("link admission kept changing before reconcile".into());
+        }
         let upstream = Upstream {
-            link: service.live.handle(peer),
+            link,
             transport,
             addresses: &addresses,
             peer,
@@ -2621,6 +2665,10 @@ impl Node {
                 true => Some(self.replica.revocation_digest().await?),
                 false => None,
             },
+        };
+        let reconcile = match &upstream.link {
+            Some(handle) => Some(handle.begin_reconcile().await?),
+            None => None,
         };
         let coordinator = self
             .coordinator
@@ -2716,6 +2764,13 @@ impl Node {
         )
         .await?;
         bootstrapped.extend(transfer);
+        if let Some(reconcile) = reconcile {
+            reconcile.close().await?;
+        }
+        if let Some(handle) = &upstream.link {
+            handle.drain().await?;
+        }
+        service.live.close_short(peer);
         Ok((newer, retry, bootstrapped))
     }
     /// Serves one inbound stream: sync for any peer its chain and the

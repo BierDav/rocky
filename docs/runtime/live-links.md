@@ -115,5 +115,6 @@ another sync path.
 The iroh link ALPN keeps its independent connection and stream budgets. See
 [SDK transports](sdk-transports.md#bounds). The memory hub counts complete
 link messages and injects byte cuts, write muting and stalled dials under the
-paused clock. Internet traversal qualification belongs to phase 6. Android device evidence
-is recorded in the [phase 5 brief](../features_08/05-status-kotlin-lifecycle.md).
+paused clock. Android lifecycle evidence is in the [phase 5 brief](../features_08/05-status-kotlin-lifecycle.md);
+desktop and phone runs over cellular and an iroh relay are in the
+[phase 6 evidence](../features_08/06-qualification-evidence.md).

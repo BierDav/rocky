@@ -51,3 +51,5 @@ settings:
 
 aliases:
   - mobile: [android, iosArm64, iosSimulatorArm64]
+  # The live-link qualification agent: JDK sockets and clocks on desktop and Android.
+  - jvmAndroid: [jvm, android]

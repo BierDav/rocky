@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 46;
+	objectVersion = 70;
 	objects = {
 
 /* Begin PBXFileReference section */
@@ -22,23 +22,15 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		E5EAD2DB00A5E3A5C4699AC4 /* src */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				E5EAD701A6CEEBDDB0A431C6 /* PBXFileSystemSynchronizedBuildFileExceptionSet */,
-			);
-			explicitFileTypes = {
-			};
-			explicitFolders = (
-			);
-			path = src;
-			sourceTree = SOURCE_ROOT;
-		};
+		E5EAD2DB00A5E3A5C4699AC4 /* src */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (E5EAD701A6CEEBDDB0A431C6 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = src; sourceTree = SOURCE_ROOT; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		E5EAD8B8EF71D931F7BED783 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -90,11 +82,14 @@
 /* Begin PBXProject section */
 		E5EAD67012C849E366D5E8B5 /* Project object */ = {
 			isa = PBXProject;
+			attributes = {
+			};
 			buildConfigurationList = E5EADBC72A59341E1067DC30 /* Build configuration list for PBXProject "module" */;
 			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = English;
 			hasScannedForEncodings = 0;
 			knownRegions = (
+				English,
 				en,
 			);
 			mainGroup = E5EADFCE408E7FF229A95E8C;
@@ -110,6 +105,9 @@
 /* Begin PBXResourcesBuildPhase section */
 		E5EAD268DC11180C46DD1470 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -118,6 +116,9 @@
 		E5EADF64E3AD6C47FED791EA /* Build Kotlin */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
 			inputPaths = (
 			);
 			name = "Build Kotlin";
@@ -132,6 +133,9 @@
 /* Begin PBXSourcesBuildPhase section */
 		E5EAD04A19574AC4F52C84D9 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -153,16 +157,17 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				INFOPLIST_FILE = src/Info.plist;
 				KOTLIN_CLI_WRAPPER_PATH = ../kotlin;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = iosApp;
 				PRODUCT_MODULE_NAME = app;
 				PRODUCT_NAME = iosApp;
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = (
-					1,
-					2,
-				);
+				TARGETED_DEVICE_FAMILY = "1 2";
 			};
 			name = Release;
 		};
@@ -179,23 +184,25 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
+				DEVELOPMENT_TEAM = G5K3D2J5Y9;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				INFOPLIST_FILE = src/Info.plist;
 				KOTLIN_CLI_WRAPPER_PATH = ../kotlin;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
 				ONLY_ACTIVE_ARCH = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = iosApp;
+				PRODUCT_BUNDLE_IDENTIFIER = "org.example.examples.shoppinglist-app";
 				PRODUCT_MODULE_NAME = app;
 				PRODUCT_NAME = iosApp;
 				SDKROOT = iphoneos;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = (
-					1,
-					2,
-				);
+				TARGETED_DEVICE_FAMILY = "1 2";
 			};
 			name = Debug;
 		};
@@ -209,6 +216,7 @@
 				E5EAD903BA96E6422B29C8A8 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 		E5EADBC72A59341E1067DC30 /* Build configuration list for PBXProject "module" */ = {
 			isa = XCConfigurationList;

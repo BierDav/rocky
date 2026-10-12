@@ -206,6 +206,13 @@ The multi-process qualification uses manual sync and a keyless custody peer;
 Android device qualification is documented in
 [shopping devices](../../docs/runtime/shopping-devices.md).
 
+`qualify-live-links` measures live links between a desktop process and a phone
+running the debug Android app; it is how the
+[live-link evidence](../../docs/features_08/06-qualification-evidence.md) was
+taken. The phone agent starts only in a debuggable build after `prepare` creates
+its flag through `adb shell run-as`; its households live under `files/live-links`,
+apart from the app's own.
+
 ## iOS
 
 `shared` builds unchanged screens and logic for `iosArm64` and

@@ -14,6 +14,7 @@ process, and its sharing and move steps on two Android emulators. Phone runs are
 | `cd examples/shoppinglist-app && ./kotlin run -m requiredSchema` | The required schema by hand and from Room, installed natively |
 | `sdks/kotlin/gradlew -p sdks/kotlin :qualification:schema:check` | Hand/Room equivalence and every partitioned refusal |
 | `cargo test -p rocky-secure --lib <name>` | The native tests named below, in `./scripts/check` |
+| `./examples/shoppinglist-app/qualify-live-links <command>` | Live links between a desktop process and the debug Android app over iroh: latency, lifecycle, idle cost and a three-desktop mesh; see the [phase 6 evidence](../features_08/06-qualification-evidence.md) |
 
 `ROCKY_SCENARIOS=gate,relink` selects harness scenarios. The application
 modules contain no Rust source; the custody process is the packaged launcher
@@ -150,6 +151,6 @@ see [Phase 13 evidence](../features_07/13-relayed-horizon-evidence.md).
 | Scenario | Blocking contract |
 | --- | --- |
 | Two-phone runs of the gate, moves and revocation | Two physical Android phones on the qualification host, running the [device procedure](shopping-devices.md#two-phone-procedure). Only one phone, in personal use, was attached; the procedure [passed on two emulators](shopping-devices.md#emulator-pair-2026-10-09) |
-| Internet, NAT and relays | A run over iroh relays between networks; only loopback and one LAN were used |
+| Release scenarios over Internet, NAT and relays | The scenarios above ran on loopback and one LAN only. Live links between a desktop and a phone on cellular through an iroh relay are measured separately in the [phase 6 evidence](../features_08/06-qualification-evidence.md) |
 
 The earlier single-phone LAN run is recorded in [shopping devices](shopping-devices.md).

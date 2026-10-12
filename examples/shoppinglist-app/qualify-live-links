@@ -1,0 +1,10 @@
+#!/bin/sh
+# Phase 6 live-link qualification: `agent <port>` serves a desktop device; `prepare`, `pair`, `latency`, `lifecycle`,
+# `undialable`, `idle`, `mesh` and `finish` drive agents. Evidence goes to $ROCKY_EVIDENCE (default local/live-links).
+# See docs/features_08/06-qualification-evidence.md.
+set -eu
+app=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH='' cd -- "$app/../.." && pwd)
+cd "$app"
+ROCKY_EVIDENCE="${ROCKY_EVIDENCE:-$repo_root/local/live-links}" \
+    ./kotlin run -m qualification --project-dir "${ROCKY_SHOPPING_PROJECT:-$app}" -- live-links "$@"

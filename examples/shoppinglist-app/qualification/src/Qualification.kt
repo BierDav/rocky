@@ -13,10 +13,12 @@ import java.util.concurrent.TimeUnit
  * file over TCP; the custody peer is the packaged `rocky-peer` launcher. The application contains no Rust source.
  *
  * `ROCKY_PEER` names the `rocky-peer` executable; `ROCKY_EVIDENCE` the directory for logs and `evidence.json`.
- * With `ROCKY_PHONES`, it drives two Android devices instead ([phones]).
+ * With `ROCKY_PHONES`, it drives two Android devices instead ([phones]); `live-links …` runs the live-link
+ * qualification instead ([liveLinks]).
  * See docs/runtime/shopping-qualification.md.
  */
-fun main() {
+fun main(args: Array<String>) {
+    if (args.firstOrNull() == "live-links") return liveLinks(args.drop(1))
     val peer = File(System.getenv("ROCKY_PEER") ?: error("set ROCKY_PEER to the rocky-peer executable"))
     check(peer.canExecute()) { "$peer is not executable" }
     val evidence = File(System.getenv("ROCKY_EVIDENCE") ?: Files.createTempDirectory("shopping-qualification").toString())

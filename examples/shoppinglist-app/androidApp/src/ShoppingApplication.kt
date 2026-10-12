@@ -12,5 +12,6 @@ class ShoppingApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         appGraph = ShoppingGraph(PlatformContext(this))
+        startLiveLinkAgent(this)
     }
 }

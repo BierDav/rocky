@@ -72,8 +72,8 @@ The JVM stalled-transport test measured a 5 ms pause and a 4 ms foreground
 dial on 2026-10-10 ([phase-2 evidence](../features_07/02-change-driven-sync.md#measured-evidence-2026-10-10)).
 These timings have not been measured on an Android device. The phase 5
 `android-discovery:qualify` probe checks open → background closed → foreground
-open with TCP links and enforces the one-second pause bound. Its current run
-is blocked by Gradle distribution verification; see the
+open with TCP links and enforces the one-second pause bound. Its device execution is
+pending final qualification; see the
 [phase 5 evidence](../features_08/05-status-kotlin-lifecycle.md#implementation-and-evidence).
 
 What a killed process loses, and what the next open does:

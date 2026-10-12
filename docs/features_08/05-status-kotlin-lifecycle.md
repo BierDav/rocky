@@ -1,6 +1,6 @@
 # 5. Status, Kotlin and lifecycle
 
-Status: implemented; native targeted tests pass, Kotlin/app/device gates blocked by Gradle integrity.
+Status: implemented; final native and platform verification in progress.
 Owner: `rocky-sdk` readiness and network status; Kotlin `rocky-core`
 (`RuntimePort.kt`, `RockyDatabase.kt`, `RockyLifecycle.kt`); the shopping
 example's Sync and Devices tabs. Depends on [phase 2](02-link-session-and-signals.md);
@@ -78,8 +78,8 @@ Attempted commands:
 - `sdks/kotlin/gradlew -p sdks/kotlin :qualification:android-discovery:qualify -Procky.android.avd=Pixel_9_API_37.2`: exit 1 at the same verification; no APK build or emulator run.
 - `./examples/shoppinglist-app/check`: exit 1 in `requiredSchema` compilation against the old Maven-local SDK; JVM/Android shared tests and desktop build did not run.
 
-New Kotlin artifacts, both app targets and Android lifecycle execution have
-not been verified. Restore a distribution matching the trusted wrapper pin (or
-review and correct the pin against the official distribution), publish the SDK
-with `publishToMavenLocal`, then rerun the SDK, shopping and Android commands.
+The [official Gradle checksums](https://gradle.org/release-checksums/) confirm
+that the old pin belongs to 9.8.0, while the downloaded bytes match 9.8.1. The
+wrapper pin is corrected to the official 9.8.1 checksum; verification remains
+enabled. SDK, app and Android builds are being retried.
 Phase 6 has not started.

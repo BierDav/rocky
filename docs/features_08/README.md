@@ -1,8 +1,8 @@
 # features_08: live links
 
 Status: accepted execution roadmap (2026-10-12). Phases 1–4 are implemented and
-verified; see their briefs for evidence. Phase 5 is implemented with platform
-verification blocked by Gradle distribution integrity; phase 6 has not started.
+verified; see their briefs for evidence. Phase 5 is implemented with final
+verification in progress; phase 6 has not started.
 This is the current next-work authority. Each brief states the questions
 it owns under "Settled" and records its own status.
 

@@ -166,6 +166,14 @@ impl Device {
             serde_json::from_value(identity["scope"].clone()).expect("scope"),
         )
     }
+    async fn ready(&self) {
+        let mut status = self.ok(json!({"type":"status"})).await;
+        while status["state"] != "ready" {
+            status = self
+                .ok(json!({"type":"status_next","after":status["token"]}))
+                .await;
+        }
+    }
     async fn close(&self) {
         self.database.close().await.expect("close");
     }
@@ -249,6 +257,7 @@ impl Pair {
         coordinator.register(scope, owner, [1; 16], vec![executor], 1, 1)?;
         coordinator.set_invokers(scope, owner, vec![(executor, owner), (caller, principal)])?;
         coordinator.acquire(scope, owner, executor)?;
+        b.ready().await;
         Ok(Self {
             root,
             hub,
@@ -786,7 +795,7 @@ async fn mesh_buyers_find_an_executor_through_only_a_neighbor() -> Result<(), Fa
     let pair = Pair::new(None).await?;
     pair.restock(1, 1).await;
     let neighbor = mesh_neighbor(&pair).await?;
-    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    let executor = pair.a.ok(json!({"type":"session"})).await["node"].clone();
     let contact = neighbor.ok(json!({"type":"contact"})).await["uri"].clone();
     pair.b
         .ok(json!({"type":"peer_add","contact":contact}))
@@ -840,6 +849,7 @@ async fn mesh_neighbor(pair: &Pair) -> Result<Device, Failure> {
         owner,
         vec![(executor, owner), (buyer, principal), (node, user)],
     )?;
+    neighbor.ready().await;
     Ok(neighbor)
 }
 
@@ -902,7 +912,7 @@ async fn mesh_forwarding_and_direct_replay_decide_one_ticket_once() -> Result<()
     let mut pair = Pair::new(None).await?;
     pair.restock(1, 2).await;
     let neighbor = mesh_neighbor(&pair).await?;
-    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    let executor = pair.a.ok(json!({"type":"session"})).await["node"].clone();
     pair.b.ok(json!({"type":"peer_add","contact":neighbor.ok(json!({"type":"contact"})).await["uri"]})).await;
     pair.b
         .ok(json!({"type":"peer_remove","node":executor}))
@@ -1023,7 +1033,7 @@ async fn mesh_offline_caller_settles_from_custody_alone() -> Result<(), Failure>
         .ok(json!({"type":"command_envelope","handle":vec![2;32]}))
         .await["envelope"]
         .clone();
-    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    let executor = pair.a.ok(json!({"type":"session"})).await["node"].clone();
     pair.b
         .ok(json!({"type":"peer_add","contact":custody.ok(json!({"type":"contact"})).await["uri"]}))
         .await;
@@ -1121,7 +1131,7 @@ impl rocky_sdk::transport::Transport for GatedTransport {
 }
 async fn gated_mesh(pair: &mut Pair) -> Result<(Device, Arc<ForwardGate>), Failure> {
     let neighbor = mesh_neighbor(pair).await?;
-    let executor = pair.b.ok(json!({"type":"peers"})).await["peers"][0]["node"].clone();
+    let executor = pair.a.ok(json!({"type":"session"})).await["node"].clone();
     pair.b.ok(json!({"type":"peer_add","contact":neighbor.ok(json!({"type":"contact"})).await["uri"]})).await;
     pair.b
         .ok(json!({"type":"peer_remove","node":executor}))

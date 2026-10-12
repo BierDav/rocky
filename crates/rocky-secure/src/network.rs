@@ -205,9 +205,12 @@ enum Side {
 
 /// Session signatures bind fresh mutual challenges, credentials and frame sequence.
 /// Confidentiality is provided by encrypted payloads; routing and credentials are visible.
+enum SessionIo {
+    Native(Box<dyn SessionStream>),
+    Channel(Box<link::channels::Io>),
+}
 pub struct NativeSession {
-    stream: Box<dyn SessionStream>,
-    channel: Option<link::channels::Io>,
+    stream: SessionIo,
     local: PrivateKey,
     peer: PublicKey,
     credentials: CredentialChain,
@@ -436,8 +439,7 @@ impl NativeSession {
             &encode(&(shared, &binding))?,
         );
         let mut session = Self {
-            stream,
-            channel: None,
+            stream: SessionIo::Native(stream),
             local,
             peer: peer.node,
             peer_chain: crate::wire::Chain::new(peer.credentials.clone())?,
@@ -510,13 +512,13 @@ impl NativeSession {
     /// Ends the session: the peer reads the end of the stream after the
     /// last message. Transports that reset unfinished streams need this.
     pub async fn close(mut self) -> Result<(), Error> {
-        if let Some(channel) = &mut self.channel {
-            return channel.close().await;
+        match &mut self.stream {
+            SessionIo::Channel(channel) => channel.close().await,
+            SessionIo::Native(stream) => timeout(TIMEOUT, stream.shutdown())
+                .await
+                .map_err(|_| denied("native write timeout"))?
+                .map_err(Error::Io),
         }
-        timeout(TIMEOUT, self.stream.shutdown())
-            .await
-            .map_err(|_| denied("native write timeout"))?
-            .map_err(Error::Io)
     }
     async fn send(&mut self, message: impl Into<Message>) -> Result<(), Error> {
         let bytes = encode(&message.into())?;
@@ -529,10 +531,9 @@ impl NativeSession {
             signature,
         })?;
         self.spend(frame.len())?;
-        if let Some(channel) = &mut self.channel {
-            channel.send(frame).await?;
-        } else {
-            write_frame(&mut self.stream, &frame).await?;
+        match &mut self.stream {
+            SessionIo::Channel(channel) => channel.send(frame).await?,
+            SessionIo::Native(stream) => write_frame(stream, &frame).await?,
         }
         self.sent = self
             .sent
@@ -541,10 +542,9 @@ impl NativeSession {
         Ok(())
     }
     async fn receive(&mut self) -> Result<Message, Error> {
-        let bytes = if let Some(channel) = &mut self.channel {
-            channel.receive().await?
-        } else {
-            read_frame(&mut self.stream).await?
+        let bytes = match &mut self.stream {
+            SessionIo::Channel(channel) => channel.receive().await?,
+            SessionIo::Native(stream) => read_frame(stream).await?,
         };
         self.spend(bytes.len())?;
         let message: SignedMessage = decode(&bytes)?;

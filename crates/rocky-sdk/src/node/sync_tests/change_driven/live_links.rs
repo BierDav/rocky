@@ -29,6 +29,42 @@ async fn pair(root: &std::path::Path, hub: &Arc<Hub>) -> Result<(Arc<Node>, Arc<
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_contact_request_reuses_the_open_link() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let (a, b) = pair(root.path(), &hub).await?;
+            let requested = PrivateKey::new().public_key();
+            a.configure(|settings| {
+                settings.peers.insert(
+                    requested,
+                    Contact {
+                        routes: vec![crate::enrollment::Route {
+                            transport: "memory".into(),
+                            address: "contact-only".into(),
+                        }],
+                    },
+                );
+                Ok(())
+            })
+            .await?;
+            let before = [hub.dials_to("a"), hub.dials_to("b")];
+            let reply = b
+                .request_contact(&*transport(&b).await?, secure_node_id(requested))
+                .await?;
+            assert_eq!(reply["node"], requested.to_hex());
+            assert!(b.settings.lock().await.peers.contains_key(&requested));
+            assert_eq!([hub.dials_to("a"), hub.dials_to("b")], before);
+            assert_eq!(hub.protocol_dials("b", "a", Protocol::Sync), 0);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
 async fn committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcile()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new()
@@ -907,6 +943,118 @@ async fn revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority
                 rows(&a).await?,
                 ["1"],
                 "the local commit survives cancelled publication"
+            );
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            add(&a, 1).await?;
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let other = PrivateKey::new().public_key();
+            let a_port = transport(&a).await?;
+            let b_port = transport(&b).await?;
+            a_port.listen(false);
+            assert!(b.sync(&*b_port).await.is_err());
+            assert!(
+                b.retries.lock().unwrap_or_else(PoisonError::into_inner)[&peer]
+                    .retry
+                    .deadline()
+                    .is_some()
+            );
+            a_port.listen(true);
+            b.retries
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(other)
+                .or_default()
+                .retry
+                .failed();
+            let other_deadline = b.retries.lock().unwrap_or_else(PoisonError::into_inner)[&other]
+                .retry
+                .deadline();
+            let before = tokio::time::Instant::now();
+            b.renew(Some(&*b_port), false, Some(peer), false).await?;
+            {
+                let retries = b.retries.lock().unwrap_or_else(PoisonError::into_inner);
+                assert!(retries[&peer].retry.ready());
+                assert_eq!(retries[&other].retry.deadline(), other_deadline);
+            }
+            b.sync(&*b_port).await?;
+            assert_eq!(rows(&b).await?, ["1"]);
+            assert_eq!(tokio::time::Instant::now(), before);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
+#[tokio::test(start_paused = true)]
+async fn unchanged_epoch_probe_ignores_contacts_changed_while_the_reply_was_in_flight()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((&a, Profile::Issuer)),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            a.sync(&*transport(&a).await?).await?;
+            let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let authority = a.replica.observe_authority().await;
+            let before = hub.protocol_dials("a", "b", Protocol::Renew);
+            hub.hold_cut.store(true, Ordering::SeqCst);
+            hub.cut_after(Some(0));
+            let transport = transport(&a).await?;
+            let renew = a.renew(Some(&*transport), true, Some(peer), true);
+            let metadata = async {
+                until(|| hub.protocol_dials("a", "b", Protocol::Renew) > before).await;
+                a.configure(|settings| {
+                    let meta = settings
+                        .contact_meta
+                        .get_mut(&peer)
+                        .ok_or("contact metadata")?;
+                    meta.learned = meta.learned.saturating_add(1);
+                    Ok(())
+                })
+                .await?;
+                hub.cut_after(None);
+                Ok::<_, Failure>(())
+            };
+            let (renewed, changed) = tokio::join!(renew, metadata);
+            changed?;
+            renewed?;
+            assert!(
+                !authority.has_changed()?,
+                "an unchanged epoch response must not invalidate admission"
             );
             a.detach(None).await;
             b.detach(None).await;

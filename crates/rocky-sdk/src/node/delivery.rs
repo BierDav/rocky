@@ -38,7 +38,20 @@ impl Deliveries for Port<'_> {
         peer: PublicKey,
         deliveries: Vec<SealedDelivery>,
     ) -> DeliveryFuture<'_, Vec<DeliveryReceipt>> {
-        Box::pin(async move { self.node.receive(peer, deliveries).await.map_err(secure) })
+        Box::pin(async move {
+            let node = self
+                .node
+                .owner
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| secure("delivery owner ended".into()))?;
+            // Installing an epoch ends the link. Finish the admitted local batch
+            // even when its caller loses the reply, so retry observes every install.
+            tokio::task::spawn_local(async move { node.receive(peer, deliveries).await })
+                .await
+                .map_err(|error| secure(error.into()))?
+                .map_err(secure)
+        })
     }
     fn deposit<'a>(
         &'a self,

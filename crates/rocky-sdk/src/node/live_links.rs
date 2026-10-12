@@ -67,6 +67,17 @@ impl Registry {
             .is_some_and(|entry| !entry.persistent && !entry.dialed)
     }
 
+    pub fn close_peer(&self, peer: PublicKey) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+        {
+            entry.close.send_replace(Some(CloseReason::Detached));
+        }
+    }
+
     pub fn close_short(&self, peer: PublicKey) {
         if let Some(entry) = self
             .entries
@@ -222,7 +233,7 @@ impl Node {
                         if node.learned.load(Ordering::SeqCst) {
                             node.wake_sync();
                         }
-                        // Busy or an unavailable link retains ordinary sync for this pair.
+                        // Reconciliation retries the link; only busy refusal permits native sync.
                         node.activity.record_changed(
                             "link_unavailable",
                             json!({"peer":peer.to_hex(),"error":error.to_string()}),
@@ -264,9 +275,37 @@ impl Node {
             || *service.stage.borrow() != Stage::Open
             || authority.has_changed()?
         {
-            return Err("link authority changed during handshake".into());
+            let _ = opened
+                .writer
+                .send(Frame::new(
+                    opened.direction,
+                    Message::Close {
+                        reason: CloseReason::Authority,
+                    },
+                ))
+                .await;
+            let _ = opened.writer.finish().await;
+            return Err(Box::new(rocky_secure::Error::Application(Box::new(
+                link::AuthorityChanged,
+            ))));
         }
         authority.borrow_and_update();
+        self.absorb_revocations(None).await?;
+        if authority.has_changed()? {
+            let _ = opened
+                .writer
+                .send(Frame::new(
+                    opened.direction,
+                    Message::Close {
+                        reason: CloseReason::Authority,
+                    },
+                ))
+                .await;
+            let _ = opened.writer.finish().await;
+            return Err(Box::new(rocky_secure::Error::Application(Box::new(
+                link::AuthorityChanged,
+            ))));
+        }
         drop(handshake_permit);
         let permit = if expected.is_none() {
             match service.live_budget.clone().try_acquire_owned() {

@@ -63,7 +63,10 @@ struct Slot {
 struct State {
     next: u64,
     remote: u64,
-    reconciling: std::collections::BTreeSet<bool>,
+    reconciling: BTreeMap<bool, u64>,
+    next_reconcile: u64,
+    remote_reconcile: u64,
+    flushed_reconcile: Option<u64>,
     slots: BTreeMap<(bool, u16), Slot>,
 }
 #[derive(Clone)]
@@ -108,7 +111,7 @@ impl Channels {
             outgoing,
         }
     }
-    pub fn reconcile(&self, direction: bool, started: bool) -> Result<(), Error> {
+    pub fn reconcile(&self, direction: bool, generation: u64, started: bool) -> Result<(), Error> {
         if direction == self.handle.direction {
             return Err(denied("link reconcile direction"));
         }
@@ -117,13 +120,19 @@ impl Channels {
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let changed = if started {
-            state.reconciling.insert(direction)
+        if started {
+            if state.reconciling.contains_key(&direction) || generation < state.remote_reconcile {
+                return Err(denied("link reconcile lifecycle"));
+            }
+            state.remote_reconcile = generation
+                .checked_add(1)
+                .ok_or_else(|| denied("link reconcile generation exhausted"))?;
+            state.reconciling.insert(direction, generation);
         } else {
-            state.reconciling.remove(&direction)
-        };
-        if !changed {
-            return Err(denied("link reconcile lifecycle"));
+            if state.reconciling.get(&direction) != Some(&generation) {
+                return Err(denied("link reconcile lifecycle"));
+            }
+            state.reconciling.remove(&direction);
         }
         self.handle.events.send_replace(());
         Ok(())
@@ -207,6 +216,7 @@ impl Channels {
 }
 pub struct Reconcile {
     handle: Handle,
+    generation: u64,
     closed: bool,
 }
 impl Reconcile {
@@ -215,7 +225,10 @@ impl Reconcile {
             TIMEOUT,
             self.handle.send.send(Frame::new(
                 self.handle.direction,
-                Message::Reconcile { started: false },
+                Message::Reconcile {
+                    generation: self.generation,
+                    started: false,
+                },
             )),
         )
         .await
@@ -225,18 +238,18 @@ impl Reconcile {
         timeout(TIMEOUT, async {
             loop {
                 events.borrow_and_update();
-                if self.handle.send.is_closed() {
-                    return Err(denied("link ended before reconcile finish"));
-                }
-                let pending = self
+                if self
                     .handle
                     .state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .reconciling
-                    .contains(&self.handle.direction);
-                if !pending {
+                    .flushed_reconcile
+                    == Some(self.generation)
+                {
                     return Ok(());
+                }
+                if self.handle.send.is_closed() {
+                    return Err(denied("link ended before reconcile finish"));
                 }
                 events.changed().await.map_err(|_| denied("link ended"))?;
             }
@@ -248,12 +261,14 @@ impl Reconcile {
     }
     fn mark_closed(&mut self) {
         self.closed = true;
-        self.handle
+        let mut state = self
+            .handle
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reconciling
-            .remove(&self.handle.direction);
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.reconciling.get(&self.handle.direction) == Some(&self.generation) {
+            state.reconciling.remove(&self.handle.direction);
+        }
         self.handle.events.send_replace(());
     }
 }
@@ -262,7 +277,10 @@ impl Drop for Reconcile {
         if !self.closed {
             let _ = self.handle.send.try_send(Frame::new(
                 self.handle.direction,
-                Message::Reconcile { started: false },
+                Message::Reconcile {
+                    generation: self.generation,
+                    started: false,
+                },
             ));
             self.mark_closed();
         }
@@ -273,34 +291,37 @@ impl Handle {
         self.send.is_closed()
     }
     /// Called only after the link writer flushes the final reconcile marker.
-    pub fn flushed_reconcile(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reconciling
-            .remove(&self.direction);
+    pub fn flushed_reconcile(&self, generation: u64) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.flushed_reconcile = Some(generation);
         self.events.send_replace(());
     }
-
     pub async fn begin_reconcile(&self) -> Result<Reconcile, Error> {
-        if !self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .reconciling
-            .insert(self.direction)
-        {
-            return Err(denied("link reconcile already active"));
-        }
+        let generation = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.reconciling.contains_key(&self.direction) {
+                return Err(denied("link reconcile already active"));
+            }
+            let generation = state.next_reconcile;
+            state.next_reconcile = generation
+                .checked_add(1)
+                .ok_or_else(|| denied("link reconcile generation exhausted"))?;
+            state.reconciling.insert(self.direction, generation);
+            generation
+        };
         let lease = Reconcile {
             handle: self.clone(),
+            generation,
             closed: false,
         };
         timeout(
             TIMEOUT,
             self.send.send(Frame::new(
                 self.direction,
-                Message::Reconcile { started: true },
+                Message::Reconcile {
+                    generation,
+                    started: true,
+                },
             )),
         )
         .await
@@ -485,14 +506,13 @@ impl Handle {
             &(admission.binding, key, generation),
         )?;
         Ok(NativeSession {
-            stream: Box::new(tokio::io::duplex(1).0),
-            channel: Some(Io {
+            stream: SessionIo::Channel(Box::new(Io {
                 handle: self.clone(),
                 key,
                 generation,
                 receive,
                 closed: false,
-            }),
+            })),
             local: admission.local.clone(),
             peer: admission.peer,
             credentials: admission.credentials.clone(),
@@ -640,7 +660,7 @@ impl Drop for Channels {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn channels() -> Channels {
+    pub(super) fn channels() -> Channels {
         let credentials = CredentialChain(vec![]);
         let (send, outgoing) = mpsc::channel(QUEUE);
         Channels {
@@ -703,7 +723,10 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(
-            session.channel.as_mut().unwrap().receive().await.unwrap(),
+            match &mut session.stream {
+                SessionIo::Channel(channel) => channel.receive().await.unwrap(),
+                _ => panic!("request channel"),
+            },
             [1, 2, 3]
         );
         channels
@@ -814,5 +837,49 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    #[tokio::test]
+    async fn a_previous_finish_cannot_release_a_new_reconcile() {
+        let mut channels = super::tests::channels();
+        let first = channels.handle.begin_reconcile().await.unwrap();
+        channels.handle.flushed_reconcile(0);
+        assert!(channels.handle.begin_reconcile().await.is_err());
+        drop(first);
+        let second = channels.handle.begin_reconcile().await.unwrap();
+        channels.handle.flushed_reconcile(0);
+        assert_eq!(
+            channels
+                .handle
+                .state
+                .lock()
+                .unwrap()
+                .reconciling
+                .get(&false),
+            Some(&1)
+        );
+        let close = second.close();
+        let write = async {
+            loop {
+                let frame = channels.outgoing.recv().await.unwrap();
+                if let Message::Reconcile {
+                    generation,
+                    started: false,
+                } = frame.message
+                {
+                    channels.handle.flushed_reconcile(generation);
+                    if generation == 1 {
+                        break;
+                    }
+                }
+            }
+        };
+        let (closed, ()) = tokio::join!(close, write);
+        closed.unwrap();
+        assert!(channels.handle.state.lock().unwrap().reconciling.is_empty());
     }
 }

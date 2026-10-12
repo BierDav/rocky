@@ -617,9 +617,16 @@ impl Node {
             tasks.spawn_local(async move {
                 if protocol == Protocol::Link {
                     let settings = node.settings.lock().await.clone();
-                    let _ = node
+                    if let Err(error) = node
                         .admit_link(service, stream, None, settings, Some(permit))
-                        .await;
+                        .await
+                    {
+                        let _ = node.absorb_revocations(Some(&error)).await;
+                        node.activity.record_changed(
+                            "link_admission_failed",
+                            json!({"error": error.to_string()}),
+                        );
+                    }
                 } else {
                     let _permit = permit;
                     let _ = node.serve(protocol, stream).await;
@@ -942,6 +949,13 @@ impl Node {
                 })
                 .await?;
                 self.reached()?.remove(&node);
+                self.met
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&node);
+                if let Some(service) = self.current() {
+                    service.live.close_peer(node);
+                }
                 self.retries
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -1714,6 +1728,9 @@ impl Node {
                 return Err(error);
             }
         };
+        if let Some(peer) = renewed.contacted {
+            self.inbound_sync(peer);
+        }
         self.learned.store(false, Ordering::SeqCst);
         let mut settings = self.settings.lock().await;
         if !epochs_only && settings.lacks(&renewed.revocations)? {
@@ -1722,21 +1739,23 @@ impl Node {
         if epochs_only {
             renewed.chain = settings.credentials.clone();
         }
-        // Install delivered keys before reading a registry that may wait for them.
+        // Compare under the lock: concurrent contact changes are not an epoch install.
+        let before_adopt = serde_json::to_vec(&*settings)?;
         let keys = settings.adopt(&self.path, &self.vault, &renewed)?;
-        if epochs_only && serde_json::to_vec(&current)? == serde_json::to_vec(&*settings)? {
-            return Ok(());
-        }
-        self.apply(&settings.revocations, &settings.credentials, keys)
-            .await?;
-        for partition in settings.partitions(&self.domain)? {
-            self.hold_keys(&settings, &partition).await?;
+        let mut changed = !epochs_only || before_adopt != serde_json::to_vec(&*settings)?;
+        if changed {
+            self.apply(&settings.revocations, &settings.credentials, keys)
+                .await?;
+            for partition in settings.partitions(&self.domain)? {
+                self.hold_keys(&settings, &partition).await?;
+            }
         }
         if settings.issuer() {
             drop(settings);
             let registry = self.registry().await?;
             settings = self.settings.lock().await;
             if settings.begin_exposure_rotation(&registry)? {
+                changed = true;
                 settings.save(&self.path)?;
                 let keys = settings
                     .rotate(&self.vault)?
@@ -1748,6 +1767,9 @@ impl Node {
                     self.hold_keys(&settings, &partition).await?;
                 }
             }
+        }
+        if !changed {
+            return Ok(());
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
@@ -2396,6 +2418,17 @@ impl Node {
                         .is_err_and(|error| error.is::<sync::Learned>())
                 };
                 if renewed || results.iter().any(|(_, _, _, result)| learned(result)) {
+                    let admitted: std::collections::BTreeSet<_> = self
+                        .settings
+                        .lock()
+                        .await
+                        .targets()
+                        .into_iter()
+                        .map(|(peer, _)| peer)
+                        .collect();
+                    results.retain(|(peer, _, _, _)| admitted.contains(peer));
+                    // Coverage from the previous authority cannot skip its replacement pass.
+                    covered.clear();
                     let again = |result: &Result<_, Failure>| match renewed {
                         true => result.is_ok() || failed(result),
                         false => learned(result),
@@ -2553,9 +2586,14 @@ impl Node {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
             let authority = self.replica.observe_authority().await;
+            let revocations = self.replica.revocation_digest().await?;
             let before = self.current().and_then(|service| service.live.id(peer));
             result = self.exchange(transport, peer, contact).await;
             self.absorb_revocations(result.as_ref().err()).await?;
+            if result.is_err() && self.replica.revocation_digest().await? != revocations {
+                result = Err(Box::new(sync::Learned));
+                break;
+            }
             if result.is_err()
                 && let Some(service) = self.current()
             {
@@ -2579,11 +2617,7 @@ impl Node {
                 Some(rocky_secure::Error::Rejected(reason)) => reason.starts_with("link ended"),
                 _ => error.to_string() == "link authority changed during handshake",
             });
-            if result.is_ok()
-                || !interrupted
-                || (!authority.has_changed()? && !replaced)
-                || self.learned.load(Ordering::SeqCst)
-            {
+            if result.is_ok() || !interrupted || (!authority.has_changed()? && !replaced) {
                 break;
             }
         }
@@ -2594,12 +2628,12 @@ impl Node {
             .insert(peer);
         Ok(transfer)
     }
-    async fn exchange(
+    pub(super) async fn request_link(
         &self,
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+    ) -> Result<Option<rocky_secure::network::link::channels::Handle>, Failure> {
         let addresses = contact.addresses(transport.kind());
         let service = self
             .current()
@@ -2611,11 +2645,6 @@ impl Node {
             }
             .into());
         }
-        let (credentials, renewable) = {
-            let settings = self.settings.lock().await;
-            let renewable = !settings.issuer() || !settings.issuers.is_empty();
-            (settings.credentials.clone(), renewable)
-        };
         let mut link = None;
         let mut busy_refused = false;
         for _ in 0..4 {
@@ -2640,6 +2669,13 @@ impl Node {
             ))
             .await;
             if let Err(error) = admitted {
+                let changed = error.downcast_ref::<rocky_secure::Error>().is_some_and(|error| {
+                    matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::AuthorityChanged>())
+                });
+                if changed {
+                    self.absorb_revocations(Some(&error)).await?;
+                    continue;
+                }
                 let busy = error.downcast_ref::<rocky_secure::Error>().is_some_and(|error| {
                     matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::Busy>())
                 });
@@ -2653,6 +2689,27 @@ impl Node {
         if link.is_none() && !busy_refused {
             return Err("link admission kept changing before reconcile".into());
         }
+        Ok(link)
+    }
+    async fn exchange(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+        let addresses = contact.addresses(transport.kind());
+        let service = self
+            .current()
+            .ok_or(ServiceError::NetworkRequired("sync"))?;
+        let revocations = self.replica.revocation_digest().await?;
+        let link = self.request_link(transport, peer, contact).await?;
+        let (credentials, renewable) = {
+            let settings = self.settings.lock().await;
+            (
+                settings.credentials.clone(),
+                !settings.issuer() || !settings.issuers.is_empty(),
+            )
+        };
         let upstream = Upstream {
             link,
             transport,
@@ -2662,7 +2719,7 @@ impl Node {
             credentials,
             contacts: Some(self),
             renew_from: match renewable {
-                true => Some(self.replica.revocation_digest().await?),
+                true => Some(revocations),
                 false => None,
             },
         };
@@ -2856,6 +2913,9 @@ impl Node {
                             *current = draft;
                             self.apply(&current.revocations, &current.credentials, Vec::new())
                                 .await?;
+                            for partition in current.partitions(&self.domain)? {
+                                self.hold_keys(&current, &partition).await?;
+                            }
                         }
                         let reply =
                             current.answer_epochs(&self.vault, &request.request, &registry)?;

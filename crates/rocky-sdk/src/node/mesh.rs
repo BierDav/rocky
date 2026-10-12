@@ -81,32 +81,43 @@ impl Node {
             {
                 continue;
             }
-            let addresses = contact.addresses(transport.kind());
-            if addresses.is_empty() {
-                continue;
+            let link = match self.request_link(transport, peer, &contact).await {
+                Ok(link) => link,
+                Err(_) => continue,
+            };
+            let credentials = self.settings.lock().await.credentials.clone();
+            let mut session = match &link {
+                Some(handle) => handle.open().await?,
+                None => {
+                    let addresses = contact.addresses(transport.kind());
+                    let stream =
+                        crate::enrollment::dial(transport, &addresses, Protocol::Sync).await?;
+                    NativeSession::authenticate(
+                        stream,
+                        &self.replica,
+                        PrivateKey::from_bytes(&self.vault.get("node")?),
+                        credentials,
+                        peer,
+                        rocky_secure::MAX_SECURE_BYTES,
+                    )
+                    .await?
+                }
+            };
+            let response = async {
+                let response = session
+                    .exchange_contacts(ContactRequest::Request { node: id })
+                    .await?;
+                session.close().await?;
+                if let Some(handle) = link {
+                    handle.drain().await?;
+                }
+                Ok::<_, Failure>(response)
             }
-            let stream = match crate::enrollment::dial(transport, &addresses, Protocol::Sync).await
-            {
-                Ok(stream) => stream,
-                Err(_) => continue,
-            };
-            let mut session = match NativeSession::authenticate(
-                stream,
-                &self.replica,
-                PrivateKey::from_bytes(&self.vault.get("node")?),
-                settings.credentials.clone(),
-                peer,
-                rocky_secure::MAX_SECURE_BYTES,
-            )
-            .await
-            {
-                Ok(session) => session,
-                Err(_) => continue,
-            };
-            let response = session
-                .exchange_contacts(ContactRequest::Request { node: id })
-                .await?;
-            session.close().await?;
+            .await;
+            if let Some(service) = self.current() {
+                service.live.close_short(peer);
+            }
+            let response = response?;
             if let ContactResponse::Contact {
                 contact: Some(contact),
             } = response

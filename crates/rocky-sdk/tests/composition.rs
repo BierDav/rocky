@@ -203,8 +203,8 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     member.close().await?;
     creator.close().await?;
     let enrolled = hub.counts();
-    // The member's first sync also requests its writable table's author.
-    assert_eq!(enrolled, [2, 5, 2]);
+    // Bootstrap and rows share a link; the writable author uses renewal.
+    assert_eq!(enrolled, [2, 4, 2]);
     assert!(!hub.listens("a"));
 
     // Both devices open, write and reopen with no factory at all.

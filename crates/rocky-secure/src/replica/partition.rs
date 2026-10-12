@@ -606,6 +606,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(offers)
     }
+    /// Peer holdings on a link do not subscribe a reader to an unknown partition.
+    pub(crate) async fn accept_link_custody_offers(
+        &self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        scopes: &[ResourceScope],
+        offers: &[(ResourceScope, PartitionTuple)],
+    ) -> Result<(), Error> {
+        let offered = {
+            let inner = self.inner.lock().await;
+            let own = inner.config.node.public_key();
+            let mut offered = Vec::new();
+            for (scope, tuple) in offers {
+                inner.check_tuple(*scope, tuple)?;
+                let held = inner.partition_grants(&inner.config.credentials, own, *scope, tuple)?;
+                if inner.partitions.contains_key(scope) || custody_only(&held) {
+                    offered.push((*scope, tuple.clone()));
+                }
+            }
+            offered
+        };
+        self.accept_custody_offers(peer, credentials, scopes, &offered)
+            .await
+    }
     /// Registers offered partitions this node holds only as keyless custody,
     /// from a peer authorized to read or keep each of them. Other offers are
     /// refused; a known partition is unchanged.

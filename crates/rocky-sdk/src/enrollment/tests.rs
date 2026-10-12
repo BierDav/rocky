@@ -639,6 +639,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                 &path,
                 target_vault,
                 &Renewed {
+                    contacted: None,
                     revocations: reply.revocations,
                     chain: target.credentials.clone(),
                     keys,

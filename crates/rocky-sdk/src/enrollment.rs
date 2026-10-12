@@ -526,6 +526,8 @@ impl Terms {
 /// What a renewal brought: the issuer's revocations, this device's chain
 /// and reader keys it did not hold.
 pub struct Renewed {
+    /// The issuer that answered, when renewal used a transport.
+    pub contacted: Option<PublicKey>,
     pub revocations: RevocationSet,
     pub chain: CredentialChain,
     pub keys: Vec<(String, rocky_core::KeyEpoch, [u8; 32])>,
@@ -1866,6 +1868,7 @@ impl Settings {
             return Err("missing reader key".into());
         }
         Ok(Renewed {
+            contacted: None,
             revocations: credentials.revocations.clone(),
             chain,
             epoch_statements: supplied.epoch_statements.clone(),
@@ -2913,6 +2916,7 @@ impl Settings {
                 }
             }
             return Ok(Renewed {
+                contacted: Some(*issuer),
                 revocations: reply.revocations,
                 chain: self.credentials.clone(),
                 keys,
@@ -2944,6 +2948,7 @@ impl Settings {
                 }
             }
             return Ok(Renewed {
+                contacted: None,
                 revocations: self.revocations.clone(),
                 chain: self.renew_locally(vault)?,
                 keys: Vec::new(),
@@ -3042,6 +3047,7 @@ impl Settings {
             }
         }
         Ok(Renewed {
+            contacted: Some(issuer),
             revocations: renewal.revocations,
             chain,
             groups,
@@ -3116,6 +3122,7 @@ impl Settings {
             }
         }
         Ok(Renewed {
+            contacted: Some(issuer),
             revocations: renewal.revocations,
             chain,
             groups,

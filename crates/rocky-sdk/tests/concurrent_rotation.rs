@@ -214,8 +214,12 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     let reader = json!({"kind":"reader","scopes":["parts"]});
     let carol = join(root, &hub, "carol", &a, reader.clone(), LIST_SCHEMA).await?;
     let dave = join(root, &hub, "dave", &b, reader, LIST_SCHEMA).await?;
-    a.sync().await.map_err(|e| format!("a sync: {e}"))?;
-    b.sync().await.map_err(|e| format!("b sync: {e}"))?;
+    a.sync()
+        .await
+        .map_err(|e| format!("a sync before revocations: {e}"))?;
+    b.sync()
+        .await
+        .map_err(|e| format!("b sync before revocations: {e}"))?;
     for (device, other, original) in [(&carol, &b, &a), (&dave, &a, &b)] {
         common::introduce(device, other).await;
         device
@@ -240,8 +244,12 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
     }
     assert_eq!(rows(&carol, "parts").await, ["b", "before"]);
     assert_eq!(rows(&dave, "parts").await, ["a", "before"]);
-    a.sync().await.map_err(|e| format!("a sync: {e}"))?;
-    b.sync().await.map_err(|e| format!("b sync: {e}"))?;
+    a.sync()
+        .await
+        .map_err(|e| format!("a sync after revocations: {e}"))?;
+    b.sync()
+        .await
+        .map_err(|e| format!("b sync after revocations: {e}"))?;
     let current = partition(&a, "partition_status").await["current"].clone();
     assert_eq!(current["generation"], 3);
     assert_eq!(partition(&b, "partition_status").await["current"], current);

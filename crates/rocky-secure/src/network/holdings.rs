@@ -54,6 +54,27 @@ impl NativeSession {
         proofs: &[(ResourceScope, Vec<HoldingProof>)],
         partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
     ) -> Result<(), Error> {
+        self.accept_proofs_for(replica, scopes, proofs, partitions, false)
+            .await
+    }
+    pub(super) async fn accept_link_proofs<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+        proofs: &[(ResourceScope, Vec<HoldingProof>)],
+        partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+    ) -> Result<(), Error> {
+        self.accept_proofs_for(replica, scopes, proofs, partitions, true)
+            .await
+    }
+    async fn accept_proofs_for<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+        proofs: &[(ResourceScope, Vec<HoldingProof>)],
+        partitions: &[(ResourceScope, rocky_core::PartitionTuple)],
+        link: bool,
+    ) -> Result<(), Error> {
         let distinct: BTreeSet<_> = scopes.iter().copied().collect();
         let valid = |members: Vec<ResourceScope>| {
             members.len() <= scopes.len()
@@ -96,9 +117,15 @@ impl NativeSession {
             .filter(|(scope, _)| accepted.contains(scope))
             .cloned()
             .collect();
-        replica
-            .accept_custody_offers(self.peer, &self.credentials, scopes, &offers)
-            .await?;
+        if link {
+            replica
+                .accept_link_custody_offers(self.peer, &self.credentials, scopes, &offers)
+                .await?;
+        } else {
+            replica
+                .accept_custody_offers(self.peer, &self.credentials, scopes, &offers)
+                .await?;
+        }
         self.proved.extend(accepted);
         Ok(())
     }

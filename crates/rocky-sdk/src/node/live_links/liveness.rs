@@ -63,6 +63,7 @@ impl Node {
                                 let absorbed = self.absorb_revocations(result.as_ref().err()).await;
                                 result?;
                                 absorbed?;
+                                self.topics_changed();
                                 session.close().await?;
                                 Ok(())
                             }));
@@ -70,9 +71,12 @@ impl Node {
                         continue;
                     }
                     match frame.message {
-                        Message::Reconcile { started } => {
-                            opened.channels.reconcile(frame.direction, started)?
-                        }
+                        Message::Reconcile {
+                            generation,
+                            started,
+                        } => opened
+                            .channels
+                            .reconcile(frame.direction, generation, started)?,
                         Message::Push { scope, frames } if frame.direction != direction => {
                             if requests.len() >= 8 {
                                 return Err("link request queue quota".into());
@@ -98,9 +102,17 @@ impl Node {
                                     seen.pop_front();
                                 }
                                 seen.push_back(token);
-                                if self.signal_token(&scopes).await? != token {
-                                    self.link_pending(peer);
+                                if requests.len() >= 8 {
+                                    return Err("link request queue quota".into());
                                 }
+                                // Handlers may hold the replica while awaiting storage. Poll
+                                // signal work beside them instead of blocking their progress.
+                                requests.push(Box::pin(async move {
+                                    if self.signal_token(&scopes).await? != token {
+                                        self.link_pending(peer);
+                                    }
+                                    Ok(())
+                                }));
                             }
                         }
                         Message::Ping if frame.direction != direction => {
@@ -142,9 +154,9 @@ impl Node {
                             deadline = tokio::time::Instant::now() + PING;
                         }
                         Some(frame) = outgoing.recv() => {
-                            let finished = matches!(frame.message, Message::Reconcile { started: false });
+                            let finished = if let Message::Reconcile { generation, started: false } = frame.message { Some(generation) } else { None };
                             opened.writer.send(frame).await?;
-                            if finished { opened.channels.handle.flushed_reconcile(); }
+                            if let Some(generation) = finished { opened.channels.handle.flushed_reconcile(generation); }
                             deadline = tokio::time::Instant::now() + PING;
                         }
                         _ = changes.changed() => {

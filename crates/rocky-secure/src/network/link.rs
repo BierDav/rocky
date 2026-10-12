@@ -24,6 +24,7 @@ pub enum Message {
         token: [u8; 32],
     },
     Reconcile {
+        generation: u64,
         started: bool,
     },
     Push {
@@ -118,6 +119,14 @@ pub struct Writer {
     sequence: u64,
 }
 #[derive(Debug)]
+pub struct AuthorityChanged;
+impl std::fmt::Display for AuthorityChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("link authority changed during handshake")
+    }
+}
+impl std::error::Error for AuthorityChanged {}
+#[derive(Debug)]
 pub struct Busy;
 impl std::fmt::Display for Busy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,6 +152,9 @@ impl Link {
             Message::Close {
                 reason: CloseReason::Busy,
             } => Err(Error::Application(Box::new(Busy))),
+            Message::Close {
+                reason: CloseReason::Authority,
+            } => Err(Error::Application(Box::new(AuthorityChanged))),
             _ => Err(denied("link ready response")),
         }
     }
@@ -213,7 +225,10 @@ impl Link {
         };
         let held = session.proved.iter().copied().collect();
         let channels = channels::Channels::new(&session, side == Side::Acceptor);
-        let (read, write) = tokio::io::split(session.stream);
+        let SessionIo::Native(stream) = session.stream else {
+            return Err(denied("link handshake requires a transport"));
+        };
+        let (read, write) = tokio::io::split(stream);
         Ok(Self {
             peer: session.peer,
             channels,
@@ -364,7 +379,7 @@ impl NativeSession {
                     proofs,
                     partitions,
                 }) => {
-                    self.accept_proofs(replica, &scopes, &proofs, &partitions)
+                    self.accept_link_proofs(replica, &scopes, &proofs, &partitions)
                         .await?;
                     let mut accepted = Vec::new();
                     for scope in scopes {
@@ -376,6 +391,8 @@ impl NativeSession {
                         {
                             self.proved.insert(scope);
                             accepted.push(scope);
+                        } else {
+                            self.proved.remove(&scope);
                         }
                     }
                     self.send(HoldingMessage::Proved { scopes: accepted })

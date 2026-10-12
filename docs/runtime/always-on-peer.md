@@ -85,16 +85,20 @@ call `setOnline(true)` / `{"type":"connection","online":true}` when the
 application learns connectivity returned. Offline mode suspends attempts.
 
 With the worker enabled, admitted peers keep an authenticated
-[live link](live-links.md). Committed changes signal the peer over that link;
-only the receiving peer opens a data pass. Peers without a link retain the
-ordinary change-driven path. Links close on authority changes, offline mode,
-disabling the worker and detach. Idle links run only their 15-second ping.
+[live link](live-links.md). A committed frame is pushed over it after flush;
+a small edit needs one message and no receiving reconcile. Overflow and
+non-frame changes reconcile on request channels of the same link. A new link
+reconciles before steady live traffic. Only a busy refusal retains a native
+sync fallback. Explicit sync and a disabled remote worker use short links,
+which are not repeatedly reopened at idle. Links close on authority changes,
+offline mode, disabling the worker and detach. Idle persistent links run only
+their 15-second ping.
 
 A pass reconciles at most four peers concurrently. Each peer has its own
 back-off: 1, 2, 4, 8, 16, 32 and then 60 seconds. A local write wakes the
 worker but leaves a failed peer's deadline intact. Connectivity and
 `setOnline(true)` reset all peers; a peer configuration change or an
-authenticated inbound session resets that peer alone. Reachability is recorded
+authenticated inbound session or verified renewal response resets that peer alone. Reachability is recorded
 as each peer answers; the pass status follows once all dialed peers finish.
 
 Data-pass retry timers run only for pending changes, requested metadata refresh

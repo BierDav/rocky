@@ -69,8 +69,9 @@ buffer and `network_changed()` signals connectivity. `mute(node, protocol, true)
 writes on that node's existing streams for deterministic missing-pong tests;
 `protocol_dials(from, to, protocol)` counts its successful stream openings.
 
-[Live links](live-links.md) reuse these streams for committed-change signals
-and application ping/pong liveness. A link has a separate inbound service budget.
+[Live links](live-links.md) reuse these streams for synchronization requests,
+committed-frame pushes and application ping/pong liveness. `link_messages(node)`
+counts complete link frames even when transport writes fragment them. A link has a separate inbound service budget.
 
 ## Sync wakeups
 

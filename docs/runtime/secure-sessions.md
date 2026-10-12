@@ -127,8 +127,15 @@ scopes. Proof memory is local to that native session; the application
 `SecureSession` transaction and invalidation rules above are unchanged.
 
 The [live link](live-links.md) reuses this admission and proof exchange with
-a distinct handshake identity and carries only signals during phase 2.
-Authority changes also notify the link owner without polling.
+a distinct handshake identity. Its bounded logical channels reuse these request
+handlers for rows, checkpoints, existence, horizons, results, envelopes and
+contacts. Admission and holding proofs bind the link; each channel has its own
+signed sequence and chain table. Committed pushes carry self-contained chains
+and use the same receive transactions as catch-up. Authority changes cancel
+channels and notify the link owner without polling. A peer holding proof cannot
+register a new reader partition; its envelope remains the installation path.
+Native sync is a temporary fallback only for a busy link refusal; one-shot
+Pair, Renew and Command protocols remain separate.
 
 ## Qualification
 

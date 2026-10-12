@@ -306,7 +306,7 @@ revocation statements with key rotation and issuer tombstones, envelope delivery
 from its outbox in `identity.json` and a mailbox's deposits
 ([decision 0054](decisions/0054-envelope-delivery.md)), supplied credentials, durable pseudonym assignment
 and per-table signing keys, the `SecretStore` key
-provider, contact records and sync with any admitted peer
+provider, contact records and bounded live-link sync with any admitted peer
 ([SDK enrollment](runtime/sdk-enrollment.md)). Its transports are TCP, the
 in-process hub and the chunk adapter for transports defined outside Rust;
 iroh comes from `rocky-iroh` behind the default `iroh` feature

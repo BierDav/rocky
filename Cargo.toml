@@ -27,6 +27,15 @@ all = { level = "deny", priority = -1 }
 dbg_macro = "deny"
 todo = "deny"
 
+# Development artifacts keep only line-table debug info and no incremental
+# state. Full debug info was ~89% of a typical optimized rlib's bytes, and the
+# per-workspace incremental cache reached tens of gigabytes, which multiplied
+# across worktrees. Restore either for a debugging session with
+# CARGO_PROFILE_DEV_DEBUG=2 or CARGO_INCREMENTAL=1.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 # Crypto and SQLite dominate test time; optimize dependencies. Generic code
 # such as encoding is compiled in the crate that uses it, so the crates
 # that encode most are optimized as well; decision 0060 has the measurements.

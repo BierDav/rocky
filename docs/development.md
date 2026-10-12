@@ -9,6 +9,18 @@ Workspace crates inherit shared dependency and lint configuration.
 Keep the root `Cargo.lock` committed. Update it intentionally when changing
 dependencies. The engine benchmark retains its own manifest and lockfile.
 
+### Disk use
+
+Each Jujutsu workspace builds into its own `target` directories, so a full
+build costs the same space in every worktree. The `dev` profile keeps only
+line-table debug info and no incremental state (see the profile comment in
+`Cargo.toml`); restore full debug or incremental with `CARGO_PROFILE_DEV_DEBUG=2`
+or `CARGO_INCREMENTAL=1`. `sccache` is configured as the user's `rustc-wrapper`
+in `~/.cargo/config.toml`, so dependency crates compile once and are reused
+across worktrees. `scripts/clean` removes one checkout's Cargo and Kotlin/Gradle
+output, and `scripts/clean --evidence` also removes generated benchmark
+databases; run it in each worktree to reclaim space.
+
 ## Version control: Jujutsu only
 
 Use `jj` for all version-control operations. Never invoke the Git CLI, including

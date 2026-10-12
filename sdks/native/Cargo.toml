@@ -48,6 +48,12 @@ unsafe_code = "deny"
 netdev = { path = "../../vendor/netdev" }
 netwatch = { path = "../../vendor/netwatch" }
 
+# Match the root workspace: line-table debug info only, no incremental state,
+# so the iOS/Android static libraries and host tests stay small.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 # Keep the standalone binding build on the workspace test profile: crypto
 # and SQLite must not run unoptimized in host and simulator integration tests.
 [profile.dev.package."*"]

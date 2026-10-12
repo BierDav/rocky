@@ -1,0 +1,33 @@
+#!/bin/sh
+# Reclaim regenerable build output; see docs/development.md#disk-use.
+#
+#   scripts/clean             this checkout's Cargo and Kotlin/Gradle output
+#   scripts/clean --evidence  also this checkout's generated benchmark databases
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+evidence=false
+case "${1:-}" in
+'') ;;
+--evidence) evidence=true ;;
+*) usage ;;
+esac
+
+# The root workspace and the standalone native bindings workspace have their
+# own target directories.
+cargo clean
+[ -f sdks/native/Cargo.toml ] && cargo clean --manifest-path sdks/native/Cargo.toml
+
+# Gradle, Kotlin/Native and Amper output under the SDK and shopping example.
+find sdks/kotlin examples/shoppinglist-app \
+    -type d \( -name build -o -name .gradle -o -name .kotlin \) -prune \
+    -exec rm -rf {} + 2>/dev/null || true
+
+if $evidence; then
+    find benchmarks/runtime-scaling/evidence -type f \
+        \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) -delete
+fi

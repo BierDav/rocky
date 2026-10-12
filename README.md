@@ -66,8 +66,8 @@ classes' power-loss evidence. The qualification guide lists every result and
 open budget.
 
 A separate [authenticated encrypted row path](docs/runtime/permissions-and-sync.md)
-provides signed capabilities, transactional p2panda operation storage and native
-TCP sync through a keyless relay, plus encrypted strong commands and scoped
+provides signed capabilities, transactional p2panda operation storage and
+authenticated sync over live links through a keyless relay, plus encrypted strong commands and scoped
 result projection. The [employees desktop demo](docs/runtime/encrypted-commands.md#desktop-demonstration)
 uses this path. The legacy todo demo remains trusted.
 
@@ -138,7 +138,7 @@ cargo run -p todo-desktop --locked -- --data-dir local/todo-demo
 | `crates/rocky-storage` | SQLite access, row capture, statement analysis, snapshot cursors and table events shared by the runtimes |
 | `crates/rocky-runtime` | Trusted transactions, replication and observation |
 | `crates/rocky-credentials` | Credential verification, issuance, grant profiles, key providers and enrollment messages |
-| `crates/rocky-secure` | Capability enforcement, encrypted replicas, key epochs and native sessions |
+| `crates/rocky-secure` | Capability enforcement, encrypted replicas, key epochs and live link sessions |
 | `crates/rocky-iroh` | Optional iroh handlers for an application's endpoint, and the starter's own |
 | `crates/rocky-sdk` / `sdks/native` | Generic native SDK lifecycle and UniFFI ABI |
 | `crates/rocky-coordinator` | Generic fencing and strong-commit metadata |

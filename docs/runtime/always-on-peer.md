@@ -88,10 +88,11 @@ With the worker enabled, admitted peers keep an authenticated
 [live link](live-links.md). A committed frame is pushed over it after flush;
 a small edit needs one message and no receiving reconcile. Overflow and
 non-frame changes reconcile on request channels of the same link. A new link
-reconciles before steady live traffic. Only a busy refusal retains a native
-sync fallback. Explicit sync and a disabled remote worker use short links,
-which are not repeatedly reopened at idle. Links close on authority changes,
-offline mode, disabling the worker and detach. Idle persistent links run only
+reconciles before steady live traffic. A refused link, a busy one included,
+backs off and is dialed again; nothing else syncs. Explicit sync reuses or
+opens a link, keeping it while both workers run. With either worker disabled,
+it uses a short link, which is not repeatedly reopened at idle. Links close on
+authority changes, offline mode, disabling the worker and detach. Idle persistent links run only
 their 15-second ping.
 
 A pass reconciles at most four peers concurrently. Each peer has its own
@@ -103,9 +104,9 @@ as each peer answers; the pass status follows once all dialed peers finish.
 
 Data-pass retry timers run only for pending changes, requested metadata refresh
 or bounded continuation; an idle failed data peer waits for a signal, as does a
-successful idle peer. Link reconnection has a separate back-off deadline, so a
-busy link slot does not postpone a ready data pass. A queued commit wakeup still
-runs the first pass to an unattempted peer.
+successful idle peer. Link reconnection has a separate back-off deadline; a
+refused link carries no data until a later attempt opens it. A queued commit
+wakeup still runs the first pass to an unattempted peer.
 Disabling with `sync_start` cancels the active automatic pass and acknowledges
 its cancellation within one second. Committed frames stay whole and the next
 pass repeats interrupted work. Enabling starts a pass immediately, resetting

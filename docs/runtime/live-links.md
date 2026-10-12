@@ -1,10 +1,10 @@
 # Live links
 
-Links carry synchronization requests and committed-frame pushes. The
-[phase 3 brief](../features_08/03-data-over-the-link.md) records qualification;
-[decision 0064](../decisions/0064-sync-on-live-links.md) defines the request
-lifecycle. Native per-pass sync remains only for a typed busy refusal until
-phase 4. Pair, Renew and Command retain their own streams.
+Links carry every synchronization request and committed-frame push; no other
+sync path exists. The [phase 3 brief](../features_08/03-data-over-the-link.md)
+records qualification, the [phase 4 brief](../features_08/04-remove-per-pass-sessions.md)
+the removal of per-pass sessions; [decision 0064](../decisions/0064-sync-on-live-links.md)
+defines the request lifecycle. Pair, Renew and Command retain their own streams.
 
 ## Authentication and ownership
 
@@ -26,10 +26,16 @@ only by authorized keyless custody; readers install them through envelopes.
 The database's network service owns links. Detach, database close, offline mode
 and disabling the worker close persistent links. Borrowed application transports,
 endpoints and routers remain open. Both workers must request persistence to
-keep a link. Explicit sync, or a peer with its worker disabled, uses a short
-link with the same protocol and handlers. Short links close after reconciliation;
+keep a link. Explicit sync reuses the open link or opens one. When both workers
+run, the link remains open; with either worker disabled it is a short link
+using the same protocol and handlers. Short links close after reconciliation;
 they do not restart continuously at idle. An automatic worker reconciles after
 an incoming short exchange finishes.
+
+An accepted link stream whose first frame is a pinned contact reference's
+resolution gets the signed proof of the node key and closes without a link.
+`Link::drive` carries request channels for an embedder without the SDK worker,
+such as the employees demo; it answers pings and ignores signals and pushes.
 
 One registry entry exists per authenticated node. Simultaneous dials retain
 the stream initiated by the lower node key. Replacement cancels old requests;
@@ -84,8 +90,9 @@ reconciliation still govern release of retained operations.
 A queue, reassembly or byte overflow fails explicitly. Control is selected
 before data; a stalled write ends before the next ping interval. An idle read
 has no deadline, but a started frame has ten seconds. After unanswered pings
-at 15, 30 and 45 seconds, the third miss closes at 60 seconds. Errors reconnect
-with per-peer back-off. Busy refusal alone permits a native data pass.
+at 15, 30 and 45 seconds, the third miss closes at 60 seconds. Errors, a busy
+refusal included, reconnect with per-peer back-off; nothing falls back to
+another sync path.
 
 The iroh link ALPN keeps its independent connection and stream budgets. See
 [SDK transports](sdk-transports.md#bounds). The memory hub counts complete

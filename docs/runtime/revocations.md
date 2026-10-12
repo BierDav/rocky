@@ -64,7 +64,7 @@ the held set:
 - confirmed command results and historical checkpoints verify with no
   revocation at the time they were issued, since a receipt anchors them.
 
-Every native session ends its handshake with the
+Every [live link](live-links.md) handshake ends with the
 [revocation exchange](../decisions/0051-roster-free-admission.md): both sides
 compare digests and, when they differ, send each other the statements the
 other lacks, then check the merged set. A peer it revokes is refused as `the
@@ -120,7 +120,7 @@ count; Kotlin's `SessionStatus` and `Readiness` carry them as
 | `Revocation` | `app`, `issuer`, `time`, `nodes`, `users`, `capabilities`, `pseudonyms`; ID `rocky.revocation.id.v1` |
 | `SignedRevocation` | Publisher signature `rocky.revocation.v1`, issuer signature `rocky.revocation-issuer.v1`; at most 2,048 bytes |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
-| Native session | `rocky.native-session.v12`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
+| Live link handshake | `rocky.link.v1`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
 | Checkpoint statement | Format 7, `revocations` digest of its signer |
 | Horizon statement | Format 4, `revocations` digest of its declaring issuer |
 | Encrypted replica | `rocky.encrypted-replica.v9`; `secure_metadata.revocations` |

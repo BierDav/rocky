@@ -122,7 +122,7 @@ serves it to read-only participants; see
 | Checkpoint | Format 9 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
 | File identity | `rocky.encrypted-replica.v14` |
-| Native session | `rocky.native-session.v14` |
+| Live link handshake | `rocky.link.v1` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 5, with an explicit existence-base list.

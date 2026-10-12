@@ -160,7 +160,8 @@ Owns the secure profile around `EncryptedReplica`: admission of the signed
 capabilities `rocky-credentials` verifies under the revocation set it holds,
 reader key epochs and rotation,
 encrypted row operations, a framework-transaction p2panda store adapter and bounded
-authenticated native TCP synchronization, encrypted command scheduling and
+authenticated synchronization over live links and their request channels
+(`network.rs`, `network/link.rs`), encrypted command scheduling and
 scoped strong projections with [bounded strong history](runtime/strong-history.md),
 and signed per-scope checkpoints, pruning and
 rebootstrap ([encrypted checkpoints](runtime/encrypted-checkpoints.md)), and
@@ -289,7 +290,7 @@ Depends on `rocky-runtime`, `rocky-secure`, `rocky-coordinator`, `todo-app` and 
 dependency is for composing the development setup, not placing its rules in UI.
 Dioxus 0.7 renders both editable panels from runtime observations. The separate
 `employees-desktop` executable composes secure row/command clients with an opaque
-relay over authenticated native TCP; see [its guide](runtime/encrypted-commands.md).
+relay over authenticated loopback links; see [its guide](runtime/encrypted-commands.md).
 The default todo executable accepts `--data-dir`; its window-close path drains
 both runtimes before exit.
 

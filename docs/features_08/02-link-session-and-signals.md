@@ -11,7 +11,7 @@ decision record 0063.
 ## Inputs and objective
 
 Read [change-driven sync](../runtime/always-on-peer.md#change-driven-sync),
-[secure sessions](../runtime/secure-sessions.md#native-peer-sessions),
+[secure sessions](../runtime/secure-sessions.md#peer-sessions-on-links),
 [SDK transports](../runtime/sdk-transports.md) and
 [decision 0051](../decisions/0051-roster-free-admission.md).
 
@@ -128,7 +128,7 @@ failures. Its assertions and the 2 s integration budget are unchanged.
 
 Slice 5 updates [change-driven sync](../runtime/always-on-peer.md#change-driven-sync),
 [SDK transports](../runtime/sdk-transports.md),
-[secure sessions](../runtime/secure-sessions.md#native-peer-sessions) and the new
+[secure sessions](../runtime/secure-sessions.md#peer-sessions-on-links) and the new
 [live-link guide](../runtime/live-links.md). Decision
 [0063](../decisions/0063-live-link-sessions.md) records the wire and ownership rules.
 

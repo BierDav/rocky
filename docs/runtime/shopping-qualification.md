@@ -35,7 +35,7 @@ repeats it natively. Measured: see [evidence](#evidence).
 On 2026-10-10, [Phase 13](../features_07/13-relayed-horizon-evidence.md)
 qualified all nine horizons through keyless custody alone. A and B enroll and
 receive authors through local credential APIs, then alternate online; they
-never share a native session, including setup.
+never connect to each other, including setup.
 
 ## Acceptance scenarios
 

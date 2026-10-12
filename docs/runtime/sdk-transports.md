@@ -10,17 +10,17 @@ contact. Qualified on one host only.
 ## What a transport does
 
 A transport connects two devices with a reliable ordered byte stream and
-carries the protocol name: pairing, sync, live links, renewal or commands. It adds no
+carries the protocol name: pairing, live links, renewal or commands. It adds no
 security the SDK relies on. Pairing answers are sealed under the invitation
-token, renewals are signed, and sync runs
-[mutually authenticated native sessions](permissions-and-sync.md) carrying
-encrypted rows. A relay or network observer still sees who talks to whom,
+token, renewals are signed, and sync runs on mutually authenticated
+[live links](live-links.md) carrying encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/native-session/14`, `rocky/link/1`,
+Protocols are versioned strings: `rocky/sdk-pair/1`, `rocky/link/1`,
 `rocky/sdk-renew/2`, `rocky/command/2`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
-not register a name refuses the stream.
+not register a name refuses the stream, a retired one included. A link stream
+also answers the resolution of a pinned contact reference without opening.
 
 A domain is bound to no transport. Each transport has a kind naming its
 address format. A device knows [routes](sdk-enrollment.md#peers-and-contacts)
@@ -80,7 +80,7 @@ iroh supplies it from endpoint address updates. Without a transport signal,
 the application calls `setOnline` / the native `connection` request. See
 [change-driven sync](always-on-peer.md#change-driven-sync). Connectivity and
 `setOnline(true)` reset per-peer back-off; committed local writes do not.
-Pausing the worker cancels outstanding dials and sessions without closing the
+Pausing the worker cancels outstanding dials and links without closing the
 attached transport.
 
 ## Supplying a transport
@@ -217,9 +217,9 @@ session follows.
 | Cached outbound iroh connections | 64 |
 | `RockyEndpoint` inbound streams per application protocol | 64 |
 | Dial and stream open | iroh and SDK dial 15 s each; TCP connect and preamble 10 s |
-| Session frame read or write | 10 s |
+| Handshake or channel frame read or write | 10 s |
 | Pairing/renewal exchange | 30 s after dialing; each route has its own dial deadline |
-| Sessions per sync and peer | 16 |
+| Request channels per sync and peer | 16, each with its own byte budget |
 | Contacts kept; contacts dialed per sync pass | 64; 16, issuers first, then the least recently attempted |
 | Peers met without a contact that `peers` lists | 64, the least recent dropped |
 | Unconfigured peers with horizon credentials or frontiers per replica | 256, the least recently served since open losing theirs; contacts, issuers and full nodes are kept |
@@ -283,5 +283,5 @@ are not qualified ([phase 22](../features_07/22-qualification.md)).
 - Rocky registers handlers on the application's router instead of owning one,
   so an application keeps its endpoint and protocols; closing Rocky never
   closes application infrastructure.
-- Contacts and routes are unsigned hints: the session handshake already
+- Contacts and routes are unsigned hints: the link handshake already
   proves the node key, and a signature would suggest routes are trusted.

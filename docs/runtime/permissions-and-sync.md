@@ -1,7 +1,7 @@
 # Authenticated encrypted row synchronization
 
 `rocky_secure::EncryptedReplica` is the secure row profile: signed credentials,
-per-scope encryption and authenticated native sync. The trusted `Replica` and
+per-scope encryption and authenticated sync over [live links](live-links.md). The trusted `Replica` and
 `Runtime` files cannot be opened through it. Commands are in
 [encrypted commands](encrypted-commands.md).
 

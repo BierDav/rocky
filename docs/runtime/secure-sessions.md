@@ -102,13 +102,14 @@ The commit is admitted under the replica lock inside the write transaction.
 A revocation learned before that point refuses it; one learned after it applies
 to later calls. Bytes already returned cannot be taken back.
 
-## Native peer sessions
+## Peer sessions on links
 
-Authenticated network sessions use version 14; any other is refused in the
-handshake. A frame's signed header names its author's credential chain by
-digest. The session carries each distinct chain once, in a message of its own
-before the first page whose frames name it; later pages of the session send
-only frames. Each side keeps that table for the session alone. Sharing the
+Peers authenticate with the [live link](live-links.md) handshake, signed under
+`rocky.link.v1`; any other version is refused. Every request runs as a
+`NativeSession` on one of the link's request channels. A frame's signed header names its author's credential chain by
+digest. A channel carries each distinct chain once, in a message of its own
+before the first page whose frames name it; later pages of the channel send
+only frames. Each side keeps that table for the channel alone. Sharing the
 bytes shares no authority: every received frame's chain is verified against
 the current [revocations](revocations.md), so a chain revoked during a
 session admits no later frame of it. A frame whose chain the session never
@@ -119,23 +120,22 @@ receives them. See [decision 0053](../decisions/0053-chains-by-reference.md).
 A partition's grants are checked
 in addition to its [holding proof](replica-roles.md#proving-a-partition). Reader
 proofs bind the key epoch, scope and mutual handshake; keyless custody uses the
-tuple and custody authority. Frontier batches refuse unproved members alone.
+tuple and custody authority. A link proves the holdings of both sides when
+it opens; a channel may prove more. Frontier batches refuse unproved members alone.
 Scoped requests fail with the same denial and session outcome as an unknown
 scope, before row, checkpoint, horizon or command result state is inspected.
 Scope enumeration includes only proved partitions and granted unpartitioned
-scopes. Proof memory is local to that native session; the application
+scopes. Proof memory is local to that link; the application
 `SecureSession` transaction and invalidation rules above are unchanged.
 
-The [live link](live-links.md) reuses this admission and proof exchange with
-a distinct handshake identity. Its bounded logical channels reuse these request
-handlers for rows, checkpoints, existence, horizons, results, envelopes and
-contacts. Admission and holding proofs bind the link; each channel has its own
-signed sequence and chain table. Committed pushes carry self-contained chains
-and use the same receive transactions as catch-up. Authority changes cancel
-channels and notify the link owner without polling. A peer holding proof cannot
-register a new reader partition; its envelope remains the installation path.
-Native sync is a temporary fallback only for a busy link refusal; one-shot
-Pair, Renew and Command protocols remain separate.
+The link's bounded logical channels carry the request handlers for rows,
+checkpoints, existence, horizons, results, envelopes and contacts. Admission
+and holding proofs bind the link; each channel has its own signed sequence and
+chain table. Committed pushes carry self-contained chains and use the same
+receive transactions as catch-up. Authority changes cancel channels and notify
+the link owner without polling. A peer holding proof cannot register a new
+reader partition; its envelope remains the installation path. One-shot Pair,
+Renew and Command protocols remain separate.
 
 ## Qualification
 
@@ -155,6 +155,7 @@ Pair, Renew and Command protocols remain separate.
 
 `cargo test -p rocky-secure --lib tests::chains` covers the chain table: one
 chain across two pages of a 20-grant author, a withheld chain in a pull and a
-push, a revocation inside a session and an earlier session version.
+push and a revocation inside a channel. `tests::admission` refuses another
+link handshake version.
 
 This is application-level evidence, not a cryptographic audit.

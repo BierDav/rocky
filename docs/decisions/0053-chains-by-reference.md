@@ -79,7 +79,7 @@ the 63 KiB plaintext, no longer half of it.
 - Existing replicas and peers on session 10 are refused; installations
   reinstall ([decision 0039](0039-single-current-formats.md)).
 
-[Secure sessions](../runtime/secure-sessions.md#native-peer-sessions),
+[Secure sessions](../runtime/secure-sessions.md#peer-sessions-on-links),
 [encrypted checkpoints](../runtime/encrypted-checkpoints.md#rebootstrap) and
 [replica roles](../runtime/replica-roles.md#chains-by-reference) describe the
 behavior; the [partition guide](../runtime/partitioned-scopes.md#four-table-profile)

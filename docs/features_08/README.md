@@ -1,7 +1,7 @@
 # features_08: live links
 
-Status: accepted execution roadmap (2026-10-12). Phases 1–3 are implemented and
-verified; see their briefs for evidence. Phases 4–6 have not started.
+Status: accepted execution roadmap (2026-10-12). Phases 1–4 are implemented and
+verified; see their briefs for evidence. Phases 5–6 have not started.
 This is the current next-work authority. Each brief states the questions
 it owns under "Settled" and records its own status.
 

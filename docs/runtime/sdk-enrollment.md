@@ -280,10 +280,11 @@ concrete scope. Holdings are not persisted. Renewal still dials an issuer.
 `selected_local`, `selected_holding`, `selected_trusted`, `selected_probe`,
 `covered`, `backoff`, `pass_limit`, or `not_considered` for the last pass.
 
-An explicit sync opens authenticated native sessions with the contacts it
-dials,
-pushes what the peer lacks and pulls what this device lacks for the granted
-collections, in bounded frames. It succeeds when one peer was reached; `peers`
+An explicit sync uses the open [live link](live-links.md) with each contact,
+or opens one, and over its request channels pushes what the peer lacks and
+pulls what this device lacks for the granted collections, in bounded frames.
+The link remains open while both workers run; with either worker disabled,
+it closes after reconciliation. It succeeds when one peer was reached; `peers`
 shows each. Members keep syncing while every issuer is offline, until their
 credentials expire. Sync needs an [attached network](sdk-composition.md#attach-a-network);
 reads and writes do not. Requests are authorized under the revocations this
@@ -308,11 +309,12 @@ issuer the rows still sync and the new keys wait. Successful old handshakes and 
 failures are then checked again against the refreshed authority, still at most
 four at a time. Unavailable routes keep their retry deadline.
 
-Change-driven delivery needs a route back to each recipient.
-Pairing learns the joining device's authenticated return route when it supplies
-one and the issuer has room in its peer set. Sessions hand over recently reached contacts; applications can still add them
-explicitly. An idle recipient with only a one-way route needs a connectivity
-signal or `syncOnce` to pull later remote writes.
+Either end of an open link receives committed changes, including a recipient
+that cannot be dialed back. Pairing learns the joining device's authenticated
+return route when it supplies one and the issuer has room in its peer set.
+Link channels hand over recently reached contacts; applications can still add
+them explicitly. A device with its worker disabled uses `syncOnce` to pull
+later remote writes over a short link.
 
 The creator mints a discovery root, and every revocation mints a signed value
 bound to its statement ID. Only admitted sessions exchange them, after merging

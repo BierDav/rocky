@@ -29,7 +29,7 @@ Select the guide for your task rather than reading every document.
 | Run the persistent desktop demo or use runtime APIs | [Local replica](runtime/local-replica.md) |
 | Use two-replica transport, progress and recovery | [Two-replica sync](runtime/local-replica.md#replication-port) |
 | Publish immutable snapshots and recover strong commands | [Strong publication](runtime/strong-publication.md) |
-| Use signed grants, encrypted rows and native sync | [Permissions and sync](runtime/permissions-and-sync.md) |
+| Use signed grants, encrypted rows and authenticated sync | [Permissions and sync](runtime/permissions-and-sync.md) |
 | Run encrypted commands or the employees desktop demo | [Encrypted commands](runtime/encrypted-commands.md) |
 | Recover commands after coordinator retirement | [Coordinator retention](runtime/coordinator-retention.md) |
 | Register isolated domains on a public or self-hosted service | [Public coordination](runtime/public-coordination.md) |

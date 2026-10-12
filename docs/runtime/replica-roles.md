@@ -52,7 +52,7 @@ admission and limits, [decision 0046](../decisions/0046-per-scope-frontier-refus
 refusal and the current wire format. [Phase 9](../features_06/09-group-sync-measurement.md)
 provides the reproducible ERP comparison and its budgets.
 
-`NativeSession` (label `rocky.native-session.v12`) pulls by frontier:
+A `NativeSession` request channel of a [live link](live-links.md) pulls by frontier:
 
 | Call | What it does |
 | --- | --- |
@@ -82,10 +82,10 @@ dropped; a dropped frontier only delays pruning
 
 ### Proving a partition
 
-A whole-table profile grant does not reveal every list. In each native session,
-a reader proves a named partition with a value derived from one of its retained
-key epochs. The session binds the proof to both fresh handshake challenges;
-replaying it in another session fails. The client supplies at most four epochs,
+A whole-table profile grant does not reveal every list. On each link, a reader
+proves a named partition with a value derived from one of its retained key
+epochs. The link binds the proof to both fresh handshake challenges; replaying
+it on another link fails. The client supplies at most four epochs,
 newest first; a peer accepts a retained losing sibling or previous generation.
 A peer without any matching epoch refuses the member, and renewal or envelope
 delivery supplies the missing keys.
@@ -167,7 +167,7 @@ and the other targets rebootstrap from a full node when they fall behind.
 
 A frame's signed header names its author's credential chain by digest
 ([decision 0053](../decisions/0053-chains-by-reference.md)). A
-[session](secure-sessions.md#native-peer-sessions) carries the chain once and
+[request channel](secure-sessions.md#peer-sessions-on-links) carries the chain once and
 its pages hold frames alone: 32 frames of a 20-grant author in a 128 KiB page,
 where 3 fit with the 32 KB chain in every header.
 

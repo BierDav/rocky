@@ -1,6 +1,6 @@
 # 5. Status, Kotlin and lifecycle
 
-Status: implemented; final native and platform verification in progress.
+Status: implemented and verified (2026-10-12); all phase 5 completion gates passed.
 Owner: `rocky-sdk` readiness and network status; Kotlin `rocky-core`
 (`RuntimePort.kt`, `RockyDatabase.kt`, `RockyLifecycle.kt`); the shopping
 example's Sync and Devices tabs. Depends on [phase 2](02-link-session-and-signals.md);
@@ -39,67 +39,64 @@ links while it is in the background.
   after `enterBackground` and an open link after `enterForeground`.
 - The shopping app check compiles both targets with the new fields.
 
-## Implementation and evidence
+## Implementation and evidence (2026-10-12)
 
-The native slice adds link state to network peers and readiness, records open
-and close reasons, measures ping round trips, and clears cancelled openings.
-Readiness and sync status wake on transitions; neither token changes on pings.
-On 2026-10-12:
+Status, Kotlin and Android lifecycle gates are verified. Per-peer `link` state,
+Unix opening time and last ping round trip reach network status and readiness.
+Opening/closing advance tokens and wake existing flows; pings do neither.
+Activity carries typed open/close reasons. The Sync and Devices tabs show Live
+per peer, and any open link makes the top badge Live. Backgrounding drains
+links and refuses later admission until foregrounding; borrowed transports
+remain open.
 
-- `cargo test -p rocky-sdk --lib three_missing_pongs_close_and_reconnect_with_backoff --locked`: one passed, 0.18 s in the final rerun; open status after reconciliation, ping-token stability and a readiness wait waking with closed status at 60 s.
-- `cargo test -p rocky-sdk --lib link_status_reports_opening --locked`: one passed, 0.94 s; cancelling an in-flight dial clears opening status and changes readiness.
-- `cargo test -p rocky-sdk --lib node::sync_tests::change_driven::live_links --locked`: 30 passed, 4.46 s. Existing authority, simultaneous dial, transport, push and retry regressions remain green.
-- `cargo test -p rocky-sdk --lib background_refuses_new_links_until_foreground --locked`: one passed, 0.21 s; pause closes links under one second, rejects new inbound links, and foreground reopens.
-- `./scripts/check --unit`: 149 passed; unit wall 78.3 ms, budget 10 s.
-- `./scripts/lint`: exit 0. Final `./scripts/check`: exit 0; strict Clippy and formatting passed, 165 unit tests passed (117.0 ms), and 921 integration tests passed (698 default + 223 no-iroh, 164.99 s within 300 s).
+| Slice / check | Result | Limits |
+| --- | --- | --- |
+| Native status/liveness | Paused-clock memory-hub test reports open after reconciliation, unchanged tokens on ping, and a waiting readiness observer receives closed at 60 s | No physical-peer liveness measurement |
+| Opening cancellation / pause | Cancelling a dial clears opening; pause acknowledges only after links close, under 1 s; background rejects incoming links and foreground reopens | Native memory-hub coverage |
+| `cargo test -p rocky-sdk --lib node::sync_tests::change_driven::live_links --locked` | 30 passed, 4.46 s | Targeted development run; later full checks cover final code |
+| `cargo test -p rocky-sdk --lib node::sync_tests::mesh --locked` | 7 passed, 1.32 s, including retained handover hints | In-process transport |
+| `./scripts/check --unit` | 149 passed, 90.7 ms | Development unit tier |
+| Final `./scripts/check` | Exit 0; strict Clippy/formatting, 165 unit tests (105.5 ms), 923 integration tests (699 default + 224 no-iroh, 153.35 s within 300 s) | No e2e or doc tier |
+| `./scripts/lint` | Exit 0 | Static checks |
+| `sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal` | Exit 0; JVM, Android and iOS library publications; final rebuild 4 min 32 s | iOS library build, no iOS runtime qualification |
+| `sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest :qualification:android-discovery:qualify -Procky.android.avd=Pixel_9_API_37.2` | Exit 0, 1 min 6 s; all 13 JVM tests passed; emulator logs background closed / foreground open and Activity discovery-lock transitions | API 37.2 arm64 emulator, local TCP; no physical phone or cellular |
+| `./examples/shoppinglist-app/check` | Exit 0; required hand/Room schema equivalence and native install, 37 JVM + 6 Android tests, desktop and Android app builds | Loopback consumer tests; no real-network application run |
+| Final badge compilation | `kotlin build --project-dir examples/shoppinglist-app -m desktopApp -m androidApp`: exit 0 | Compilation only |
 
-The first full check exposed three tests in both feature configurations that
-mistook a link transition notification for a completed sync pass. Their waits
-now select the expected completed state; all existing state, retry, dial-count
-and row assertions remain. The three targeted reruns passed (retry 0.36 s,
-idle 0.40 s, custody 0.60 s); no budget or production assertion changed.
+The JVM lifecycle tests now explicitly return `Unit`; previously their inferred
+non-void return types meant they were compiled but not discovered. Both probes
+ran: live background/foreground (0.797 s) and stalled-dial cancellation
+(0.399 s) in the first explicit run. The final full JVM run includes both.
 
-The Kotlin/UI slice exposes `Peer.link`, readiness peers and typed link activity.
-Sync and Devices show Live per peer; the top badge uses readiness to show Live
-while any link is open. JVM and Android lifecycle probes use readiness rather
-than sleeps and assert background closure and foreground reopening. Native
-background admission also rejects later links, beyond draining existing ones.
+## Prerequisite and tooling repairs
 
-Gradle 9.8.1 fails distribution integrity
-verification before compilation: the wrapper pins
-`bafd5ce9cfaea0fbccfdc8439a1ac42fbd4cd9c89dc9a988228d8a2639a58e6c`,
-but the download hashes to
-`dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f`.
-No integrity check was bypassed. The shopping check sees the old published SDK
-and fails with unresolved `LinkState`, `Peer.link` and `Readiness.peers`.
-Attempted commands:
+Full and partial devices have identical SDK grants. Inferring full before the
+invitation's application description was recorded could share an unshared
+list with a partial device. Undescribed members now default to partial; only
+an explicit full description enables every-list delivery. The new deterministic
+consumer regression checks the fallback and the explicit full transition.
 
-- `sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest`: exit 1 at distribution verification; no Kotlin compilation or tests.
-- `sdks/kotlin/gradlew -p sdks/kotlin :qualification:android-discovery:qualify -Procky.android.avd=Pixel_9_API_37.2`: exit 1 at the same verification; no APK build or emulator run.
-- `./examples/shoppinglist-app/check`: exit 1 in `requiredSchema` compilation against the old Maven-local SDK; JVM/Android shared tests and desktop build did not run.
+Contact handover previously consumed hints after an earlier successful pass,
+leaving a later device with only its enrollment upstream. It now retains at
+most 16 recently successful peers. A paused-clock regression exercises two
+earlier passes before a new device obtains the partner route.
 
-The [official Gradle checksums](https://gradle.org/release-checksums/) confirm
-that the old pin belongs to 9.8.0, while the downloaded bytes match 9.8.1. The
-wrapper pin is corrected to the official 9.8.1 checksum; verification remains
-enabled. SDK, app and Android builds are being retried.
-Phase 6 has not started.
+Existing native tests now wait for a fresh completed sync state rather than
+treating the next link-status notification as a completed pass. State, retry,
+dial-count, permission, row and timeout assertions remain unchanged.
 
-## Prerequisite repairs found in consumer verification
+The wrapper URL named Gradle 9.8.1, but pinned the checksum for 9.8.0. The pin
+was corrected using the [official checksum reference](https://gradle.org/release-checksums/),
+with integrity verification retained. After publication, Kotlin CLI 0.13's
+stale extracted Maven-local AARs also required regeneration; the
+[consumer guide](../../examples/shoppinglist-app/README.md#run-and-pair) records
+that workaround. Published archives were preserved.
 
-The first fresh-artifact shopping checks exposed two contract failures. Full
-and partial devices have identical SDK grants; the household inferred full
-while an enrollment's application description was pending, so an unshared
-list could reach a partial device. Undescribed members now default to partial;
-only an explicit full description enables every-list delivery. A deterministic
-regression verifies both the fallback and the transition to explicit full.
+Earlier parallel consumer runs also intermittently timed out observing a list
+key/items and logged Room authority-refresh errors. Failure diagnostics retain
+network, holding, raw-row and activity evidence without relaxing the 60 s data
+assertion. The final diagnostic run passed all 37 + 6 tests; these checks do not
+prove all intermittent Room refresh behavior has been eliminated.
 
-Contact handover also consumed its hints after an earlier successful pass,
-leaving a later device with only its enrollment upstream. The SDK now retains
-at most 16 recently successful peers. A paused-clock regression exercises two
-earlier passes before a newly contacted device obtains the partner route.
-`cargo test -p rocky-sdk --lib node::sync_tests::mesh --locked` passed all
-seven tests in 1.32 s, including the new paused-clock regression.
-`./scripts/check --unit` passed 149 tests in 90.7 ms after the repairs.
-The application policy regression passed in the consumer run.
-No permission, data, timeout or budget assertion was weakened. Final consumer
-verification after these repairs is in progress.
+Phase 6 has not started. No cellular latency, idle-cost, Internet traversal or
+physical-phone qualification is claimed.

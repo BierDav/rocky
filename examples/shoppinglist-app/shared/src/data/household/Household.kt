@@ -213,11 +213,8 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
         require(it.size <= 256) { "The device name and kind must fit a 256-byte label" }
     }
 
-    private fun kind(device: Device): NodeKind = when (device.profile) {
-        GrantProfile.Issuer -> NodeKind.Trusted
-        NodeKind.Full.profile -> NodeKind.Full
-        else -> NodeKind.Partial
-    }
+    // Full and partial grants are identical; only an application description may enable every-list delivery.
+    private fun kind(device: Device): NodeKind = if (device.profile == GrantProfile.Issuer) NodeKind.Trusted else NodeKind.Partial
 
     private fun deviceLabel(bytes: ByteArray): DeviceRow? = runCatching {
         val label = Json.parseToJsonElement(bytes.decodeToString()).jsonObject

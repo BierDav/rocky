@@ -55,7 +55,11 @@ fun SyncScreen(model: SyncViewModel = metroViewModel()) {
                 Column(Modifier.padding(12.dp)) {
                     Text(peer.node.take(12), style = MaterialTheme.typography.titleSmall)
                     Text("${peer.source} · ${peer.choice} · ${peer.state}", style = MaterialTheme.typography.bodySmall)
-                    Text(if (peer.link.state == rocky.LinkState.Open) "Live" else "Link ${peer.link.state.name.lowercase()}", style = MaterialTheme.typography.labelSmall)
+                    if (peer.link.state == rocky.LinkState.Open) {
+                        Badge(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer) { Text("Live") }
+                    } else {
+                        Text("Link ${peer.link.state.name.lowercase()}", style = MaterialTheme.typography.labelSmall)
+                    }
                     peer.error?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
             }

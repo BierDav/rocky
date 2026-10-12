@@ -27,8 +27,7 @@ data class SyncBadgeState(
 )
 
 /**
- * The sync state at a glance: green when the last pass reached a peer, amber while a scope bootstraps, grey offline
- * and red when no peer answered. It pulses while frames move.
+ * Shows Live while any link is open, then bootstrap, offline or last-pass status. It pulses while frames move.
  */
 @Composable
 fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {

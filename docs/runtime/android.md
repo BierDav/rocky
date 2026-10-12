@@ -72,8 +72,7 @@ The JVM stalled-transport test measured a 5 ms pause and a 4 ms foreground
 dial on 2026-10-10 ([phase-2 evidence](../features_07/02-change-driven-sync.md#measured-evidence-2026-10-10)).
 These timings have not been measured on an Android device. The phase 5
 `android-discovery:qualify` probe checks open → background closed → foreground
-open with TCP links and enforces the one-second pause bound. Its device execution is
-pending final qualification; see the
+open with TCP links and enforces the one-second pause bound. It passed on the API 37.2 arm64 emulator on 2026-10-12; see the
 [phase 5 evidence](../features_08/05-status-kotlin-lifecycle.md#implementation-and-evidence).
 
 What a killed process loses, and what the next open does:
@@ -122,6 +121,7 @@ when examples were reduced to the todo and shopping-list apps; the 2026-10-07 an
 
 | Run | Covered |
 | --- | --- |
+| Android API 37.2 arm64 emulator, loopback TCP, 2026-10-12 | Phase 5 live link open → background closed under one second → foreground open; actual Activity background/foreground discovery-lock transitions |
 | Android 15 (API 35) arm64 emulator, loopback TCP through `adb reverse`, 2026-10-07 | Instrumented packaged consumer, Keystore store, missing-secret refusal and a background/foreground/reopen cycle, in debug and R8-minified release builds; todo and shopping apps joining a host issuer, syncing both ways, pausing sync while backgrounded and resuming the same identity after `am kill` |
 | Two Android 15 arm64 emulators, `adb reverse`, 2026-10-09 | Shopping lists shared through the packaged custody peer, a duplicate title and a move keeping an offline tick ([details](shopping-devices.md#emulator-pair-2026-10-09)) |
 | Pixel 11 Pro (Android 17), direct LAN TCP, 2026-10-08 | The same steps plus the Compose app; Keystore security level 1 ([details](shopping-devices.md#physical-device-run-2026-10-08)) |

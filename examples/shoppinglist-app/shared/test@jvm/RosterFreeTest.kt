@@ -101,8 +101,8 @@ class RosterFreeTest {
             first.syncOnce()
             val second = RockyDatabase.join(File(root, "second"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             // Enrollment supplies just the issuer. The first authenticated pass hands over its other contact.
-            second.syncOnce()
-            assertTrue(second.peers().any { it.node == first.session().node && it.source == "handover" })
+            assertEquals(ConnectionState.Connected, second.syncOnce().state)
+            assertTrue(second.peers().any { it.node == first.session().node && it.source == "handover" }, second.peers().toString())
             issuer.setOnline(false)
             assertEquals(ConnectionState.Connected, second.syncOnce().state)
             assertTrue(second.peers().any { it.node == first.session().node && it.state == "connected" })

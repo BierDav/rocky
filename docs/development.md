@@ -213,7 +213,7 @@ runs every SDK check and test. Android is packaged and qualified separately; see
 The shopping-list application is a standalone Kotlin toolchain project: its
 `project.yaml` workspace has Amper modules that configure JVM desktop targets.
 Run `./examples/shoppinglist-app/check` for the actual Room/Rocky integration
-and desktop compilation, `./examples/shoppinglist-app/qualify` for the
+and desktop/Android app compilation, `./examples/shoppinglist-app/qualify` for the
 multi-process [shopping qualification](runtime/shopping-qualification.md), and
 `sdks/kotlin/gradlew -p sdks/kotlin :qualification:inventory:check`
 for the existing SDK contract qualification. Run `./sdks/native/check` for the

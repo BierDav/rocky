@@ -19,6 +19,12 @@ local, so publish the SDK first, and again after SDK or Rust changes:
 ./kotlin build -m androidApp
 ```
 
+After republishing the local `0.1.0` Android artifacts, Kotlin CLI 0.13 may
+reuse an older extracted AAR. If Android alone cannot resolve new SDK members,
+remove the derived `<artifact>-0.1.0/` directory and `<artifact>-0.1.0.aar.flag`
+inside `~/.m2/repository/rocky/<artifact>/0.1.0/` for the Rocky Android artifacts,
+then build again. Keep the published `.aar`, POM and module metadata.
+
 The desktop keeps its household in `~/.rocky-shopping`, or
 `ROCKY_SHOPPING_DATA`. Install the Android debug APK with `adb install -r`;
 Android keeps secrets in the Keystore and pauses automatic sync in the
@@ -216,6 +222,10 @@ household** / **Join a household**. It removes
 local lists and household setup, including unsynced changes, and selects a
 fresh secret namespace. Other devices keep their copies. **Cancel** keeps
 the current household open.
+
+A member without an application device description is treated as partial.
+Full and partial members have the same SDK grants; only an explicit full
+description enables automatic sharing of every list.
 
 The Sync and Devices tabs show **Live** per peer while its authenticated link is
 open. The top badge shows **Live** whenever any link is open, using the existing

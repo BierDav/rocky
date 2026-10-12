@@ -7,3 +7,4 @@ project=${ROCKY_SHOPPING_PROJECT:-$app}
 ./kotlin run --project-dir "$project" -m requiredSchema
 ./kotlin test --project-dir "$project" -p jvm -p android -m shared
 ./kotlin build --project-dir "$project" -m desktopApp
+./kotlin build --project-dir "$project" -m androidApp

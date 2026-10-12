@@ -5,7 +5,11 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.ShoppingSchema
 import org.example.examples.shopping.data.db.list
@@ -21,6 +25,7 @@ import rocky.PeerTransport
 import rocky.ReadinessState
 import rocky.RockyDatabase
 import rocky.RockyEvent
+import rocky.query
 import rocky.room.buildOnRocky
 import java.io.File
 import java.nio.file.Files
@@ -37,14 +42,74 @@ class HouseholdTest {
     private suspend fun ShoppingNode.titles(list: Long) = repository.observe(list).first().map { it.title }.sorted()
 
     /** Waits until [list] reads [titles] here; its rows may arrive before it is held. */
-    private suspend fun ShoppingNode.awaitTitles(list: Long, vararg titles: String) = withTimeout(60_000) {
-        repository.observe(list).first { rows -> rows.map { it.title }.sorted() == titles.toList() }
+    private suspend fun ShoppingNode.awaitTitles(list: Long, vararg titles: String, issuer: ShoppingNode? = null) = coroutineScope {
+        val events = ArrayDeque<RockyEvent>()
+        var observed = emptyList<String>()
+        val recording = launch(start = CoroutineStart.UNDISPATCHED) {
+            rocky.activity().collect {
+                if (events.size == 128) events.removeFirst()
+                events.addLast(it)
+            }
+        }
+        try {
+            withTimeout(60_000) {
+                repository.observe(list).onEach { observed = it.map { row -> row.title }.sorted() }
+                    .first { rows -> rows.map { it.title }.sorted() == titles.toList() }
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            withContext(NonCancellable) {
+                runCatching {
+                    withTimeout(2_000) {
+                        println("list=$list expected=${titles.toList()} observed=$observed node=$self")
+                        println("network=${rocky.network()}")
+                        println("holding=${rocky.list(list).status()}")
+                        println("activity=${events.toList()}")
+                        val parameter = buildJsonObject {
+                            put("type", "integer")
+                            put("value", list)
+                        }
+                        println("rows=${runCatching { rocky.read(query("SELECT title FROM items WHERE list = ? ORDER BY title", JsonArray(listOf(parameter)))) }}")
+                        if (issuer != null) {
+                            println("issuer network=${issuer.rocky.network()}")
+                            println("issuer devices=${issuer.rocky.devices().map { it.node to it.label?.decodeToString() }}")
+                            println("issuer holding=${issuer.rocky.list(list).status()}")
+                            println("issuer rows=${issuer.rocky.read(query("SELECT title FROM items WHERE list = ? ORDER BY title", JsonArray(listOf(parameter))))}")
+                        }
+                    }
+                }.onFailure { println("delivery diagnostics failed: $it") }
+            }
+            throw timeout
+        } finally {
+            recording.cancelAndJoin()
+        }
     }
     private suspend fun ShoppingNode.holds(list: Long) = rocky.list(list).status().isKeyed
 
     /** The household records an enrollment asynchronously, using its single pending invitation. */
     private suspend fun ShoppingNode.awaitEnrollment(node: ShoppingNode, name: String, kind: NodeKind) = withTimeout(30_000) {
         household.devices().first { devices -> devices.any { it.node == node.self && it.name == name && it.kind == kind.name.lowercase() } }
+    }
+
+    @Test fun `an undescribed member cannot receive every list from its grant profile`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-undescribed-member").toFile()
+        val transport = { PeerTransport.Tcp("127.0.0.1:0") }
+        val issuer = RockyDatabase.create(File(root, "issuer"), ShoppingSchema, transport(), automaticSync = false)
+        val room = Room.databaseBuilder<ShoppingDatabase>(File(root, "room").path).buildOnRocky(issuer)
+        var member: RockyDatabase? = null
+        try {
+            assertEquals(NodeKind.Full.profile, NodeKind.Partial.profile)
+            member = RockyDatabase.join(File(root, "member"), ShoppingSchema, issuer.pairing(NodeKind.Partial.profile).uri, transport(), automaticSync = false)
+            val node = member.session().node
+            val household = Household(room.room, issuer, issuer.session().node)
+            assertEquals("partial", household.devices().first().single { it.node == node }.kind)
+            household.record(node, "Explicit full", NodeKind.Full)
+            assertEquals("full", household.devices().first().single { it.node == node }.kind)
+        } finally {
+            member?.close()
+            room.close()
+            issuer.close()
+            root.deleteRecursively()
+        }
     }
 
     @Test fun `delayed enrollment events keep each invitation choice and leave the newer code open`() = runBlocking {
@@ -271,7 +336,7 @@ class HouseholdTest {
             val weekly = trusted.repository.createList("Weekly")
             trusted.repository.add(weekly, "Milk")
             // No envelope is copied by hand: sync delivers the key sealed to the full device, which catches up.
-            full.awaitTitles(weekly, "Milk")
+            full.awaitTitles(weekly, "Milk", issuer = trusted)
             // Joining installed its authors: it edits the list it received.
             full.repository.add(weekly, "Bread")
             trusted.awaitTitles(weekly, "Bread", "Milk")
@@ -320,7 +385,7 @@ class HouseholdTest {
             var full = ShoppingNode.join(platform(root, "laptop"), code).also { opened += it }
             val weekly = trusted.repository.createList("Weekly")
             trusted.repository.add(weekly, "Milk")
-            full.awaitTitles(weekly, "Milk")
+            full.awaitTitles(weekly, "Milk", issuer = trusted)
             full.repository.add(weekly, "Eggs")
             trusted.awaitTitles(weekly, "Eggs", "Milk")
             full.close()

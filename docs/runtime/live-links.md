@@ -41,6 +41,10 @@ such as the employees demo; it ignores signals and pushes.
 One registry entry exists per authenticated node. Simultaneous dials retain
 the stream initiated by the lower node key. Replacement cancels old requests;
 a bounded retry uses the surviving link without classifying it as unreachable.
+A requester uses the newly admitted link immediately, including a competing
+inbound short link, instead of waiting for that peer's reconciliation to end.
+Stream I/O failures retain the ordinary retry/backoff; they do not trigger
+credential renewal, which would cancel unrelated active links.
 
 ## Status and lifecycle
 

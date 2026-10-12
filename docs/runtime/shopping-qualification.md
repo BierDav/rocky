@@ -9,9 +9,9 @@ The 2026-10-12 JVM consolidation uses isolated iroh. Household and contact-hando
 classes passed three consecutive complete runs (36 tests), and the full shopping
 check passed all 36 JVM tests and desktop/Android compilation. The three-process
 live-link mesh opened every pair, detected process death and reopened after restart.
-The custody harness passed exclusion/revocation, relink and creator loss, but its
-`gate` scenario still fails with `unexpected end of file` during sync, also when
-run alone. The earlier TCP evidence below does not qualify this current iroh gate.
+The custody harness now passes all four scenarios over isolated iroh, including
+initial catch-up, all nine relayed horizons and long-offline rebootstrap. The
+EOF repair and repeated gate measurements are recorded [below](#evidence).
 The JVM live-link harness exercises SDK lifecycle hooks; it does not measure
 Android activity handling, cellular connectivity, battery cost or radio wake-ups.
 
@@ -110,6 +110,11 @@ and every reference between groups is refused natively and in Kotlin:
 
 ## Defects fixed during qualification
 
+- Live-link custody sync intermittently ended with EOF during initial catch-up
+  and horizon relay. The requester now uses the admitted link immediately;
+  stream I/O failures no longer trigger credential renewal that cancels other
+  active links. Deterministic SDK regressions cover competing short requests and
+  EOF with an available renewal service.
 - A keyless custody peer could not hold a list created after it enrolled, and a
   device syncing with it failed its whole batch as an end of file. Devices now
   offer partition tuples to custody ([decision 0045](../decisions/0045-custody-partition-offers.md)).
@@ -155,6 +160,16 @@ procedures passed on version 6. The earlier passes below describe prior schemas.
 Recorded on 2026-10-09; see the [phase brief](../features_06/10-qualification.md#evidence).
 The custody-only horizon rerun on 2026-10-10 passed the JVM gate in 35.747 s;
 see [Phase 13 evidence](../features_07/13-relayed-horizon-evidence.md).
+
+The 2026-10-12 EOF repair passed all four scenarios over isolated loopback iroh
+with the rebuilt JVM SDK and custody launcher. Three consecutive `gate` runs
+passed in 92.493, 207.148 and 320.622 s, including checkpoint catch-up, all nine
+horizons, long-offline rebootstrap and the member privacy audit. Other scenarios
+passed in 25.858 s (exclusion/revocation), 9.256 s (relink) and 12.982 s
+(creator loss). These runs overlapped a heavily loaded workspace build; they
+qualify behavior, not latency or throughput. Local artifacts are in
+`local/custody-eof-fixed{,-2,-3}/evidence.json`. All three native
+`shopping_release` tests passed as well.
 
 ## Outstanding
 

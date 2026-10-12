@@ -495,6 +495,144 @@ async fn simultaneous_short_syncs_reconcile_after_a_duplicate_stream_ends() -> R
         .await
 }
 
+#[tokio::test]
+async fn simultaneous_short_requests_use_the_admitted_link_before_remote_reconcile_ends()
+-> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            targets(&a, std::slice::from_ref(&b)).await?;
+            targets(&b, std::slice::from_ref(&a)).await?;
+            let ka = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let kb = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
+            let (lower, higher, lower_key, higher_key) = if ka < kb {
+                (&a, &b, ka, kb)
+            } else {
+                (&b, &a, kb, ka)
+            };
+            let low_service = lower.current().ok_or("service")?;
+            let high_service = higher.current().ok_or("service")?;
+            let low_contact = lower.settings.lock().await.peers[&higher_key].clone();
+            let high_contact = higher.settings.lock().await.peers[&lower_key].clone();
+            let (ready, waiting) = tokio::sync::oneshot::channel();
+            let (first, second) = tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(
+                    async {
+                        let handle = lower
+                            .request_link(&*low_service.transport, higher_key, &low_contact)
+                            .await?;
+                        let reconcile = handle.begin_reconcile().await?;
+                        waiting.await?;
+                        reconcile.close().await?;
+                        Ok::<_, Failure>(())
+                    },
+                    async {
+                        let handle = higher
+                            .request_link(&*high_service.transport, lower_key, &high_contact)
+                            .await?;
+                        ready.send(()).map_err(|_| "request ended")?;
+                        Ok::<_, Failure>(handle)
+                    },
+                )
+            })
+            .await?;
+            first?;
+            second?;
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        })
+        .await
+}
+
+/// Ends link handshakes after receiving their hello; renewal remains available.
+struct EofLinks(Arc<dyn Transport>);
+impl Transport for EofLinks {
+    fn kind(&self) -> &str {
+        self.0.kind()
+    }
+    fn address(&self) -> crate::transport::BoxFuture<'_, Result<String, Failure>> {
+        self.0.address()
+    }
+    fn connect<'a>(
+        &'a self,
+        address: &'a str,
+        protocol: Protocol,
+    ) -> crate::transport::BoxFuture<'a, Result<Stream, Failure>> {
+        if protocol != Protocol::Link {
+            return self.0.connect(address, protocol);
+        }
+        Box::pin(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (near, mut far) = tokio::io::duplex(64 * 1024);
+            tokio::task::spawn_local(async move {
+                let length = far.read_u32().await.unwrap() as usize;
+                far.read_exact(&mut vec![0; length]).await.unwrap();
+                far.shutdown().await.unwrap();
+            });
+            Ok(Stream::new(near))
+        })
+    }
+    fn accept(&self) -> crate::transport::BoxFuture<'_, Option<(Protocol, Stream)>> {
+        self.0.accept()
+    }
+    fn close(&self) -> crate::transport::BoxFuture<'_, ()> {
+        self.0.close()
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(frozen(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Reader {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            let authority = b.replica.observe_authority().await;
+            let renewals = hub.protocol_dials("b", "a", Protocol::Renew);
+            let error = b.sync(&EofLinks(transport(&b).await?)).await.unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<Error>(),
+                Some(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+            ));
+            assert!(
+                !authority.has_changed()?,
+                "a failed stream must leave authority intact"
+            );
+            assert_eq!(hub.protocol_dials("b", "a", Protocol::Renew), renewals);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        }))
+        .await
+}
+
 #[tokio::test(start_paused = true)]
 async fn losing_short_sync_cleanup_leaves_the_replacement_link_open() -> Result<(), Failure> {
     tokio::task::LocalSet::new()

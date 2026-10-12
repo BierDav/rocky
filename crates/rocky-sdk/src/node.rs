@@ -2407,9 +2407,15 @@ impl Node {
                     .as_ref()
                     .is_err_and(|error| !error.is::<ServiceError>())
             };
+            // Renewing cannot repair a broken stream and would cancel other active links.
             let renewal_peer = results
                 .iter()
-                .filter(|(_, _, _, result)| failed(result))
+                .filter(|(_, _, _, result)| {
+                    failed(result)
+                        && !result.as_ref().is_err_and(|error| {
+                            matches!(error.downcast_ref::<Error>(), Some(Error::Io(_)))
+                        })
+                })
                 .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))
                 .map(|(peer, _, _, _)| *peer);
             if round == 0
@@ -2685,6 +2691,9 @@ impl Node {
                 }
                 // A refusal, a full link budget included, backs off; nothing else syncs.
                 return Err(error);
+            }
+            if let Some(open) = service.live.handle(peer) {
+                return Ok(open);
             }
         }
         Err(Box::new(rocky_secure::Error::Application(Box::new(

@@ -106,7 +106,11 @@ to later calls. Bytes already returned cannot be taken back.
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
 `rocky.link.v1`; any other version is refused. Every request runs as a
-`NativeSession` on one of the link's request channels. A frame's signed header names its author's credential chain by
+`NativeSession` on one of the link's request channels. Each session message is
+signed under `rocky.native-frame.v2` over the digest of the session binding,
+its sequence and the digest of its body, so signing hashes the same few bytes
+however large the message is. A peer without a coordinator answers command
+requests with a refusal and keeps the session. A frame's signed header names its author's credential chain by
 digest. A channel carries each distinct chain once, in a message of its own
 before the first page whose frames name it; later pages of the channel send
 only frames. Each side keeps that table for the channel alone. Sharing the

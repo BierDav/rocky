@@ -25,7 +25,12 @@ pub(super) enum CommandMessage {
     ResultAck {
         states: Vec<(ResourceScope, bool)>,
     },
+    /// The answering peer runs no coordination: it executes no command and
+    /// keeps no results to exchange. The session goes on.
+    Unavailable,
 }
+/// The refusal of a peer without coordination; see `CommandMessage::Unavailable`.
+pub const NO_COORDINATION: &str = "the peer runs no coordination";
 
 impl CommandMessage {
     pub(super) fn scopes(&self) -> Vec<ResourceScope> {
@@ -156,9 +161,10 @@ impl NativeSession {
             scopes: scopes.clone(),
         })
         .await?;
-        let CommandMessage::Result { result, evidence } = self.reply::<CommandMessage>().await?
-        else {
-            return Err(denied("unexpected native result response"));
+        let (result, evidence) = match self.reply::<CommandMessage>().await? {
+            CommandMessage::Result { result, evidence } => (result, evidence),
+            CommandMessage::Unavailable => return Err(denied(NO_COORDINATION)),
+            _ => return Err(denied("unexpected native result response")),
         };
         let Some(result) = result else {
             return Ok(false);

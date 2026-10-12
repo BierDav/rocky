@@ -518,7 +518,7 @@ impl Handle {
             credentials: admission.credentials.clone(),
             peer_chain: admission.peer_chain.clone(),
             chains: Default::default(),
-            signing: frame_signing_head(&binding)?,
+            signing: frame_binding(&binding),
             binding: admission.binding,
             proved: admission.proved.clone(),
             offered: admission.offered.clone(),

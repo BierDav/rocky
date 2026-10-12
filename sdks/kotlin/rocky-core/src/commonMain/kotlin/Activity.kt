@@ -65,6 +65,14 @@ sealed interface RockyEvent {
         val scopes: List<ScopeName>,
     ) : RockyEvent
 
+    /** A sync pushed no history of [scopes] to [peer], which restores them from a checkpoint. Empty once nothing waits. */
+    data class ScopesWaiting(
+        override val sequence: Long,
+        override val atEpochMillis: Long,
+        val peer: String,
+        val scopes: List<ScopeName>,
+    ) : RockyEvent
+
     /** A sync with [peer] moved rows, but pulling confirmed command results failed with [error]; it is retried. Recorded when the error changes. */
     data class ResultsFailed(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
     data class PeerAdded(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
@@ -163,6 +171,13 @@ sealed interface RockyEvent {
                 "peer_unreachable" -> PeerUnreachable(sequence, at, text("peer"), text("error"))
 
                 "scopes_refused" -> ScopesRefused(
+                    sequence,
+                    at,
+                    text("peer"),
+                    event.getValue("scopes").jsonArray.map { ScopeName.of(it.jsonObject) },
+                )
+
+                "scopes_waiting" -> ScopesWaiting(
                     sequence,
                     at,
                     text("peer"),

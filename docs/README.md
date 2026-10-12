@@ -60,6 +60,7 @@ Select the guide for your task rather than reading every document.
 | Configure retention, sync a peer behind the horizon, rebootstrap or audit a file | [Checkpoints, pruning and rebootstrap](runtime/checkpoints.md) |
 | Find why pruning stopped and release a strong request or silent peer | [Retention holds](runtime/retention-holds.md) |
 | The same for `EncryptedReplica` | [Encrypted checkpoints](runtime/encrypted-checkpoints.md) |
+| Import a checkpoint page by page and read rows while it runs | [Importing an encrypted checkpoint](runtime/checkpoint-import.md) |
 | Run full replica nodes, subscribe a device to some scopes, evict one or read remotely | [Full and partial replicas](runtime/replica-roles.md) |
 | Find throughput, read and retention limits and the measured options | [Scaling limits](runtime/scaling-limits.md) |
 | Group writes, receive pages, wait for queue space and read writer counters | [Write concurrency](runtime/write-concurrency.md) |

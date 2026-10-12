@@ -28,7 +28,7 @@ impl<A: RowApplication> Inner<A> {
         let payload = self.row_payload(frame)?;
         let ceiling = Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.public_key,
+            author: operation.header.public_key.into(),
             sequence: operation.header.seq_num,
         };
         for write in writes {
@@ -96,10 +96,11 @@ impl<A: RowApplication> Inner<A> {
                 let mark = marks.iter().find(|mark| mark.author == identity.author());
                 if (carried.is_none() && extension.author != Some(identity.author()))
                     || mark.is_some_and(|mark| {
-                        let signer = carried.map_or(operation.header.public_key, |carried| {
-                            carried.proof.stamp().author
-                        });
-                        mark.signer != signer
+                        let signer = carried
+                            .map_or(operation.header.public_key.into(), |carried| {
+                                carried.proof.stamp().author
+                            });
+                        signer != mark.signer
                             || (carried.is_none()
                                 && identity.sequence() <= mark.sequence
                                 && !(finalized && current.is_some()))
@@ -179,7 +180,7 @@ impl<A: RowApplication> Inner<A> {
                 if proof.stamp() != &ceiling {
                     return Err(denied("birth proof must name its creating frame stamp"));
                 }
-                record.proof = Some(proof.clone());
+                record.proof = Some(proof.stored()?);
             }
             self.release_protection(&mut record, write, &operation)?;
             record.key = Some(change.row);
@@ -228,11 +229,10 @@ impl<A: RowApplication> Inner<A> {
                     scope,
                     &checkpoint::IdentityMark {
                         author: identity.author(),
-                        signer: payload
-                            .carried(&write.change.row)
-                            .map_or(operation.header.public_key, |carried| {
-                                carried.proof.stamp().author
-                            }),
+                        signer: match payload.carried(&write.change.row) {
+                            Some(carried) => carried.proof.stamp().author.key()?,
+                            None => operation.header.public_key,
+                        },
                         sequence: identity.sequence(),
                     },
                 )
@@ -277,6 +277,15 @@ impl<A: RowApplication> Inner<A> {
                 None => None,
             };
             self.protection_stubs(id, &record).await?;
+            // The record names its proof's bindings by digest.
+            if let Some(proof) = payload
+                .carried(&change.row)
+                .map(|carried| &carried.proof)
+                .or_else(|| payload.proof(&change.row))
+                .filter(|_| record.proof.is_some())
+            {
+                self.keep_bindings(proof).await?;
+            }
             let new = encode(&record)?;
             sets.replace(&row, old.as_deref(), &new)?;
             self.conn.execute("INSERT INTO secure_rows VALUES(?,?,?,?) ON CONFLICT(scope,row) DO UPDATE SET fields=excluded.fields,stamp=excluded.stamp", [encode(&change.scope)?, row.to_vec(), new, frame.id()?.as_bytes().to_vec()]).await?;
@@ -354,7 +363,7 @@ pub(super) fn merge_row(
         key: Some(change.row),
         created: Some(Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.public_key,
+            author: operation.header.public_key.into(),
             sequence: operation.header.seq_num,
         }),
     });
@@ -375,7 +384,7 @@ pub(super) fn merge_row(
     } else if !record.deleted {
         let stamp = Stamp {
             clock: operation.header.timestamp,
-            author: operation.header.public_key,
+            author: operation.header.public_key.into(),
             sequence: operation.header.seq_num,
         };
         let after = change
@@ -399,7 +408,7 @@ pub(super) fn merge_row(
     if let Some(carried) = carried
         && change.before.is_none()
     {
-        record.proof = Some(carried.proof.clone());
+        record.proof = Some(carried.proof.stored()?);
         record.created = Some(carried.proof.stamp().clone());
         record.moved_from = carried.moved_from.clone();
     }

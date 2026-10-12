@@ -119,6 +119,9 @@ pub(crate) struct FrontierState {
     pub(crate) frontier: ScopeFrontier,
     pub(crate) signed: Option<Box<rocky_credentials::SignedHorizon>>,
     pub(crate) behind: bool,
+    /// The replying replica imports the scope from a checkpoint and takes
+    /// no history for it meanwhile.
+    pub(crate) importing: bool,
 }
 /// One member's answer in a frontier batch, in request order.
 #[derive(Serialize, Deserialize)]
@@ -1029,6 +1032,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     || inner
                         .horizon_device_behind(frontier.scope, inner.config.node.public_key())
                         .await?,
+                importing: inner.importing(frontier.scope).await?,
             }));
         }
         Ok(replies)

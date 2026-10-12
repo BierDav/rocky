@@ -589,7 +589,7 @@ async fn proof_replay_and_future_stamps_require_the_current_move_contract() {
     let operation = insertion.operation().unwrap();
     let ceiling = crate::replica::Stamp {
         clock: operation.header.timestamp,
-        author: operation.header.public_key,
+        author: operation.header.public_key.into(),
         sequence: operation.header.seq_num,
     };
     let inner = b.inner.lock().await;

@@ -50,6 +50,13 @@ shared yet ([decision 0046](../decisions/0046-per-scope-frontier-refusal.md)).
 It is recorded when that set changes for the peer; an empty list means nothing
 is refused any more.
 
+`ScopesWaiting` (`scopes_waiting`) lists the scopes a sync pushed no history
+of because the peer restores them from a checkpoint: it is
+[importing](checkpoint-import.md#while-a-scope-is-importing) them, or is behind
+this device's pruning horizon. The sync continues with the other scopes. It is
+recorded when that set changes for the peer; an empty list means nothing waits
+any more.
+
 `ResultsFailed` (`results_failed`) carries a peer and an error when a sync moved
 rows but pulling confirmed command results failed, for instance because the
 coordinator no longer verifies a receipt. The pass is retried with the next

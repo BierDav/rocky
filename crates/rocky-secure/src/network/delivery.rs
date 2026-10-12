@@ -196,6 +196,10 @@ impl NativeSession {
                 (Message::Commands(message), Some(coordinator), _) => {
                     self.answer_command(replica, coordinator, message).await?;
                 }
+                // Refused politely: a mixed household keeps its links.
+                (Message::Commands(_), None, _) => {
+                    self.send(CommandMessage::Unavailable).await?;
+                }
                 (Message::Delivery(message), _, _) => {
                     self.answer_delivery(deliveries, message).await?;
                 }

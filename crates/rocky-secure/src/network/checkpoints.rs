@@ -226,6 +226,29 @@ impl NativeSession {
             .ok_or_else(|| denied("the peer offers no checkpoint"))?;
         self.import_within(replica, signed, quota).await
     }
+    /// The checkpoint the peer offers for each scope, in order, with its
+    /// stored rows; `None` where it offers none this replica may import:
+    /// what a bootstrap plans with before it imports anything.
+    pub async fn offered_rows<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+    ) -> Result<Vec<Option<(Commitment, u64)>>, Error> {
+        self.ensure_holding(replica, scopes).await?;
+        let mut offered = Vec::with_capacity(scopes.len());
+        for scope in scopes {
+            offered.push(match self.checkpoint_offer(*scope).await? {
+                Some(signed)
+                    if signed.statement.finalized.is_some()
+                        || !replica.owns_checkpoint_signer(&signed).await =>
+                {
+                    Some((signed.id()?, signed.statement.rows.count))
+                }
+                _ => None,
+            });
+        }
+        Ok(offered)
+    }
     /// The peer's current checkpoint of `scope`, if it offers one.
     async fn checkpoint_offer(
         &mut self,
@@ -275,17 +298,21 @@ impl NativeSession {
                 (None, false)
             }
         };
+        // Whether the page after `after` is already asked for.
+        let mut asked = false;
         while !complete {
-            if self.low(quota) {
-                return Ok(None);
+            if !asked {
+                if self.low(quota) {
+                    return Ok(None);
+                }
+                self.send(CheckpointMessage::CheckpointPull {
+                    scope,
+                    checkpoint,
+                    after,
+                    quota,
+                })
+                .await?;
             }
-            self.send(CheckpointMessage::CheckpointPull {
-                scope,
-                checkpoint,
-                after,
-                quota,
-            })
-            .await?;
             let mut reply = self.reply::<CheckpointMessage>().await?;
             let mut chains = Vec::new();
             // The caller's chain and the executor's, at most.
@@ -308,6 +335,18 @@ impl NativeSession {
             }
             page.chains = chains;
             (after, complete) = (page.next, page.next.is_none());
+            // The peer cuts the next page while this one is verified and
+            // stored: a page costs the slower of the two, not their sum.
+            asked = !complete && !self.low(quota);
+            if asked {
+                self.send(CheckpointMessage::CheckpointPull {
+                    scope,
+                    checkpoint,
+                    after,
+                    quota,
+                })
+                .await?;
+            }
             replica.stage_checkpoint_page(*page).await?;
         }
         let report = replica.finish_rebootstrap(scope).await?;
@@ -321,6 +360,25 @@ impl NativeSession {
                 .await?;
         }
         Ok(Some(report))
+    }
+    /// Serves until the session ends or an answer fails; returns how many
+    /// checkpoint pages the peer asked for.
+    #[cfg(test)]
+    pub(crate) async fn serve_counting_pages<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+    ) -> usize {
+        let mut pages = 0;
+        while let Ok(message) = self.answered().await {
+            pages += usize::from(matches!(
+                message,
+                Message::Checkpoints(CheckpointMessage::CheckpointPull { .. })
+            ));
+            if self.answer(replica, message).await.is_err() {
+                break;
+            }
+        }
+        pages
     }
     /// Starts from a verified checkpoint even when the peer has retained history,
     /// then catches up. Exhausted sessions leave durable import progress.

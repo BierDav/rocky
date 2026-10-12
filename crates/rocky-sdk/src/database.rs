@@ -898,7 +898,12 @@ async fn run(
         )
         .with_service(service),
     );
-    if let Err(error) = node.complete_revocation().await {
+    if let Err(error) = async {
+        node.complete_revocation().await?;
+        node.refresh_importing().await
+    }
+    .await
+    {
         if let Some((transport, true)) = &link {
             transport.close().await;
         }

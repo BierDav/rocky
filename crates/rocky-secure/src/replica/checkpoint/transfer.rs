@@ -75,7 +75,115 @@ struct PagePlain {
     after: Option<Commitment>,
     next: Option<Commitment>,
     rows: Vec<PageRow>,
+    /// Each set of author bindings the rows' proofs name, once. The rows
+    /// are signed and name them by digest, so the sets need no signature.
+    bindings: Vec<serde_bytes::ByteBuf>,
     strong: Option<PageStrong>,
+    /// The checkpoint signer's signature of `page_signing_bytes`: a peer
+    /// relaying the checkpoint can neither alter nor move a page's rows.
+    signature: Signature,
+}
+/// What the checkpoint signer signs of a page: its place and its rows.
+fn page_signing_bytes(
+    checkpoint: Commitment,
+    after: Option<Commitment>,
+    next: Option<Commitment>,
+    rows: &[PageRow],
+) -> Result<Vec<u8>, Error> {
+    let rows = rocky_core::commitment(
+        "rocky.checkpoint-page-rows.v1",
+        &encode(&(checkpoint, after, next, rows))?,
+    );
+    signing_bytes("rocky.checkpoint-page.v1", &rows)
+}
+/// A page opened and checked against its signature, before it is stored.
+struct OpenedPage {
+    rows: Vec<(Commitment, PageRow, Materialized)>,
+    /// The encoded sets of author bindings the rows name, checked.
+    bindings: Vec<Vec<u8>>,
+    next: Option<Commitment>,
+    strong: Option<crate::command::history::StrongState>,
+    signature: Signature,
+    /// The page's rows as a set of their own.
+    delta: Sets,
+}
+/// Opens a page sealed under `key` and verifies it against the staged
+/// checkpoint: binding, order, the signer's signature and, on the first
+/// page, the strong state. Pure computation, run off the replica's thread.
+fn open_page(
+    page: CheckpointPage,
+    key: [u8; 32],
+    signed: &SignedCheckpoint,
+    cursor: Option<Commitment>,
+) -> Result<OpenedPage, Error> {
+    let plain: PagePlain = decode(&page.rows.open(&key)?)?;
+    if plain.checkpoint != page.checkpoint
+        || plain.after != page.after
+        || plain.next != page.next
+        || plain.rows.is_empty() && plain.next.is_some()
+        || plain.rows.len() > STEP_ROWS
+    {
+        return Err(denied("checkpoint page binding mismatch"));
+    }
+    let signing = page_signing_bytes(plain.checkpoint, plain.after, plain.next, &plain.rows)?;
+    if !signed.signer().verify(&signing, &plain.signature) {
+        return Err(denied("checkpoint page signature mismatch"));
+    }
+    // Chains beside the page are verified against the digests the
+    // strong state names before anything is staged.
+    let strong = match (plain.strong, page.after) {
+        (Some(state), None) => {
+            let state = state.attach(&page.chains)?;
+            state.binds(signed)?;
+            Some(state)
+        }
+        (None, Some(_)) if page.chains.is_empty() => None,
+        _ => return Err(denied("checkpoint strong page binding mismatch")),
+    };
+    // A page carries exactly the binding sets its rows name.
+    let mut sets = BTreeMap::new();
+    for set in &plain.bindings {
+        decode::<Vec<rocky_credentials::AuthorBinding>>(set)?;
+        if sets.insert(moves::bindings_digest(set), false).is_some() {
+            return Err(denied("checkpoint page repeats author bindings"));
+        }
+    }
+    let mut delta = Sets::new();
+    let mut last = cursor;
+    let mut rows = Vec::with_capacity(plain.rows.len());
+    for row in plain.rows {
+        let id = row_of(&row.row)?;
+        if last.is_some_and(|last| id <= last) {
+            return Err(denied("checkpoint rows out of order"));
+        }
+        last = Some(id);
+        delta.replace(&id, None, &row.fields)?;
+        let record = decode::<Materialized>(&row.fields)?;
+        if let Some(proof) = &record.proof {
+            *sets
+                .get_mut(&proof.bindings())
+                .ok_or_else(|| denied("checkpoint page lacks a row's author bindings"))? = true;
+        }
+        rows.push((id, row, record));
+    }
+    if plain.next.is_some() && plain.next != last {
+        return Err(denied("checkpoint page binding mismatch"));
+    }
+    if sets.values().any(|named| !named) {
+        return Err(denied("checkpoint page carries unnamed author bindings"));
+    }
+    Ok(OpenedPage {
+        rows,
+        bindings: plain
+            .bindings
+            .into_iter()
+            .map(|set| set.into_vec())
+            .collect(),
+        next: plain.next,
+        strong,
+        signature: plain.signature,
+        delta,
+    })
 }
 /// A scope's strong state as the first page carries it: the latest command
 /// names its chains by digest, and the importer supplies the checkpoint.
@@ -149,6 +257,9 @@ pub(super) struct Staging {
     cursor: Option<Commitment>,
     complete: bool,
     pub(super) sets: Sets,
+    /// The scope held nothing when the import began: verified pages go
+    /// straight into its stored rows and projection.
+    pub(super) direct: bool,
 }
 
 impl<A: RowApplication> Inner<A> {
@@ -169,7 +280,7 @@ impl<A: RowApplication> Inner<A> {
         let mut result = self
             .conn
             .query(
-                "SELECT signed,cursor,complete,sets FROM secure_rebootstrap WHERE scope=?",
+                "SELECT signed,cursor,complete,sets,direct FROM secure_rebootstrap WHERE scope=?",
                 [id],
             )
             .await?;
@@ -184,7 +295,350 @@ impl<A: RowApplication> Inner<A> {
             },
             complete: row.get::<i64>(2)? == 1,
             sets: Sets::from_bytes(&row.get::<Vec<u8>>(3)?)?,
+            direct: row.get::<i64>(4)? == 1,
         }))
+    }
+    /// Whether the scope is being imported from a checkpoint: a staged
+    /// import, or the owner's intent while the scope holds no rows yet. A
+    /// scope that holds rows keeps syncing history until its import begins.
+    pub(crate) async fn importing(&self, scope: ResourceScope) -> Result<bool, Error> {
+        let Some(id) = self.find_scope_id(scope).await? else {
+            return Ok(self.importing.contains(&scope));
+        };
+        if self.importing.contains(&scope) {
+            let mut held = self
+                .conn
+                .query(
+                    "SELECT 1 FROM secure_rows WHERE scope=? LIMIT 1",
+                    [encode(&scope)?],
+                )
+                .await?;
+            if held.next().await?.is_none() {
+                return Ok(true);
+            }
+        }
+        let mut staged = self
+            .conn
+            .query("SELECT 1 FROM secure_rebootstrap WHERE scope=?", [id])
+            .await?;
+        Ok(staged.next().await?.is_some())
+    }
+    /// The key and staged import a page must match, before it is opened.
+    async fn expected_page(&self, page: &CheckpointPage) -> Result<([u8; 32], Staging), Error> {
+        let scope = page.scope;
+        let (_, key) = self.scope_key(scope)?;
+        let id = self
+            .find_scope_id(scope)
+            .await?
+            .ok_or_else(|| denied("no rebootstrap in progress"))?;
+        let staging = self
+            .staging(id)
+            .await?
+            .ok_or_else(|| denied("no rebootstrap in progress"))?;
+        if staging.signed.id()? != page.checkpoint
+            || staging.complete
+            || staging.cursor != page.after
+            || page.rows.scope != scope
+            || page.rows.kind != PackageKind::Checkpoint
+            || page.rows.generation != staging.signed.statement.key_epoch
+        {
+            return Err(denied("unexpected checkpoint page"));
+        }
+        Ok((key, staging))
+    }
+    /// Stores one opened page in the caller's transaction: staged for the
+    /// switch, or for a direct import stored and projected.
+    async fn store_page(
+        &mut self,
+        scope: ResourceScope,
+        id: i64,
+        staging: &Staging,
+        page: &OpenedPage,
+        after: Option<Commitment>,
+    ) -> Result<(), Error> {
+        let statement = &staging.signed.statement;
+        if let Some(state) = &page.strong {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_rebootstrap_strong VALUES(?,?)",
+                    bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(state)?)]),
+                )
+                .await?;
+        }
+        for set in &page.bindings {
+            self.put_bindings(set).await?;
+        }
+        let mut sets = staging.sets.clone();
+        sets.merge_rows(&page.delta);
+        let blob = encode(&scope)?;
+        for (row, PageRow { fields, clock, .. }, record) in &page.rows {
+            // A row moved out leaves a tombstone without an image.
+            if let Some(tuple) = &statement.partition
+                && !(record.deleted && record.fields.is_empty())
+            {
+                let change = RowChange {
+                    scope,
+                    row: record
+                        .key
+                        .ok_or_else(|| denied("partition checkpoint row lacks key"))?,
+                    before: None,
+                    after: Some(record.fields.clone()),
+                };
+                if self
+                    .app
+                    .row_partition(&change)
+                    .map_err(|error| denied(&error))?
+                    .as_ref()
+                    != Some(tuple)
+                {
+                    return Err(denied("checkpoint row differs from its partition"));
+                }
+            }
+            if let Some(identity) = record.identity {
+                let identity = rocky_core::RowIdentity::from_integer(identity)
+                    .map_err(|error| denied(&error.to_string()))?;
+                if !statement.identities.iter().any(|mark| {
+                    mark.author == identity.author() && mark.sequence >= identity.sequence()
+                }) {
+                    return Err(denied("checkpoint identity exceeds its permanent mark"));
+                }
+            }
+            if staging.direct {
+                let stored = self
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_rows VALUES(?,?,?,X'') ON CONFLICT(scope,row) DO NOTHING",
+                        bindings(vec![
+                            SqlValue::Blob(blob.clone()),
+                            SqlValue::Blob(row.to_vec()),
+                            SqlValue::Blob(fields.clone()),
+                        ]),
+                    )
+                    .await?;
+                // A local write cannot name a row it never saw.
+                if stored == 0 {
+                    return Err(Error::Corrupt(
+                        "a checkpoint row is already stored during its import".into(),
+                    ));
+                }
+                self.index_row_key(&blob, row, record).await?;
+                self.protection_stubs(id, record).await?;
+                // Every stored row's creation stays known, as after the switch.
+                self.put_stub(record.creation, id, *clock, true).await?;
+            }
+            self.conn
+                .execute(
+                    match staging.direct {
+                        true => "INSERT INTO secure_checkpoint_rows VALUES(?,?,?)",
+                        false => "INSERT INTO secure_rebootstrap_rows VALUES(?,?,?)",
+                    },
+                    bindings(vec![
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(row.to_vec()),
+                        SqlValue::Blob(fields.clone()),
+                    ]),
+                )
+                .await?;
+            let creation = record.creation;
+            let known = collect_rows(
+                self.conn
+                    .query(
+                        "SELECT clock FROM secure_rebootstrap_stubs WHERE scope=? AND hash=?",
+                        bindings(vec![
+                            SqlValue::Integer(id),
+                            SqlValue::Blob(creation.as_bytes().to_vec()),
+                        ]),
+                    )
+                    .await?,
+            )
+            .await?;
+            match known.first().map(Vec::as_slice) {
+                Some([SqlValue::Integer(known)]) if *known as u64 == *clock => {}
+                Some(_) => return Err(denied("checkpoint creation clocks disagree")),
+                None => {
+                    sets.create(creation, *clock);
+                    self.conn
+                        .execute(
+                            "INSERT INTO secure_rebootstrap_stubs VALUES(?,?,?)",
+                            bindings(vec![
+                                SqlValue::Integer(id),
+                                SqlValue::Blob(creation.as_bytes().to_vec()),
+                                SqlValue::Integer(*clock as i64),
+                            ]),
+                        )
+                        .await?;
+                }
+            }
+        }
+        if staging.direct {
+            // The scope's digest keeps following its stored rows.
+            let (rows, tombstones, mut digest, applied) = self.scope_state(id).await?;
+            digest.merge(&page.delta.digest);
+            self.store_scope_state(
+                id,
+                rows + page.delta.rows,
+                tombstones + page.delta.tombstones,
+                &digest,
+                applied,
+            )
+            .await?;
+            for (_, _, record) in &page.rows {
+                self.project(scope, None, record).await?;
+            }
+            Box::pin(self.resolve(None)).await?;
+            self.cause(crate::observe::Cause::Sync);
+            self.conn
+                .execute(
+                    "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                    (),
+                )
+                .await?;
+        }
+        let cursor = page.rows.last().map(|(row, ..)| *row).or(staging.cursor);
+        let row = |row: Option<Commitment>| {
+            row.map_or(SqlValue::Null, |row| SqlValue::Blob(row.to_vec()))
+        };
+        self.conn
+            .execute(
+                "INSERT INTO secure_rebootstrap_pages VALUES(?,?,?,?)",
+                bindings(vec![
+                    SqlValue::Integer(id),
+                    SqlValue::Blob(after.map(|row| row.to_vec()).unwrap_or_default()),
+                    row(page.next),
+                    SqlValue::Blob(page.signature.to_bytes().to_vec()),
+                ]),
+            )
+            .await?;
+        self.conn
+            .execute(
+                "UPDATE secure_rebootstrap SET cursor=?,complete=?,sets=? WHERE scope=?",
+                bindings(vec![
+                    row(cursor),
+                    SqlValue::Integer(i64::from(page.next.is_none())),
+                    SqlValue::Blob(sets.to_bytes()),
+                    SqlValue::Integer(id),
+                ]),
+            )
+            .await?;
+        self.fault(Stage::Import)?;
+        Ok(())
+    }
+    /// The key that signed `signed`, when this replica holds it.
+    fn checkpoint_key(&self, signed: &SignedCheckpoint) -> Option<PrivateKey> {
+        let signer = signed.signer();
+        self.row_authors
+            .get(&signed.statement.scope.table)
+            .map(|author| &author.key)
+            .into_iter()
+            .chain(self.credential_signer.as_ref())
+            .chain([&self.config.node])
+            .find(|key| key.public_key() == signer)
+            .cloned()
+    }
+    /// Whether operations of the scope were applied.
+    async fn applied_any(&self, id: i64) -> Result<bool, Error> {
+        let mut applied = self
+            .conn
+            .query("SELECT 1 FROM secure_applied WHERE scope=? LIMIT 1", [id])
+            .await?;
+        Ok(applied.next().await?.is_some())
+    }
+    /// Whether the scope holds stored rows, a checkpoint or applied
+    /// operations: an import then stages its pages and switches at the end.
+    async fn holds_anything(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
+        let held = collect_rows(
+            self.conn
+                .query(
+                    "SELECT EXISTS(SELECT 1 FROM secure_rows WHERE scope=?) OR EXISTS(SELECT 1 FROM secure_checkpoints WHERE scope=?2) OR EXISTS(SELECT 1 FROM secure_applied WHERE scope=?2)",
+                    bindings(vec![SqlValue::Blob(encode(&scope)?), SqlValue::Integer(id)]),
+                )
+                .await?,
+        )
+        .await?;
+        Ok(held != vec![vec![SqlValue::Integer(0)]])
+    }
+    /// Undoes a direct import's rows so the scope holds nothing again.
+    /// Operations applied over them wait to apply after the next import.
+    async fn abort_direct(&mut self, scope: ResourceScope, id: i64) -> Result<(), Error> {
+        let blob = encode(&scope)?;
+        self.conn
+            .execute(
+                "UPDATE secure_operations SET status='pending' WHERE hash IN(SELECT hash FROM secure_applied WHERE scope=?)",
+                [id],
+            )
+            .await?;
+        for sql in [
+            "DELETE FROM secure_rows WHERE scope=?",
+            "DELETE FROM secure_move_rows WHERE scope=?",
+        ] {
+            self.conn.execute(sql, [blob.clone()]).await?;
+        }
+        for sql in [
+            "DELETE FROM secure_applied WHERE scope=?",
+            "DELETE FROM secure_logs WHERE scope=?",
+            "DELETE FROM secure_checkpoint_rows WHERE scope=?",
+            "DELETE FROM secure_stubs WHERE scope=?",
+        ] {
+            self.conn.execute(sql, [id]).await?;
+        }
+        self.store_scope_state(id, 0, 0, &Lt::new(), 0).await?;
+        self.reproject(scope).await?;
+        self.clear_staging(id).await
+    }
+    /// Reads which scopes a direct import is filling, after a commit that
+    /// began or ended one.
+    pub(in crate::replica) async fn load_direct(&mut self) -> Result<(), Error> {
+        let mut direct = BTreeSet::new();
+        for record in collect_rows(
+            self.conn
+                .query(
+                    "SELECT s.scope FROM secure_rebootstrap b JOIN secure_scope_state s ON s.id=b.scope WHERE b.direct=1",
+                    (),
+                )
+                .await?,
+        )
+        .await?
+        {
+            let [SqlValue::Blob(scope)] = record.as_slice() else {
+                return Err(Error::Corrupt("direct import scope".into()));
+            };
+            direct.insert(decode(scope)?);
+        }
+        self.direct = direct;
+        Ok(())
+    }
+    /// The end and signature of the imported checkpoint's page after `after`.
+    async fn page_record(
+        &self,
+        id: i64,
+        after: Option<Commitment>,
+    ) -> Result<Option<(Option<Commitment>, Signature)>, Error> {
+        let record = collect_rows(
+            self.conn
+                .query(
+                    "SELECT next,signature FROM secure_checkpoint_pages WHERE scope=? AND after=?",
+                    bindings(vec![
+                        SqlValue::Integer(id),
+                        SqlValue::Blob(after.map(|row| row.to_vec()).unwrap_or_default()),
+                    ]),
+                )
+                .await?,
+        )
+        .await?;
+        match record.first().map(Vec::as_slice) {
+            None => Ok(None),
+            Some([next, SqlValue::Blob(signature)]) => {
+                let next = match next {
+                    SqlValue::Blob(next) => Some(row_of(next)?),
+                    SqlValue::Null => None,
+                    _ => return Err(Error::Corrupt("checkpoint page record".into())),
+                };
+                let signature = Signature::try_from(signature.as_slice())
+                    .map_err(|_| Error::Corrupt("checkpoint page signature".into()))?;
+                Ok(Some((next, signature)))
+            }
+            Some(_) => Err(Error::Corrupt("checkpoint page record".into())),
+        }
     }
     async fn clear_staging(&self, id: i64) -> Result<(), Error> {
         for table in [
@@ -192,6 +646,7 @@ impl<A: RowApplication> Inner<A> {
             "secure_rebootstrap_rows",
             "secure_rebootstrap_stubs",
             "secure_rebootstrap_strong",
+            "secure_rebootstrap_pages",
         ] {
             self.conn
                 .execute(format!("DELETE FROM {table} WHERE scope=?"), [id])
@@ -349,6 +804,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
                 return Ok(None);
             }
+            // A scope still being imported has nothing whole to offer.
+            if inner.importing(scope).await? {
+                return Ok(None);
+            }
             let time = now()?;
             // A keyless holder serves only complete, verified sealed archives.
             if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {
@@ -498,14 +957,29 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("byte quota smaller than checkpoint strong state"));
         }
         let budget = budget - strong_bytes;
+        // The signer cuts and signs its own checkpoint's pages; a holder of
+        // an imported one serves the pages its signer cut and signed.
+        let signer = inner.checkpoint_key(&signed);
+        let stored = match signer {
+            Some(_) => None,
+            None => Some(
+                inner
+                    .page_record(id, after)
+                    .await?
+                    .ok_or_else(|| denied("checkpoint page unavailable"))?,
+            ),
+        };
+        let through = stored.as_ref().and_then(|(next, _)| *next);
         let records = collect_rows(
             inner
                 .conn
                 .query(
-                    "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? ORDER BY row LIMIT ?",
+                    "SELECT row,fields FROM secure_checkpoint_rows WHERE scope=? AND row>? AND (? IS NULL OR row<=?) ORDER BY row LIMIT ?",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(after.map(|row| row.to_vec()).unwrap_or_default()),
+                        through.map_or(SqlValue::Null, |row| SqlValue::Blob(row.to_vec())),
+                        through.map_or(SqlValue::Null, |row| SqlValue::Blob(row.to_vec())),
                         SqlValue::Integer(STEP_ROWS as i64 + 1),
                     ]),
                 )
@@ -517,15 +991,33 @@ impl<A: RowApplication> EncryptedReplica<A> {
             after,
             next: None,
             rows: vec![],
+            bindings: vec![],
             strong,
+            signature: Signature::from_bytes(&[0; 64]),
         };
+        let mut named = BTreeSet::new();
         let mut used = 0;
         for record in &records {
             let [SqlValue::Blob(row), SqlValue::Blob(fields)] = record.as_slice() else {
                 return Err(Error::Corrupt("checkpoint row".into()));
             };
-            let weight = ROW_OVERHEAD + fields.len();
+            let record = decode::<Materialized>(fields)?;
+            // A row's bindings weigh on the page that first names them.
+            let set = match record.proof.as_ref().map(|proof| proof.bindings()) {
+                Some(digest) if !named.contains(&digest) => {
+                    Some((digest, inner.stored_bindings(digest).await?))
+                }
+                _ => None,
+            };
+            let weight = ROW_OVERHEAD
+                + fields.len()
+                + set.as_ref().map_or(0, |(_, set)| ROW_OVERHEAD + set.len());
             if plain.rows.len() == STEP_ROWS || used + weight > budget {
+                if stored.is_some() {
+                    return Err(Error::Corrupt(
+                        "checkpoint page exceeds its signed cut".into(),
+                    ));
+                }
                 plain.next = plain
                     .rows
                     .last()
@@ -534,9 +1026,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 break;
             }
             used += weight;
-            let creation = decode::<Materialized>(fields)?.creation;
+            if let Some((digest, set)) = set {
+                named.insert(digest);
+                plain.bindings.push(serde_bytes::ByteBuf::from(set));
+            }
             let (_, clock) = inner
-                .stub(creation)
+                .stub(record.creation)
                 .await?
                 .ok_or_else(|| Error::Corrupt("checkpoint row creation is unknown".into()))?;
             row_of(row)?;
@@ -549,6 +1044,29 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if plain.rows.is_empty() && !records.is_empty() {
             return Err(denied("byte quota smaller than one checkpoint row"));
         }
+        plain.signature = match (signer, stored) {
+            (Some(signer), _) => signer.sign(&page_signing_bytes(
+                checkpoint,
+                after,
+                plain.next,
+                &plain.rows,
+            )?),
+            (None, Some((next, signature))) => {
+                let last = plain
+                    .rows
+                    .last()
+                    .map(|last| row_of(&last.row))
+                    .transpose()?;
+                if next.is_some() && last != next {
+                    return Err(Error::Corrupt(
+                        "checkpoint rows differ from their signed cut".into(),
+                    ));
+                }
+                plain.next = next;
+                signature
+            }
+            (None, None) => return Err(denied("checkpoint page unavailable")),
+        };
         let page = CheckpointPage {
             scope,
             checkpoint,
@@ -609,20 +1127,30 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
             }
+            if inner
+                .staging(id)
+                .await?
+                .is_some_and(|staging| staging.direct)
+            {
+                inner.abort_direct(scope, id).await?;
+            }
             inner.clear_staging(id).await?;
+            let direct = !inner.holds_anything(scope, id).await?;
             inner
                 .conn
                 .execute(
-                    "INSERT INTO secure_rebootstrap VALUES(?,?,NULL,0,?)",
+                    "INSERT INTO secure_rebootstrap VALUES(?,?,NULL,0,?,?)",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Blob(bytes.clone()),
                         SqlValue::Blob(Sets::new().to_bytes()),
+                        SqlValue::Integer(i64::from(direct)),
                     ]),
                 )
                 .await?;
             Ok(())
-        })
+        })?;
+        inner.load_direct().await
     }
     /// The checkpoint being imported for a scope, the last row staged and
     /// whether every page arrived.
@@ -643,11 +1171,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None => Ok(None),
         }
     }
-    /// Stages the next page of checkpoint rows; pages arrive in order.
+    /// Imports the next page of checkpoint rows; pages arrive in order.
+    /// The page is opened and verified against its signer off the
+    /// replica's thread. A direct import writes the rows into the scope and
+    /// its projection, readable once the page commits; otherwise they are
+    /// staged for the switch.
     pub async fn stage_checkpoint_page(&self, page: CheckpointPage) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
         let scope = page.scope;
-        let (_, key) = inner.scope_key(scope)?;
+        let (checkpoint, after) = (page.checkpoint, page.after);
+        let (key, signed, cursor) = {
+            let inner = self.inner.lock().await;
+            let (key, staging) = inner.expected_page(&page).await?;
+            (key, staging.signed, staging.cursor)
+        };
+        let opened = tokio::task::spawn_blocking(move || open_page(page, key, &signed, cursor))
+            .await
+            .map_err(|_| Error::Closed)??;
+        let mut inner = self.inner.lock().await;
         let id = inner
             .find_scope_id(scope)
             .await?
@@ -656,145 +1196,41 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .staging(id)
             .await?
             .ok_or_else(|| denied("no rebootstrap in progress"))?;
-        if staging.signed.id()? != page.checkpoint
-            || staging.complete
-            || staging.cursor != page.after
-            || page.rows.scope != scope
-            || page.rows.kind != PackageKind::Checkpoint
-            || page.rows.generation != staging.signed.statement.key_epoch
-        {
+        // Another import may have taken the page meanwhile.
+        if staging.signed.id()? != checkpoint || staging.complete || staging.cursor != after {
             return Err(denied("unexpected checkpoint page"));
         }
-        let plain: PagePlain = decode(&page.rows.open(&key)?)?;
-        if plain.checkpoint != page.checkpoint
-            || plain.after != page.after
-            || plain.next != page.next
-            || plain.rows.is_empty() && plain.next.is_some()
-            || plain.rows.len() > STEP_ROWS
-        {
-            return Err(denied("checkpoint page binding mismatch"));
-        }
-        // Chains beside the page are verified against the digests the
-        // strong state names before anything is staged.
-        let strong = match (plain.strong, page.after) {
-            (Some(state), None) => {
-                let state = state.attach(&page.chains)?;
-                state.binds(&staging.signed)?;
-                Some(state)
-            }
-            (None, Some(_)) if page.chains.is_empty() => None,
-            _ => return Err(denied("checkpoint strong page binding mismatch")),
-        };
         transaction!(inner, |inner| {
-            if let Some(state) = &strong {
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_rebootstrap_strong VALUES(?,?)",
-                        bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(state)?)]),
-                    )
-                    .await?;
-            }
-            let mut sets = staging.sets.clone();
-            let mut cursor = staging.cursor;
-            for PageRow { row, fields, clock } in &plain.rows {
-                let row = &row_of(row)?;
-                if cursor.is_some_and(|cursor| *row <= cursor) {
-                    return Err(denied("checkpoint rows out of order"));
-                }
-                cursor = Some(*row);
-                sets.replace(row, None, fields)?;
-                let record = decode::<Materialized>(fields)?;
-                // A row moved out leaves a tombstone without an image.
-                if let Some(tuple) = &staging.signed.statement.partition
-                    && !(record.deleted && record.fields.is_empty())
-                {
-                    let change = RowChange {
-                        scope: staging.signed.statement.scope,
-                        row: record
-                            .key
-                            .ok_or_else(|| denied("partition checkpoint row lacks key"))?,
-                        before: None,
-                        after: Some(record.fields.clone()),
-                    };
-                    if inner
-                        .app
-                        .row_partition(&change)
-                        .map_err(|error| denied(&error))?
-                        .as_ref()
-                        != Some(tuple)
-                    {
-                        return Err(denied("checkpoint row differs from its partition"));
-                    }
-                }
-
-                if let Some(identity) = record.identity {
-                    let identity = rocky_core::RowIdentity::from_integer(identity)
-                        .map_err(|error| denied(&error.to_string()))?;
-                    if !staging.signed.statement.identities.iter().any(|mark| {
-                        mark.author == identity.author() && mark.sequence >= identity.sequence()
-                    }) {
-                        return Err(denied("checkpoint identity exceeds its permanent mark"));
-                    }
-                }
-                let creation = record.creation;
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_rebootstrap_rows VALUES(?,?,?)",
-                        bindings(vec![
-                            SqlValue::Integer(id),
-                            SqlValue::Blob(row.to_vec()),
-                            SqlValue::Blob(fields.clone()),
-                        ]),
-                    )
-                    .await?;
-                let known = collect_rows(
-                    inner
-                        .conn
-                        .query(
-                            "SELECT clock FROM secure_rebootstrap_stubs WHERE scope=? AND hash=?",
-                            bindings(vec![
-                                SqlValue::Integer(id),
-                                SqlValue::Blob(creation.as_bytes().to_vec()),
-                            ]),
-                        )
-                        .await?,
-                )
-                .await?;
-                match known.first().map(Vec::as_slice) {
-                    Some([SqlValue::Integer(known)]) if *known as u64 == *clock => {}
-                    Some(_) => return Err(denied("checkpoint creation clocks disagree")),
-                    None => {
-                        sets.create(creation, *clock);
-                        inner
-                            .conn
-                            .execute(
-                                "INSERT INTO secure_rebootstrap_stubs VALUES(?,?,?)",
-                                bindings(vec![
-                                    SqlValue::Integer(id),
-                                    SqlValue::Blob(creation.as_bytes().to_vec()),
-                                    SqlValue::Integer(*clock as i64),
-                                ]),
-                            )
-                            .await?;
-                    }
-                }
-            }
-            inner
-                .conn
-                .execute(
-                    "UPDATE secure_rebootstrap SET cursor=?,complete=?,sets=? WHERE scope=?",
-                    bindings(vec![
-                        cursor.map_or(SqlValue::Null, |row| SqlValue::Blob(row.to_vec())),
-                        SqlValue::Integer(i64::from(plain.next.is_none())),
-                        SqlValue::Blob(sets.to_bytes()),
-                        SqlValue::Integer(id),
-                    ]),
-                )
-                .await?;
-            inner.fault(Stage::Import)?;
-            Ok(())
+            inner.store_page(scope, id, &staging, &opened, after).await
+        })?;
+        if staging.direct {
+            inner.publish_revision().await?;
+        }
+        inner.imported.send_modify(|pages| *pages += 1);
+        Ok(())
+    }
+    /// The stored rows of `checkpoint` this replica has imported: all of
+    /// them once it switched to it.
+    pub async fn imported_rows(
+        &self,
+        scope: ResourceScope,
+        checkpoint: Commitment,
+    ) -> Result<u64, Error> {
+        let inner = self.inner.lock().await;
+        let Some(id) = inner.find_scope_id(scope).await? else {
+            return Ok(0);
+        };
+        if let Some(staging) = inner.staging(id).await?
+            && staging.signed.id()? == checkpoint
+        {
+            return Ok(staging.sets.rows);
+        }
+        Ok(match inner.checkpoint_record(id, true).await? {
+            Some(Record {
+                signed: Some(signed),
+                ..
+            }) if signed.id()? == checkpoint => signed.statement.rows.count,
+            _ => 0,
         })
     }
     /// Verifies the staged rows against the signed checkpoint, then switches
@@ -820,21 +1256,33 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("checkpoint rows are incomplete"));
         }
         let signed = staging.signed;
+        let direct = staging.direct;
         signed.verify_authority(&inner, time)?;
         let statement = signed.statement.clone();
-        if inner.rebootstrap_moves(id).await? != statement.moves
+        let moves = match direct {
+            true => inner.imported_moves(id).await?,
+            false => inner.rebootstrap_moves(id).await?,
+        };
+        if moves != statement.moves
             || staging.sets.rows_summary() != statement.rows
             || staging.sets.tombstones != statement.tombstones
             || staging.sets.creations_summary() != statement.creations
             || generation != statement.key_epoch
         {
-            // Unverifiable rows are discarded; the scope is untouched.
-            transaction!(inner, |inner| inner.clear_staging(id).await)?;
+            // Unverifiable rows are discarded; a direct import's are undone.
+            transaction!(inner, |inner| match direct {
+                true => inner.abort_direct(scope, id).await,
+                false => inner.clear_staging(id).await,
+            })?;
+            inner.load_direct().await?;
+            inner.publish_revision().await?;
             return Err(Error::Corrupt(
                 "checkpoint rows differ from the signed checkpoint".into(),
             ));
         }
         let sets = staging.sets;
+        // Operations applied again at the switch must not wait on the import.
+        inner.direct.remove(&scope);
         let report = transaction!(inner, |inner| {
             inner.check_frontier(id, &signed).await?;
             if let Some(horizon) = &signed.statement.horizon {
@@ -853,19 +1301,28 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 rejected: vec![],
                 pending: vec![],
             };
+            // A direct import's rows and projection are in place, unless a
+            // local write applied over them: then they are restored and
+            // the write applies again.
+            let rewrite = !direct || inner.applied_any(id).await?;
             let reapply = inner.supersede(scope, &statement, &mut report).await?;
             let blob = encode(&scope)?;
-            inner
-                .conn
-                .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
-                .await?;
-            inner
-                .conn
-                .execute(
-                    "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
-                    bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
-                )
-                .await?;
+            if rewrite {
+                inner
+                    .conn
+                    .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
+                    .await?;
+                inner
+                    .conn
+                    .execute(
+                        match direct {
+                            true => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_checkpoint_rows WHERE scope=?",
+                            false => "INSERT INTO secure_rows SELECT ?,row,fields,X'' FROM secure_rebootstrap_rows WHERE scope=?",
+                        },
+                        bindings(vec![SqlValue::Blob(blob), SqlValue::Integer(id)]),
+                    )
+                    .await?;
+            }
             let permanent = inner.identity_marks(scope).await?;
             inner
                 .conn
@@ -877,25 +1334,40 @@ impl<A: RowApplication> EncryptedReplica<A> {
             for mark in &statement.identities {
                 inner.put_identity_mark(scope, mark).await?;
             }
-            inner.reproject(scope).await?;
+            if rewrite {
+                inner.reproject(scope).await?;
+            }
+            if !direct {
+                for sql in [
+                    "DELETE FROM secure_checkpoint_rows WHERE scope=?",
+                    "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
+                ] {
+                    inner.conn.execute(sql, [id]).await?;
+                }
+            }
+            if rewrite {
+                inner
+                    .conn
+                    .execute("DELETE FROM secure_stubs WHERE scope=?", [id])
+                    .await?;
+            }
             for sql in [
-                "DELETE FROM secure_checkpoint_rows WHERE scope=?",
-                "INSERT INTO secure_checkpoint_rows SELECT scope,row,fields FROM secure_rebootstrap_rows WHERE scope=?",
                 "DELETE FROM secure_checkpoint_overlay WHERE scope=?",
                 "DELETE FROM secure_checkpoint_scratch WHERE scope=?",
-                "DELETE FROM secure_stubs WHERE scope=?",
-                "INSERT INTO secure_stubs SELECT hash,scope,clock,1 FROM secure_rebootstrap_stubs WHERE scope=?",
+                "INSERT INTO secure_stubs SELECT hash,scope,clock,1 FROM secure_rebootstrap_stubs WHERE scope=? ON CONFLICT(hash) DO UPDATE SET creation=1",
                 "DELETE FROM secure_logs WHERE scope=?",
                 "DELETE FROM secure_checkpoints WHERE scope=?",
+                "DELETE FROM secure_checkpoint_stubs WHERE scope=?",
+                "INSERT INTO secure_checkpoint_stubs SELECT * FROM secure_rebootstrap_stubs WHERE scope=?",
+                "DELETE FROM secure_checkpoint_pages WHERE scope=?",
+                "INSERT INTO secure_checkpoint_pages SELECT * FROM secure_rebootstrap_pages WHERE scope=?",
             ] {
                 inner.conn.execute(sql, [id]).await?;
             }
-            inner
-                .conn
-                .execute("DELETE FROM secure_checkpoint_stubs WHERE scope=?", [id])
-                .await?;
-            inner.conn.execute("INSERT INTO secure_checkpoint_stubs SELECT * FROM secure_rebootstrap_stubs WHERE scope=?", [id]).await?;
-            inner.restore_protection_stubs(scope, id).await?;
+            // A direct import kept the release stubs of each page's rows.
+            if rewrite {
+                inner.restore_protection_stubs(scope, id).await?;
+            }
             for log in &statement.frontier {
                 inner
                     .conn
@@ -997,7 +1469,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             inner.fault(Stage::Switch)?;
             Ok(report)
-        })?;
+        });
+        inner.load_direct().await?;
+        let report = report?;
         inner.verified_at.remove(&id);
         inner.publish_revision().await?;
         drop(inner);
@@ -1117,4 +1591,57 @@ impl<A: RowApplication> Inner<A> {
         reapply.sort();
         Ok(reapply.into_iter().map(|(_, hash)| hash).collect())
     }
+}
+
+/// Re-seals a page's rows after `edit`, keeping its binding and signature:
+/// what a reader holding the scope key could forge.
+#[cfg(test)]
+pub(crate) fn forge_page(
+    page: &mut CheckpointPage,
+    key: &[u8; 32],
+    edit: impl FnOnce(&mut Vec<(Vec<u8>, Vec<u8>, u64)>),
+) {
+    let mut plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
+    let mut rows = plain
+        .rows
+        .into_iter()
+        .map(|row| (row.row, row.fields, row.clock))
+        .collect();
+    edit(&mut rows);
+    plain.rows = rows
+        .into_iter()
+        .map(|(row, fields, clock)| PageRow { row, fields, clock })
+        .collect();
+    page.rows = EncryptedPackage::seal(
+        page.rows.scope,
+        page.rows.generation,
+        PackageKind::Checkpoint,
+        key,
+        &encode(&plain).unwrap(),
+    )
+    .unwrap();
+}
+/// Re-seals a page after `edit` of the author bindings beside its rows.
+#[cfg(test)]
+pub(crate) fn forge_page_bindings(
+    page: &mut CheckpointPage,
+    key: &[u8; 32],
+    edit: impl FnOnce(&mut Vec<Vec<u8>>),
+) {
+    let mut plain: PagePlain = decode(&page.rows.open(key).unwrap()).unwrap();
+    let mut sets = plain
+        .bindings
+        .into_iter()
+        .map(|set| set.into_vec())
+        .collect();
+    edit(&mut sets);
+    plain.bindings = sets.into_iter().map(serde_bytes::ByteBuf::from).collect();
+    page.rows = EncryptedPackage::seal(
+        page.rows.scope,
+        page.rows.generation,
+        PackageKind::Checkpoint,
+        key,
+        &encode(&plain).unwrap(),
+    )
+    .unwrap();
 }

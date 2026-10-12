@@ -101,6 +101,9 @@ private fun StatusCard(state: SyncState, now: Long, onOnline: (Boolean) -> Unit,
                 Switch(online, onOnline, Modifier.semantics { contentDescription = "Online" })
             }
             Fact("State", state.readiness?.state?.name?.lowercase() ?: "…")
+            state.readiness?.bootstrap?.let { progress ->
+                Fact("Bootstrap", "${progress.percent}% · ${progress.rowsDone} of ${progress.rowsTotal} rows · ${progress.scopesDone} of ${progress.scopesTotal} scopes")
+            }
             Fact(
                 "Last sync",
                 "${

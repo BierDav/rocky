@@ -773,6 +773,86 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
     assert_eq!(rows(&session, ITEMS).await, visible);
 }
 
+/// A row record names its author's bindings by digest. Each set is stored
+/// once, and a checkpoint page carries exactly the sets its rows name: an
+/// importer refuses any other page and ends up holding the same sets.
+#[tokio::test]
+async fn author_bindings_are_stored_once_and_travel_with_checkpoint_pages() {
+    async fn sets(replica: &EncryptedReplica<TypedRows>) -> Vec<Vec<SqlValue>> {
+        let inner = replica.inner.lock().await;
+        crate::storage::rows(
+            &inner.conn,
+            "SELECT digest,bindings FROM secure_author_bindings ORDER BY digest",
+        )
+        .await
+        .unwrap()
+    }
+    let shop = Shop::new();
+    let dir = TempDir::new().unwrap();
+    let a_node = PrivateKey::new();
+    let a = shop.open(&dir.path().join("a.db"), &a_node, 31).await;
+    let sa = shop.sql(&a).await;
+    for title in ["hardware", "garden", "kitchen"] {
+        commit(
+            &sa,
+            &[(
+                "INSERT INTO lists(title,id) VALUES(?,?id)",
+                vec![text(title)],
+            )],
+        )
+        .await;
+    }
+    let stored = sets(&a).await;
+    assert_eq!(stored.len(), 1, "three rows of one author name one set");
+
+    let fresh_node = PrivateKey::new();
+    let fresh = shop
+        .open(&dir.path().join("fresh.db"), &fresh_node, 33)
+        .await;
+    let signed = a.checkpoint(shop.lists).await.unwrap();
+    fresh.begin_rebootstrap(signed.clone()).await.unwrap();
+    let page = a
+        .checkpoint_page(
+            fresh_node.public_key(),
+            &shop.credentials(&fresh_node),
+            shop.lists,
+            signed.id().unwrap(),
+            None,
+            crate::MAX_SECURE_FRAME,
+        )
+        .await
+        .unwrap();
+    assert!(page.next.is_none());
+    let key = [44; 32];
+    let forge = |edit: fn(&mut Vec<Vec<u8>>)| {
+        let mut forged = page.clone();
+        crate::replica::checkpoint::forge_page_bindings(&mut forged, &key, edit);
+        forged
+    };
+    for forged in [
+        forge(|sets| sets.clear()),
+        forge(|sets| {
+            sets.push(crate::encode(&Vec::<rocky_credentials::AuthorBinding>::new()).unwrap())
+        }),
+        forge(|sets| sets.push(sets[0].clone())),
+        forge(|sets| {
+            sets[0] = crate::encode(&Vec::<rocky_credentials::AuthorBinding>::new()).unwrap()
+        }),
+    ] {
+        assert!(fresh.stage_checkpoint_page(forged).await.is_err());
+        assert!(sets(&fresh).await.is_empty());
+    }
+    fresh.stage_checkpoint_page(page).await.unwrap();
+    fresh.finish_rebootstrap(shop.lists).await.unwrap();
+    assert_eq!(sets(&fresh).await, stored);
+    assert_eq!(
+        rows(&shop.sql(&fresh).await, "SELECT title FROM lists")
+            .await
+            .len(),
+        3
+    );
+}
+
 #[tokio::test]
 async fn equal_unique_stamps_from_different_columns_choose_the_larger_row_id() {
     let shop = Shop::new();

@@ -110,13 +110,13 @@ pub struct Link {
 pub struct Reader {
     stream: ReadHalf<Box<dyn SessionStream>>,
     peer: PublicKey,
-    signing: Vec<u8>,
+    signing: Commitment,
     sequence: u64,
 }
 pub struct Writer {
     stream: WriteHalf<Box<dyn SessionStream>>,
     local: PrivateKey,
-    signing: Vec<u8>,
+    signing: Commitment,
     sequence: u64,
 }
 #[derive(Debug)]
@@ -302,7 +302,7 @@ impl Link {
             reader: Reader {
                 stream: read,
                 peer: session.peer,
-                signing: session.signing.clone(),
+                signing: session.signing,
                 sequence: session.received,
             },
             writer: Writer {
@@ -545,7 +545,7 @@ impl Writer {
             sequence: self.sequence,
             signature: self
                 .local
-                .sign(&frame_signing_bytes(&self.signing, self.sequence, &bytes)),
+                .sign(&frame_signing_bytes(&self.signing, self.sequence, &bytes)?),
             bytes,
         })?;
         if frame.len() > FRAME_BYTES {
@@ -588,7 +588,7 @@ impl Reader {
             let signed: SignedMessage = decode(&bytes)?;
             if signed.sequence != self.sequence
                 || !self.peer.verify(
-                    &frame_signing_bytes(&self.signing, signed.sequence, &signed.bytes),
+                    &frame_signing_bytes(&self.signing, signed.sequence, &signed.bytes)?,
                     &signed.signature,
                 )
             {
@@ -732,7 +732,7 @@ mod integration_tests {
             let mut reader = Reader {
                 stream,
                 peer: PrivateKey::new().public_key(),
-                signing: vec![],
+                signing: [0; 32],
                 sequence: 0,
             };
             far.write_u32(length).await.unwrap();

@@ -11,6 +11,8 @@ pub use audit::AuditReport;
 use p2panda_core::Signature;
 pub use prune::{PruneBlock, PruneReport};
 pub use transfer::{CheckpointPage, HorizonPage, RebootstrapReport};
+#[cfg(test)]
+pub(crate) use transfer::{forge_page, forge_page_bindings};
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_horizon_live_creations(scope INTEGER NOT NULL,hash BLOB NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
@@ -24,14 +26,16 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_logs(scope INTEGER NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,horizon INTEGER NOT NULL,PRIMARY KEY(scope,author)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_stubs(hash BLOB PRIMARY KEY,scope INTEGER NOT NULL,clock INTEGER NOT NULL,creation INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoints(scope INTEGER NOT NULL,sequence INTEGER NOT NULL,state TEXT NOT NULL,position INTEGER NOT NULL,cursor INTEGER NOT NULL,sets BLOB NOT NULL,capture BLOB,signed BLOB,PRIMARY KEY(scope,sequence))",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL,direct INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_rows(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_stubs(scope INTEGER NOT NULL,hash BLOB NOT NULL,clock INTEGER NOT NULL,PRIMARY KEY(scope,hash)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_handles_hash ON secure_handles(hash)",
     "CREATE INDEX IF NOT EXISTS secure_ack_hash ON secure_ack(hash)",
@@ -526,6 +530,12 @@ impl Lt {
     pub(super) fn digest(&self) -> Commitment {
         rocky_core::commitment("rocky.checkpoint-set.v1", &self.to_bytes())
     }
+    /// Adds every element of `other`: the digest of the union of disjoint sets.
+    pub(super) fn merge(&mut self, other: &Self) {
+        for (lane, value) in self.0.iter_mut().zip(&other.0) {
+            *lane = lane.wrapping_add(*value);
+        }
+    }
 }
 pub(super) const ROW_LABEL: &str = "rocky.checkpoint-row.v2";
 pub(super) const CREATION_LABEL: &str = "rocky.checkpoint-creation.v1";
@@ -593,6 +603,12 @@ impl Sets {
         self.rows += 1;
         self.tombstones += u64::from(decode::<Materialized>(new)?.deleted);
         Ok(())
+    }
+    /// Adds the rows of `delta`, stored rows disjoint from these.
+    pub(super) fn merge_rows(&mut self, delta: &Self) {
+        self.rows += delta.rows;
+        self.tombstones += delta.tombstones;
+        self.digest.merge(&delta.digest);
     }
     pub(super) fn create(&mut self, hash: Hash, clock: u64) {
         self.creations += 1;
@@ -1057,9 +1073,28 @@ impl<A: RowApplication> Inner<A> {
             sets: Sets::from_bytes(&row.get::<Vec<u8>>(4)?)?,
             capture: blob(5)?.map(|bytes| decode(&bytes)).transpose()?,
             signed: blob(6)?
-                .map(|bytes| SignedCheckpoint::from_bytes(&bytes))
+                .map(|bytes| self.decoded_checkpoint((scope, verified), bytes))
                 .transpose()?,
         }))
+    }
+    /// Decodes a stored statement once; maintenance reads it in every step.
+    fn decoded_checkpoint(
+        &self,
+        scope: (i64, bool),
+        bytes: Vec<u8>,
+    ) -> Result<SignedCheckpoint, Error> {
+        let mut cache = self
+            .decoded_checkpoints
+            .lock()
+            .map_err(|_| Error::Corrupt("checkpoint cache poisoned".into()))?;
+        if let Some((held, signed)) = cache.get(&scope)
+            && *held == bytes
+        {
+            return Ok(signed.clone());
+        }
+        let signed = SignedCheckpoint::from_bytes(&bytes)?;
+        cache.insert(scope, (bytes, signed.clone()));
+        Ok(signed)
     }
     /// A stored checkpoint is used only while it still verifies: signature,
     /// installed definition, scope and the row sets it was sealed over.
@@ -1228,7 +1263,10 @@ impl<A: RowApplication> Inner<A> {
                     payload.carried(&write.change.row),
                 )?;
                 if write.change.before.is_none() && payload.carried(&write.change.row).is_none() {
-                    record.proof = payload.proof(&write.change.row).cloned();
+                    record.proof = payload
+                        .proof(&write.change.row)
+                        .map(moves::CreationProof::stored)
+                        .transpose()?;
                 }
                 self.release_protection(&mut record, &write, &operation)?;
                 record.key = Some(write.change.row);

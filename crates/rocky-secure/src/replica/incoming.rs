@@ -114,6 +114,11 @@ impl<A: RowApplication> Inner<A> {
             }
         };
         let extension = &operation.header.extensions;
+        // Verified checkpoint pages are filling the scope: its operations
+        // apply on top once the import ends.
+        if self.direct.contains(&extension.scope) {
+            return Ok(Outcome::Waiting);
+        }
         if !self
             .horizon_allows_position(
                 extension.scope,

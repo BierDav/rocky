@@ -1526,6 +1526,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             statement.creations = sets.creations_summary();
             let finalized = inner.sign_checkpoint(statement)?;
             for sql in [
+                "DELETE FROM secure_checkpoint_pages WHERE scope=?",
                 "DELETE FROM secure_checkpoint_rows WHERE scope=?",
                 "INSERT INTO secure_checkpoint_rows SELECT ?,row,fields FROM secure_rows WHERE scope=(SELECT scope FROM secure_scope_state WHERE id=?)",
             ] {

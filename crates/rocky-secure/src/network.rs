@@ -35,6 +35,7 @@ mod rows;
 use chains::{ChainMessage, ChainTable};
 use checkpoints::CheckpointMessage;
 use commands::CommandMessage;
+pub use commands::NO_COORDINATION;
 use contacts::ContactMessage;
 use delivery::DeliveryMessage;
 pub use delivery::{DELIVERY_PAGE, Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
@@ -86,60 +87,32 @@ struct Hello {
 fn session_label(version: u32) -> String {
     format!("rocky.link.v{version}")
 }
-/// What a session signs of each message is
-/// `signing_bytes("rocky.native-frame.v1", &(binding, sequence, bytes))`.
-/// A `Vec<u8>` encodes as an array of integers, which the generic encoder
-/// writes one element at a time, and the binding holds both hellos with
-/// their credential chains: encoding it for every message cost more than
-/// the signature. The session encodes it once, up to the sequence.
-fn frame_signing_head(binding: &Vec<u8>) -> Result<Vec<u8>, Error> {
-    let mut head = signing_bytes("rocky.native-frame.v1", &(binding, 0u64, &Vec::<u8>::new()))?;
-    // Sequence 0 and the empty message are the last two bytes.
-    if head.split_off(head.len().saturating_sub(2)) != [0x00, 0x80] {
-        return Err(Error::Corrupt("native frame signing head".into()));
-    }
-    Ok(head)
+/// What a session signs of each message: its binding, which holds both
+/// hellos with their credential chains, the sequence and the message, each
+/// by digest. The signature hashes 32 bytes however large the message.
+fn frame_signing_bytes(
+    binding: &Commitment,
+    sequence: u64,
+    bytes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let body = rocky_core::commitment("rocky.native-frame-body.v2", bytes);
+    signing_bytes(
+        "rocky.native-frame.v2",
+        &(
+            serde_bytes::Bytes::new(binding),
+            sequence,
+            serde_bytes::Bytes::new(&body),
+        ),
+    )
 }
-/// The signed bytes of one message, byte for byte as `signing_bytes`
-/// encodes them after `frame_signing_head`.
-fn frame_signing_bytes(head: &[u8], sequence: u64, bytes: &[u8]) -> Vec<u8> {
-    let mut signed = Vec::with_capacity(head.len() + 18 + 2 * bytes.len());
-    signed.extend_from_slice(head);
-    cbor_head(&mut signed, 0, sequence);
-    cbor_head(&mut signed, 4, bytes.len() as u64);
-    for byte in bytes {
-        if *byte < 24 {
-            signed.push(*byte);
-        } else {
-            signed.extend_from_slice(&[24, *byte]);
-        }
-    }
-    signed
+/// The session binding as each message's signature names it.
+fn frame_binding(binding: &[u8]) -> Commitment {
+    rocky_core::commitment("rocky.native-frame-binding.v2", binding)
 }
-/// A CBOR head in its shortest form, as the canonical encoder writes it.
-fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let major = major << 5;
-    if let Ok(value) = u8::try_from(value) {
-        if value < 24 {
-            out.push(major | value);
-        } else {
-            out.extend([major | 24, value]);
-        }
-    } else if let Ok(value) = u16::try_from(value) {
-        out.push(major | 25);
-        out.extend(value.to_be_bytes());
-    } else if let Ok(value) = u32::try_from(value) {
-        out.push(major | 26);
-        out.extend(value.to_be_bytes());
-    } else {
-        out.push(major | 27);
-        out.extend(value.to_be_bytes());
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 struct SignedMessage {
     sequence: u64,
+    #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
     signature: Signature,
 }
@@ -216,7 +189,7 @@ pub struct NativeSession {
     peer_chain: crate::wire::Chain,
     chains: ChainTable,
     /// The encoded start of every message's signed bytes.
-    signing: Vec<u8>,
+    signing: Commitment,
     binding: Commitment,
     proved: std::collections::BTreeSet<ResourceScope>,
     offered: std::collections::BTreeSet<ResourceScope>,
@@ -391,7 +364,7 @@ impl NativeSession {
             peer_chain: crate::wire::Chain::new(peer.credentials.clone())?,
             chains: Default::default(),
             credentials: peer.credentials,
-            signing: frame_signing_head(&binding)?,
+            signing: frame_binding(&binding),
             binding: rocky_core::commitment("rocky.holding-session.v1", &binding),
             proved: Default::default(),
             offered: Default::default(),
@@ -464,7 +437,7 @@ impl NativeSession {
         let bytes = encode(&message.into())?;
         let signature = self
             .local
-            .sign(&frame_signing_bytes(&self.signing, self.sent, &bytes));
+            .sign(&frame_signing_bytes(&self.signing, self.sent, &bytes)?);
         let frame = encode(&SignedMessage {
             sequence: self.sent,
             bytes,
@@ -490,7 +463,7 @@ impl NativeSession {
         let message: SignedMessage = decode(&bytes)?;
         if message.sequence != self.received
             || !self.peer.verify(
-                &frame_signing_bytes(&self.signing, message.sequence, &message.bytes),
+                &frame_signing_bytes(&self.signing, message.sequence, &message.bytes)?,
                 &message.signature,
             )
         {
@@ -612,18 +585,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_signing_bytes_equal_the_generic_encoding() {
-        let binding = (0..4096).map(|index| (index % 251) as u8).collect();
-        let head = frame_signing_head(&binding).unwrap();
-        for length in [0, 1, 23, 24, 255, 256, 65_535, 65_536, 70_000] {
-            let bytes: Vec<u8> = (0..length).map(|index| (index * 31 % 256) as u8).collect();
-            for sequence in [0, 23, 24, 255, 256, 65_536, 1 << 40] {
-                assert_eq!(
-                    frame_signing_bytes(&head, sequence, &bytes),
-                    signing_bytes("rocky.native-frame.v1", &(&binding, sequence, &bytes)).unwrap(),
-                    "{length} bytes at {sequence}"
-                );
-            }
+    fn a_message_signature_binds_session_sequence_and_body_and_the_body_travels_as_bytes() {
+        let binding = frame_binding(&[7; 4096]);
+        let body = vec![200u8; 70_000];
+        let signed = frame_signing_bytes(&binding, 5, &body).unwrap();
+        assert!(signed.len() < 128);
+        let mut other = body.clone();
+        other[69_999] = 0;
+        for changed in [
+            frame_signing_bytes(&frame_binding(&[8; 4096]), 5, &body),
+            frame_signing_bytes(&binding, 6, &body),
+            frame_signing_bytes(&binding, 5, &other),
+        ] {
+            assert_ne!(changed.unwrap(), signed);
         }
+        let key = PrivateKey::new();
+        let frame = encode(&SignedMessage {
+            sequence: 5,
+            signature: key.sign(&signed),
+            bytes: body,
+        })
+        .unwrap();
+        assert!(frame.len() < 70_200, "{}", frame.len());
     }
 }

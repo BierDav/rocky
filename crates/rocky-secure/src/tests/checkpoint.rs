@@ -1290,3 +1290,296 @@ async fn checkpoint_signer_expiry_is_checked_at_the_controlled_admission_clock()
             .is_none()
     );
 }
+
+/// A scope being imported from a checkpoint makes none of its own until the
+/// switch: the database thread serves the import instead.
+#[tokio::test]
+async fn maintenance_waits_for_a_scope_being_imported() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a, _) = open(&f, &dir.path().join("a.db"), &PrivateKey::new()).await;
+    let (b, _) = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
+    a.author(handle(0), insert(&f, 0, "source"), vec![])
+        .await
+        .unwrap();
+    let signed = a.checkpoint(f.public).await.unwrap();
+    b.author(handle(1), insert(&f, 1, "held"), vec![])
+        .await
+        .unwrap();
+    b.set_retention_limits(RetentionLimits {
+        checkpoint_operations: 2,
+        ..RetentionLimits::default()
+    })
+    .await
+    .unwrap();
+    b.begin_rebootstrap(signed).await.unwrap();
+    for index in 2..6 {
+        b.author(handle(index), insert(&f, index, "row"), vec![])
+            .await
+            .unwrap();
+    }
+    b.maintain_checkpoint_for_test(f.public).await;
+    let status = b.checkpoint_status(f.public).await.unwrap();
+    assert!(status.checkpoint.is_none() && !status.in_progress);
+    // The owner's intent holds back a scope that holds no rows yet.
+    let (c, _) = open(&f, &dir.path().join("c.db"), &PrivateKey::new()).await;
+    c.set_importing([f.public].into()).await;
+    assert!(c.inner.lock().await.importing(f.public).await.unwrap());
+    c.author(handle(7), insert(&f, 7, "own"), vec![])
+        .await
+        .unwrap();
+    assert!(!c.inner.lock().await.importing(f.public).await.unwrap());
+}
+
+/// The page of `signed` after `after`, as `source` serves it to `peer`.
+async fn page_of(
+    source: &Replica,
+    peer: (&PrivateKey, &CredentialChain),
+    signed: &SignedCheckpoint,
+    after: Option<Commitment>,
+) -> CheckpointPage {
+    source
+        .checkpoint_page(
+            peer.0.public_key(),
+            peer.1,
+            signed.statement.scope,
+            signed.id().unwrap(),
+            after,
+            4096,
+        )
+        .await
+        .unwrap()
+}
+
+/// A replica that holds nothing of a scope reads each verified page as it
+/// commits; an interrupted import resumes at the next page and ends as the
+/// source's rows, verified like any switch.
+#[tokio::test]
+async fn a_fresh_import_shows_each_verified_page_and_resumes_after_reopen() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    for index in 0..40 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = a.checkpoint(f.public).await.unwrap();
+    let path = dir.path().join("b.db");
+    let (b, b_credentials) = open(&f, &path, &b_key).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let revisions = b.observe_revision();
+    let first = page_of(&a, (&b_key, &b_credentials), &signed, None).await;
+    let next = first.next;
+    b.stage_checkpoint_page(first).await.unwrap();
+    assert!(revisions.has_changed().unwrap());
+    let shown = all_rows(&f, &b).await;
+    assert!(!shown.is_empty() && shown.len() < 40, "{}", shown.len());
+    let source = all_rows(&f, &a).await;
+    assert!(
+        shown
+            .iter()
+            .all(|(row, fields)| source.get(row) == Some(fields))
+    );
+    b.audit(f.public).await.unwrap();
+    drop(b);
+    let (b, _) = open(&f, &path, &b_key).await;
+    let (_, cursor, complete) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
+    assert_eq!((cursor, complete), (next, false));
+    assert_eq!(all_rows(&f, &b).await, shown);
+    let mut after = cursor;
+    while let Some(cursor) = after {
+        let page = page_of(&a, (&b_key, &b_credentials), &signed, Some(cursor)).await;
+        after = page.next;
+        b.stage_checkpoint_page(page).await.unwrap();
+    }
+    let report = b.finish_rebootstrap(f.public).await.unwrap();
+    assert_eq!(report.checkpoint, signed.id().unwrap());
+    assert_eq!(all_rows(&f, &b).await, all_rows(&f, &a).await);
+    let status = b.checkpoint_status(f.public).await.unwrap();
+    assert_eq!(
+        status.checkpoint.unwrap().id().unwrap(),
+        signed.id().unwrap()
+    );
+    b.audit(f.public).await.unwrap();
+    drop(b);
+    open(&f, &path, &b_key)
+        .await
+        .0
+        .audit(f.public)
+        .await
+        .unwrap();
+}
+
+/// A page whose rows a key holder changed, dropped or reordered, or one
+/// moved to another place, is refused before anything is stored.
+#[tokio::test]
+async fn a_tampered_checkpoint_page_is_refused_before_anything_is_stored() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    for index in 0..40 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = a.checkpoint(f.public).await.unwrap();
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let first = page_of(&a, (&b_key, &b_credentials), &signed, None).await;
+    let second = page_of(&a, (&b_key, &b_credentials), &signed, first.next).await;
+    let key = [11; 32];
+    let mut changed = first.clone();
+    crate::replica::checkpoint::forge_page(&mut changed, &key, |rows| {
+        rows[0].1 = rows[1].1.clone();
+    });
+    let mut dropped = first.clone();
+    crate::replica::checkpoint::forge_page(&mut dropped, &key, |rows| {
+        rows.remove(1);
+    });
+    let mut reordered = first.clone();
+    crate::replica::checkpoint::forge_page(&mut reordered, &key, |rows| rows.swap(0, 1));
+    // The second page's sealed rows under the first page's place.
+    let mut moved = first.clone();
+    moved.rows = second.rows.clone();
+    for forged in [changed, dropped, reordered, moved] {
+        assert!(b.stage_checkpoint_page(forged).await.is_err());
+        assert!(all_rows(&f, &b).await.is_empty());
+        let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
+        assert_eq!(cursor, None);
+    }
+    b.stage_checkpoint_page(first).await.unwrap();
+    assert!(!all_rows(&f, &b).await.is_empty());
+}
+
+/// The importer asks for the next page before it stores the one it holds,
+/// so its peer cuts a page while another is verified and stored: when
+/// storing the first page fails, the second was already asked for.
+#[tokio::test]
+async fn an_import_asks_for_the_next_page_while_it_stores_the_current_one() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, a_credentials) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    for index in 0..40 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    a.checkpoint(f.public).await.unwrap();
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    let (mut session, mut serving) = network::link::testing::sessions(
+        (&b, b_key.clone(), b_credentials),
+        (&a, a_key.clone(), a_credentials),
+    )
+    .await
+    .unwrap();
+    b.inject_stage_fault(Stage::Import, 0).await;
+    let (pages, imported) = tokio::join!(serving.serve_counting_pages(&a), async {
+        let imported = session.bootstrap_scope(&b, f.public, 4096).await;
+        // As a failed sync does: the answer on its way is never read.
+        drop(session);
+        imported
+    });
+    assert!(
+        matches!(imported, Err(Error::InjectedFailure)),
+        "{:?}",
+        imported.err()
+    );
+    assert_eq!(pages, 2);
+    assert!(all_rows(&f, &b).await.is_empty());
+    // The failed page was not stored: the import resumes from it.
+    let (_, cursor, _) = b.rebootstrap_progress(f.public).await.unwrap().unwrap();
+    assert_eq!(cursor, None);
+}
+
+/// Frames for a scope its import fills wait and apply after the switch; a
+/// local write meanwhile is replayed over the imported rows.
+#[tokio::test]
+async fn writes_during_a_fresh_import_apply_over_its_rows_after_the_switch() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
+    let (a, _) = open(&f, &dir.path().join("a.db"), &a_key).await;
+    for index in 0..40 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = a.checkpoint(f.public).await.unwrap();
+    let later = a
+        .author(handle(41), insert(&f, 41, "later"), vec![])
+        .await
+        .unwrap();
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
+    b.begin_rebootstrap(signed.clone()).await.unwrap();
+    let mut after = None;
+    let first = page_of(&a, (&b_key, &b_credentials), &signed, after).await;
+    after = first.next;
+    b.stage_checkpoint_page(first).await.unwrap();
+    // The source's later frame waits, so reads report the scope
+    // incomplete; a local write applies at once.
+    b.receive(later).await.unwrap();
+    let shown = b
+        .snapshot_page(f.public, None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    assert!(!shown.complete && !shown.rows.contains_key(&id(41)));
+    b.author(handle(50), insert(&f, 50, "local"), vec![])
+        .await
+        .unwrap();
+    let shown = b
+        .snapshot_page(f.public, None, MAX_SNAPSHOT_ROWS)
+        .await
+        .unwrap();
+    assert!(shown.rows.contains_key(&id(50)));
+    while let Some(cursor) = after {
+        let page = page_of(&a, (&b_key, &b_credentials), &signed, Some(cursor)).await;
+        after = page.next;
+        b.stage_checkpoint_page(page).await.unwrap();
+    }
+    let report = b.finish_rebootstrap(f.public).await.unwrap();
+    assert_eq!(report.reapplied.len(), 1);
+    let rows = all_rows(&f, &b).await;
+    assert_eq!(rows.len(), 42);
+    assert!(rows.contains_key(&id(41)) && rows.contains_key(&id(50)));
+    b.audit(f.public).await.unwrap();
+}
+
+/// A holder of an imported checkpoint serves the pages its signer cut and
+/// signed; a third replica verifies them like the signer's own.
+#[tokio::test]
+async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let keys = [PrivateKey::new(), PrivateKey::new(), PrivateKey::new()];
+    let (a, _) = open(&f, &dir.path().join("a.db"), &keys[0]).await;
+    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &keys[1]).await;
+    let (c, c_credentials) = open(&f, &dir.path().join("c.db"), &keys[2]).await;
+    for index in 0..40 {
+        a.author_buffered(handle(index), insert(&f, index, "base"), vec![])
+            .await
+            .unwrap();
+    }
+    let signed = a.checkpoint(f.public).await.unwrap();
+    for (source, target, peer) in [
+        (&a, &b, (&keys[1], &b_credentials)),
+        (&b, &c, (&keys[2], &c_credentials)),
+    ] {
+        target.begin_rebootstrap(signed.clone()).await.unwrap();
+        let mut after = None;
+        loop {
+            let page = page_of(source, peer, &signed, after).await;
+            after = page.next;
+            target.stage_checkpoint_page(page).await.unwrap();
+            if after.is_none() {
+                break;
+            }
+        }
+        target.finish_rebootstrap(f.public).await.unwrap();
+    }
+    assert_eq!(all_rows(&f, &c).await, all_rows(&f, &a).await);
+    c.audit(f.public).await.unwrap();
+}

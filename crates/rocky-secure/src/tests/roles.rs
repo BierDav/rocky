@@ -1119,7 +1119,7 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         &[scope],
     )
     .await;
-    insert(&f, &full, scope, 0..300, 1).await;
+    insert(&f, &full, scope, 0..500, 1).await;
     // Both pruned history behind a checkpoint and frames after it.
     let (mut session, server) = connect(&reader, &full).await;
     session
@@ -1133,8 +1133,8 @@ async fn a_sync_larger_than_a_session_continues_on_the_next() {
         .await
         .unwrap();
     full.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(full.replica.prune(scope).await.unwrap().pruned, 300);
-    insert(&f, &full, scope, 300..600, 1).await;
+    assert_eq!(full.replica.prune(scope).await.unwrap().pruned, 500);
+    insert(&f, &full, scope, 500..1000, 1).await;
     let mut sessions = 0;
     let mut rebootstrapped = false;
     loop {

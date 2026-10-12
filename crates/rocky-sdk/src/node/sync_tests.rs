@@ -250,6 +250,53 @@ async fn idle_has_no_poll_and_a_commit_reaches_the_peer_without_time_advancing()
     }).await
 }
 
+/// Requests share a link that is not persistent: it closes when the last of
+/// them ends, not under the others when the first does.
+#[tokio::test]
+async fn a_short_link_stays_open_until_its_last_request_ends() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let profile = Profile::Writer {
+                scopes: ["items".into()].into(),
+            };
+            let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, profile))).await?;
+            let contact = {
+                let link = b.network.read().await;
+                let transport = &*link.as_ref().ok_or("link")?.transport;
+                b.settings
+                    .lock()
+                    .await
+                    .contact(&b.vault, transport)
+                    .await?
+                    .0
+            };
+            a.configure(|settings| settings.add_peer(&a.vault, &contact))
+                .await?;
+            let (peer, contact) = a
+                .settings
+                .lock()
+                .await
+                .targets()
+                .into_iter()
+                .next()
+                .ok_or("peer")?;
+            let service = a.current().ok_or("service")?;
+            a.request_link(&*service.transport, peer, &contact).await?;
+            let (first, second) = (service.live.short(peer), service.live.short(peer));
+            drop(first);
+            assert!(service.live.handle(peer).is_some());
+            drop(second);
+            assert!(service.live.handle(peer).is_none());
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        })
+        .await
+}
+
 #[tokio::test]
 async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_up()
 -> Result<(), Failure> {
@@ -521,4 +568,81 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         node.detach(None).await;
         Ok(())
     }).await
+}
+
+/// A peer importing a scope from a checkpoint takes none of its history:
+/// the frontier exchange names the scope as importing, not changed, and
+/// the session goes on.
+#[tokio::test]
+async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure> {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let root = tempfile::tempdir()?;
+            let hub = Arc::new(Hub::default());
+            let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
+            let b = enrolled(
+                &root.path().join("b"),
+                &hub,
+                "b",
+                Some((
+                    &a,
+                    Profile::Writer {
+                        scopes: ["items".into()].into(),
+                    },
+                )),
+            )
+            .await?;
+            add(&a, 1).await?;
+            let scopes = a.app_scopes();
+            b.replica
+                .set_importing(scopes.iter().copied().collect())
+                .await;
+            let (mut session, mut answering) = link_sessions(&a, &b).await?;
+            let server = b.clone();
+            let serving = async move {
+                let deliveries = delivery::Port {
+                    node: &server,
+                    serving: true,
+                };
+                answering
+                    .serve_all(&server.replica, None, &deliveries, None)
+                    .await
+            };
+            let exchanging = async {
+                let exchange = session.changed_scopes(&a.replica, &scopes).await?;
+                session.close().await?;
+                Ok::<_, Failure>(exchange)
+            };
+            let (served, exchange) = tokio::join!(serving, exchanging);
+            served?;
+            let exchange = exchange?;
+            assert_eq!(exchange.importing, scopes);
+            assert!(exchange.changed.is_empty());
+            b.replica
+                .set_importing(std::collections::BTreeSet::new())
+                .await;
+            let (mut session, mut answering) = link_sessions(&a, &b).await?;
+            let server = b.clone();
+            let serving = async move {
+                let deliveries = delivery::Port {
+                    node: &server,
+                    serving: true,
+                };
+                answering
+                    .serve_all(&server.replica, None, &deliveries, None)
+                    .await
+            };
+            let exchanging = async {
+                let exchange = session.changed_scopes(&a.replica, &scopes).await?;
+                session.close().await?;
+                Ok::<_, Failure>(exchange)
+            };
+            let (served, exchange) = tokio::join!(serving, exchanging);
+            served?;
+            assert_eq!(exchange?.changed, scopes);
+            a.detach(None).await;
+            b.detach(None).await;
+            Ok(())
+        })
+        .await
 }

@@ -69,6 +69,9 @@ pub(crate) struct Transfer {
     /// credentials, as the other sees them, grant no whole-scope access.
     pub refused: Vec<ResourceScope>,
     pub held: Vec<ResourceScope>,
+    /// Scopes the peer restores from a checkpoint, as it is importing them
+    /// or behind this device's pruning horizon: no history was pushed.
+    pub waiting: Vec<ResourceScope>,
     /// Why the confirmed results pass failed; rows still synced.
     pub results: Option<String>,
 }
@@ -78,6 +81,7 @@ impl Transfer {
             self.add(scope, moved);
         }
         self.refuse(&other.refused);
+        self.wait(&other.waiting);
         for scope in other.held {
             if !self.held.contains(&scope) {
                 self.held.push(scope);
@@ -91,6 +95,13 @@ impl Transfer {
         for scope in scopes {
             if !self.refused.contains(scope) {
                 self.refused.push(*scope);
+            }
+        }
+    }
+    fn wait(&mut self, scopes: &[ResourceScope]) {
+        for scope in scopes {
+            if !self.waiting.contains(scope) {
+                self.waiting.push(*scope);
             }
         }
     }
@@ -136,6 +147,16 @@ pub(crate) async fn reconcile(
     let retry = match coordinator {
         Some(coordinator) => match results(replica, upstream, scopes, coordinator).await {
             Ok(retry) => retry,
+            // A peer without coordination holds no results to pull.
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(rocky_secure::Error::Rejected(reason))
+                        if reason == rocky_secure::network::NO_COORDINATION
+                ) =>
+            {
+                false
+            }
             Err(error) => {
                 transfer.results = Some(error.to_string());
                 true
@@ -145,9 +166,19 @@ pub(crate) async fn reconcile(
     };
     Ok((newer, retry, transfer))
 }
+/// One scope of a bootstrap: the checkpoint its peer offered and the
+/// stored rows it holds, which progress counts.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Planned {
+    pub scope: ResourceScope,
+    pub checkpoint: rocky_core::Commitment,
+    pub rows: u64,
+}
 /// Checkpoint-first enrollment, resumed from the runtime's staged pages.
-/// `None` when the peer offers no checkpoint, as a keyless custody peer:
-/// the remaining intent waits for a peer that does.
+/// The peer's offers come first: the smallest scopes import first, so rows
+/// appear soonest, and the intent records each scope's rows for progress.
+/// `None` when the peer offers no checkpoint for some scope, as a keyless
+/// custody peer: the remaining intent waits for a peer that does.
 pub(crate) async fn bootstrap(
     replica: &EncryptedReplica<TypedCommands>,
     upstream: &Upstream<'_>,
@@ -162,14 +193,64 @@ pub(crate) async fn bootstrap(
     if scopes.is_empty() {
         return Ok(Some(expected));
     }
+    let mut planning = match first.take() {
+        Some(session) => session,
+        None => session(replica, upstream).await?,
+    };
+    let offered = planning.offered_rows(replica, scopes).await?;
+    first = Some(planning);
+    let mut totals: Vec<Planned> = match saved.get("totals") {
+        Some(totals) => serde_json::from_value(totals.clone())?,
+        None => Vec::new(),
+    };
+    totals.retain(|planned| !scopes.contains(&planned.scope));
+    let mut planned: Vec<Planned> = scopes
+        .iter()
+        .zip(&offered)
+        .filter_map(|(scope, offer)| {
+            offer.map(|(checkpoint, rows)| Planned {
+                scope: *scope,
+                checkpoint,
+                rows,
+            })
+        })
+        .collect();
+    planned.sort_by_key(|planned| planned.rows);
+    totals.extend(planned.iter().cloned());
+    let importable = planned.len();
+    let pending: Vec<ResourceScope> = planned
+        .iter()
+        .map(|planned| planned.scope)
+        .chain(
+            scopes
+                .iter()
+                .zip(&offered)
+                .filter(|(_, rows)| rows.is_none())
+                .map(|(scope, _)| *scope),
+        )
+        .collect();
     let mut next = 0;
+    let record = |next: usize, expected: &mut Vec<u8>| -> Result<(), Failure> {
+        if std::fs::read(marker)? != *expected {
+            return Err("bootstrap authority changed; retry with the new intent".into());
+        }
+        *expected = serde_json::to_vec(
+            &serde_json::json!({"intent": intent, "pending": &pending[next..], "totals": &totals}),
+        )?;
+        rocky_credentials::write_private(marker, expected)?;
+        Ok(())
+    };
+    record(next, &mut expected)?;
     let mut imported = false;
     for _ in 0..SESSIONS {
+        if next == importable {
+            break;
+        }
         let mut session = match first.take() {
             Some(session) => session,
             None => session(replica, upstream).await?,
         };
-        let scope = scopes.get(next).ok_or("missing bootstrap scope")?;
+        let scope = pending.get(next).ok_or("missing bootstrap scope")?;
         let (catch_up, checkpoint) = if imported {
             (
                 session.sync_scope(replica, *scope, QUOTA).await?.catch_up,
@@ -198,22 +279,22 @@ pub(crate) async fn bootstrap(
         );
         if !catch_up.exhausted {
             replica.flush().await?;
-            if std::fs::read(marker)? != expected {
-                return Err("bootstrap authority changed; retry with the new intent".into());
-            }
             next += 1;
-            expected = serde_json::to_vec(
-                &serde_json::json!({"intent": intent, "pending": &scopes[next..]}),
-            )?;
-            rocky_credentials::write_private(marker, &expected)?;
+            record(next, &mut expected)?;
+            replica
+                .set_importing(pending[next..].iter().copied().collect())
+                .await;
             imported = false;
         }
         session.close().await?;
-        if next == scopes.len() {
-            return Ok(Some(expected));
-        }
     }
-    Err("bootstrap exceeded its session budget; it continues on the next sync".into())
+    if next < importable {
+        return Err("bootstrap exceeded its session budget; it continues on the next sync".into());
+    }
+    if let Some(session) = first.take() {
+        session.close().await?;
+    }
+    Ok((importable == pending.len()).then_some(expected))
 }
 /// A request channel on the link with the upstream peer. The link handshake
 /// left `replica` holding every revocation statement the peer sent; see
@@ -251,6 +332,8 @@ async fn rows(
         let mut exhausted = false;
         let exchange = session.changed_scopes(replica, scopes).await?;
         transfer.refuse(&exchange.refused);
+        // An importing peer takes the checkpoint, not this device's history.
+        transfer.wait(&exchange.importing);
         for scope in scopes {
             if !exchange.refused.contains(scope) && !transfer.held.contains(scope) {
                 transfer.held.push(*scope);
@@ -294,8 +377,9 @@ async fn rows(
                 }
                 other => other?,
             };
+            // The peer restores this scope from a checkpoint; others go on.
             if pushed.behind {
-                return Err("the peer is behind this device's pruning horizon".into());
+                transfer.wait(&[*scope]);
             }
             moved.pushed = pushed.frames;
             transfer.add(*scope, moved);

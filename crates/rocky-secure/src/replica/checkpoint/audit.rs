@@ -93,7 +93,12 @@ impl<A: RowApplication> Inner<A> {
                 record.position,
                 record.sets,
             ),
-            None => (None, 0, Sets::new()),
+            // The pages a direct import stored so far are the base that
+            // local writes applied over.
+            None => match self.staging(id).await?.filter(|staging| staging.direct) {
+                Some(staging) => (None, 0, staging.sets),
+                None => (None, 0, Sets::new()),
+            },
         };
         let clear = "DELETE FROM secure_checkpoint_scratch WHERE scope=?";
         transaction!(@commit self, |inner| {

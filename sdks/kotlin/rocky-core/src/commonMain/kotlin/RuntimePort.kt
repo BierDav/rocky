@@ -251,7 +251,15 @@ data class Readiness(
     val issuerContact: Boolean = true,
     val discovery: DiscoveryStatus = DiscoveryStatus(false, DiscoveryPath(DiscoveryPathState.Off), DiscoveryPath(DiscoveryPathState.Off)),
     val peers: List<Peer> = emptyList(),
+    /** How far a checkpoint bootstrap has imported; null until its peer's offers are known. */
+    val bootstrap: BootstrapProgress? = null,
 )
+
+/** Rows imported of all offered checkpoints of a bootstrap, and whole scopes done. */
+data class BootstrapProgress(val rowsDone: Long, val rowsTotal: Long, val scopesDone: Int, val scopesTotal: Int) {
+    /** Whole percent imported, 100 for a bootstrap with no rows. */
+    val percent: Int get() = if (rowsTotal == 0L) 100 else (rowsDone * 100 / rowsTotal).toInt()
+}
 
 /** The last sync: its state, its error, how many [peers] it reached and when it ended. */
 data class ConnectionStatus(val state: ConnectionState, val error: String? = null, val peers: Int = 0, val atEpochMillis: Long? = null)

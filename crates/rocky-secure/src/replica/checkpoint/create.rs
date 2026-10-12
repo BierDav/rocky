@@ -91,6 +91,11 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     async fn begin_step(&mut self, scope: ResourceScope) -> Result<Step, Error> {
+        // Verified pages are still arriving; the import's own checkpoint
+        // becomes the scope's when it ends.
+        if self.direct.contains(&scope) {
+            return Err(denied("the scope is being imported from a checkpoint"));
+        }
         transaction!(self, |inner| {
             let id = inner.scope_id(scope).await?;
             let verified = inner.checkpoint_record(id, true).await?;
@@ -408,6 +413,11 @@ impl<A: RowApplication> Inner<A> {
                         [id, record.sequence],
                     )
                     .await?;
+                // Its own checkpoint's pages are signed as they are served.
+                inner
+                    .conn
+                    .execute("DELETE FROM secure_checkpoint_pages WHERE scope=?", [id])
+                    .await?;
             }
             inner.fault(Stage::Install)?;
             Ok(done)
@@ -578,9 +588,10 @@ impl<A: RowApplication> Inner<A> {
             }
         }
     }
-    /// True when a step ran.
+    /// True when a step ran. A scope being imported waits: its own
+    /// checkpoint would only repeat the one it imports.
     async fn maintain_scope(&mut self, scope: ResourceScope) -> Result<bool, Error> {
-        if self.scope_key(scope).is_err() {
+        if self.scope_key(scope).is_err() || self.importing(scope).await? {
             return Ok(false);
         }
         let Some(id) = self.find_scope_id(scope).await? else {

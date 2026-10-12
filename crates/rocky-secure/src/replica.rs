@@ -154,19 +154,71 @@ pub struct CiphertextPage {
     /// `horizon_page` with what it holds before it relies on this pass.
     pub pruned: Vec<ResourceScope>,
 }
+/// A stamp: which write of which author last set a field. Stored as a
+/// tuple in every row record, so it carries no field names.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(from = "(u64, Author, u64)", into = "(u64, Author, u64)")]
 pub(crate) struct Stamp {
     pub(crate) clock: u64,
-    pub(crate) author: PublicKey,
+    pub(crate) author: Author,
     pub(crate) sequence: u64,
 }
+impl From<(u64, Author, u64)> for Stamp {
+    fn from((clock, author, sequence): (u64, Author, u64)) -> Self {
+        Self {
+            clock,
+            author,
+            sequence,
+        }
+    }
+}
+impl From<Stamp> for (u64, Author, u64) {
+    fn from(stamp: Stamp) -> Self {
+        (stamp.clock, stamp.author, stamp.sequence)
+    }
+}
+/// An author's public key as its bytes, in the byte order keys sort by.
+/// Decoding a row record does not decompress it; `key` does, to verify.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Author(#[serde(with = "serde_bytes")] [u8; 32]);
+impl Author {
+    pub(crate) fn key(&self) -> Result<PublicKey, Error> {
+        PublicKey::from_bytes(&self.0).map_err(|_| Error::Corrupt("author key".into()))
+    }
+}
+impl From<PublicKey> for Author {
+    fn from(key: PublicKey) -> Self {
+        Self(*key.as_bytes())
+    }
+}
+impl PartialEq<PublicKey> for Author {
+    fn eq(&self, key: &PublicKey) -> bool {
+        self.0 == *key.as_bytes()
+    }
+}
+impl std::fmt::Debug for Author {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+/// Decoded signed checkpoints by scope number and kind, with their bytes.
+type DecodedCheckpoints = HashMap<(i64, bool), (Vec<u8>, SignedCheckpoint)>;
+/// A stored row record. Identifiers and values are CBOR byte strings: the
+/// record is stored, digested and transferred with every row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Materialized {
-    proof: Option<moves::CreationProof>,
+    proof: Option<moves::StoredProof>,
+    #[serde(with = "serde_bytes")]
     moved_from: Option<Vec<u8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protected: Option<protection::Protected>,
+    #[serde(with = "byte_fields")]
     fields: RowFields,
+    #[serde(with = "byte_keys")]
     stamps: BTreeMap<Commitment, Stamp>,
     deleted: bool,
     creation: Hash,
@@ -174,9 +226,57 @@ pub(super) struct Materialized {
     #[serde(with = "identity::decimal")]
     identity: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_bytes")]
     key: Option<Commitment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created: Option<Stamp>,
+}
+/// A map keyed by commitments, its keys as byte strings.
+mod byte_keys {
+    use super::*;
+    pub(super) fn serialize<S: serde::Serializer, V: Serialize>(
+        map: &BTreeMap<Commitment, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            map.iter()
+                .map(|(key, value)| (serde_bytes::Bytes::new(key), value)),
+        )
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>, V: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<Commitment, V>, D::Error> {
+        let map = BTreeMap::<serde_bytes::ByteArray<32>, V>::deserialize(deserializer)?;
+        Ok(map
+            .into_iter()
+            .map(|(key, value)| (key.into_array(), value))
+            .collect())
+    }
+}
+/// Row fields, keys and values as byte strings.
+mod byte_fields {
+    use super::*;
+    pub(super) fn serialize<S: serde::Serializer>(
+        fields: &RowFields,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(
+            fields
+                .iter()
+                .map(|(key, value)| (serde_bytes::Bytes::new(key), serde_bytes::Bytes::new(value))),
+        )
+    }
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<RowFields, D::Error> {
+        let map = BTreeMap::<serde_bytes::ByteArray<32>, serde_bytes::ByteBuf>::deserialize(
+            deserializer,
+        )?;
+        Ok(map
+            .into_iter()
+            .map(|(key, value)| (key.into_array(), value.into_vec()))
+            .collect())
+    }
 }
 pub(super) struct Inner<A> {
     _owner: DatabaseOwner,
@@ -189,6 +289,9 @@ pub(super) struct Inner<A> {
     pub(super) chain: Chain,
     /// Stored chains decoded recently, by digest.
     chains: std::sync::Mutex<HashMap<Commitment, Chain>>,
+    /// The last checkpoint statement decoded per scope number, newest or
+    /// verified, with its bytes.
+    decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
     row_authors: BTreeMap<Commitment, identity::RowAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
@@ -225,6 +328,12 @@ pub(super) struct Inner<A> {
     /// Scopes buffered SQL commits wrote, whose maintenance step `maintain`
     /// runs after the commit answered.
     deferred_maintenance: BTreeSet<ResourceScope>,
+    /// Scopes the owner imports from a checkpoint: peers do not push their
+    /// history, and maintenance waits until the import ends.
+    importing: BTreeSet<ResourceScope>,
+    /// Scopes whose import writes verified pages straight into their rows;
+    /// operations for them wait until the import ends.
+    direct: BTreeSet<ResourceScope>,
     /// This device's verified partition selectors for an authority and
     /// second: every statement of a partitioned schema asks for them.
     local_selectors: std::sync::Mutex<Option<LocalSelectors>>,
@@ -232,6 +341,8 @@ pub(super) struct Inner<A> {
     pub(super) queries: queries::Queries,
     pub(super) notifications: watch::Sender<u64>,
     pub(super) frames: watch::Sender<()>,
+    /// Checkpoint pages stored since open, by any import.
+    pub(super) imported: watch::Sender<u64>,
     wal: PathBuf,
     /// Commits with changes since open. Nothing leaves the device until the
     /// flusher's durable watermark covers it.
@@ -428,7 +539,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v14" {
+    if label != "rocky.encrypted-replica.v15" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -567,6 +678,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             app: Arc::new(app),
             chain: Chain::new(config.credentials.clone())?,
             chains: Default::default(),
+            decoded_checkpoints: Default::default(),
             config,
             row_authors: BTreeMap::new(),
             credential_signer: None,
@@ -589,9 +701,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             local: Default::default(),
             local_selectors: Default::default(),
             deferred_maintenance: BTreeSet::new(),
+            importing: BTreeSet::new(),
+            direct: BTreeSet::new(),
             queries: Default::default(),
             notifications,
             frames: watch::channel(()).0,
+            imported: watch::channel(0).0,
             wal,
             // A reopened file may hold commits a crashed process never flushed.
             commit: 1,
@@ -691,6 +806,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.local_grants(now()?)?;
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
+        inner.load_direct().await?;
         inner.verify_open().await?;
         let replica = Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -712,6 +828,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     pub fn observe_revision(&self) -> watch::Receiver<u64> {
         self.revisions.clone()
+    }
+    /// Changes after every stored checkpoint page, so import progress can
+    /// be shown as it moves.
+    pub async fn observe_imports(&self) -> watch::Receiver<u64> {
+        self.inner.lock().await.imported.subscribe()
     }
     /// Concurrent calls share one transaction and one flush; each request
     /// keeps its own savepoint, admission checks and result. The frame may be
@@ -861,6 +982,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner.maintain(&scopes).await;
         }
         inner.checkpoint_if_due().await;
+    }
+    /// Names the scopes the owner is about to import from a checkpoint,
+    /// replacing the previous set. A scope with a staged import counts too.
+    pub async fn set_importing(&self, scopes: BTreeSet<ResourceScope>) {
+        self.inner.lock().await.importing = scopes;
     }
     /// The last commit known to survive power loss.
     pub async fn durable_commit(&self) -> u64 {

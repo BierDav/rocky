@@ -13,20 +13,26 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import org.example.examples.shopping.util.epochMillis
+import rocky.BootstrapProgress
 import rocky.ConnectionState
 import rocky.ConnectionStatus
 import rocky.ReadinessState
 
-/** What the sync badge needs: the connection, bootstrapping and the last transfer. */
+/** What the sync badge needs: the connection, bootstrapping and its progress, and the last transfer. */
 data class SyncBadgeState(
     val connection: ConnectionStatus = ConnectionStatus(ConnectionState.Unavailable),
     val readiness: ReadinessState? = null,
     val lastTransferAtEpochMillis: Long? = null,
     val live: Boolean = false,
+    val bootstrap: BootstrapProgress? = null,
 )
 
+/** "Bootstrapping 42%" once the offered rows are known. */
+fun bootstrapLabel(progress: BootstrapProgress?): String = progress?.let { "Bootstrapping ${it.percent}%" } ?: "Bootstrapping"
+
 /**
- * Shows Live while any link is open, then bootstrap, offline or last-pass status. It pulses while frames move.
+ * Shows Offline, then a bootstrap and its progress, then Live while any link is open, then the last pass. It pulses
+ * while frames move.
  */
 @Composable
 fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
@@ -41,9 +47,9 @@ fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
     }
     val moving = state.lastTransferAtEpochMillis?.let { now - it < 2_000 } == true || readiness == ReadinessState.Bootstrapping
     val (color, label) = when {
-        state.live -> Color(0xFF43A047) to "Live"
-        readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to "Bootstrapping"
         connection.state == ConnectionState.Offline -> Color(0xFF9E9E9E) to "Offline"
+        readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to bootstrapLabel(state.bootstrap)
+        state.live -> Color(0xFF43A047) to "Live"
         connection.state == ConnectionState.Connected && connection.peers > 0 -> Color(0xFF43A047) to (if (moving) "Syncing" else "Synced")
         connection.state == ConnectionState.Connected -> Color(0xFF9E9E9E) to "No peers"
         connection.atEpochMillis == null -> Color(0xFF9E9E9E) to "Starting"

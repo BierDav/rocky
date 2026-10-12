@@ -25,6 +25,9 @@ pub struct FrontierExchange {
     /// credentials, or the peer's view of this replica's, grants no whole-scope
     /// read or custody. A peer that has not learned a partition refuses it.
     pub refused: Vec<ResourceScope>,
+    /// Scopes the peer imports from a checkpoint: no rows move this round,
+    /// so history does not crowd out the import.
+    pub importing: Vec<ResourceScope>,
 }
 
 impl NativeSession {
@@ -38,6 +41,7 @@ impl NativeSession {
     ) -> Result<FrontierExchange, Error> {
         let mut changed = Vec::new();
         let mut refused = Vec::new();
+        let mut importing = Vec::new();
         for requested in replica
             .frontier_batches(scopes, MAX_FRONTIER_SCOPES)
             .await?
@@ -113,7 +117,9 @@ impl NativeSession {
                 newer
             };
             for (local, state) in held {
-                if newer
+                if state.importing {
+                    importing.push(local.scope);
+                } else if newer
                     || local != &state.frontier
                     || local.logs.iter().any(|log| log.held != log.applied)
                     || state.behind
@@ -134,6 +140,7 @@ impl NativeSession {
         Ok(FrontierExchange {
             changed: order(&changed),
             refused: order(&refused),
+            importing: order(&importing),
         })
     }
     pub(super) async fn answer_frontiers<A: RowApplication>(

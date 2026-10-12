@@ -13,6 +13,8 @@ struct Entry {
     id: u64,
     dialed: bool,
     persistent: bool,
+    /// Requests in flight that keep a link open which is not persistent.
+    shorts: usize,
     handle: link::channels::Handle,
     authority: watch::Receiver<u64>,
     close: watch::Sender<Option<CloseReason>>,
@@ -137,11 +139,18 @@ impl Registry {
         }
     }
 
+    /// Keeps the link with `peer` for one request. A link that is not
+    /// persistent closes when its last request ends: requests share it.
     pub fn short(&self, peer: PublicKey) -> ShortLink<'_> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = entries.get_mut(&peer).map(|entry| {
+            entry.shorts += 1;
+            entry.id
+        });
         ShortLink {
             registry: self,
             peer,
-            id: self.id(peer),
+            id,
         }
     }
 
@@ -150,11 +159,13 @@ impl Registry {
             .entries
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&peer)
+            .get_mut(&peer)
             && Some(entry.id) == id
-            && !entry.persistent
         {
-            entry.close.send_replace(Some(CloseReason::Detached));
+            entry.shorts = entry.shorts.saturating_sub(1);
+            if entry.shorts == 0 && !entry.persistent {
+                entry.close.send_replace(Some(CloseReason::Detached));
+            }
         }
     }
 
@@ -216,6 +227,7 @@ impl Registry {
             .get(&peer)
             .map(|entry| entry.dialed)
     }
+    #[cfg(test)]
     pub fn id(&self, peer: PublicKey) -> Option<u64> {
         self.entries
             .lock()
@@ -492,6 +504,7 @@ impl Node {
                         id,
                         dialed,
                         persistent,
+                        shorts: 0,
                         handle: opened.channels.handle.clone(),
                         authority: authority.clone(),
                         close: close.clone(),
@@ -596,6 +609,7 @@ impl Node {
                             at: now().unwrap_or_default(),
                             error: None,
                             refused: vec![],
+                            waiting: vec![],
                             held: vec![],
                             results: None,
                         });

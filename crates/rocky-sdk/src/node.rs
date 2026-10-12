@@ -221,6 +221,8 @@ struct Reached {
     error: Option<String>,
     /// Scopes the last successful sync with the peer did not exchange.
     refused: Vec<ResourceScope>,
+    /// Scopes the peer restores from a checkpoint instead of this device's history.
+    waiting: Vec<ResourceScope>,
     held: Vec<ResourceScope>,
     /// Why the last successful sync's results pass failed, if it did.
     results: Option<String>,
@@ -1504,6 +1506,7 @@ impl Node {
         let mut status = json!({
             "state": state,
             "ready": state == "ready",
+            "bootstrap": self.bootstrap_progress().await?,
             "revision": revision.to_string(),
             "generation": generation,
             "authority": {
@@ -1532,9 +1535,46 @@ impl Node {
         status["token"] = json!(token);
         Ok(status)
     }
+    /// How far the bootstrap intent has imported, in the stored rows of the
+    /// checkpoints its peer offered; `null` until a peer offered one.
+    async fn bootstrap_progress(&self) -> Result<Value, Failure> {
+        let intent: Value = match std::fs::read(self.path.with_file_name("bootstrap.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(totals) = intent.get("totals") else {
+            return Ok(Value::Null);
+        };
+        let totals: Vec<sync::Planned> = serde_json::from_value(totals.clone())?;
+        if totals.is_empty() {
+            return Ok(Value::Null);
+        }
+        let pending: Vec<ResourceScope> = serde_json::from_value(intent["pending"].clone())?;
+        let (mut rows_done, mut scopes_done) = (0, 0);
+        for planned in &totals {
+            if pending.contains(&planned.scope) {
+                rows_done += self
+                    .replica
+                    .imported_rows(planned.scope, planned.checkpoint)
+                    .await?
+                    .min(planned.rows);
+            } else {
+                rows_done += planned.rows;
+                scopes_done += 1;
+            }
+        }
+        Ok(json!({
+            "rows_done": rows_done,
+            "rows_total": totals.iter().map(|planned| planned.rows).sum::<u64>(),
+            "scopes_done": scopes_done,
+            "scopes_total": totals.len(),
+        }))
+    }
     /// The status once it differs from the one `after` named.
     async fn readiness_after(&self, client: &Client, after: &str) -> Result<Value, Failure> {
         let mut revisions = self.replica.observe_revision();
+        let mut imports = self.replica.observe_imports().await;
         let mut sync_state = self.sync_state.subscribe();
         let mut closing = client.closing.subscribe();
         let mut events = self.sync_events.subscribe();
@@ -1556,6 +1596,9 @@ impl Node {
                 }
                 _ = events.changed() => {},
                 _ = network.changed() => {},
+                changed = imports.changed() => {
+                    changed.map_err(|_| ServiceError::Closed("database"))?
+                }
                 _ = async {
                     let expires = status["authority"]["expires"].as_str().ok_or("missing expiry")?.parse::<u64>()?;
                     let time = now()?;
@@ -1803,6 +1846,7 @@ impl Node {
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
             settings.granted(&self.domain);
         drop(settings);
+        self.refresh_importing().await?;
         self.forget_readers().await;
         if self.settings.lock().await.issuer() {
             Box::pin(self.complete_revocation()).await?;
@@ -1886,9 +1930,14 @@ impl Node {
         result: &Result<(bool, bool, sync::Transfer), Failure>,
     ) {
         let peer_hex = peer.to_hex();
-        let (before, refused_before, results_before) = match before {
-            Some(reached) => (Some(reached.error), reached.refused, reached.results),
-            None => (None, Vec::new(), None),
+        let (before, refused_before, waiting_before, results_before) = match before {
+            Some(reached) => (
+                Some(reached.error),
+                reached.refused,
+                reached.waiting,
+                reached.results,
+            ),
+            None => (None, Vec::new(), Vec::new(), None),
         };
         match result {
             Err(error) => {
@@ -1914,6 +1963,17 @@ impl Node {
                         .collect();
                     self.activity.record(
                         "scopes_refused",
+                        json!({"peer": peer_hex, "scopes": scopes}),
+                    );
+                }
+                if transfer.waiting != waiting_before {
+                    let scopes: Vec<Value> = transfer
+                        .waiting
+                        .iter()
+                        .map(|scope| self.scope_label(scope))
+                        .collect();
+                    self.activity.record(
+                        "scopes_waiting",
                         json!({"peer": peer_hex, "scopes": scopes}),
                     );
                 }
@@ -2370,11 +2430,13 @@ impl Node {
                 tokio::pin!(attempts);
                 while let Some((peer, contact, generation, result)) = attempts.next().await {
                     let error = result.as_ref().err().map(ToString::to_string);
-                    let (refused, received) = match &result {
-                        Ok((_, _, transfer)) => {
-                            (transfer.refused.clone(), transfer.results.clone())
-                        }
-                        Err(_) => (Vec::new(), None),
+                    let (refused, waiting, received) = match &result {
+                        Ok((_, _, transfer)) => (
+                            transfer.refused.clone(),
+                            transfer.waiting.clone(),
+                            transfer.results.clone(),
+                        ),
+                        Err(_) => (Vec::new(), Vec::new(), None),
                     };
                     let before = self.reached()?.insert(
                         peer,
@@ -2382,6 +2444,7 @@ impl Node {
                             at: now()?,
                             error,
                             refused,
+                            waiting,
                             held: result
                                 .as_ref()
                                 .map(|(_, _, transfer)| transfer.held.clone())
@@ -2588,7 +2651,50 @@ impl Node {
         }
         *settings = draft;
         drop(settings);
+        self.refresh_importing().await?;
         self.sweep_deliveries().await
+    }
+    /// The scopes a bootstrap intent still imports from a checkpoint.
+    async fn bootstrap_pending(&self, intent: &Value) -> Result<Vec<ResourceScope>, Failure> {
+        let token = intent.get("intent").unwrap_or(intent);
+        if token != &json!(true) {
+            return Err(refused("invalid bootstrap authority intent"));
+        }
+        let pending: Vec<ResourceScope> = match intent.get("pending") {
+            Some(pending) => serde_json::from_value(pending.clone())?,
+            None if intent == &json!(true) => self.scopes(),
+            None => return Err(refused("invalid bootstrap intent")),
+        };
+        if pending.iter().any(|scope| !self.scopes().contains(scope)) {
+            return Err(refused("bootstrap intent names an ungranted scope"));
+        }
+        // Keyless custody scopes cannot import a checkpoint; they sync rows.
+        // Nor can a partitioned table's own scope, which holds no rows.
+        let settings = self.settings.lock().await;
+        Ok(pending
+            .into_iter()
+            .filter(|scope| {
+                settings.reads_whole(&self.domain, scope) && !self.domain.partitioned_table(scope)
+            })
+            .collect())
+    }
+    /// Tells the replica which scopes the bootstrap intent imports, so
+    /// peers hold back their history for them.
+    pub(crate) async fn refresh_importing(&self) -> Result<(), Failure> {
+        // An intent the bootstrap itself refuses holds nothing back; the
+        // bootstrap reports it.
+        let pending = match std::fs::read(self.path.with_file_name("bootstrap.json")) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(intent) => self.bootstrap_pending(&intent).await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        self.replica
+            .set_importing(pending.into_iter().collect())
+            .await;
+        Ok(())
     }
     /// Syncs with one peer, then keeps the revocations its sessions brought.
     async fn reconcile(
@@ -2740,31 +2846,12 @@ impl Node {
             if marker.exists() {
                 self.sync_state.send_replace("bootstrapping");
                 let expected = std::fs::read(&marker)?;
-                let intent: Value = serde_json::from_slice(&expected)?;
-                let token = intent.get("intent").unwrap_or(&intent);
-                if token != &json!(true) {
-                    return Err(refused("invalid bootstrap authority intent"));
-                }
-                let pending: Vec<ResourceScope> = match intent.get("pending") {
-                    Some(pending) => serde_json::from_value(pending.clone())?,
-                    None if intent == true => self.scopes(),
-                    None => return Err(refused("invalid bootstrap intent")),
-                };
-                if pending.iter().any(|scope| !self.scopes().contains(scope)) {
-                    return Err(refused("bootstrap intent names an ungranted scope"));
-                }
-                // Keyless custody scopes cannot import a checkpoint; they sync rows.
-                // Nor can a partitioned table's own scope, which holds no rows.
-                let pending: Vec<ResourceScope> = {
-                    let settings = self.settings.lock().await;
-                    pending
-                        .into_iter()
-                        .filter(|scope| {
-                            settings.reads_whole(&self.domain, scope)
-                                && !self.domain.partitioned_table(scope)
-                        })
-                        .collect()
-                };
+                let pending = self
+                    .bootstrap_pending(&serde_json::from_slice(&expected)?)
+                    .await?;
+                self.replica
+                    .set_importing(pending.iter().copied().collect())
+                    .await;
                 self.activity.record_changed(
                     "bootstrap_started",
                     json!({"peer": peer.to_hex(), "scopes": pending.len()}),
@@ -2786,6 +2873,9 @@ impl Node {
                         return Err("bootstrap authority changed; retry with the new intent".into());
                     }
                     std::fs::remove_file(&marker)?;
+                    self.replica
+                        .set_importing(std::collections::BTreeSet::new())
+                        .await;
                     #[cfg(unix)]
                     std::fs::File::open(
                         marker.parent().ok_or("bootstrap marker has no directory")?,

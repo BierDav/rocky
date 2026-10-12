@@ -34,7 +34,7 @@ data class SyncState(
     val entries: List<ActivityEntry> = emptyList(),
     val peers: List<Peer> = emptyList(),
 ) {
-    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, peers.any { it.link.state == LinkState.Open })
+    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, peers.any { it.link.state == LinkState.Open }, readiness?.bootstrap)
 }
 
 @Inject

@@ -35,16 +35,23 @@ SDK reconciliation restores the peer's base before pushing local operations.
 verify and atomically adopt a checkpoint, then pull its tail. Local operations
 not covered by the checkpoint are reapplied under the runtime's admission rules;
 mutation handles survive. An interrupted import resumes from durable staging.
-A peer behind this device's own horizon must initiate its own catch-up; a push
-reports that condition instead of replaying missing history.
+A peer behind this device's own horizon must initiate its own catch-up. A push
+skips that scope, and any scope the peer reports it is
+[importing](checkpoint-import.md#while-a-scope-is-importing), and continues with
+the others; the SDK records the skipped scopes as
+[`scopes_waiting`](activity.md). A bootstrapping peer is therefore never fed
+the history its checkpoint replaces.
 
 ## Join
 
 Enrollment persists checkpoint-first intent before installing an identity. Join
-starts a sync in the background; applications may also call `sync`. For every
-granted collection it requests a current checkpoint, imports it through durable
-staging, and pulls the ordinary tail. A writable source creates the checkpoint
-on demand, including an empty one. Interrupted transfers resume on sync or reopen;
+starts a sync in the background; applications may also call `sync`. It first
+asks its peer which checkpoint it offers for every granted collection, then
+imports them smallest first, so the first rows appear soonest, and pulls each
+ordinary tail. Each [verified page](checkpoint-import.md) of a collection the
+device held nothing of is readable as it commits. A writable source creates the
+checkpoint on demand, including an empty one. Interrupted transfers resume at
+the next page on sync or reopen;
 Each completed scope is recorded after catch-up and a local flush, so retries
 resume only incomplete scopes. Intent clears after all scopes complete. Session rollover resumes
 the tail after a completed import instead of repeatedly importing its base. A
@@ -75,9 +82,25 @@ while checkpoint-first intent or a staged import remains, `syncing` during an
 ordinary pass, `ready` when idle with valid authority, `revoked` after a verified
 [revocation notice](sdk-enrollment.md#renewal-revocation-and-logout), or `unavailable` after
 logout, expiry or during a generation rebuild. `ready` is true only in the
-`ready` state. Reads during import still see the previous committed projection;
-a new join is not complete until bootstrap finishes. A failed bootstrap remains
-`bootstrapping` across reopen. Cancelling an ordinary sync clears its activity.
+`ready` state. During a join, rows are readable page by page while the state
+stays `bootstrapping`; a collection that already held rows keeps its previous
+projection until its import switches. A new join is not complete until
+bootstrap finishes. A failed bootstrap remains `bootstrapping` across reopen.
+Cancelling an ordinary sync clears its activity.
+
+While bootstrapping, `bootstrap` reports progress once a peer offered a
+checkpoint, and is `null` before that and in every other state:
+
+| Field | Meaning |
+| --- | --- |
+| `rows_done`, `rows_total` | Stored rows imported, of all offered checkpoints |
+| `scopes_done`, `scopes_total` | Collections whose import and catch-up completed |
+
+`rows_total` is fixed when the offers arrive; `rows_done` only grows, page by
+page, and each page wakes `status_next`. Kotlin exposes
+`Readiness.bootstrap: BootstrapProgress?` with a whole `percent`. The totals
+are kept in the bootstrap intent, so progress survives a reopen. Operations
+pulled after a checkpoint are not counted.
 
 `status_next` wakes on sync state changes as well as committed revisions; its
 token covers the state. Offline local databases can be ready without a network.

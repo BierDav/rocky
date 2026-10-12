@@ -140,7 +140,9 @@ paused clock. Android lifecycle evidence is in the [phase 5 brief](../features_0
 desktop and phone runs over cellular and an iroh relay are in the
 [phase 6 evidence](../features_08/06-qualification-evidence.md).
 
-Short-link cleanup names the admitted link identity. When simultaneous dials
+Short-link cleanup names the admitted link identity. Requests that share a
+short link, such as a reconciliation and concurrent contact lookups, each hold
+it: it closes when the last of them ends. When simultaneous dials
 replace a stream, a failed reconciliation on the losing stream cannot close
 the replacement. Both peers can retry on the surviving link. Stream interruptions retry within
 the existing four-attempt reconciliation bound, including when a remote

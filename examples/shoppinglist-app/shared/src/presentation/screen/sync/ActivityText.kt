@@ -76,6 +76,18 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             event.scopes.joinToString("\n") { scope(it) },
         )
 
+        is RockyEvent.ScopesWaiting -> ActivityEntry(
+            key,
+            event.atEpochMillis,
+            EntryKind.Network,
+            if (event.scopes.isEmpty()) {
+                "${device(event.peer)} caught up from its checkpoints"
+            } else {
+                "${device(event.peer)} is restoring ${event.scopes.size} tables from a checkpoint"
+            },
+            event.scopes.joinToString("\n") { scope(it) },
+        )
+
         is RockyEvent.ResultsFailed -> ActivityEntry(
             key,
             event.atEpochMillis,

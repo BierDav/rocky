@@ -263,7 +263,7 @@ impl<A: RowApplication> Inner<A> {
             clock: clock
                 .checked_add(1)
                 .ok_or_else(|| denied("logical clock exhausted"))?,
-            author: signing_key.public_key(),
+            author: signing_key.public_key().into(),
             sequence,
         };
         let mut proofs = BTreeMap::new();

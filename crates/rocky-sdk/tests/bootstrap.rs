@@ -80,6 +80,22 @@ async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Re
         .await;
     assert!(!status["horizon"].as_array().expect("horizon").is_empty());
     a.add(13, "tail").await;
+    // Pushing to a peer behind the horizon skips the scope; the pass succeeds.
+    common::introduce(&a, &c).await;
+    a.sync().await.expect("push to a behind peer");
+    let behind = c.node().await;
+    assert!(a.peer(&behind).await["error"].is_null());
+    let activity = a.ok(json!({"type": "activity"})).await;
+    assert!(
+        activity["events"]
+            .as_array()
+            .ok_or("events")?
+            .iter()
+            .any(|event| event["kind"] == "scopes_waiting"
+                && event["peer"] == behind
+                && event["scopes"][0]["table"] == "items"),
+        "{activity}"
+    );
     c.sync().await.expect("rebootstrap and publish");
     assert_eq!(a.items().await, c.items().await);
     assert!(c.titles().await.contains(&"unsent".to_owned()));
@@ -452,7 +468,8 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
             .len(),
         1
     );
-    assert_eq!(member.titles().await, ["first scope"]);
+    // The empty scope imported first: the one holding the row is pending.
+    assert!(member.titles().await.is_empty());
     member.close().await;
     let member = Device::new(Database::open(Open {
         directory: &path,
@@ -480,6 +497,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
     assert_eq!(*attempts.borrow() - before, 2);
     assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
     assert!(!path.join("bootstrap.json").exists());
+    assert_eq!(member.titles().await, ["first scope"]);
     member.close().await;
     gate.close().await;
     a.close().await;
@@ -621,5 +639,77 @@ async fn horizon_sdk_declares_finalizes_maintains_and_preserves_reopen_state() -
     assert_eq!(status["finalized"], true);
     assert_eq!(reopened.titles().await, ["base", "fresh"]);
     reopened.close().await;
+    Ok(())
+}
+
+/// An intent no peer offered a checkpoint for has no progress to report.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    Device::create(root.path(), None)?.close().await;
+    rocky_credentials::write_private(
+        &root.path().join("bootstrap.json"),
+        br#"{"intent":true,"pending":[],"totals":[]}"#,
+    )?;
+    let device = Device::open(root.path(), None)?;
+    let status = device.ok(json!({"type": "status"})).await;
+    assert_eq!(status["state"], "bootstrapping");
+    assert!(status["bootstrap"].is_null(), "{status}");
+    device.close().await;
+    Ok(())
+}
+
+/// Bootstrap progress counts the stored rows of the offered checkpoints: it
+/// only grows, with a stable total, and the status turns ready when the
+/// intent completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    for handle in 0..40 {
+        a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
+            .await;
+    }
+    let b = Arc::new(Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?);
+    let observer = {
+        let b = b.clone();
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            let mut status = b.ok(json!({"type": "status"})).await;
+            while status["state"] != "ready" {
+                seen.push(status["bootstrap"].clone());
+                status = b
+                    .ok(json!({"type": "status_next", "after": status["token"]}))
+                    .await;
+            }
+            (seen, status)
+        })
+    };
+    b.sync().await.expect("join sync");
+    let (seen, ready) = observer.await?;
+    assert!(ready["bootstrap"].is_null(), "{ready}");
+    let progress: Vec<_> = seen.iter().filter(|progress| !progress.is_null()).collect();
+    assert!(progress.len() > 2, "{seen:?}");
+    let total = progress[0]["rows_total"].clone();
+    assert!(total.as_u64().is_some_and(|total| total >= 40), "{total}");
+    for pair in progress.windows(2) {
+        assert_eq!(pair[1]["rows_total"], total);
+        assert!(pair[0]["rows_done"].as_u64() <= pair[1]["rows_done"].as_u64());
+        assert!(pair[1]["rows_done"].as_u64() <= total.as_u64());
+    }
+    assert!(progress.iter().any(|progress| {
+        progress["rows_done"].as_u64() > Some(0) && progress["rows_done"] != total
+    }));
+    assert_eq!(b.titles().await.len(), 40);
+    b.close().await;
+    a.close().await;
     Ok(())
 }

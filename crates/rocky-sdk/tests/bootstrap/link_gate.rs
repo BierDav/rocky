@@ -24,6 +24,7 @@ pub(super) struct LinkGate {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Signed {
     sequence: u64,
+    #[serde(with = "serde_bytes")]
     bytes: Vec<u8>,
     signature: rocky_credentials::Signature,
 }

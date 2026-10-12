@@ -40,6 +40,14 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             authority["issuer_contact"]?.jsonPrimitive?.boolean ?: true,
             discovery(status.getValue("network").jsonObject.getValue("discovery").jsonObject),
             status.getValue("network").jsonObject.getValue("peers").jsonArray.map { peer(it.jsonObject) },
+            (status["bootstrap"] as? JsonObject)?.let { progress ->
+                BootstrapProgress(
+                    progress.getValue("rows_done").jsonPrimitive.long,
+                    progress.getValue("rows_total").jsonPrimitive.long,
+                    progress.getValue("scopes_done").jsonPrimitive.int,
+                    progress.getValue("scopes_total").jsonPrimitive.int,
+                )
+            },
         )
     }
 

@@ -31,6 +31,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         loop {
             let mut inner = self.inner.lock().await;
             if inner.eviction_step(scope, &mut report).await? {
+                inner.load_direct().await?;
                 return Ok(report);
             }
         }
@@ -218,6 +219,9 @@ impl<A: RowApplication> Inner<A> {
                         "secure_checkpoints",
                         "secure_rebootstrap",
                         "secure_rebootstrap_stubs",
+                        "secure_rebootstrap_strong",
+                        "secure_rebootstrap_pages",
+                        "secure_checkpoint_pages",
                         "secure_checkpoint_stubs",
                         "secure_checkpoint_build_stubs",
                         "secure_horizon_live_creations",

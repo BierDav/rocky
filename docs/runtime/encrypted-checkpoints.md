@@ -71,37 +71,13 @@ deleted row; only a [mergeable horizon](mergeable-horizon.md) removes them.
 
 SDK [join](sdk-bootstrapping.md#join) requests a checkpoint before ordinary
 catch-up, even when the source still retains its history. A writable source
-seals a current checkpoint on demand when offering it. `bootstrap_scope` performs
-that import followed by tail catch-up; `sync_scope` keeps using the behind signal.
-
-`NativeSession::rebootstrap(replica, scope, quota)` fetches the peer's signed
-checkpoint and its rows in pages and switches to it. An interrupted import of
-the same checkpoint continues from `rebootstrap_progress`. The SDK reports
-[bootstrapping readiness](sdk-bootstrapping.md#readiness) while import remains. Without a session,
-use `checkpoint_offer`, `begin_rebootstrap`, `checkpoint_page`,
-`stage_checkpoint_page` and `finish_rebootstrap`.
-
-Pages also carry confirmed command rows and the latest result under the current
-scope key; the switch installs their sequence/head as the
-[strong base](strong-history.md#read-and-catch-up). A cached offer behind the
-source's strong pruning base is refreshed.
-
-The latest result names its caller's and its executor's credential chain by
-digest. The chains travel beside the first page: in `CheckpointPage::chains`,
-and on a session in a message of their own before the page. Staging rebuilds
-the signed result from them and refuses the page, staging nothing, unless
-exactly the named chains arrived
-([decision 0053](../decisions/0053-chains-by-reference.md)).
-
-The switch verifies the staged rows against the statement. `RebootstrapReport`
-accounts for every local operation: `superseded` when the checkpoint covers it,
-otherwise `reapplied`, `rejected` with the reason, or `pending` on a dependency
-or key. A checkpoint that ends before the replica's own horizon, or whose
-signature, signer or definition does not verify, is refused. The signer needs
-whole-scope read and a write grant; see
-[bootstrap signers](sdk-bootstrapping.md#bootstrap-signers). Its credentials
-must be valid at admission and again at the final switch; an interrupted import
-does not pin expired authority.
+seals a current checkpoint on demand when offering it. The import verifies and
+stores the checkpoint's rows page by page and then switches to it; a scope that
+held nothing is readable as each page commits. See
+[importing a checkpoint](checkpoint-import.md) for the calls, signed pages,
+what is readable meanwhile and the report of the switch. The SDK reports
+[bootstrapping readiness](sdk-bootstrapping.md#readiness) with its progress
+while an import remains.
 
 ## Retries
 
@@ -133,10 +109,15 @@ against their digests, and the replay, in batches under the replica lock.
   is imported.
 - The rebootstrap switch and `rebuild_projection` are one transaction
   proportional to the scope's rows.
+- A row record names its author's bindings by digest; the sets are stored once
+  and are not removed with the rows. See
+  [stored row records](checkpoint-import.md#stored-row-records).
 - A checkpoint names at most 256 logs per scope and must fit one 256 KiB frame.
 - Checkpoint pages use the whole frame, less 8 KiB. A page's sealed plaintext
-  must fit one 64 KiB package, so a page holds at most 63 KiB of row records;
-  stored bytes are CBOR byte strings and count once. The first page also
+  must fit one 64 KiB package, so a page holds at most 63 KiB of row records
+  and the author bindings they name, and at most 256 rows; stored bytes are
+  CBOR byte strings and count once. Each page carries its signer's signature;
+  a holder of an imported checkpoint serves the signer's pages. The first page also
   carries a command table's strong state: 3.1 KB after one command, whatever
   the chains, where it was 79 KB with two 20-grant chains embedded.
 - A chain beside the page must fit one 256 KiB session frame, and the confirmed

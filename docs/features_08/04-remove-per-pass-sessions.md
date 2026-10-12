@@ -93,9 +93,10 @@ Slice 4 updates SDK transports, live links, secure sessions, always-on peer,
 SDK enrollment, permissions and sync, replica roles, revocations, mergeable
 horizon, the shopping qualification, the module map and the README.
 
-## Final qualification (2026-10-12)
+## Pre-merge qualification (2026-10-12)
 
-The final code slice is `vkmusspr / 4ee1a218`; this guides slice is separate.
+Before the stack merge, the code slice was `vkmusspr / 4ee1a218`; the guides
+slice was separate.
 The resumed review read both diffs, confirmed the explicit-sync close regression
 is in the code slice and completed these checks against it:
 
@@ -126,3 +127,44 @@ These are Rust workspace and SDK qualifications, including native shopping and
 command/confirmed-table coverage. Standalone Kotlin shopping/market harnesses,
 the excluded native ABI checks, doc tests, desktop UI and real-network/mobile
 qualification were not rerun. Phases 5–6 remain unstarted.
+
+## Post-merge qualification (2026-10-12)
+
+The merged code is `vkmusspr / 909be856`, the merged guides are
+`lrnuoozr / 3f3ca107`, and the scheme change `ttlykuxu / 02cb158f` is retained.
+None of those commits was edited. Verification started from the empty
+`wsvqorwr` change; only this workspace's own target directory was cleaned
+with Cargo, removing 36.4 GiB before the clean build.
+
+The first full check passed all 917 integration executions but failed the
+2 s timing gate for `iroh_authority_gate` and `iroh_liveness_gate`: each was
+3.15 s alone in the SDK build without defaults. Instrumentation located the
+authority test's delay after its assertions: 184 ms before detach, then about
+3 s closing the second endpoint. Repair `wsvqorwr / 48da7818` stops both
+workers before either endpoint closes and detaches both concurrently. It
+changes test teardown only; no assertion, production deadline or budget changed.
+The four affected TCP/iroh authority and liveness tests passed serially in
+0.67 s. Temporary timing instrumentation was removed.
+
+Final checks against that repair:
+
+- `./scripts/lint`: passed, exit 0; no formatting fixes were needed.
+- `./scripts/check`: passed, exit 0; strict workspace Clippy, 165 unit tests
+  (149 workspace, 16 SDK without defaults) and 917 integration tests
+  (696 workspace, 221 SDK without defaults). Unit wall time was 102.3 ms;
+  integration wall time was 142.71 s against the unchanged 300 s budget.
+  Isolated iroh authority/liveness confirmations were 229.4 ms and 154.9 ms,
+  within the unchanged 2 s per-test budget.
+- `./scripts/check --e2e`: passed in the foreground, exit 0; 84 tests
+  (59 workspace, 25 SDK without defaults), wall 277.08 s against the
+  unchanged 900 s budget. Both shopping release gates passed in both builds.
+- Idle, explicit-sync close, busy-link back-off and lost-link reconnect
+  regressions passed in both builds. The explicit-sync regression remains
+  in the merged code slice.
+- The removal search above produced no output, exit 1. The requested
+  unfiltered search across crates, SDKs, examples and docs found only
+  historical records and this removal brief.
+
+Standalone Kotlin shopping/market harnesses, excluded ABI checks, doc tests,
+desktop UI and real-network/mobile qualification were not rerun. Phases 5–6
+remain unstarted. The passing full rerun supersedes the timing failure above.

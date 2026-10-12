@@ -198,7 +198,8 @@ handlers on a router the application owns and dials with its endpoint, without
 ever closing either; `Options` is the starter that binds, routes and shuts
 down its own. `Attachment::serving` answers another protocol set, such as a
 coordinator voter's. Its `discovery` module finds members of a topic over
-mDNS and a rendezvous record, beside the endpoint and only when asked. It
+standard DNS-SD (system Bonjour on Apple platforms) and a rendezvous record,
+beside the endpoint and only when asked. It
 re-exports the iroh version it attaches to. See
 [iroh networking](runtime/sdk-transports.md#iroh) and
 [discovery](runtime/discovery.md).

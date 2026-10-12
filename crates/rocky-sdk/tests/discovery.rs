@@ -30,7 +30,7 @@ fn starter(lookup: Option<&str>, local: bool) -> Network {
         lookup: Some(lookup.unwrap_or("disabled").into()),
         topic: lookup.is_some(),
         local,
-        bind: Some("127.0.0.1:0".into()),
+        bind: Some(if local { "0.0.0.0:0" } else { "127.0.0.1:0" }.into()),
     }))
 }
 async fn discovered(device: &Device) -> Option<Value> {

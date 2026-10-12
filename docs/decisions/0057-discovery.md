@@ -1,6 +1,8 @@
 # 0057. Discovery capability and topic
 
-Status: accepted; implemented by phase 15.
+Status: accepted; implemented by phase 15. The local-network mechanism and its
+claim format are replaced by [standard DNS-SD](../runtime/discovery-dns-sd.md);
+the topic/rendezvous mechanism remains current.
 Date: 2026-10-10.
 
 ## Context

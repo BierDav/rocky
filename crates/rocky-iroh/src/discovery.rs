@@ -1,20 +1,16 @@
-//! Finding admitted peers on iroh: an mDNS announcement on the local
-//! network and a rendezvous record on the address-lookup service, both
-//! under names and keys derived from a topic only members hold. Neither
-//! touches the endpoint's own lookup services. See
-//! `docs/decisions/0057-discovery.md`.
+//! Finding admitted peers through standard DNS-SD and sealed rendezvous records.
+//! Neither path changes the endpoint's own lookup services. See
+//! `docs/runtime/discovery-dns-sd.md` and `docs/runtime/discovery.md`.
 use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use data_encoding::{BASE32_NOPAD, BASE64URL_NOPAD};
-use futures_util::StreamExt;
+use data_encoding::BASE64URL_NOPAD;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr, Watcher,
-    address_lookup::{AddressLookup, EndpointData, PkarrError, PkarrRelayClient, UserData},
+    Endpoint, EndpointAddr, EndpointId, RelayUrl, SecretKey, TransportAddr,
+    address_lookup::{PkarrError, PkarrRelayClient},
 };
 use iroh_dns::pkarr::SignedPacket;
-use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use rand::RngCore;
 use rocky_core::{
     commitment,
@@ -29,6 +25,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, mpsc, watch};
+
+mod local;
+pub use local::LOCAL_SERVICE;
 
 /// A member merges its contact into the rendezvous record this often.
 pub const RENDEZVOUS_INTERVAL: Duration = Duration::from_secs(300);
@@ -70,26 +69,8 @@ pub struct Discover {
     pub local: bool,
 }
 
-/// Why local discovery cannot run on this target, if it cannot. A physical
-/// iOS device needs the multicast entitlement, which no build carries yet.
-pub fn local_unavailable() -> Option<&'static str> {
-    if cfg!(all(target_os = "ios", not(target_abi = "sim"))) {
-        Some(
-            "this build lacks the iOS multicast entitlement; peers are found by topic and contacts",
-        )
-    } else {
-        None
-    }
-}
-
 fn derive(label: &str, topic: &[u8; 32]) -> [u8; 32] {
     commitment(label, topic)
-}
-/// The mDNS service members of `topic` announce: 15 characters, as a
-/// service name allows.
-pub fn service_name(topic: &[u8; 32]) -> String {
-    let tag = BASE32_NOPAD.encode(&derive("rocky.discovery-mdns-service.v1", topic));
-    format!("rk{}", tag[..13].to_ascii_lowercase())
 }
 /// The key whose public half names the rendezvous record of `topic`.
 pub fn rendezvous_key(topic: &[u8; 32]) -> SecretKey {
@@ -111,31 +92,6 @@ fn open(cipher: &ChaCha20Poly1305, sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>>
     cipher
         .decrypt(Nonce::from_slice(nonce), Payload { msg, aad })
         .ok()
-}
-
-/// The node key a local announcement carries, sealed to the topic and
-/// bound to the announcing endpoint.
-fn local_claim(
-    topic: &[u8; 32],
-    endpoint: EndpointId,
-    node: &[u8; 32],
-) -> Result<UserData, Failure> {
-    let sealed = seal(
-        &cipher("rocky.discovery-local-key.v1", topic),
-        node,
-        endpoint.as_bytes(),
-    )?;
-    Ok(BASE64URL_NOPAD.encode(&sealed).parse()?)
-}
-fn local_node(topic: &[u8; 32], endpoint: EndpointId, claim: &str) -> Option<[u8; 32]> {
-    let sealed = BASE64URL_NOPAD.decode(claim.as_bytes()).ok()?;
-    open(
-        &cipher("rocky.discovery-local-key.v1", topic),
-        &sealed,
-        endpoint.as_bytes(),
-    )?
-    .try_into()
-    .ok()
 }
 
 /// One contact of the rendezvous record.
@@ -398,9 +354,7 @@ impl Finder {
         self.0.failed.lock().unwrap_or_else(PoisonError::into_inner)[path] = reason;
     }
     fn local_runs(&self) -> bool {
-        self.0.asked.local
-            && local_unavailable().is_none()
-            && self.0.foreground.load(Ordering::SeqCst)
+        self.0.asked.local && self.0.foreground.load(Ordering::SeqCst)
     }
     /// Replaces what is announced and the tasks announcing it.
     fn start(&self, announce: Option<([u8; 32], Vec<[u8; 32]>)>) {
@@ -418,10 +372,8 @@ impl Finder {
             return;
         };
         let mut tasks = Vec::new();
-        if self.local_runs() {
-            for topic in &topics {
-                tasks.push(tokio::spawn(self.clone().local(node, *topic)));
-            }
+        if self.local_runs() && !topics.is_empty() {
+            tasks.push(tokio::spawn(self.clone().local(node, topics.clone())));
         }
         if let Topic::On(relay) = &self.0.asked.topic
             && !topics.is_empty()
@@ -451,67 +403,24 @@ impl Finder {
         }
     }
 
-    /// Announces this endpoint under the topic's service and reports the
+    /// Announces this endpoint with sealed topic claims and reports the
     /// members that answer. A replaced endpoint is announced anew.
-    async fn local(self, node: [u8; 32], topic: [u8; 32]) {
+    async fn local(self, node: [u8; 32], topics: Vec<[u8; 32]>) {
         let mut endpoints = self.0.endpoint.clone();
         loop {
             let endpoint = endpoints.borrow_and_update().clone();
             let result = tokio::select! {
-                result = self.local_on(&endpoint, node, topic) => result,
+                result = local::run(&self, &endpoint, node, &topics) => result,
                 changed = endpoints.changed() => match changed {
                     Ok(()) => continue,
                     Err(_) => return,
                 },
             };
             self.fail(0, result.err().map(|error| error.to_string()));
-            // The endpoint closed or mDNS failed: wait for a replacement.
-            if endpoints.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-    async fn local_on(
-        &self,
-        endpoint: &Endpoint,
-        node: [u8; 32],
-        topic: [u8; 32],
-    ) -> Result<(), Failure> {
-        let lookup = MdnsAddressLookup::builder()
-            .service_name(service_name(&topic))
-            .build(endpoint.id())
-            .map_err(|error| format!("mDNS could not start: {error}"))?;
-        self.fail(0, None);
-        let claim = local_claim(&topic, endpoint.id(), &node)?;
-        let mut events = lookup.subscribe().await;
-        let mut addresses = endpoint.watch_addr();
-        loop {
-            // Relay URLs stay off the local network: a LAN peer needs none.
-            let mut data = EndpointData::from(addresses.get());
-            data.clear_relay_urls();
-            lookup.publish(&data.with_user_data(claim.clone()));
+            // Permission or network changes may recover without a new endpoint.
             tokio::select! {
-                changed = addresses.updated() => {
-                    if changed.is_err() {
-                        return Ok(());
-                    }
-                }
-                event = events.next() => {
-                    let Some(event) = event else {
-                        return Err("mDNS stopped".into());
-                    };
-                    let DiscoveryEvent::Discovered { endpoint_info, .. } = event else {
-                        continue;
-                    };
-                    let Some(node) = endpoint_info
-                        .user_data()
-                        .and_then(|claim| local_node(&topic, endpoint_info.endpoint_id, claim.as_ref()))
-                    else {
-                        continue;
-                    };
-                    let address = EndpointAddr::from(endpoint_info.with_user_data(None));
-                    self.report(node, &address, LOCAL_PATH, true);
-                }
+                changed = endpoints.changed() => if changed.is_err() { return; },
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {},
             }
         }
     }
@@ -607,6 +516,9 @@ impl Discovery for Finder {
             if *self.0.closed.borrow() {
                 return Err("the iroh attachment is closed".into());
             }
+            if topics.len() > 2 {
+                return Err("discovery accepts at most two topics".into());
+            }
             let unchanged = self
                 .0
                 .announced
@@ -643,10 +555,7 @@ impl Discovery for Finder {
             Some(reason) => PathState::Unavailable(reason.clone()),
             None => PathState::On,
         };
-        let local = match local_unavailable() {
-            Some(reason) if self.0.asked.local => PathState::Unavailable(reason.into()),
-            _ => state(self.local_runs(), &failed[0]),
-        };
+        let local = state(self.local_runs(), &failed[0]);
         let topic = match &self.0.asked.topic {
             Topic::Unavailable(reason) => PathState::Unavailable(reason.clone()),
             Topic::Off => PathState::Off,
@@ -767,23 +676,6 @@ mod tests {
         assert!(merged.len() >= 3);
         let packet = record(&[1; 32], &merged)?;
         assert_eq!(entries(&[1; 32], &packet), merged);
-        Ok(())
-    }
-
-    #[test]
-    fn a_local_claim_opens_only_for_its_topic_and_endpoint() -> Result<(), Failure> {
-        let endpoint = SecretKey::from_bytes(&[1; 32]).public();
-        let other = SecretKey::from_bytes(&[2; 32]).public();
-        let claim = local_claim(&[5; 32], endpoint, &[9; 32])?;
-        assert_eq!(
-            local_node(&[5; 32], endpoint, claim.as_ref()),
-            Some([9; 32])
-        );
-        assert_eq!(local_node(&[6; 32], endpoint, claim.as_ref()), None);
-        assert_eq!(local_node(&[5; 32], other, claim.as_ref()), None);
-        let name = service_name(&[5; 32]);
-        assert_eq!(name.len(), 15);
-        assert_ne!(name, service_name(&[6; 32]));
         Ok(())
     }
 }

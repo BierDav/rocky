@@ -104,3 +104,8 @@ packages contain neither socket-fault calls nor commit-exit hooks.
 limits. Physical iPhone qualification additionally requires the locked-device
 behavior of the application's secret store, restart and restore refusal, and foregrounding after ten
 minutes in the background. Simulator results do not establish those properties.
+
+Local discovery uses system Bonjour without the multicast entitlement. Consumers
+declare `_rocky._udp` and a usage description in their app plist and obtain
+local-network permission; see [discovery](discovery.md#apple-application-configuration)
+and [the physical-device gate](discovery-devices.md).

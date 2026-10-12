@@ -21,7 +21,7 @@ class SimulatorDiscoveryTest {
             primaryKey("id")
         }
     }
-    private fun local() = PeerTransport.Iroh(relay = "disabled", lookup = "disabled", topic = true, local = true, bind = "127.0.0.1:0")
+    private fun local() = PeerTransport.Iroh(relay = "disabled", lookup = "disabled", topic = true, local = true, bind = "0.0.0.0:0")
     private fun write(path: String, text: String) {
         @Suppress("CAST_NEVER_SUCCEEDS")
         check((text as NSString).writeToFile(path, true, NSUTF8StringEncoding, null)) { "cannot write $path" }

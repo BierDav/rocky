@@ -12,7 +12,7 @@ fn options(lookup: Option<&LookupServer>, local: bool) -> Options {
         lookup: Some(lookup.map_or("disabled".into(), |server| server.url.clone())),
         topic: lookup.is_some(),
         local,
-        ..Options::isolated("127.0.0.1:0")
+        ..Options::isolated(if local { "0.0.0.0:0" } else { "127.0.0.1:0" })
     }
 }
 async fn found(transport: &dyn Transport, node: [u8; 32]) -> Result<Found, Failure> {

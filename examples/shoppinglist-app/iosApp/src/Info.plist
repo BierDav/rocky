@@ -29,6 +29,10 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSBonjourServices</key>
+	<array><string>_rocky._udp</string></array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Find your household devices nearby to sync shopping lists.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan a shopping pairing code.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

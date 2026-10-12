@@ -163,7 +163,7 @@ device's stored transport key, so its address is stable.
   DNS service, `disabled` nowhere, anything else is a pkarr relay URL.
 - `topic`, `local`: the two [discovery](#discovery) paths.
   Disabling `local` also disables multicast gateway discovery for port mapping.
-  Physical iOS disables gateway discovery when local discovery is unavailable.
+  iOS always disables raw multicast gateway discovery, including when system Bonjour is enabled.
 - `bind`: a local socket address. Without relay and lookup, peers know only
   addresses in invitations, contacts and local announcements: use a fixed port.
 
@@ -184,7 +184,7 @@ credential chains cross a session in the clear to its peer. Beyond that:
 
 | Party | From sync through a relay or directly | From the `local` path | From the `topic` path |
 | --- | --- | --- | --- |
-| LAN observer | Which IP addresses exchange QUIC, when and how much | Each announcing endpoint's ID, IP addresses and port; a service tag shared by the domain's members until a revocation changes it; an opaque sealed value. Not the node key, the domain or the topic | The device's requests to the lookup service, under TLS |
+| LAN observer | Which IP addresses exchange QUIC, when and how much | The fixed Rocky service type, each endpoint's ID, IP addresses and port, and one or two sealed claims. Apple Bonjour may also expose the system hostname. Not the node key, domain or topic | The device's requests to the lookup service, under TLS |
 | Lookup service | With `lookup` on: each endpoint's ID and relay URL, and who resolves whom, from which address | Nothing | An opaque record under an opaque key, its size and write times, and the addresses that read and write it, so which addresses belong to one domain. Not the contacts, node keys or topic |
 | Relay | Which endpoint IDs exchange traffic, from which addresses, when and how much | Nothing | Nothing; a found contact may name the relay it is reached through |
 
@@ -258,9 +258,10 @@ in back-off. Disabling that worker cancels its attempts within one second.
 - `./sdks/native/qualify-ios-discovery`: a simulator and a host process find
   each other over mDNS, and the path stops in the background.
 
-One host: a relay and the two discovery paths work, each once. NAT traversal,
-public relays and lookup services, multicast across real networks and phones
-are not qualified ([phase 22](../features_07/22-qualification.md)).
+One host: a relay and both discovery paths work. The [physical-device gate](discovery-devices.md)
+additionally checks iPhone/Pixel local DNS-SD and direct QUIC on one Wi-Fi LAN.
+NAT traversal, public services, arbitrary networks and combined mobile database
+fault scenarios remain unqualified.
 
 ## Design rationale
 

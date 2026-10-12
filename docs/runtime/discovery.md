@@ -14,7 +14,7 @@ device under that topic and keeps whatever it finds as a contact:
 
 | Path | Mechanism | Finds |
 | --- | --- | --- |
-| `local` | mDNS under a service name derived from the topic | Members on the same network; marked local, so a sync tries them first |
+| `local` | Standard DNS-SD under `_rocky._udp`, with topic-encrypted claims | Members on the same network; marked local, so a sync tries them first |
 | `topic` | A sealed rendezvous record on the lookup service, under a key derived from the topic | Up to 6 members anywhere, newest first, refreshed every 5 minutes |
 
 A found contact is a hint. The session it leads to authenticates the peer and
@@ -64,7 +64,7 @@ and the test hub's default have no discovery and work from contacts.
 `on` means asked for and running, `off` not asked for, detached or stopped in
 the background, `unavailable` asked for but impossible, with the reason: a
 disabled lookup service, a failed mDNS socket, a lookup service that did not
-answer, a transport without discovery or an iOS device build. `announcing` is
+answer, a transport without discovery or denied local-network access. `announcing` is
 false until the device holds the discovery root, and for a device that is
 logged out or knows it is revoked. Kotlin: `RockySession.discovery()`,
 `NetworkStatus.discovery`, `Readiness.discovery` and `Peer.isLocal`.
@@ -87,10 +87,22 @@ cadence while the process runs.
 
 | Platform | Local path |
 | --- | --- |
-| Desktop JVM, Linux, macOS | On when asked. macOS may prompt for local-network access |
+| Desktop JVM, Linux, macOS | On when asked. Apple platforms use system Bonjour; others use standard DNS-SD. macOS may prompt for local-network access |
 | Android | On when asked. `RockyLifecycle.follow` holds the Wi-Fi multicast lock while the path is on and releases it in the background; the SDK's manifest declares `CHANGE_WIFI_MULTICAST_STATE` |
 | iOS simulator | On when asked, in the foreground |
-| iOS device | Unavailable: no build carries the multicast entitlement yet. The status names that reason; peers are found by topic and contacts |
+| iOS device | System Bonjour in the foreground, after the user grants local-network access. No multicast entitlement |
+
+## Apple application configuration
+
+Applications declare `_rocky._udp` in `NSBonjourServices` and explain discovery
+in `NSLocalNetworkUsageDescription`. The SDK cannot supply the host app's plist.
+The shopping example declares both. System Bonjour owns the multicast traffic;
+Rocky registers the endpoint's existing UDP port without binding another socket.
+Raw multicast gateway discovery remains disabled on iOS.
+
+The new local format replaces the topic-derived service types entirely. See
+[DNS-SD design and security](discovery-dns-sd.md) for the current format,
+expiry, privacy tradeoffs and resource limits.
 
 ## Bounds
 
@@ -102,6 +114,10 @@ cadence while the process runs.
 | Lookup request | 15 s |
 | Found contacts waiting for the SDK | 64; further ones are dropped and reported again |
 | Topics announced at once | 2: the current and, for 24 h, the previous |
+| Local TXT; sockets per candidate | 384 bytes; 8 |
+| Local claim refresh; age; future clock tolerance | 60 s; 120 s; 30 s |
+| Bonjour resolutions | 16 concurrent, 3 s per candidate; 64 starts per 30 s |
+| Local reports | 64 distinct endpoints per 30 s; one report per endpoint per window |
 | Topic re-derivation | After each sync pass and served session, and every 10 min |
 
 ## Checks
@@ -112,9 +128,15 @@ and the hub scenarios; `./scripts/check --e2e` the two-process runs;
 `sdks/kotlin/gradlew -p sdks/kotlin :qualification:android-discovery:qualify` the multicast lock on an emulator.
 [SDK transports](sdk-transports.md#qualification) lists what each shows.
 
-## Not covered
+The physical-device probe is built with
+`sdks/native/qualification/discovery/build-devices`; see
+[device qualification](discovery-devices.md). It tests discovery and direct QUIC
+without a relay or public lookup.
 
-Qualified on one host: loopback mDNS and a local lookup server. Multicast
-across real access points, client isolation, the public lookup service, the
-Android multicast lock on real Wi-Fi and a physical iPhone belong to
-[phase 22](../features_07/22-qualification.md).
+## Qualification limits
+
+Loopback DNS-SD and a local lookup server are covered by the Rust gates.
+Physical iPhone/Pixel discovery and direct QUIC on one Wi-Fi network are
+covered by the [device gate](discovery-devices.md). These do not establish
+behavior across arbitrary access points, client isolation, IPv6-only networks,
+public lookup services or mobile database convergence under combined faults.

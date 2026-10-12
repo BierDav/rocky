@@ -24,8 +24,8 @@ mod discovery;
 #[cfg(feature = "test-utils")]
 pub mod testing;
 pub use discovery::{
-    DEFAULT_RENDEZVOUS, Discover, RENDEZVOUS_AGE, RENDEZVOUS_BYTES, RENDEZVOUS_CONTACTS,
-    RENDEZVOUS_INTERVAL, Topic, local_unavailable, rendezvous_key, service_name,
+    DEFAULT_RENDEZVOUS, Discover, LOCAL_SERVICE, RENDEZVOUS_AGE, RENDEZVOUS_BYTES,
+    RENDEZVOUS_CONTACTS, RENDEZVOUS_INTERVAL, Topic, rendezvous_key,
 };
 
 /// The iroh version these handlers attach to; build the endpoint with it.
@@ -574,7 +574,7 @@ impl Options {
             .secret_key(SecretKey::from_bytes(&secret))
             .relay_mode(relay_mode);
         // Gateway discovery also uses multicast; a manual/local-disabled path must not probe it.
-        if !self.local || local_unavailable().is_some() {
+        if !self.local || cfg!(target_os = "ios") {
             builder = builder.portmapper_config(PortmapperConfig::Disabled);
         }
         match self.lookup.as_deref().unwrap_or("default") {

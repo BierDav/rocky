@@ -163,7 +163,9 @@ async fn enable(node: &Node) -> Result<(), Failure> {
     let mut statuses = node.sync_status.subscribe();
     node.automatic.store(true, Ordering::SeqCst);
     node.wake_sync();
-    statuses.changed().await?;
+    statuses
+        .wait_for(|status| status["state"] == "connected")
+        .await?;
     assert_eq!(statuses.borrow()["state"], "connected");
     assert_eq!(statuses.borrow()["retry"], false);
     Ok(())
@@ -334,7 +336,11 @@ async fn incoming_keyless_custody_wakes_forwarding_and_connectivity_wakes_catch_
             );
             let mut statuses = relay.sync_status.subscribe();
             hub.network_changed();
-            tokio::time::timeout(Duration::from_secs(5), statuses.changed()).await??;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                statuses.wait_for(|status| status["state"] == "connected"),
+            )
+            .await??;
             for node in [&a, &relay, &b] {
                 node.detach(None).await;
             }
@@ -378,7 +384,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             let mut status = a.sync_status.subscribe();
             a.automatic.store(true, Ordering::SeqCst);
             a.wake_sync();
-            status.changed().await?;
+            status.wait_for(|status| status["retry"] == true).await?;
             assert_eq!(status.borrow()["retry"], true);
             let dials = hub.counts()[1];
             tokio::time::pause();
@@ -392,7 +398,11 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
             tokio::time::resume();
             b.attach(Network::Owned(hub.connector("b"))).await?;
             hub.network_changed();
-            tokio::time::timeout(Duration::from_secs(5), status.changed()).await??;
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                status.wait_for(|status| status["state"] == "connected"),
+            )
+            .await??;
             assert_eq!(status.borrow()["state"], "connected");
             assert_eq!(status.borrow()["retry"], false);
             a.detach(None).await;

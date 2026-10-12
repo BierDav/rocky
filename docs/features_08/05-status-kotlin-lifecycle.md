@@ -51,7 +51,13 @@ On 2026-10-12:
 - `cargo test -p rocky-sdk --lib node::sync_tests::change_driven::live_links --locked`: 30 passed, 4.46 s. Existing authority, simultaneous dial, transport, push and retry regressions remain green.
 - `cargo test -p rocky-sdk --lib background_refuses_new_links_until_foreground --locked`: one passed, 0.21 s; pause closes links under one second, rejects new inbound links, and foreground reopens.
 - `./scripts/check --unit`: 149 passed; unit wall 78.3 ms, budget 10 s.
-- `./scripts/lint`: exit 0. Full `./scripts/check` is still running.
+- `./scripts/lint`: exit 0. Full `./scripts/check` is being rerun after repairing test synchronization.
+
+The first full check exposed three tests in both feature configurations that
+mistook a link transition notification for a completed sync pass. Their waits
+now select the expected completed state; all existing state, retry, dial-count
+and row assertions remain. The three targeted reruns passed (retry 0.36 s,
+idle 0.40 s, custody 0.60 s); no budget or production assertion changed.
 
 The Kotlin/UI slice exposes `Peer.link`, readiness peers and typed link activity.
 Sync and Devices show Live per peer; the top badge uses readiness to show Live

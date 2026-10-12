@@ -56,6 +56,10 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             },
         )
 
+        is RockyEvent.LinkOpened -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Live link with ${device(event.peer)}", event.reason)
+
+        is RockyEvent.LinkClosed -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Link closed with ${device(event.peer)}", event.error ?: event.reason)
+
         is RockyEvent.PeerReached -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Reached ${device(event.peer)}")
 
         is RockyEvent.PeerUnreachable -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Cannot reach ${device(event.peer)}", event.error)

@@ -39,6 +39,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean,
             authority["issuer_contact"]?.jsonPrimitive?.boolean ?: true,
             discovery(status.getValue("network").jsonObject.getValue("discovery").jsonObject),
+            status.getValue("network").jsonObject.getValue("peers").jsonArray.map { peer(it.jsonObject) },
         )
     }
 
@@ -363,6 +364,13 @@ open class RockySession internal constructor(internal val client: RockyClient, o
             value.text("state"),
             value.getValue("checked").jsonPrimitive.contentOrNull?.toLong(),
             value.getValue("error").jsonPrimitive.contentOrNull,
+            value.getValue("link").jsonObject.let {
+                PeerLink(
+                    LinkState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)),
+                    it.getValue("opened").jsonPrimitive.contentOrNull?.toLong(),
+                    it.getValue("round_trip_ms").jsonPrimitive.contentOrNull?.toLong(),
+                )
+            },
         )
         private fun discovery(value: JsonObject): DiscoveryStatus {
             fun path(name: String) = value.getValue("paths").jsonObject.getValue(name).jsonObject.let {

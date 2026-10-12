@@ -3,6 +3,7 @@ import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.*
 import java.io.File
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
 /**
@@ -40,11 +41,14 @@ abstract class AndroidDiscoveryCheck : DefaultTask() {
             adb(serial, "install", "-r", apk.path)
             adb(serial, "logcat", "-c")
             shell(serial, "am", "start", "-W", "-n", "$PACKAGE/.CheckActivity")
+            await(serial, "links background=closed foreground=open")
             await(serial, "foreground=true lock=true local=On")
             check(held(serial) > 0) { "the system does not list the multicast lock" }
+            adb(serial, "logcat", "-c")
             shell(serial, "input", "keyevent", "KEYCODE_HOME")
             await(serial, "foreground=false lock=false local=Off")
             check(held(serial) == 0) { "the multicast lock is still held in the background" }
+            adb(serial, "logcat", "-c")
             shell(serial, "am", "start", "-W", "-n", "$PACKAGE/.CheckActivity")
             await(serial, "foreground=true lock=true local=On")
             logger.lifecycle("Android discovery: the multicast lock is held in the foreground and released in the background")
@@ -62,14 +66,18 @@ abstract class AndroidDiscoveryCheck : DefaultTask() {
 
     /** Waits for the line the app logs once a lifecycle transition was applied. */
     private fun await(serial: String, state: String) {
-        repeat(60) {
-            capture(adb, "-s", serial, "logcat", "-d", "-s", "$TAG:I").lines().lastOrNull { state in it }?.let {
-                logger.lifecycle(it)
-                return
-            }
-            Thread.sleep(1_000)
+        val process = ProcessBuilder(adb, "-s", serial, "logcat", "-s", "$TAG:*").redirectErrorStream(true).start()
+        try {
+            val line = CompletableFuture.supplyAsync {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.firstOrNull { state in it || "failed " in it } ?: error("logcat ended before $state")
+                }
+            }.get(60, TimeUnit.SECONDS)
+            check(state in line) { line }
+            logger.lifecycle(line)
+        } finally {
+            process.destroyForcibly()
         }
-        error("no log line matched: $state\n" + capture(adb, "-s", serial, "logcat", "-d", "-s", "$TAG:*"))
     }
 
     private fun held(serial: String) = shell(serial, "dumpsys", "wifi").lines().count { "Multicaster{rocky-discovery" in it }

@@ -2,6 +2,7 @@ package rocky
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
@@ -43,6 +44,38 @@ class SyncLifecycleTest {
             val back = Channel<ByteArray>(8)
             pipes.listeners.getValue(address).send(InboundStream(protocol, Pipe(there, back)))
             return Pipe(back, there)
+        }
+    }
+
+    @Test
+    fun backgroundClosesLiveLinksAndForegroundReopensThroughReadiness() = runBlocking {
+        val root = Files.createTempDirectory("rocky-live-lifecycle").toFile()
+        val definition = schema("livelifecycle") {
+            table("items") {
+                text("title")
+                primaryKey("id")
+            }
+        }
+        val pipes = Pipes()
+        val a = RockyDatabase.create(File(root, "a"), definition, PeerTransport.Custom(Network(pipes, "a")))
+        var b: RockyDatabase? = null
+        try {
+            b = RockyDatabase.join(File(root, "b"), definition, a.pairing(GrantProfile.Issuer).uri, PeerTransport.Custom(Network(pipes, "b")))
+            a.addPeer(b.contact().uri)
+            val opened = withTimeout(5_000) { a.observeReadiness().first { it.peers.any { peer -> peer.link.state == LinkState.Open } } }
+            assertNotNull(opened.peers.first { it.link.state == LinkState.Open }.link.openedAtEpochSeconds)
+            withTimeout(1_000) { a.enterBackground() }
+            assertTrue(a.network().peers.all { it.link.state == LinkState.Closed })
+            val closed = withTimeout(1_000) { a.activity().first { it is RockyEvent.LinkClosed && it.reason == "offline" } } as RockyEvent.LinkClosed
+            assertNull(closed.error)
+            a.enterForeground()
+            withTimeout(5_000) { a.observeReadiness().first { it.peers.any { peer -> peer.link.state == LinkState.Open } } }
+        } finally {
+            a.enterBackground()
+            b?.enterBackground()
+            b?.close()
+            a.close()
+            root.deleteRecursively()
         }
     }
 

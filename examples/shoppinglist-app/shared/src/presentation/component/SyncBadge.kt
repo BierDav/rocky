@@ -23,6 +23,7 @@ data class SyncBadgeState(
     val readiness: ReadinessState? = null,
     val lastTransferAtEpochMillis: Long? = null,
     val serving: Boolean = false,
+    val live: Boolean = false,
 )
 
 /**
@@ -42,6 +43,7 @@ fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
     }
     val moving = state.lastTransferAtEpochMillis?.let { now - it < 2_000 } == true || readiness == ReadinessState.Bootstrapping
     val (color, label) = when {
+        state.live -> Color(0xFF43A047) to "Live"
         readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to "Bootstrapping"
         connection.state == ConnectionState.Offline -> Color(0xFF9E9E9E) to "Offline"
         connection.state == ConnectionState.Connected && connection.peers > 0 -> Color(0xFF43A047) to (if (moving) "Syncing" else "Synced")

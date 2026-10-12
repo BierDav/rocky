@@ -216,3 +216,9 @@ household** / **Join a household**. It removes
 local lists and household setup, including unsynced changes, and selects a
 fresh secret namespace. Other devices keep their copies. **Cancel** keeps
 the current household open.
+
+The Sync and Devices tabs show **Live** per peer while its authenticated link is
+open. The top badge shows **Live** whenever any link is open, using the existing
+readiness flow. Connected without Live describes an earlier successful pass.
+The activity feed includes link open and close reasons. See
+[live-link status](../../docs/runtime/live-links.md#status-and-lifecycle).

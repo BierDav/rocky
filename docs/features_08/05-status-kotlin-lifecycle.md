@@ -1,6 +1,6 @@
 # 5. Status, Kotlin and lifecycle
 
-Status: native slice verified by targeted tests; Kotlin/UI slice awaits platform verification.
+Status: implemented; native targeted tests pass, Kotlin/app/device gates blocked by Gradle integrity.
 Owner: `rocky-sdk` readiness and network status; Kotlin `rocky-core`
 (`RuntimePort.kt`, `RockyDatabase.kt`, `RockyLifecycle.kt`); the shopping
 example's Sync and Devices tabs. Depends on [phase 2](02-link-session-and-signals.md);

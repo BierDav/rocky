@@ -276,6 +276,8 @@ private fun DeviceCard(
                 device.revoked -> Status(MaterialTheme.colorScheme.error, "Revoked · future access removed")
                 device.isSelf -> {}
                 peer == null -> Status(Color(0xFF9E9E9E), "Syncs through other devices")
+                peer.link.state == rocky.LinkState.Open -> Status(Color(0xFF43A047), "Live" + if (peer.isIssuer) " · issuer" else "")
+                peer.link.state == rocky.LinkState.Opening -> Status(Color(0xFFF9A825), "Opening link")
                 peer.state == "connected" -> Status(Color(0xFF43A047), "Connected ${ago(peer.checkedAtEpochSeconds?.times(1000))}" + if (peer.isIssuer) " · issuer" else "")
                 peer.state == "unreachable" -> Status(Color(0xFFE53935), "Unreachable: ${peer.error ?: "no answer"}")
                 else -> Status(Color(0xFF9E9E9E), "Not contacted yet")

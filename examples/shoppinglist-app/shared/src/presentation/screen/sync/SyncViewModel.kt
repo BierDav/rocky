@@ -37,7 +37,7 @@ data class SyncState(
     val entries: List<ActivityEntry> = emptyList(),
     val peers: List<Peer> = emptyList(),
 ) {
-    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, serving)
+    val badge: SyncBadgeState get() = SyncBadgeState(connection, readiness?.state, lastTransferAtEpochMillis, serving, peers.any { it.link.state == LinkState.Open })
 }
 
 @Inject
@@ -63,7 +63,7 @@ class SyncViewModel(private val session: ShoppingSession) : NodeViewModel(sessio
         val identity = ticks.map { rocky.session() }
         combine(rocky.observeReadiness(), combine(rocky.status, rocky.serving(), ::Pair), holdings, combine(log, if (node.isTrusted) node.household.devices() else flowOf(emptyList()), identity, ::Triple)) { readiness, (connection, served), held, (entries, devices, self) ->
             val lists = held.flatMap { holding -> holding.status?.tables.orEmpty().map { it.partition to holding.list.title } }.toMap()
-            val peers = rocky.peers()
+            val peers = readiness.peers
             val names = peers.associate { it.node to node.contacts.label(it.node) } + devices.associate { it.node to it.name }
             val titles = held.associate { it.list.id to it.list.title }
             SyncState(

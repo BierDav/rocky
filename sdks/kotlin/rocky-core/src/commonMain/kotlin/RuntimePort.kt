@@ -164,7 +164,13 @@ data class Peer(
     val state: String,
     val checkedAtEpochSeconds: Long?,
     val error: String?,
+    val link: PeerLink,
 )
+
+enum class LinkState { Open, Opening, Closed }
+
+/** Link lifetime and the latest ping measurement; pings do not emit readiness changes. */
+data class PeerLink(val state: LinkState, val openedAtEpochSeconds: Long?, val roundTripMillis: Long?)
 
 /** A `rocky://peer/…` URI naming this device and its current route. It grants nothing. */
 data class Contact(val uri: String, val node: String, val routes: List<Route>)
@@ -238,6 +244,7 @@ data class Readiness(
     /** False on a member that can reach no issuer to renew its credentials. */
     val issuerContact: Boolean = true,
     val discovery: DiscoveryStatus = DiscoveryStatus(false, DiscoveryPath(DiscoveryPathState.Off), DiscoveryPath(DiscoveryPathState.Off)),
+    val peers: List<Peer> = emptyList(),
 )
 
 /** The last sync: its state, its error, how many [peers] it reached and when it ended. */

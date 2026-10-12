@@ -47,7 +47,7 @@ class RockyDatabase private constructor(
 
     /**
      * For a process the platform may freeze or kill: cancels the native automatic pass promptly, so none
-     * runs after this returns, and stops local-network discovery. The file, sessions, attached network and its
+     * runs after this returns, closes live links and stops local-network discovery. The file, sessions, attached network and its
      * endpoint stay open, and reads and writes continue; acknowledged writes are already durable.
      */
     suspend fun enterBackground() = lifecycle.withLock {
@@ -57,7 +57,7 @@ class RockyDatabase private constructor(
         client.call(request("network_background"))
     }
 
-    /** Resumes automatic sync, starting with an immediate pass, if the database was opened with it. */
+    /** Allows live links again and resumes automatic sync with an immediate pass if opened with it. */
     suspend fun enterForeground() = lifecycle.withLock {
         client.call(request("network_foreground"))
         if (automaticSync && synchronizing == null) {

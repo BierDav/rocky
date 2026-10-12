@@ -45,6 +45,12 @@ sealed interface RockyEvent {
         val finished: Boolean,
     ) : RockyEvent
 
+    /** An authenticated link became available. */
+    data class LinkOpened(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val reason: String) : RockyEvent
+
+    /** An authenticated link ended; [error] is present for a failed link. */
+    data class LinkClosed(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val reason: String, val error: String?) : RockyEvent
+
     /** [peer] answered again after an error or for the first time. */
     data class PeerReached(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
 
@@ -147,6 +153,10 @@ sealed interface RockyEvent {
                 "bootstrap_started" -> Bootstrap(sequence, at, text("peer"), int("scopes"), finished = false)
 
                 "bootstrap_finished" -> Bootstrap(sequence, at, text("peer"), null, finished = true)
+
+                "link_opened" -> LinkOpened(sequence, at, text("peer"), text("reason"))
+
+                "link_closed" -> LinkClosed(sequence, at, text("peer"), text("reason"), event["error"]?.jsonPrimitive?.contentOrNull)
 
                 "peer_reached" -> PeerReached(sequence, at, text("peer"))
 

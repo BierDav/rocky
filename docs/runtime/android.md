@@ -53,7 +53,8 @@ recovered by its handle with `reconcile` ([SDK packaging](sdk-packaging.md#batch
 What remains is not syncing while nobody looks:
 
 - `RockyDatabase.enterBackground()` stops automatic sync. It cancels the native pass and returns within
-  one second, so none runs after it returns. Sessions, reads and writes continue; the file, the attached network
+  one second, so none runs after it returns. It also closes every live link and refuses
+  new inbound or outbound links until foregrounding. Sessions, reads and writes continue; the file, the attached network
   service and an owned or borrowed endpoint stay open, so the device keeps its address.
 - `enterBackground()` also stops [local-network discovery](discovery.md#lifecycle-and-platforms) and
   `enterForeground()` resumes it. While the path is on, `RockyLifecycle` holds the Wi-Fi multicast lock for
@@ -61,14 +62,19 @@ What remains is not syncing while nobody looks:
   lock in the background and when the database is no longer followed. The SDK's manifest declares
   `CHANGE_WIFI_MULTICAST_STATE`.
 - `enterForeground()` restarts automatic sync with an immediate pass, if the database was opened with
-  it. A database opened without automatic sync is left to the application's own `syncOnce` calls.
+  it, reopening live links. A database opened without automatic sync is left to the
+  application's own foreground `syncOnce` calls.
 - `rocky.android.RockyLifecycle.register(application)` in `Application.onCreate` counts started
   activities; `follow(database)` applies the visibility now and on every change. It never closes a
   database or a network, and `unfollow` leaves the database in its current state.
 
 The JVM stalled-transport test measured a 5 ms pause and a 4 ms foreground
 dial on 2026-10-10 ([phase-2 evidence](../features_07/02-change-driven-sync.md#measured-evidence-2026-10-10)).
-These timings have not been measured on an Android device.
+These timings have not been measured on an Android device. The phase 5
+`android-discovery:qualify` probe checks open → background closed → foreground
+open with TCP links and enforces the one-second pause bound. Its current run
+is blocked by Gradle distribution verification; see the
+[phase 5 evidence](../features_08/05-status-kotlin-lifecycle.md#implementation-and-evidence).
 
 What a killed process loses, and what the next open does:
 

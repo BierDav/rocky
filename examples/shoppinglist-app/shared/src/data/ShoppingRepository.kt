@@ -77,7 +77,7 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
     suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) = database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
 
     /**
-     * Shares a held list with [recipients] by node; members obtain the node from a scanned contact. Sync carries each envelope to its device
+     * Shares a held list with [recipients] by node; members choose a discovered peer. Sync carries each envelope to its device
      * alone, directly or through the custody peer, which installs it and starts a list new to it from a checkpoint.
      */
     suspend fun share(list: Long, recipients: List<String>) {

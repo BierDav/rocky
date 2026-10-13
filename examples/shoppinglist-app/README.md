@@ -60,8 +60,12 @@ trusted devices see the removal after sync. A trusted device chooses:
 | Full | Receives every list automatically and edits its items and categories |
 | Partial | Receives only lists shared with it from a trusted device's Devices tab |
 
-The Devices tab starts with **This device**: its name, kind, node and credential
-expiry, also before a trusted device's record of it has synced.
+The Devices tab starts with one compact **This device** card: its name and kind,
+connection badge and **Online** toggle, readiness/revision, last sync with peer
+count and last transfer. Bootstrap progress and connection errors appear when
+present. **Identity and access** expands to its full selectable node/domain IDs,
+grants, revocation count/digest, credential expiry, renewal route and reset
+control. This works before a trusted device's record of it has synced.
 
 In **Devices → Revoke device**, a trusted device can revoke a device it manages.
 Revoked devices collapse into their own section; the badge persists across restarts. Revocation stops future access and
@@ -75,11 +79,11 @@ creates a new device identity; it does not undo the old identity's revocation.
 Trusted devices also record their own enrollment. Each recipient's key delivery
 runs independently, so a refused recipient cannot block the remaining devices.
 
-Members' **Devices** tab shows **This device** and only peers met here, with local labels.
-**My contact code** shows the code another member scans. **Scan contact** keeps a
-route and a local label; it grants no access and replicates no label. Pairing
-supplies one issuer contact; authenticated sessions hand over other contacts,
-so no reciprocal contact entry is needed. Discovery is not used by these flows.
+Members' **Devices** tab shows **This device** and discovered peers, using short
+node identifiers as names. Rocky finds peers through mDNS and topic discovery;
+pairing supplies an issuer route and authenticated sessions hand over additional
+contacts. Members read no issuer registry, and no peer names or routes enter
+replicated application tables. The app needs no manual contact codes.
 
 Trusted devices manage every device in the issuer registry, including devices
 enrolled elsewhere. The trusted-only `devices` table records name and kind;
@@ -87,12 +91,20 @@ the same two fields form the opaque registry label, available before that table
 syncs. **Clear name** clears a revoked device's application description; its
 registry tombstone and signed revocation remain. No roster horizon is declared.
 
-A peer with an open live link shows its network paths under its card in
-**Devices** and in **Sync → Sync partners**: collapsed, the path count, the
-selected path's kind and round trip; expanded, each path's kind, addresses
-and round trip, and tapping a path shows its MTU, congestion window, traffic,
-loss and congestion events. Devices refreshes them every two seconds, Sync
-every three; see [link status](../../docs/runtime/live-links.md#status-and-lifecycle).
+Each peer's **Devices** card shows one connection summary. Live links have a
+per-device duration timer, updated every second from the SDK's link opening time;
+reconnecting resets it. Closed links show when the last attempt reached the peer
+or failed. The next row shows the discovery/contact source, local-network and
+issuer flags, and the selection reason. An error appears once below these rows;
+a stale failed attempt does not hide an open link.
+
+An open link also shows its network paths: collapsed, the path count, selected
+path's kind and round trip; expanded, each path's kind, addresses and round trip.
+Tapping a path shows its MTU, congestion window, traffic, loss and congestion
+events. **Identity and routes** expands to the full copyable node ID, exact last
+check and link opening times, round trip, raw source/selection values, saved-contact
+flag and dialing routes. Devices refreshes measurements every two seconds; see
+[link status](../../docs/runtime/live-links.md#status-and-lifecycle).
 
 Copy and paste use Klip's system clipboard; iOS may request paste consent.
 Credential dates use kotlinx-datetime in the device's time zone, displayed as
@@ -138,19 +150,25 @@ members have no physical `devices` table. SQL against any removed member table
 returns `no such table`, including after reopen. A byte search of a member's
 directory finds no other device's node key; see
 [Phase 20 evidence](../../docs/features_07/20-shopping-without-a-roster-evidence.md).
-In **Lists → Share list**, a member
-scans or pastes the recipient's contact code; a trusted node chooses from the
-registry, including a device it has never contacted. List title conflicts converge per list; deleting a list hides its
+In **Lists → Share list**, a member chooses a discovered peer; a trusted node
+chooses from the registry, including a device it has never contacted. List title conflicts converge per list; deleting a list hides its
 children, and deleting a category clears its items' category. Moving an item
 keeps an offline tick attached to it.
 
-The **Sync** tab shows readiness, connection state, domain and node identity,
-grants, revocation digest and count, credential expiry, per-table holdings and key epochs.
-Its partner list shows each known peer's source, ranking reason and last connection state.
-Its activity feed shows transfers, checkpoint imports, bootstrap, horizon
-finalization, author installation, enrollment and key delivery. The feed is
-bounded and lasts for the open database's lifetime; see
-[SDK activity](../../docs/runtime/activity.md). The top badge shows **Live** only while an authenticated link is open. Raw
+The **Sync** tab is the searchable activity log. **All**, **Problems**,
+**Transfers**, **Connections**, **Keys**, **Access**, **Devices** and **History**
+chips show counts for the current search. Select several categories to include
+any of them; search terms must all match the title, detail or event ID, ignoring
+case. Failed connections appear under Problems and Connections; ordinary link
+closures appear only under Connections. Controls stay above the scrolling log,
+and new events do not clear the query. **Clear filters** restores the complete
+feed. Each entry's title, details, millisecond-precision local timestamp and event ID
+are selectable.
+
+The feed shows transfers, checkpoint imports, bootstrap, horizon finalization,
+author installation, enrollment and key delivery. It is bounded and lasts for
+the open database's lifetime; see [SDK activity](../../docs/runtime/activity.md).
+The top badge shows **Live** only while an authenticated link is open. Raw
 inbound connection counts do not imply successful synchronization.
 
 The current Room schema is version 6. Earlier application schemas are refused;

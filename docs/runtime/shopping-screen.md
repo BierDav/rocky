@@ -25,7 +25,9 @@ Failures retain the draft and use the existing snackbar error channel.
 
 The list overflow menu contains **Share list** for every device type and
 **Show/Hide completed**. Trusted devices also get rename and confirmed deletion.
-The existing registry and contact-code sharing flows retain their permissions.
+Trusted devices select recipients from the issuer registry; members select
+discovered peers without reading a registry. Sharing retains the existing
+whole-list reader and delegation checks.
 
 Selecting a category filters the rows and sets the category for new items.
 **All items** clears that selection. Category creation and deletion are under

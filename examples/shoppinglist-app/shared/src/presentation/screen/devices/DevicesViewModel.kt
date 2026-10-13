@@ -15,9 +15,13 @@ import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.data.session.ShoppingSession
 import org.example.examples.shopping.presentation.screen.NodeViewModel
+import rocky.ConnectionState
+import rocky.ConnectionStatus
 import rocky.Device
 import rocky.NetworkStatus
 import rocky.Peer
+import rocky.Readiness
+import rocky.RockyEvent
 import rocky.SessionStatus
 import rocky.room.settledOnRocky
 
@@ -52,13 +56,17 @@ data class DevicesState(
     val invitation: PairingCode? = null,
     /** On a trusted device: every trusted device's open invitation, soonest to expire first. */
     val invitations: List<OpenInvitation> = emptyList(),
+    val readiness: Readiness? = null,
+    val connection: ConnectionStatus = ConnectionStatus(ConnectionState.Unavailable),
+    val lastTransferAtEpochMillis: Long? = null,
+    val domain: String = "",
 )
 
 @Inject
 @ViewModelKey
 @ContributesIntoMap(AppScope::class, binding = binding<ViewModel>())
 @OptIn(ExperimentalCoroutinesApi::class)
-class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
+class DevicesViewModel(private val session: ShoppingSession) : NodeViewModel(session) {
     private val invitation = MutableStateFlow<PairingCode?>(null)
     val revoking = MutableStateFlow<Set<String>>(emptySet())
     private val refresh = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -78,7 +86,7 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
         }.settledOnRocky()
         val recorded = combine(if (node.isTrusted) node.household.devices() else flowOf(emptyList()), node.household.invitations(), ::Pair)
         val sent = if (node.isTrusted) node.household.sent() else flowOf(emptyMap())
-        combine(recorded, sent, node.repository.lists(), reach, invitation) { (rows, opened), sent, lists, reach, code ->
+        val devices = combine(recorded, sent, node.repository.lists(), reach, invitation) { (rows, opened), sent, lists, reach, code ->
             val (self, network, enrolled) = reach
             val titles = lists.associate { it.id to it.title }
             val recorded = rows.map { row ->
@@ -94,8 +102,8 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 )
             }
             // Peers no trusted device recorded yet, such as an issuer that enrolled this device.
-            val unrecorded = network.peers.filter { peer -> peer.node != self.node && (node.isTrusted || peer.isConfigured || peer.state == "connected") && rows.none { it.node == peer.node } }.map { peer ->
-                HouseholdDevice(peer.node, node.contacts.label(peer.node), null, false, peer, emptyList())
+            val unrecorded = network.peers.filter { peer -> peer.node != self.node && rows.none { it.node == peer.node } }.map { peer ->
+                HouseholdDevice(peer.node, "Device ${peer.node.take(6)}", null, false, peer, emptyList())
             }
             // Until a trusted device's record of it syncs, this device describes itself from its own grants.
             val me = recorded.firstOrNull { it.isSelf }
@@ -111,6 +119,11 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 invitations,
             )
         }
+        val lastTransfer = node.rocky.activity().filterIsInstance<RockyEvent.Synced>()
+            .map<RockyEvent.Synced, Long?> { it.atEpochMillis }.onStart { emit(null) }
+        combine(devices, node.rocky.observeReadiness(), node.rocky.status, lastTransfer) { state, readiness, connection, transfer ->
+            state.copy(readiness = readiness, connection = connection, lastTransferAtEpochMillis = transfer, domain = node.rocky.domain)
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DevicesState())
 
     private data class Reach(val self: SessionStatus, val network: NetworkStatus, val enrolled: List<Device>)
@@ -120,6 +133,9 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
     fun dismissInvitation() {
         invitation.value = null
     }
+
+    fun setOnline(online: Boolean) = write { rocky.setOnline(online) }
+    fun reset() = session.reset()
 
     /** Sends a partial device the key of [list]. */
     fun share(list: Long, node: String) = write { household.share(list, node) }
@@ -140,13 +156,4 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
         household.forget(node)
         refresh.tryEmit(Unit)
     }
-
-    fun rememberContact(code: String, label: String) = write {
-        val peer = rocky.addPeer(code)
-        contacts.name(peer, label)
-        refresh.tryEmit(Unit)
-    }
-
-    fun showContact() = write { contact.value = rocky.contact().uri }
-    val contact = MutableStateFlow<String?>(null)
 }

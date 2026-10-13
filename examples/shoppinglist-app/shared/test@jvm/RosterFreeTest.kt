@@ -30,7 +30,7 @@ class RosterFreeTest {
         }
     }
 
-    @Test fun `members have no roster and share only after scanning a recipient contact`() = runBlocking {
+    @Test fun `members have no roster and share with a peer learned through handover`() = runBlocking {
         val root = Files.createTempDirectory("rocky-roster-free").toFile()
         val nodes = mutableListOf<RockyDatabase>()
         val rooms = mutableListOf<ShoppingDatabase>()
@@ -49,11 +49,14 @@ class RosterFreeTest {
             val list = repository.createList("Weekly")
             repository.add(list, "Milk")
             repository.share(list, listOf(left.session().node))
+            // Handover advertises peers the issuer has successfully reconciled with.
+            assertEquals(ConnectionState.Connected, right.syncOnce().state)
+            assertFalse(right.list(list).status().isKeyed)
+            assertEquals(ConnectionState.Connected, issuer.syncOnce().state)
             assertEquals(ConnectionState.Connected, left.syncOnce().state)
             assertEquals(listOf("Milk"), leftRoom.items().all(list).map { it.title })
-            right.syncOnce()
-            assertFalse(right.list(list).status().isKeyed)
-            assertEquals(right.session().node, household.shareWithContact(list, right.contact().uri))
+            assertTrue(left.peers().any { it.node == right.session().node && it.source == "handover" }, left.peers().toString())
+            household.share(list, right.session().node)
             assertEquals(ConnectionState.Connected, left.syncOnce().state, left.peers().toString())
             assertEquals(ConnectionState.Connected, right.syncOnce().state)
             assertEquals(listOf("Milk"), rightRoom.items().all(list).map { it.title })

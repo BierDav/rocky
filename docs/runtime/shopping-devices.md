@@ -75,11 +75,12 @@ The run installs the app, clears its data, then:
 5. Member B scans A's contact and shares Weekly back. No member reads a roster.
 6. Trusted A revokes B; B's next custody sync reports Revoked.
 
-For the interactive flow, B's **Devices** tab shows This device and local
-peers; **My contact code** is what another member scans. **Lists → Share list**
-opens a contact scanner on B and a registry picker on A. **Sync** shows each
-peer's source and ranking reason. Keep one contact when pairing; do not add
-reciprocal contacts. Local peer labels never replicate.
+For the current interactive flow, B's **Devices** tab shows the local-device
+card, Online toggle and discovered peers with source/selection diagnostics.
+**Lists → Share list** opens a discovered-peer picker on B and a registry picker
+on A; pairing and discovery supply routes automatically. **Sync** contains
+searchable, filterable and selectable activity. The historical driver procedure
+above still needs its removed debug-link driver replaced.
 
 Evidence goes to `local/shopping-qualification/phones.json` with each device's
 model, API level and ABI, and the app's log lines under `phones/`.
@@ -179,11 +180,11 @@ as `deadline has elapsed` rather than a classified unreachable error.
 The application builds its shared Compose sources for arm64 simulators and
 arm64 iPhones. Run `./examples/shoppinglist-app/check-ios` on macOS/Xcode, then
 install `Shopping.app` with `agent-device install`. The app uses
-[iOS Keychain and lifecycle](ios.md), with starter iroh endpoints. Its only
-usage-description permission is the camera. Local discovery on an iPhone is
-unavailable; the app carries no multicast entitlement or local-network
-usage description. The iOS host explicitly disables mDNS and pairs using
-invitations. A simulator without a camera offers a paste field. System Paste consent may
+[iOS Keychain and lifecycle](ios.md), with starter iroh endpoints. Its
+usage descriptions cover the camera and local-network discovery. It declares
+`_rocky._udp` in `NSBonjourServices` and discovers peers through system Bonjour;
+see [discovery](discovery.md#apple-application-configuration). Pairing still uses
+single-use invitations. A simulator without a camera offers a paste field. System Paste consent may
 appear on this host's iOS 27 simulator; the procedure accepts only the named
 example's clipboard dialog.
 
@@ -196,7 +197,7 @@ build. CI builds the app and owns this procedure in its macOS job.
 
 1. Open Shopping with `agent-device open org.example.rockyshopping --foreground`.
    Expect **Start a household**. Choose **Start**; expect **Create your first list**.
-2. Choose **Sync**, disable **Online**, and return to **Lists**. Create **Offline
+2. Choose **Devices**, disable **Online**, and return to **Lists**. Create **Offline
    groceries**, add **Milk**, and expect **Milk** in the list. The automated gate
    uses the debug drive link for these same repository writes and waits for
    **done offline-write** and **Milk**.
@@ -217,10 +218,10 @@ build. CI builds the app and owns this procedure in its macOS job.
    - The trusted simulator shares **Offline groceries** with the member it picks
      from the issuer registry; expect the list on both devices.
    - Take the simulator offline and add **Milk**. Restore connectivity while it
-     is backgrounded, then foreground it. Without pressing **Sync now**, expect
+     is backgrounded, then foreground it. With automatic sync, expect
      **Milk** on the emulator.
-   - The member shares the list with the simulator's scanned contact, without
-     reading a registry; expect `share <simulator node>`.
+   - The historical driver shares the list using the simulator's contact, without
+     reading a registry; the current UI selects a discovered peer instead.
    - The trusted simulator revokes the member; the member's next sync through
      custody reports **Revoked**.
    Expectations go to `local/phase21-evidence/pair/expectations-shopping.json`.

@@ -15,7 +15,6 @@ import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import kotlinx.serialization.Serializable
 import org.example.examples.shopping.data.db.entity.ShoppingItem
-import org.example.examples.shopping.presentation.component.ContactDialog
 import org.example.examples.shopping.presentation.component.Empty
 import org.example.examples.shopping.presentation.component.NameDialog
 import org.example.examples.shopping.presentation.component.ShowMessages
@@ -27,7 +26,6 @@ data object ListsKey : NavKey
 fun ListsScreen(model: ListsViewModel = metroViewModel()) {
     ShowMessages(model.messages)
     val state by model.state.collectAsState()
-    val recipients by model.recipients.collectAsState()
     val editor = model.editor
     val content by remember(state, editor) {
         derivedStateOf { state.content(editor.search.text.toString(), editor.showCompleted, editor.category) }
@@ -52,29 +50,27 @@ fun ListsScreen(model: ListsViewModel = metroViewModel()) {
         naming = null
     }
     if (sharing) {
-        if (state.trusted) {
-            AlertDialog(
-                { sharing = false },
-                confirmButton = { TextButton({ sharing = false }) { Text("Done") } },
-                title = { Text("Share ${state.selected?.title.orEmpty()}") },
-                text = {
-                    LazyColumn {
-                        if (recipients.isEmpty()) item { Text("Add a device in the Devices tab to share this list.") }
-                        items(recipients, key = { it.node }) { recipient ->
-                            TextButton({
-                                model.shareWithDevice(recipient.node)
-                                sharing = false
-                            }) { Text(recipient.name) }
+        val recipients by model.recipients.collectAsState()
+        AlertDialog(
+            { sharing = false },
+            confirmButton = { TextButton({ sharing = false }) { Text("Done") } },
+            title = { Text("Share ${state.selected?.title.orEmpty()}") },
+            text = {
+                LazyColumn {
+                    if (recipients.isEmpty()) {
+                        item {
+                            Text(if (state.trusted) "Add a device in the Devices tab to share this list." else "No other device has been discovered yet.")
                         }
                     }
-                },
-            )
-        } else {
-            ContactDialog("Scan recipient contact", { sharing = false }) { code, label ->
-                sharing = false
-                model.shareWithContact(code, label)
-            }
-        }
+                    items(recipients, key = { it.node }) { recipient ->
+                        TextButton({
+                            model.shareWithDevice(recipient.node)
+                            sharing = false
+                        }) { Text(recipient.name) }
+                    }
+                }
+            },
+        )
     }
     if (deleting) {
         AlertDialog(

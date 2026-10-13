@@ -24,7 +24,7 @@ class SyncBadgeViewModel(session: ShoppingSession) : NodeViewModel(session) {
         val rocky = node.rocky
         val lastTransfer = rocky.activity().filterIsInstance<RockyEvent.Synced>().map<RockyEvent.Synced, Long?> { it.atEpochMillis }.onStart { emit(null) }
         combine(rocky.status, rocky.observeReadiness(), lastTransfer) { connection, readiness, transfer ->
-            SyncBadgeState(connection, readiness.state, transfer, readiness.peers.any { it.link.state == LinkState.Open }, readiness.bootstrap)
+            SyncBadgeState(connection, readiness, transfer)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SyncBadgeState())
 }

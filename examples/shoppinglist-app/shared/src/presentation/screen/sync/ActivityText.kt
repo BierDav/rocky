@@ -8,7 +8,7 @@ import rocky.ScopeName
 enum class EntryKind { Transfer, Checkpoint, Horizon, PeerUp, PeerDown, Credentials, Device, Author, Key, Network, Problem }
 
 /** One line of the activity log, newest first in the list. */
-data class ActivityEntry(val key: String, val atEpochMillis: Long, val kind: EntryKind, val title: String, val detail: String? = null)
+data class ActivityEntry(val key: String, val atEpochMillis: Long, val kind: EntryKind, val title: String, val detail: String? = null, val isProblem: Boolean = kind == EntryKind.Problem)
 
 /**
  * Names what Rocky did in household terms. [partitions] maps a partition id, as events and `GroupStatus` name it, to
@@ -58,11 +58,11 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
 
         is RockyEvent.LinkOpened -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Live link with ${device(event.peer)}", event.reason)
 
-        is RockyEvent.LinkClosed -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Link closed with ${device(event.peer)}", event.error ?: event.reason)
+        is RockyEvent.LinkClosed -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Link closed with ${device(event.peer)}", event.error ?: event.reason, isProblem = event.error != null)
 
         is RockyEvent.PeerReached -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Reached ${device(event.peer)}")
 
-        is RockyEvent.PeerUnreachable -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Cannot reach ${device(event.peer)}", event.error)
+        is RockyEvent.PeerUnreachable -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Cannot reach ${device(event.peer)}", event.error, isProblem = true)
 
         is RockyEvent.ScopesRefused -> ActivityEntry(
             key,

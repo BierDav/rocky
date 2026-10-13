@@ -2,7 +2,12 @@ package org.example.examples.shopping.presentation.screen.sync
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -11,23 +16,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.metroViewModel
-import kotlinx.coroutines.*
+import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
-import org.example.examples.shopping.presentation.component.KindChip
-import org.example.examples.shopping.presentation.component.LinkPaths
-import org.example.examples.shopping.presentation.component.ResetShoppingButton
-import org.example.examples.shopping.presentation.component.SectionTitle
 import org.example.examples.shopping.presentation.component.ShowMessages
-import org.example.examples.shopping.presentation.component.SyncBadge
 import org.example.examples.shopping.util.ago
 import org.example.examples.shopping.util.epochMillis
-import rocky.*
+import org.example.examples.shopping.util.formatTimestamp
 
 @Serializable
 data object SyncKey : NavKey
@@ -35,139 +35,59 @@ data object SyncKey : NavKey
 @Composable
 fun SyncScreen(model: SyncViewModel = metroViewModel()) {
     ShowMessages(model.messages)
-    val state by model.state.collectAsState()
+    val entries by model.entries.collectAsState()
+    val filters = model.filters
+    val matchingSearch = remember(entries, filters.search) { filterActivity(entries, filters.search) }
+    val shown = remember(matchingSearch, filters.selected) { filterActivity(matchingSearch, "", filters.selected) }
+    val list = rememberLazyListState()
+    val focus = LocalFocusManager.current
     var now by remember { mutableStateOf(epochMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
-            now = epochMillis()
             delay(1_000)
+            now = epochMillis()
         }
     }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        item { StatusCard(state, now, onOnline = model::setOnline, onSync = model::syncNow) }
-        item { IdentityCard(state) }
-        item { SectionTitle("Sync partners", "Known peers and Rocky's reason for choosing each one.") }
-        items(state.peers, key = { it.node }) { peer ->
-            OutlinedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp)) {
-                    Text(peer.node.take(12), style = MaterialTheme.typography.titleSmall)
-                    Text("${peer.source} · ${peer.choice} · ${peer.state}", style = MaterialTheme.typography.bodySmall)
-                    if (peer.link.state == rocky.LinkState.Open) {
-                        Badge(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer) { Text("Live") }
-                        LinkPaths(peer.link, Modifier.padding(top = 4.dp))
-                    } else {
-                        Text("Link ${peer.link.state.name.lowercase()}", style = MaterialTheme.typography.labelSmall)
-                    }
-                    peer.error?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    LaunchedEffect(filters.search, filters.selected) { list.scrollToItem(0) }
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = filters.search,
+            onValueChange = { filters.search = it },
+            label = { Text("Search activity") },
+            placeholder = { Text("Peer, list, error or event ID") },
+            leadingIcon = { Icon(Icons.Filled.Search, null) },
+            trailingIcon = {
+                if (filters.search.isNotEmpty()) IconButton({ filters.search = "" }) { Icon(Icons.Filled.Close, "Clear search") }
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+        LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { FilterChip(filters.selected.isEmpty(), filters::all, label = { Text("All (${matchingSearch.size})") }) }
+            items(ActivityFilter.entries, key = { it.name }) { filter ->
+                val count = matchingSearch.count { filter.matches(it) }
+                FilterChip(filter in filters.selected, { filters.toggle(filter) }, label = { Text("${filter.label} ($count)") })
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${shown.size} of ${entries.size} events · newest first", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (filters.search.isNotBlank() || filters.selected.isNotEmpty()) TextButton(filters::clear) { Text("Clear filters") }
+        }
+        HorizontalDivider()
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
+            state = list,
+            contentPadding = PaddingValues(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (shown.isEmpty()) {
+                item {
+                    Text(if (entries.isEmpty()) "No activity yet. Events will appear as Rocky works." else "No events match. Change the search or clear filters.", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-        }
-        item { ResetShoppingButton(model::reset) }
-        item {
-            SectionTitle(
-                "Lists on this device",
-                "Each list is one partition group: one secret, one key epoch per table, held or not.",
-            )
-        }
-        items(state.holdings, key = { it.list.id }) { holding -> HoldingCard(holding) }
-        if (state.holdings.isEmpty()) {
-            item {
-                Text(
-                    "No list is held here yet.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
-        item { SectionTitle("Activity", "What Rocky did in the background, newest first.") }
-        items(state.entries, key = { it.key }) { entry -> EntryRow(entry, now) }
-    }
-}
-
-@Composable
-private fun StatusCard(state: SyncState, now: Long, onOnline: (Boolean) -> Unit, onSync: () -> Unit) {
-    val connection = state.connection
-    val online = connection.state != ConnectionState.Offline
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SyncBadge(state.badge, onClick = onSync)
-                Spacer(Modifier.weight(1f))
-                Text("Online", style = MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.width(8.dp))
-                Switch(online, onOnline, Modifier.semantics { contentDescription = "Online" })
-            }
-            Fact("State", state.readiness?.state?.name?.lowercase() ?: "…")
-            state.readiness?.bootstrap?.let { progress ->
-                Fact("Bootstrap", "${progress.percent}% · ${progress.rowsDone} of ${progress.rowsTotal} rows · ${progress.scopesDone} of ${progress.scopesTotal} scopes")
-            }
-            Fact(
-                "Last sync",
-                "${
-                    ago(
-                        connection.atEpochMillis,
-                        now,
-                    )
-                } · ${connection.peers} peer${if (connection.peers == 1) "" else "s"} reached",
-            )
-            Fact("Last transfer", ago(state.lastTransferAtEpochMillis, now))
-            connection.error?.let { Fact("Error", it) }
-            Fact("Revision", state.readiness?.revision?.toString() ?: "…")
-            OutlinedButton(onSync, enabled = online) {
-                Icon(Icons.Filled.Sync, null)
-                Spacer(Modifier.width(6.dp))
-                Text("Sync now")
-            }
-        }
-    }
-}
-
-@Composable
-private fun IdentityCard(state: SyncState) {
-    val self = state.self
-    ElevatedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("This device", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                state.kind?.let { KindChip(it) }
-            }
-            Fact("Node", self?.node?.take(24)?.plus("…") ?: "…", mono = true)
-            Fact("Grants", self?.profile?.let(::profile) ?: "…")
-            Fact("Revocations", state.readiness?.revocations?.statements?.toString() ?: "…")
-            Fact(
-                "Credentials expire",
-                state.readiness?.expiresAtEpochSeconds?.let { "in ${(it * 1000 - epochMillis()) / 86_400_000} days" }
-                    ?: "…",
-            )
-            Fact("Transport", self?.transport ?: "…")
-            Fact("Domain", state.domain.take(48) + if (state.domain.length > 48) "…" else "", mono = true)
-        }
-    }
-}
-
-@Composable
-private fun HoldingCard(holding: ListHolding) {
-    val status = holding.status
-    OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(holding.list.title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            Text(
-                if (status?.isKeyed == true) "secret epoch ${status.epochs.maxOrNull()}" else "no key",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            status?.tables?.forEach { table ->
-                Text(
-                    "${table.table}: ${table.holding ?: "not subscribed"} · key epochs ${
-                        table.keyEpochs.joinToString().ifEmpty { "none" }
-                    } · ${table.partition.take(8)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+            items(shown, key = { it.key }) { entry -> EntryRow(entry, now) }
         }
     }
 }
@@ -175,29 +95,18 @@ private fun HoldingCard(holding: ListHolding) {
 @Composable
 private fun EntryRow(entry: ActivityEntry, now: Long) {
     val (icon, tint) = entry.kind.look()
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Icon(icon, null, Modifier.size(20.dp), tint = tint)
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(entry.title, style = MaterialTheme.typography.bodyMedium)
-            entry.detail?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    SelectionContainer {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            Icon(icon, null, Modifier.size(20.dp), tint = tint)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(entry.title, style = MaterialTheme.typography.bodyMedium)
+                entry.detail?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Text("${formatTimestamp(entry.atEpochMillis)} · ${entry.key}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Spacer(Modifier.width(8.dp))
+            Text(ago(entry.atEpochMillis, now), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(
-            ago(entry.atEpochMillis, now),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
@@ -214,17 +123,4 @@ private fun EntryKind.look(): Pair<ImageVector, Color> = when (this) {
     EntryKind.Key -> Icons.Filled.Key to Color(0xFF00897B)
     EntryKind.Network -> Icons.Filled.Wifi to MaterialTheme.colorScheme.onSurfaceVariant
     EntryKind.Problem -> Icons.Filled.ErrorOutline to MaterialTheme.colorScheme.error
-}
-
-@Composable
-private fun Fact(label: String, value: String, mono: Boolean = false) {
-    Row {
-        Text(
-            label,
-            Modifier.width(140.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Text(value, style = MaterialTheme.typography.bodySmall, fontFamily = if (mono) FontFamily.Monospace else null)
-    }
 }

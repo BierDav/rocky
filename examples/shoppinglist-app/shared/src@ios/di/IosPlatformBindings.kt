@@ -16,7 +16,6 @@ import platform.Foundation.NSApplicationSupportDirectory
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSUserDomainMask
 import platform.UIKit.UIDevice
-import rocky.PeerTransport
 
 /** iOS: keys in KSafe, sync following the scene lifecycle. */
 @BindingContainer
@@ -33,7 +32,6 @@ object IosPlatformBindings {
             deviceName = UIDevice.currentDevice.name,
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(name = path) },
             secrets = { secrets },
-            transport = { PeerTransport.Iroh(local = false) },
             commands = ::publicCoordination,
             opened = { database -> lifecycle.follow(database, onApplied = { visible.value = it }, onError = { println("Shopping lifecycle: ${it.message}") }) },
             closed = lifecycle::unfollow,

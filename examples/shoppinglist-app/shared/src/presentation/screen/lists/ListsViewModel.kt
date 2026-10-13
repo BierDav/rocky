@@ -9,13 +9,14 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.binding
 import dev.zacsweers.metrox.viewmodel.ViewModelKey
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
-import org.example.examples.shopping.data.db.DeviceRow
 import org.example.examples.shopping.data.db.entity.Category
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.session.ShoppingNode
 import org.example.examples.shopping.data.session.ShoppingSession
 import org.example.examples.shopping.presentation.screen.NodeViewModel
+import rocky.room.settledOnRocky
 
 @Inject
 @ViewModelKey
@@ -42,20 +43,21 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
             }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ListsState())
 
-    val recipients: StateFlow<List<DeviceRow>> = node.flatMapLatest { node ->
+    val recipients: StateFlow<List<ShareRecipient>> = node.flatMapLatest { node ->
         if (node.isTrusted) {
             combine(node.household.devices(), node.household.registry()) { rows, devices ->
-                rows.filter { row -> devices.any { it.node == row.node && !it.revoked && it.profile !is rocky.GrantProfile.Custody } }
+                registryRecipients(node.self, rows, devices)
             }
         } else {
-            flowOf(emptyList())
+            flow {
+                while (true) {
+                    emit(discoveredRecipients(node.self, node.rocky.network().peers))
+                    delay(2_000)
+                }
+            }.settledOnRocky()
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    fun shareWithContact(code: String, label: String) = onList { list ->
-        val recipient = household.shareWithContact(list, code)
-        contacts.name(recipient, label)
-    }
     fun shareWithDevice(recipient: String) = onList { household.share(it, recipient) }
 
     fun select(list: Long) {

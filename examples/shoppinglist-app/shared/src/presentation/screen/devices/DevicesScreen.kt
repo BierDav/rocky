@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -25,17 +24,11 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
-import org.example.examples.shopping.presentation.component.ContactDialog
 import org.example.examples.shopping.presentation.component.KindChip
-import org.example.examples.shopping.presentation.component.LinkPaths
 import org.example.examples.shopping.presentation.component.SectionTitle
 import org.example.examples.shopping.presentation.component.ShowMessages
 import org.example.examples.shopping.presentation.component.pairing.InvitationCode
-import org.example.examples.shopping.presentation.component.pairing.QrCode
-import org.example.examples.shopping.util.ago
-import org.example.examples.shopping.util.date
 import org.example.examples.shopping.util.epochMillis
-import rocky.SessionStatus
 
 @Serializable
 data object DevicesKey : NavKey
@@ -45,46 +38,26 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
     ShowMessages(model.messages)
     val state by model.state.collectAsState()
     val busy by model.revoking.collectAsState()
-    val contact by model.contact.collectAsState()
-    var meeting by remember { mutableStateOf(false) }
     var adding by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf<HouseholdDevice?>(null) }
     var revoking by remember { mutableStateOf<HouseholdDevice?>(null) }
     var forgetting by remember { mutableStateOf<HouseholdDevice?>(null) }
     var showRevoked by remember { mutableStateOf(false) }
     var showing by remember { mutableStateOf<PairingCode?>(null) }
-    if (meeting) {
-        ContactDialog("Meet a peer", { meeting = false }) { code, label ->
-            meeting = false
-            model.rememberContact(code, label)
+    var now by remember { mutableStateOf(epochMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            now = epochMillis()
         }
-    }
-    contact?.let { code ->
-        AlertDialog(
-            { model.contact.value = null },
-            confirmButton = { TextButton({ model.contact.value = null }) { Text("Done") } },
-            title = { Text("My contact code") },
-            text = {
-                Column {
-                    QrCode(code, Modifier.size(240.dp))
-                    SelectionContainer { Text(code) }
-                }
-            },
-        )
     }
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.me?.let { me ->
                 item { SectionTitle("This device") }
-                item { SelfCard(me, state.self) }
+                item { SelfDeviceCard(me, state, now, onOnline = model::setOnline, onReset = model::reset) }
             }
-            item { SectionTitle(if (state.trusted) "Household" else "Peers met", "Contacts and labels stay on this device.") }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(model::showContact) { Text("My contact code") }
-                    OutlinedButton({ meeting = true }) { Text("Scan contact") }
-                }
-            }
+            item { SectionTitle(if (state.trusted) "Household" else "Discovered devices") }
             if (state.devices.isEmpty()) {
                 item {
                     Text(
@@ -97,6 +70,7 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
             items(state.devices, key = { it.node }) { device ->
                 DeviceCard(
                     device,
+                    now,
                     canShare = state.trusted && device.kind == NodeKind.Partial,
                     busy = device.node in busy,
                     onShare = { sharing = device },
@@ -113,6 +87,7 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
                     items(state.revoked, key = { "revoked-" + it.node }) { device ->
                         DeviceCard(
                             device,
+                            now,
                             canShare = false,
                             busy = false,
                             onShare = {},
@@ -210,33 +185,6 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
     }
 }
 
-/** This device: who it is to the household and the authority it holds. */
-@Composable
-private fun SelfCard(me: HouseholdDevice, self: SessionStatus?) {
-    ElevatedCard(Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.PhoneAndroid, null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(12.dp))
-                Text(me.name, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-                me.kind?.let { KindChip(it) }
-            }
-            me.kind?.let { Text(it.summary, style = MaterialTheme.typography.bodySmall) }
-            SelectionContainer {
-                Text("Node ${me.node}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
-            }
-            self?.let { session ->
-                Text(
-                    "${session.transport} · ${session.revocations.statements} revocations · credentials until ${date(session.expiresAtEpochSeconds)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            if (me.lists.isNotEmpty()) Text("Keys received: ${me.lists.joinToString()}", style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
 @Composable
 private fun RevokedHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -250,6 +198,7 @@ private fun RevokedHeader(count: Int, expanded: Boolean, onToggle: () -> Unit) {
 @Composable
 private fun DeviceCard(
     device: HouseholdDevice,
+    now: Long,
     canShare: Boolean,
     busy: Boolean,
     onShare: () -> Unit,
@@ -276,17 +225,10 @@ private fun DeviceCard(
             when {
                 device.revoked -> Status(MaterialTheme.colorScheme.error, "Revoked · future access removed")
                 device.isSelf -> {}
-                peer == null -> Status(Color(0xFF9E9E9E), "Syncs through other devices")
-                peer.link.state == rocky.LinkState.Open -> Status(Color(0xFF43A047), "Live" + if (peer.isIssuer) " · issuer" else "")
-                peer.link.state == rocky.LinkState.Opening -> Status(Color(0xFFF9A825), "Opening link")
-                peer.state == "connected" -> Status(Color(0xFF43A047), "Connected ${ago(peer.checkedAtEpochSeconds?.times(1000))}" + if (peer.isIssuer) " · issuer" else "")
-                peer.state == "unreachable" -> Status(Color(0xFFE53935), "Unreachable: ${peer.error ?: "no answer"}")
-                else -> Status(Color(0xFF9E9E9E), "Not contacted yet")
+                peer == null -> Status(Color(0xFF9E9E9E), "No direct peer known · syncs through other devices")
+                else -> DeviceConnection(peer, now)
             }
-            peer?.routes?.firstOrNull()?.let { route ->
-                Text("via ${route.transport}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            peer?.let { LinkPaths(it.link) }
+            DeviceDetails(device.node, peer)
             if (device.lists.isNotEmpty()) Text("Keys sent: ${device.lists.joinToString()}", style = MaterialTheme.typography.bodySmall)
             Row {
                 if (canShare) {

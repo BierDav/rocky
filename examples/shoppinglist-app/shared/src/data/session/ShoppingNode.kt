@@ -7,7 +7,6 @@ import org.example.examples.shopping.data.ShoppingRepository
 import org.example.examples.shopping.data.coordination.Approvals
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.ShoppingSchema
-import org.example.examples.shopping.data.household.ContactLabels
 import org.example.examples.shopping.data.household.Household
 import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
@@ -50,7 +49,6 @@ class ShoppingNode private constructor(
     val self: String,
     commands: CommandRuntime?,
     foreground: Flow<Boolean>,
-    val contacts: ContactLabels,
     private val kindPath: String,
     initialKind: NodeKind?,
     private val closed: (RockyDatabase) -> Unit,
@@ -142,10 +140,9 @@ class ShoppingNode private constructor(
                         val backgroundErrors = CoroutineExceptionHandler { _, error -> failure.complete(error) }
                         val openedRoom = platform.room("${platform.directory}/shopping").buildOnRocky(rocky, Dispatchers.IO + backgroundErrors)
                         room = openedRoom
-                        val contacts = ContactLabels.open("${platform.directory}/contact-labels.json")
                         val kindPath = "${platform.directory}/device-kind"
                         val kind = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
-                        ShoppingNode(rocky, openedRoom, self, commands, platform.foreground, contacts, kindPath, kind, platform.closed, failure, backgroundErrors).also { opened = it }
+                        ShoppingNode(rocky, openedRoom, self, commands, platform.foreground, kindPath, kind, platform.closed, failure, backgroundErrors).also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) {
                             try {

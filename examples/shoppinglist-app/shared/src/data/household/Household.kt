@@ -142,14 +142,7 @@ class Household(
         trusted.record(node, name, kind.name.lowercase())
     }
 
-    /** A contact scanned here grants no rights and its label never enters replicated storage. */
-    suspend fun shareWithContact(list: Long, code: String): String {
-        val node = rocky.addPeer(code)
-        share(list, node)
-        return node
-    }
-
-    /** Seals the held list to [node]; members reach this through [shareWithContact]. */
+    /** Seals the held list to [node], chosen from the registry or discovered peers. */
     suspend fun share(list: Long, node: String) {
         rocky.list(list).share(listOf(node))
     }

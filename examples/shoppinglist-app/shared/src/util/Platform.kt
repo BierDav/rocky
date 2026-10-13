@@ -21,6 +21,9 @@ internal fun epochMillis(): Long = kotlin.time.Clock.System.now().toEpochMillise
 internal fun randomBytes(size: Int): ByteArray = CryptoRand.Default.nextBytes(ByteArray(size))
 internal fun formatDate(epochSeconds: Long, timeZone: TimeZone = TimeZone.currentSystemDefault()): String = dateFormat.format(Instant.fromEpochSeconds(epochSeconds).toLocalDateTime(timeZone))
 
+/** Local event time preserves the SDK timestamp's millisecond precision. */
+internal fun formatTimestamp(epochMillis: Long, timeZone: TimeZone = TimeZone.currentSystemDefault()): String = Instant.fromEpochMilliseconds(epochMillis).toLocalDateTime(timeZone).toString().replace('T', ' ')
+
 private val dateFormat = LocalDateTime.Format {
     date(LocalDate.Formats.ISO)
     char(' ')

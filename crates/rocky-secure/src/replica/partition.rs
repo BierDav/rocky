@@ -390,7 +390,7 @@ impl<A: RowApplication> Inner<A> {
                     complete = false;
                     continue;
                 }
-                if self.has_pending(*scope).await? {
+                if self.has_pending(*scope).await? || self.restoring(*scope).await? {
                     unavailable = true;
                     continue;
                 }
@@ -447,7 +447,7 @@ impl<A: RowApplication> Inner<A> {
             &rules,
             &typed.rows.schema().views,
         )
-        .map_err(|error| Error::Sql(crate::sql::SqlError::Unsupported(error)))
+        .map_err(|error| Error::Sql(error.into()))
     }
 }
 

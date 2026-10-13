@@ -148,7 +148,7 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(e) => write!(f, "local storage I/O: {e}"),
+            Self::Io(e) => write!(f, "I/O: {e}"),
             Self::Storage(e) => write!(f, "SQLite storage: {e}"),
             Self::Protocol(e) => write!(f, "operation protocol: {e}"),
             Self::Application(e) => write!(f, "application rejected request: {e}"),

@@ -54,6 +54,11 @@ pub async fn bootstrap_from_partial() -> Result<(), Failure> {
         );
         report_divergence(&[a.n(), f.n()]).await;
     }
+    let healed = status_data(f.n()).await;
+    println!("  f after the issuer returned: pending={}", healed["bootstrap_pending"]);
+    if healed["bootstrap_pending"] != false {
+        finding("full node keeps bootstrap pending after meeting its inviter");
+    }
     for s in [&mut a, &mut f, &mut p] {
         s.close().await?;
     }

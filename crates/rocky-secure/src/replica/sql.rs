@@ -271,6 +271,18 @@ impl<A: RowApplication> SecureSql<A> {
             None => table.scope,
         };
         if !self.session.status.writable.contains(&scope) {
+            // While this device imports, or for a known partition this
+            // session predates, the table may become writable: retry.
+            if !inner.importing.is_empty()
+                || inner.importing(scope).await?
+                || (inner.partitions.contains_key(&scope)
+                    && !self.session.status.scopes.contains(&scope))
+            {
+                return Err(Error::Sql(SqlError::Unavailable {
+                    table: table.table.sql_name.clone(),
+                    reason: crate::sql::Unavailable::Incomplete,
+                }));
+            }
             return Err(denied("identity allocation requires a writable table"));
         }
         // Later reservations of this transaction continue the first, whose

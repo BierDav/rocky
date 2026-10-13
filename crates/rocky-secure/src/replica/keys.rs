@@ -307,6 +307,40 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.bump_authority();
         Ok(())
     }
+    /// Every registered partition with the key epochs this file recorded
+    /// using there, ascending. An owner that lost its record of a group
+    /// finds which secrets to look for.
+    pub async fn retained_partitions(
+        &self,
+    ) -> Result<
+        Vec<(
+            ResourceScope,
+            rocky_core::PartitionTuple,
+            Vec<rocky_core::KeyEpoch>,
+        )>,
+        Error,
+    > {
+        let inner = self.inner.lock().await;
+        let mut retained = Vec::new();
+        for (scope, tuple) in &inner.partitions {
+            let mut epochs = Vec::new();
+            for sql in [
+                "SELECT generation FROM secure_keys WHERE scope=?",
+                "SELECT generation FROM secure_key_epochs WHERE scope=?",
+            ] {
+                for row in collect_rows(inner.conn.query(sql, [encode(scope)?]).await?).await? {
+                    let [SqlValue::Blob(generation)] = row.as_slice() else {
+                        return Err(denied("corrupt key metadata"));
+                    };
+                    epochs.push(decode::<rocky_core::KeyEpoch>(generation)?);
+                }
+            }
+            epochs.sort_unstable();
+            epochs.dedup();
+            retained.push((*scope, tuple.clone(), epochs));
+        }
+        Ok(retained)
+    }
     /// The installed key epochs of a scope, ascending; the last is current.
     pub async fn key_epochs(&self, scope: ResourceScope) -> Vec<rocky_core::KeyEpoch> {
         let inner = self.inner.lock().await;

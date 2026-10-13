@@ -766,6 +766,14 @@ async fn run(
     }
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     if matches!(setup.install, Install::Installed) {
+        if !directory.join("identity.json").exists() {
+            return Err(if directory.join("identity.join.json").exists() {
+                "a join in this directory is unfinished: join again with its or a newer invitation"
+            } else {
+                "no domain in this directory: create or join one"
+            }
+            .into());
+        }
         Settings::load(&directory.join("identity.json"))?;
     }
     std::fs::create_dir_all(&directory)?;
@@ -783,6 +791,14 @@ async fn run(
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
     }
     let (mut settings, link) = identity(&path, &setup, network).await?;
+    // Envelopes shared after enrollment wait at the inviter: the intent
+    // stays until one exchange with it.
+    if let (Install::Join { .. }, Some(inviter)) = (&setup.install, settings.issuers.first()) {
+        rocky_credentials::write_private(
+            &directory.join("bootstrap.json"),
+            &serde_json::to_vec(&serde_json::json!({"intent": true, "inviter": inviter.to_hex()}))?,
+        )?;
+    }
     let vault = settings.vault(&setup.secrets);
     let opened = async {
         // A revocation interrupted after its intent was saved completes
@@ -852,6 +868,11 @@ async fn run(
         {
             drop(replica);
             return Err(error.into());
+        }
+        // A settings file restored on its own may have lost groups the
+        // replica holds; the vault still keeps their secrets.
+        if settings.recover_groups(&vault, &domain, &replica.retained_partitions().await?)? {
+            settings.save(&path)?;
         }
         // Every readable member's key derives from its group secret,
         // including a table that joined the group in a later generation.

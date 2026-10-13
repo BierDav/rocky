@@ -284,9 +284,12 @@ pub(crate) async fn bootstrap(
         if std::fs::read(marker)? != *expected {
             return Err("bootstrap authority changed; retry with the new intent".into());
         }
-        *expected = serde_json::to_vec(
-            &serde_json::json!({"intent": intent, "pending": &pending[next..], "totals": &totals}),
-        )?;
+        let mut next_intent =
+            serde_json::json!({"intent": intent, "pending": &pending[next..], "totals": &totals});
+        if let Some(inviter) = saved.get("inviter") {
+            next_intent["inviter"] = inviter.clone();
+        }
+        *expected = serde_json::to_vec(&next_intent)?;
         rocky_credentials::write_private(marker, expected)?;
         Ok(())
     };

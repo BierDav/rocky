@@ -26,8 +26,8 @@ use rocky_core::{Coordinator, ResourceScope, SqlValue, TypedCommands, commitment
 use rocky_credentials::Profile;
 use rocky_secure::{
     CredentialChain, Delivery, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey,
-    RevocationSet, SecureSession, SecureSql, SqlError, SqlOptions, TicketState, secure_node_id,
-    secure_principal_id,
+    RevocationSet, SecureSession, SecureSql, SqlError, SqlOptions, TicketState, Unavailable,
+    secure_node_id, secure_principal_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -2688,8 +2688,7 @@ impl Node {
         }
         let pending: Vec<ResourceScope> = match intent.get("pending") {
             Some(pending) => serde_json::from_value(pending.clone())?,
-            None if intent == &json!(true) => self.scopes(),
-            None => return Err(refused("invalid bootstrap intent")),
+            None => self.scopes(),
         };
         if pending.iter().any(|scope| !self.scopes().contains(scope)) {
             return Err(refused("bootstrap intent names an ungranted scope"));
@@ -2703,6 +2702,25 @@ impl Node {
                 settings.reads_whole(&self.domain, scope) && !self.domain.partitioned_table(scope)
             })
             .collect())
+    }
+    /// The intent to keep instead of clearing a completed `intent` with
+    /// `peer`: a joined device waits for one exchange with its inviter, which
+    /// holds the envelopes shared with it after enrollment, unless revoked.
+    async fn awaits_inviter(
+        &self,
+        peer: PublicKey,
+        intent: &[u8],
+    ) -> Result<Option<Vec<u8>>, Failure> {
+        let mut intent: Value = serde_json::from_slice(intent)?;
+        let Some(inviter) = intent.get("inviter").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let inviter: PublicKey = inviter.parse()?;
+        if inviter == peer || self.settings.lock().await.revocations.revokes(&inviter) {
+            return Ok(None);
+        }
+        intent["pending"] = json!([]);
+        Ok(Some(serde_json::to_vec(&intent)?))
     }
     /// Tells the replica which scopes the bootstrap intent imports, so
     /// peers hold back their history for them.
@@ -3004,17 +3022,21 @@ impl Node {
                     if std::fs::read(&marker)? != completed {
                         return Err("bootstrap authority changed; retry with the new intent".into());
                     }
-                    std::fs::remove_file(&marker)?;
                     self.replica
                         .set_importing(std::collections::BTreeSet::new())
                         .await;
-                    #[cfg(unix)]
-                    std::fs::File::open(
-                        marker.parent().ok_or("bootstrap marker has no directory")?,
-                    )?
-                    .sync_all()?;
-                    self.activity
-                        .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
+                    if let Some(waiting) = self.awaits_inviter(peer, &completed).await? {
+                        rocky_credentials::write_private(&marker, &waiting)?;
+                    } else {
+                        std::fs::remove_file(&marker)?;
+                        #[cfg(unix)]
+                        std::fs::File::open(
+                            marker.parent().ok_or("bootstrap marker has no directory")?,
+                        )?
+                        .sync_all()?;
+                        self.activity
+                            .record("bootstrap_finished", json!({"peer": peer.to_hex()}));
+                    }
                 }
             }
         }
@@ -3963,6 +3985,12 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
         _ => None,
     }
 }
+fn horizon_pending(error: &Failure) -> Option<&rocky_secure::HorizonPending> {
+    match error.downcast_ref::<Error>()? {
+        Error::Application(error) => error.downcast_ref(),
+        _ => None,
+    }
+}
 fn is_authority(error: &Failure) -> bool {
     error.to_string().contains("session authority changed")
 }
@@ -3980,6 +4008,8 @@ pub fn error(error: &Failure) -> Value {
         ("rejected", false)
     } else if error.is::<Deferred>() {
         ("executor_unavailable", true)
+    } else if let Some(pending) = horizon_pending(error) {
+        return json!({"code": "horizon_pending", "retryable": true, "message": pending.to_string()});
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
         coordination_code(coordination)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {
@@ -3994,9 +4024,16 @@ pub fn error(error: &Failure) -> Value {
             Some(Error::Rejected(_) | Error::Protocol(_)) => ("rejected", false),
             Some(Error::Incompatible(_)) => ("unsupported_generation", false),
             Some(Error::Sql(SqlError::Denied)) => ("denied", false),
-            Some(Error::Sql(SqlError::Capture(_) | SqlError::Statement { .. })) => {
-                ("rejected", false)
-            }
+            Some(Error::Sql(
+                SqlError::Capture(_) | SqlError::Statement { .. } | SqlError::Unsupported(_),
+            )) => ("rejected", false),
+            // Missing rows or keys arrive by sync; a scope this device does
+            // not hold needs a subscription first.
+            Some(Error::Sql(SqlError::Unavailable { reason, .. })) => match reason {
+                Unavailable::Incomplete | Unavailable::KeyMissing => ("missing_dependencies", true),
+                Unavailable::NotHeld => ("rejected", false),
+                Unavailable::Revoked => ("denied", false),
+            },
             Some(Error::Conflict) => ("conflict", true),
             Some(Error::Backpressure) => ("quota", true),
             Some(Error::Handler(_)) => ("handler_unavailable", true),

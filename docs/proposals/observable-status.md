@@ -99,7 +99,10 @@ facts; operation-time admission remains authoritative.
 peer set, per-peer skip reasons, actual attempts, known completed transfers,
 refused/waiting scopes, result retrieval failures and retry intentions. No
 selected peers produces an empty report. Networking disabled and suspension
-produce explicit skips. Backoff is a skip, not a failed dial.
+produce explicit skips. Backoff is a skip, not a failed dial. A returned
+report means the pass ran, not that any peer was reached: a pass whose every
+attempt failed, or whose every peer was skipped, still returns its report.
+Read success from the attempts.
 
 Transfer `pulled`/`pushed` counts describe operation frames, not projection rows.
 `bytes` counts encoded received frames, including duplicates; it excludes

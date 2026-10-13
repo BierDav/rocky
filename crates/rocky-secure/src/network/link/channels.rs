@@ -574,7 +574,7 @@ impl Io {
         timeout(TIMEOUT, self.receive.recv())
             .await
             .map_err(|_| timed_out("link channel read timeout"))?
-            .ok_or_else(|| Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)))
+            .ok_or_else(|| Error::Io(super::closed_by_peer()))
     }
     pub async fn close(&mut self) -> Result<(), Error> {
         if !self.closed {

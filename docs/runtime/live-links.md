@@ -39,7 +39,9 @@ resolution gets the signed proof of the node key and closes without a link.
 such as the employees demo; it ignores signals and pushes.
 
 One registry entry exists per authenticated node. Simultaneous dials retain
-the stream initiated by the lower node key. Replacement cancels old requests;
+the stream initiated by the lower node key. A new link in the same direction
+as the existing one replaces it: the peer lost the old one, for example by
+restarting before this side noticed the dead connection. Replacement cancels old requests;
 a bounded retry uses the surviving link without classifying it as unreachable.
 A requester uses the newly admitted link immediately, including a competing
 inbound short link, instead of waiting for that peer's reconciliation to end.

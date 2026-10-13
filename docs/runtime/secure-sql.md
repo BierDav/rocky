@@ -160,6 +160,10 @@ The language-neutral session accepts `sql` requests (a statement and tagged
 cell whose `value` is the decimal string. The same cached SQL connection owns
 the lease. A `COMMIT` request may carry a 32-byte `handle` for durable recovery
 through `mutation_progress`; retries must keep the same transaction input.
+A session has one connection and so at most one open transaction, shared by
+every caller of that session: a concurrent `BEGIN` is refused, and any
+caller's `COMMIT` or `ROLLBACK` ends it. Serialize transactions per session,
+or open a session per concurrent writer.
 Kotlin `RockyClient.sql` and `nextId` wrap these. Integer values in rows and
 checkpoint incarnation IDs travel as strings; numeric JSON identities are
 rejected.

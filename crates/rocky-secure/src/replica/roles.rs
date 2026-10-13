@@ -313,24 +313,29 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    pub(super) async fn save_eviction_guard(
-        &self,
-        scope: ResourceScope,
-        id: i64,
-    ) -> Result<(), Error> {
-        if let Some(log) = self.log(id, self.config.node.public_key()).await? {
-            self.conn
-                .execute(
-                    "INSERT INTO secure_evicted_logs VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=MAX(sequence,excluded.sequence),hash=excluded.hash",
-                    bindings(vec![
-                        SqlValue::Blob(encode(&scope)?),
-                        SqlValue::Integer(log.sequence),
-                        SqlValue::Blob(log.hash.as_bytes().to_vec()),
-                    ]),
-                )
-                .await?;
-        }
+    /// Records the own log tip an eviction drops, -1 without one. The scope
+    /// reads as unavailable until a catch-up restores it.
+    pub(super) async fn save_eviction_guard(&self, scope: ResourceScope) -> Result<(), Error> {
+        let log = match self.find_scope_id(scope).await? {
+            Some(id) => self.log(id, self.config.node.public_key()).await?,
+            None => None,
+        };
+        self.conn
+            .execute(
+                "INSERT INTO secure_evicted_logs VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET sequence=MAX(sequence,excluded.sequence),hash=excluded.hash",
+                bindings(vec![
+                    SqlValue::Blob(encode(&scope)?),
+                    SqlValue::Integer(log.as_ref().map_or(-1, |log| log.sequence)),
+                    SqlValue::Blob(log.map_or_else(Vec::new, |log| log.hash.as_bytes().to_vec())),
+                ]),
+            )
+            .await?;
         Ok(())
+    }
+    /// Whether a resubscribed scope still waits for the catch-up that
+    /// restores what its eviction dropped.
+    pub(crate) async fn restoring(&self, scope: ResourceScope) -> Result<bool, Error> {
+        Ok(self.eviction_guard(scope).await?.is_some())
     }
     pub(super) async fn mark_evicting(
         &self,
@@ -651,9 +656,16 @@ impl<A: RowApplication> Inner<A> {
                 };
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let manifest = frame.operation()?.header.extensions.manifest;
+                // Every frame of a revoked author is refused, so none is sent.
                 if self
                     .generation_of(manifest, false)
                     .is_ok_and(|made| made > reach)
+                    || self
+                        .config
+                        .revocations
+                        .revoking(frame.chain()?.credentials())
+                        .map_err(credential)?
+                        .is_some()
                 {
                     break;
                 }
@@ -743,6 +755,45 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Some(Holding::Evicting | Holding::Evicted) => Ok(()),
             _ => transaction!(inner, |inner| inner.set_holding(scope, Holding::Left).await),
         }
+    }
+    /// Ends the restoration of a resubscribed scope after a complete
+    /// catch-up from a peer, once the own log an eviction dropped is back.
+    pub(crate) async fn restored(&self, scope: ResourceScope) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        if inner.holding(scope).await? != Some(Holding::Held) {
+            return Ok(());
+        }
+        let Some(guard) = inner.eviction_guard(scope).await? else {
+            return Ok(());
+        };
+        let tip = match inner.find_scope_id(scope).await? {
+            Some(id) => inner
+                .log(id, inner.config.node.public_key())
+                .await?
+                .map(|log| log.sequence),
+            None => None,
+        };
+        if tip.unwrap_or(-1) < guard {
+            return Ok(());
+        }
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "DELETE FROM secure_evicted_logs WHERE scope=?",
+                    [encode(&scope)?],
+                )
+                .await?;
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_metadata SET revision=revision+1 WHERE id=1",
+                    (),
+                )
+                .await?;
+            Ok(())
+        })?;
+        inner.publish_revision().await
     }
     /// Scopes with a recorded subscription state, in scope order.
     pub async fn subscriptions(&self) -> Result<Vec<(ResourceScope, Holding)>, Error> {

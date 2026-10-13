@@ -15,7 +15,7 @@ mod horizon;
 mod identity;
 mod protection;
 pub(crate) use horizon::HorizonFinalization;
-pub use horizon::HorizonProgress;
+pub use horizon::{HorizonPending, HorizonProgress};
 mod incoming;
 mod keys;
 pub(crate) mod migrate;

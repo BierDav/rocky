@@ -25,7 +25,8 @@ rejected. See [scalars](logical-schema.md#scalars).
 Replies contain `version: 1` and either `status: "ok", value: {...}` or
 `status: "error", error: {code, retryable, message}`. Codes are stable strings:
 `denied`, `unsupported_generation`, `missing_dependencies`, `missing_head`,
-`quota`, `corruption`, `conflict`, `closed`, `unknown_confirmation` and `storage`.
+`quota`, `corruption`, `conflict`, `closed`, `unknown_confirmation`,
+`horizon_pending` and `storage`.
 Messages are diagnostic. Use codes/retryability, not message parsing. Unknown
 versions fail; malformed calls and unknown request fields fail explicitly.
 

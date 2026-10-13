@@ -452,7 +452,9 @@ impl Intent {
             "join.json"
         })
     }
-    /// The saved intent, or a new one whose device keys now exist.
+    /// The saved intent, or a new one whose device keys now exist. Another
+    /// invitation supersedes an unfinished join: its keys may already be
+    /// registered under the consumed invitation, so they are discarded.
     fn resume(
         path: &Path,
         invitation: Option<Commitment>,
@@ -460,11 +462,16 @@ impl Intent {
     ) -> Result<(Self, Vault), Failure> {
         if path.exists() {
             let previous: Self = serde_json::from_slice(&std::fs::read(path)?)?;
-            if previous.invitation != invitation {
-                return Err("a different join is unresolved; retry its invitation".into());
-            }
             let vault = Vault::new(store.clone(), &previous.installation);
-            return Ok((previous, vault));
+            if previous.invitation == invitation {
+                return Ok((previous, vault));
+            }
+            std::fs::remove_file(path)?;
+            vault.forget(
+                ["user", "node", "transport", "credential", "publisher"]
+                    .into_iter()
+                    .map(String::from),
+            )?;
         }
         let intent = Self {
             invitation,
@@ -1418,6 +1425,77 @@ impl Settings {
             self.groups.insert(address, record);
         }
         Ok(())
+    }
+    /// Restores group epochs the replica used but this file no longer
+    /// records, as after restoring it on its own: an epoch comes back only
+    /// when the vault still holds its secret. Returns whether any did.
+    pub(crate) fn recover_groups(
+        &mut self,
+        vault: &Vault,
+        domain: &Domain,
+        retained: &[(
+            rocky_core::ResourceScope,
+            rocky_core::PartitionTuple,
+            Vec<rocky_core::KeyEpoch>,
+        )],
+    ) -> Result<bool, Failure> {
+        let logical = domain.logical();
+        let mut recovered = false;
+        for (scope, tuple, epochs) in retained {
+            let Some(table) = logical
+                .partition_groups()?
+                .into_iter()
+                .flat_map(|group| group.tables)
+                .find(|table| logical.table_id(table) == scope.table)
+            else {
+                continue;
+            };
+            let values = table
+                .partition_by
+                .iter()
+                .map(|name| {
+                    let column = table.column(name).ok_or("unknown partition column")?;
+                    Ok(tuple
+                        .values()
+                        .get(&logical.field_id(table, column))
+                        .ok_or("missing partition column")?
+                        .value()?)
+                })
+                .collect::<Result<Vec<_>, Failure>>()?;
+            let resolved = GroupPartition::resolve(domain, None, Some(&table.sql_name), values)?;
+            if resolved.members.iter().all(|member| member.scope != *scope)
+                || resolved
+                    .members
+                    .iter()
+                    .any(|member| !self.reads_partition(member))
+            {
+                continue;
+            }
+            let address = crate::groups::record_key(&resolved.record.address);
+            let mut record = self
+                .groups
+                .get(&address)
+                .cloned()
+                .unwrap_or(resolved.record);
+            let mut changed = false;
+            for epoch in epochs {
+                if record.epochs.contains(epoch) {
+                    continue;
+                }
+                let held = vault.find(&secret_role(&record.address, *epoch))?;
+                if held.is_some_and(|secret| {
+                    rocky_core::KeyEpoch::new(epoch.generation, &secret) == *epoch
+                }) {
+                    record.hold(*epoch)?;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.groups.insert(address, record);
+                recovered = true;
+            }
+        }
+        Ok(recovered)
     }
     fn statements_for(&self, keys: &Keys) -> BTreeMap<String, Vec<Commitment>> {
         keys.iter()

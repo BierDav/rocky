@@ -41,7 +41,9 @@ is for an author who schedules horizons, syncs across one, or changes the format
 While a cut is pending, new writes in the declared scope and its cut
 dependencies are refused and incoming operations beyond the cut wait; missing
 cut operations can still arrive. This availability cost prevents finalization
-against changing input.
+against changing input. The refusal is the retryable `horizon_pending`, naming
+how many devices it waits for and the latest deadline; one absent device holds
+it up to that deadline unless it is revoked.
 
 ## Dependencies and ordering
 

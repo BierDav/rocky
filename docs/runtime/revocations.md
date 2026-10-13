@@ -59,7 +59,8 @@ session and cursor and re-admits pending frames. Chains and frames verify under
 the held set:
 
 - every frame of a revoked author is refused, earlier ones included; rows of
-  that author a device did not hold arrive by checkpoint;
+  that author a device did not hold arrive by checkpoint. A replica never
+  sends such a frame, so one that relayed them still reconciles with peers;
 - frames of every other author are admitted whenever they were signed;
 - confirmed command results and historical checkpoints verify with no
   revocation at the time they were issued, since a receipt anchors them.

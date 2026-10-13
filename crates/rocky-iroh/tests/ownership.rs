@@ -151,6 +151,31 @@ async fn foreground_rebinds_dead_starter_with_the_same_identity() -> Result<(), 
 }
 
 #[tokio::test]
+async fn a_dial_rebinds_a_dead_starter_on_its_fixed_port() -> Result<(), Failure> {
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
+    let first = Options::isolated(&format!("127.0.0.1:{port}"))
+        .start([34; 32])
+        .await?;
+    let second = local().start([35; 32]).await?;
+    first.listen(true);
+    second.listen(true);
+    rocky(&first, &second).await?;
+    first.endpoint().close().await;
+    // No foreground: the next dial heals it, on the same port.
+    rocky(&first, &second).await?;
+    rocky(&second, &first).await?;
+    assert!(first.address().await?.contains(&format!(":{port}")));
+    first.endpoint().close().await;
+    first.foreground().await?;
+    rocky(&second, &first).await?;
+    first.close().await;
+    second.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn foreground_reports_a_dead_borrowed_endpoint() -> Result<(), Failure> {
     let endpoint = local().bind([33; 32]).await?;
     let attachment = Attachment::new(endpoint.clone());

@@ -571,10 +571,22 @@ impl Writer {
         Ok(())
     }
 }
+/// A link the peer ended between frames; its kind stays `UnexpectedEof`.
+pub(super) fn closed_by_peer() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "the peer closed the link",
+    )
+}
 impl Reader {
     /// Idle reads have no deadline. Once a header starts, the frame has ten seconds.
     pub async fn receive(&mut self) -> Result<Frame, Error> {
-        let first = self.stream.read_u8().await.map_err(Error::Io)?;
+        let first = self.stream.read_u8().await.map_err(|error| {
+            Error::Io(match error.kind() {
+                std::io::ErrorKind::UnexpectedEof => closed_by_peer(),
+                _ => error,
+            })
+        })?;
         timeout(TIMEOUT, async {
             let mut header = [first, 0, 0, 0];
             self.stream

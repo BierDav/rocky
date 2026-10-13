@@ -139,7 +139,7 @@ impl<A: RowApplication> Inner<A> {
                 continue;
             } else if !self.holds(scope).await? {
                 Unavailable::NotHeld
-            } else if self.has_pending(scope).await? {
+            } else if self.has_pending(scope).await? || self.restoring(scope).await? {
                 Unavailable::Incomplete
             } else {
                 continue;

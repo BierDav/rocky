@@ -127,6 +127,9 @@ impl NativeSession {
                     || replica.admitted_horizon(local.scope).await? != state.signed
                 {
                     changed.push(local.scope);
+                } else {
+                    // Nothing to pull: a resubscribed scope is complete again.
+                    replica.restored(local.scope).await?;
                 }
             }
         }

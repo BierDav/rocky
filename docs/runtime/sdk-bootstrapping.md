@@ -58,7 +58,10 @@ checkpoint only after the signer is unlinked or the import has not moved for
 three minutes. A pass that fails after it stored pages retries after one second
 instead of backing off;
 Each completed scope is recorded after catch-up and a local flush, so retries
-resume only incomplete scopes. Intent clears after all scopes complete. Session rollover resumes
+resume only incomplete scopes. Intent clears after all scopes complete and, on
+a joined device, after one exchange with its inviter: envelopes shared after
+enrollment wait there, so another peer's checkpoint alone does not claim
+completion. A revoked inviter no longer holds the intent. Session rollover resumes
 the tail after a completed import instead of repeatedly importing its base. A
 failed join sync leaves that intent in place, never claiming completion.
 

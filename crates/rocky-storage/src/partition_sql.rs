@@ -25,6 +25,44 @@ impl TablePartitions {
         self.support || (!self.complete && !self.columns.is_empty())
     }
 }
+/// Why a statement is refused: outside the supported surface, or a table
+/// it reads is not available on this device.
+#[derive(Debug)]
+pub enum Refusal {
+    Unsupported(String),
+    Unavailable {
+        table: String,
+        reason: crate::sql::Unavailable,
+    },
+}
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Self::Unsupported(reason)
+    }
+}
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        Self::Unsupported(reason.into())
+    }
+}
+impl From<Refusal> for crate::sql::SqlError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Unsupported(reason) => Self::Unsupported(reason),
+            Refusal::Unavailable { table, reason } => Self::Unavailable { table, reason },
+        }
+    }
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(reason) => f.write_str(reason),
+            Self::Unavailable { table, reason } => {
+                write!(f, "{table} is not available: {reason:?}")
+            }
+        }
+    }
+}
 fn parse(sql: &str) -> Result<Statement, String> {
     let mut statements =
         Parser::parse_sql(&SQLiteDialect {}, sql).map_err(|error| error.to_string())?;
@@ -242,7 +280,7 @@ struct Checker<'a> {
     bindings: &'a Bindings<'a>,
 }
 impl Checker<'_> {
-    fn body(&self, body: &SetExpr) -> Result<(), String> {
+    fn body(&self, body: &SetExpr) -> Result<(), Refusal> {
         match body {
             SetExpr::Select(select) => self.references(&select.from, select.selection.as_ref()),
             SetExpr::SetOperation { left, right, .. } => {
@@ -252,7 +290,7 @@ impl Checker<'_> {
             _ => Ok(()),
         }
     }
-    fn references(&self, from: &[TableWithJoins], selection: Option<&Expr>) -> Result<(), String> {
+    fn references(&self, from: &[TableWithJoins], selection: Option<&Expr>) -> Result<(), Refusal> {
         let mut references = Vec::new();
         for item in from {
             if let Some(reference) = table(&item.relation) {
@@ -284,7 +322,10 @@ impl Checker<'_> {
                 continue;
             };
             if rule.unavailable {
-                return Err(format!("{name}: held partition is incomplete"));
+                return Err(Refusal::Unavailable {
+                    table: name.clone(),
+                    reason: crate::sql::Unavailable::Incomplete,
+                });
             }
             if rule.complete || (rule.columns.is_empty() && !rule.support) {
                 continue;
@@ -314,7 +355,8 @@ impl Checker<'_> {
             if rule.columns.is_empty() {
                 return Err(format!(
                     "{name}: a table this device does not hold needs row_kind = 0"
-                ));
+                )
+                .into());
             }
             let mut tuples = vec![Vec::new()];
             for column in &rule.columns {
@@ -344,15 +386,18 @@ impl Checker<'_> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if tuples.iter().any(|tuple| !held.contains(tuple)) {
-                return Err(format!("{name}: named partition is not held"));
+                return Err(Refusal::Unavailable {
+                    table: name.clone(),
+                    reason: crate::sql::Unavailable::NotHeld,
+                });
             }
         }
         Ok(())
     }
 }
 impl Visitor for Checker<'_> {
-    type Break = String;
-    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<String> {
+    type Break = Refusal;
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Refusal> {
         if let TableFactor::NestedJoin {
             table_with_joins, ..
         } = factor
@@ -362,13 +407,13 @@ impl Visitor for Checker<'_> {
         }
         ControlFlow::Continue(())
     }
-    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<String> {
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Refusal> {
         if let Err(error) = self.body(&query.body) {
             return ControlFlow::Break(error);
         }
         ControlFlow::Continue(())
     }
-    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<String> {
+    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Refusal> {
         let result = match statement {
             Statement::Update(update) => {
                 let mut sources = vec![update.table.clone()];
@@ -392,7 +437,7 @@ impl Visitor for Checker<'_> {
             Err(error) => ControlFlow::Break(error),
         }
     }
-    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<String> {
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Refusal> {
         let is_kind = |expr: &Expr| match unnest(expr) {
             Expr::Identifier(name) => name.value.eq_ignore_ascii_case("row_kind"),
             Expr::CompoundIdentifier(names) => names
@@ -438,7 +483,7 @@ pub fn check(
     sql: &str,
     params: &[SqlValue],
     tables: &BTreeMap<String, TablePartitions>,
-) -> Result<String, String> {
+) -> Result<String, Refusal> {
     let mut statement = parse(sql)?;
     let mut bindings = Bindings {
         params,
@@ -446,7 +491,7 @@ pub fn check(
         values: BTreeMap::new(),
     };
     if let ControlFlow::Break(error) = statement.visit(&mut bindings) {
-        return Err(error);
+        return Err(error.into());
     }
     bindings.bind()?;
     let mut checker = Checker {
@@ -461,7 +506,7 @@ pub fn check(
         reads: Vec::new(),
     };
     if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut filter) {
-        return Err(error);
+        return Err(error.into());
     }
     Ok(statement.to_string())
 }
@@ -680,7 +725,7 @@ pub fn check_with_views(
     params: &[SqlValue],
     tables: &BTreeMap<String, TablePartitions>,
     views: &[rocky_core::LogicalView],
-) -> Result<String, String> {
+) -> Result<String, Refusal> {
     struct Expand<'a> {
         views: &'a [rocky_core::LogicalView],
         changed: bool,
@@ -730,7 +775,7 @@ pub fn check_with_views(
             changed: false,
         };
         if let ControlFlow::Break(error) = VisitMut::visit(&mut statement, &mut expand) {
-            return Err(error);
+            return Err(error.into());
         }
         if !expand.changed {
             return check(&statement.to_string(), params, tables);

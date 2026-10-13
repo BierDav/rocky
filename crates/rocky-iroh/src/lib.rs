@@ -53,6 +53,8 @@ pub const STREAMS_PER_CONNECTION: usize = 4;
 /// Close codes of connections Rocky refuses.
 const CLOSED: u32 = 1;
 const BUSY: u32 = 2;
+/// Binding a fixed port again waits this long for the dead socket to go.
+const REBIND: Duration = Duration::from_secs(3);
 
 /// One bidirectional stream; it keeps its connection open.
 struct QuicStream {
@@ -251,6 +253,58 @@ impl Attachment {
     pub fn refused(&self) -> u64 {
         self.0.refused.load(Ordering::Relaxed)
     }
+    /// Binds a dead starter endpoint again with the same identity; a live
+    /// one is left alone. A borrowed endpoint is its owner's to rebind.
+    async fn revive(&self) -> Result<(), Failure> {
+        let restart = self.0.restart.lock().await;
+        if *self.0.closed.borrow() {
+            return Err("the iroh attachment is closed".into());
+        }
+        if !self.endpoint().is_closed() {
+            return Ok(());
+        }
+        let Some((options, secret)) = restart.as_ref() else {
+            return Err("application-owned endpoint is dead; its owner must rebind it".into());
+        };
+        // UDP sockets close with the last clone of their endpoint: the
+        // router and cached connections go first.
+        let router = self
+            .0
+            .router
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(router) = router {
+            let _ = router.shutdown().await;
+        }
+        self.0.connections.lock().await.clear();
+        if options.bind.is_some() {
+            // A closed loopback stand-in releases the watched clone.
+            let stand_in = Endpoint::builder(presets::Minimal)
+                .secret_key(SecretKey::from_bytes(secret))
+                .relay_mode(RelayMode::Disabled)
+                .clear_ip_transports()
+                .bind_addr("127.0.0.1:0")?
+                .bind()
+                .await?;
+            stand_in.close().await;
+            self.0.endpoint.send_replace(stand_in);
+        }
+        let started = tokio::time::Instant::now();
+        let replacement = loop {
+            match options.bind(*secret).await {
+                Ok(endpoint) => break endpoint,
+                Err(_) if started.elapsed() < REBIND => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let router = self.register(Router::builder(replacement.clone())).spawn();
+        self.0.endpoint.send_replace(replacement);
+        *self.0.router.lock().unwrap_or_else(PoisonError::into_inner) = Some(router);
+        Ok(())
+    }
     fn refuse(&self, connection: &Connection, code: u32, reason: &[u8]) {
         self.0.refused.fetch_add(1, Ordering::Relaxed);
         connection.close(code.into(), reason);
@@ -405,6 +459,10 @@ impl Transport for Attachment {
             if *self.0.closed.borrow() {
                 return Err("the iroh attachment is closed".into());
             }
+            // An endpoint the OS reclaimed heals on the next dial.
+            if self.endpoint().is_closed() {
+                self.revive().await?;
+            }
             let address: EndpointAddr = serde_json::from_str(address)?;
             let key = (address.id, protocol);
             let cached = self.0.connections.lock().await.get(&key).cloned();
@@ -469,35 +527,16 @@ impl Transport for Attachment {
     }
     fn foreground(&self) -> BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async {
-            let restart = self.0.restart.lock().await;
+            // No clone of a dead endpoint may outlive its rebind.
+            if self.endpoint().is_closed() {
+                return self.revive().await;
+            }
             if *self.0.closed.borrow() {
                 return Err("the iroh attachment is closed".into());
             }
-            let endpoint = self.endpoint();
-            let Some((options, secret)) = restart.as_ref() else {
-                return if endpoint.is_closed() {
-                    Err("application-owned endpoint is dead; its owner must rebind it".into())
-                } else {
-                    Ok(())
-                };
-            };
-            if !endpoint.is_closed() {
-                endpoint.network_change().await;
-                return Ok(());
+            if self.0.restart.lock().await.is_some() {
+                self.endpoint().network_change().await;
             }
-            let replacement = options.bind(*secret).await?;
-            let router = self.register(Router::builder(replacement.clone())).spawn();
-            self.0.endpoint.send_replace(replacement);
-            let old = self
-                .0
-                .router
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .replace(router);
-            if let Some(old) = old {
-                let _ = old.shutdown().await;
-            }
-            self.0.connections.lock().await.clear();
             Ok(())
         })
     }

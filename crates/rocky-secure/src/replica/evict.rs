@@ -72,9 +72,7 @@ impl<A: RowApplication> Inner<A> {
             )));
         }
         transaction!(self, |inner| {
-            if let Some(id) = inner.find_scope_id(scope).await? {
-                inner.save_eviction_guard(scope, id).await?;
-            }
+            inner.save_eviction_guard(scope).await?;
             inner.mark_evicting(scope, false).await?;
             inner
                 .conn
@@ -235,7 +233,12 @@ impl<A: RowApplication> Inner<A> {
                         .store_scope_state(id, 0, 0, &checkpoint::Lt::new(), 0)
                         .await?;
                 }
-                for table in ["secure_retention", "secure_peer_frontiers"] {
+                // Identity marks go too: the scope's creations apply again.
+                for table in [
+                    "secure_retention",
+                    "secure_peer_frontiers",
+                    "secure_identity_marks",
+                ] {
                     inner
                         .conn
                         .execute(format!("DELETE FROM {table} WHERE scope=?"), [blob.clone()])

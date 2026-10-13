@@ -28,6 +28,28 @@ pub struct HorizonProgress {
     pub behind: Vec<PeerId>,
 }
 
+/// A write refused while a declared horizon cut is pending: it succeeds once
+/// the cut finalizes, at the latest after `deadline` (Unix seconds).
+/// Revoking a waiting device ends its wait at once.
+#[derive(Debug)]
+pub struct HorizonPending {
+    pub waiting: Vec<PeerId>,
+    pub deadline: Option<u64>,
+}
+impl std::fmt::Display for HorizonPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.deadline {
+            Some(deadline) => write!(
+                f,
+                "a horizon cut is pending; writes resume once {} device(s) acknowledge it or at {deadline} at the latest; revoking an absent device ends its wait",
+                self.waiting.len()
+            ),
+            None => f.write_str("a horizon cut is pending; writes resume once it is finalized"),
+        }
+    }
+}
+impl std::error::Error for HorizonPending {}
+
 impl<A: RowApplication> Inner<A> {
     #[cfg(test)]
     fn horizon_fault(&mut self, step: u8) -> Result<(), Error> {
@@ -1193,9 +1215,18 @@ impl<A: RowApplication> Inner<A> {
                     .chain(&signed.statement.existence)
                     .any(|cut| cut.scope == scope)
             {
-                return Err(denied(
-                    "horizon cut is sealed; finalize or rebootstrap before writing",
-                ));
+                let progress = self.horizon_progress_at(&signed, now()?).await?;
+                let deadline = signed
+                    .statement
+                    .peers
+                    .iter()
+                    .filter(|peer| progress.waiting.contains(&peer.node))
+                    .map(|peer| peer.deadline(signed.statement.issued))
+                    .max();
+                return Err(Error::Application(Box::new(HorizonPending {
+                    waiting: progress.waiting,
+                    deadline,
+                })));
             }
         }
         Ok(())

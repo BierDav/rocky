@@ -522,8 +522,12 @@ impl Node {
                 .entries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            // Crossed dials keep the preferred direction. A peer opens a
+            // second link the same way only once it lost the first, as a
+            // restarted process does: the newer one replaces it.
             if entries.get(&peer).is_some_and(|old| {
-                (old.dialed == preferred || old.dialed == dialed)
+                old.dialed != dialed
+                    && old.dialed == preferred
                     && !old.handle.is_closed()
                     && old.close.borrow().is_none()
                     && !old.authority.has_changed().unwrap_or(true)

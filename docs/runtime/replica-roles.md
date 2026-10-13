@@ -117,8 +117,10 @@ replica, for a domain with required recovery custodians, and until
 `max(1, custody)` full nodes have applied every operation this node authored in
 the scope. It is neither deletion nor pruning: the rows remain at the full
 nodes. An interrupted eviction continues on the next call. `subscribe` brings
-the scope back; sync it before authoring in it again, which is refused until
-this node's own log there is restored.
+the scope back. It reads as incomplete until a catch-up from a peer, or a
+frontier exchange with nothing to pull, restores it, and authoring is refused
+until this node's own log there is restored. Eviction drops the scope's row
+identity marks with its rows, so the history applies again.
 
 ### Remote reads
 

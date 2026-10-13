@@ -97,6 +97,11 @@ rows are plaintext at rest.
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
+An `identity.json` restored without its database may lack group partitions the
+replica still holds. Opening restores each key epoch the replica recorded for
+them whose secret the store still holds; an epoch without its secret stays
+lost until the group is shared again.
+
 Device records are not in `identity.json`: they are rows of the
 [issuer registry](issuer-registry.md). Each record accepts only its listed
 version, independent of routing flags.
@@ -120,6 +125,10 @@ subsequent `DeviceEnrolled` events before another invitation replaces it.
   publisher key, and that grants equal the profile. It pins the issuer's node key.
 - A join persists its nonce and keys before contacting the issuer, so a lost
   answer retries as the same device; nobody else can reuse the invitation.
+  Joining with another invitation abandons the unfinished join and its keys
+  and starts as a new device; an issuer that already recorded the abandoned
+  device keeps it until it is revoked. Opening a directory whose join is
+  unfinished fails and names the remedy.
 - A different schema, or no route of the attached kind, fails without
   consuming the invitation.
 - A domain's registry holds up to 256 devices; the 257th enrollment fails
@@ -346,7 +355,7 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `networking_control` with `enabled` | The application's networking control value; no reachability measurement |
-| `sync` | Native `ReconciliationReport` with selected peers, attempts, skips and transfer receipts; local preconditions remain typed errors |
+| `sync` | Native `ReconciliationReport` with selected peers, attempts, skips and transfer receipts, also when no peer was reached; local preconditions remain typed errors |
 | `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; native `Peer` records, known `renewal_routes`, and typed [discovery status](discovery.md#status) |
 | `contact_request` with hexadecimal `id` | Learned `node` key, or null |
 | `network` | See [network status](sdk-composition.md#network-status) |

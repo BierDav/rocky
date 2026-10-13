@@ -354,7 +354,7 @@ Java platform calls and `File` overloads; `src/iosMain/kotlin` supplies Foundati
 Security calls and notification lifecycle
 ([iOS](runtime/ios.md)). `sdks/kotlin/gradlew -p sdks/kotlin packageIos` stages iOS publications;
 `sdks/kotlin/qualification/packaged-ios` is the independent packaged consumer; `rocky-iroh` refreshes or rebinds starter
-sockets on foreground. The test-only `platform-test` module (`sdks/kotlin/qualification/platform-test`) supplies file fixtures.
+sockets on foreground, and rebinds dead ones, fixed ports included, on the next dial. The test-only `platform-test` module (`sdks/kotlin/qualification/platform-test`) supplies file fixtures.
 `src/androidMain/kotlin` adds the lifecycle binding. The Android variant of `rocky-core` ships the same sources as an AAR for
 [Android](runtime/android.md). `sdks/kotlin/rocky-runtime-android` is the Android library whose Cargo
 task builds the native runtime; `rocky-core`'s Android variant depends on it. `sdks/kotlin/build-logic`

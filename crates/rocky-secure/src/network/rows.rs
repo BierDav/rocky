@@ -313,6 +313,7 @@ impl NativeSession {
                 .await?;
             after = page.next;
             if after.is_none() {
+                replica.restored(scope).await?;
                 return Ok(report);
             }
         }

@@ -127,7 +127,8 @@ runs:
 
     - name: Restore compiled workspace crates when rebuilding
       if: >-
-        steps.passed.outputs.cache-hit != 'true' && inputs.job != 'shopping' && (inputs.dependencies == 'always'
+        github.server_url == 'https://github.com' && steps.passed.outputs.cache-hit != 'true'
+        && inputs.job != 'shopping' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
         || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
         || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
@@ -140,7 +141,7 @@ runs:
           rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Restore and save the shopping job's x64 compiled crates
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.job == 'shopping'
+      if: steps.passed.outputs.cache-hit != 'true' && inputs.job == 'shopping' && github.server_url == 'https://github.com'
       uses: actions/cache@v4
       with:
         path: source/target

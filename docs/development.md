@@ -328,13 +328,16 @@ or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
 When `build` finds `check` already passed for the tree it builds nothing, and
 the jobs after it build what they still run themselves. The Rust action restores dependencies and a fallback `target` directory. A
-separate compiled `target` cache then overlays it and has a separate cache key per source tree, OS, architecture and pinned
+separate compiled `target` cache on GitHub then overlays it and has a separate cache key per source tree, OS, architecture and pinned
 build configuration, with a compatible prefix for restoring the previous tree.
 When manifests change, an OS/architecture fallback still restores the previous
 targets; Cargo's fingerprints rebuild incompatible crates. This saves newly rebuilt workspace crates instead of repeatedly restoring an
 immutable dependency key's original artifacts. The build job saves it; test
 consumers restore it when an artifact is missing. Shopping also saves its x64
-build and dependency caches, since Gitea's ARM baseline cannot warm them. Gitea's Kubernetes runners
+dependency cache on Gitea and both caches on GitHub, since the ARM baseline
+cannot warm its x64 crates. Gitea uses only the Rust action's cache: extracting
+the additional 8 GB `target` overlay has repeatedly terminated its build runners
+before compilation. Fallback test builds also avoid that overlay. Gitea's Kubernetes runners
 must share persistent cache storage so another runner or a restarted pod can
 reuse it.
 

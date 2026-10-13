@@ -597,6 +597,63 @@ async fn eviction_needs_applied_custody_and_a_resubscribed_scope_converges() {
 }
 
 #[tokio::test]
+async fn a_resubscribed_scope_without_own_writes_reads_incomplete_until_restored() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let scopes = departments(&f, 1);
+    let scope = scopes[0];
+    let full = open_node(
+        &f,
+        &dir.path().join("full.db"),
+        &PrivateKey::new(),
+        &scopes,
+        &scopes,
+    )
+    .await;
+    let device = open_node(
+        &f,
+        &dir.path().join("device.db"),
+        &PrivateKey::new(),
+        &scopes,
+        &scopes,
+    )
+    .await;
+    insert(&f, &full, scope, 0..10, 2).await;
+    device.replica.set_role(partial(&[&full], 1)).await.unwrap();
+    device.replica.subscribe(scope).await.unwrap();
+    let restoring = || async {
+        device
+            .replica
+            .inner
+            .lock()
+            .await
+            .restoring(scope)
+            .await
+            .unwrap()
+    };
+    let sync = || async {
+        let (mut session, server) = connect(&device, &full).await;
+        session
+            .sync_scope(&device.replica, scope, QUOTA)
+            .await
+            .unwrap();
+        drop(session);
+        server.await.unwrap();
+    };
+    sync().await;
+    let expected = all_rows(&full.replica, scope).await;
+    assert_eq!(all_rows(&device.replica, scope).await, expected);
+
+    // No own log to guard, yet the resubscribed scope is not complete.
+    device.replica.evict(scope).await.unwrap();
+    device.replica.subscribe(scope).await.unwrap();
+    assert!(restoring().await);
+    sync().await;
+    assert!(!restoring().await);
+    assert_eq!(all_rows(&device.replica, scope).await, expected);
+}
+
+#[tokio::test]
 async fn pruning_counts_full_nodes_only_once_they_applied() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();

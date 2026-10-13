@@ -644,6 +644,18 @@ impl Options {
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&secret))
             .relay_mode(relay_mode);
+        #[cfg(feature = "qualification")]
+        if self.bind.as_deref().is_some_and(|bind| {
+            bind.parse::<std::net::SocketAddr>()
+                .is_ok_and(|address| address.ip().is_loopback())
+        }) {
+            // Failed loopback dials otherwise drain for three seconds at QUIC's initial RTT.
+            builder = builder.transport_config(
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .initial_rtt(Duration::from_millis(10))
+                    .build(),
+            );
+        }
         // Gateway discovery also uses multicast; a manual/local-disabled path must not probe it.
         if !self.local || cfg!(target_os = "ios") {
             builder = builder.portmapper_config(PortmapperConfig::Disabled);

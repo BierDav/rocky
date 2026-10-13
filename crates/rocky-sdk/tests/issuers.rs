@@ -109,13 +109,26 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     early.ok(json!({"type": "renew"})).await;
     assert_issuers(root, "early", &[&a_node, &b_node])?;
     // The second issuer serves a device it never saw: its chain admits it.
-    synced(&late).await?;
+    let report = synced(&late).await?;
     assert!(
-        b.peer(&late.node().await).await["attempts"]
+        report["peers"]
             .as_array()
-            .expect("attempts")
+            .expect("peers")
             .iter()
-            .any(|attempt| attempt["outcome"] == "completed")
+            .any(|peer| {
+                peer["node"] == b_node
+                    && peer["attempts"]
+                        .as_array()
+                        .expect("attempts")
+                        .iter()
+                        .any(|attempt| {
+                            attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                        })
+            }),
+        "{report}"
+    );
+    assert!(
+        b.peer(&late.node().await).await["last_authenticated_exchange_at_epoch_seconds"].is_u64()
     );
     assert_eq!(
         identity(root, "late")?["contact_refs"]

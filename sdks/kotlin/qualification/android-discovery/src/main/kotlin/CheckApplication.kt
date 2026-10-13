@@ -54,11 +54,11 @@ class CheckApplication : Application() {
         try {
             b = RockyDatabase.join(bDirectory, definition, a.pairing(GrantProfile.Issuer).uri, transport)
             a.addPeer(b.contact().uri)
-            withTimeout(5_000) { a.observeStatus().first { status -> status.peers.any { it.link.state == LinkState.Open } } }
+            withTimeout(5_000) { a.observeStatus().first { status -> status.network.peers.any { it.link.state == LinkState.Open } } }
             withTimeout(1_000) { a.enterBackground() }
             check(a.network().peers.all { it.link.state == LinkState.Closed }) { "background left a link open" }
             a.enterForeground()
-            withTimeout(5_000) { a.observeStatus().first { status -> status.peers.any { it.link.state == LinkState.Open } } }
+            withTimeout(5_000) { a.observeStatus().first { status -> status.network.peers.any { it.link.state == LinkState.Open } } }
             Log.i(TAG, "links background=closed foreground=open")
         } finally {
             a.enterBackground()

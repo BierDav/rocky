@@ -784,7 +784,11 @@ pub(crate) mod testing {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (near, far) = tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
-        (near.unwrap(), far.unwrap().0)
+        let (near, far) = (near.unwrap(), far.unwrap().0);
+        // Request frames must not wait for Nagle's algorithm and delayed acknowledgments.
+        near.set_nodelay(true).unwrap();
+        far.set_nodelay(true).unwrap();
+        (near, far)
     }
     /// The dialed and the accepted end of a link, each as its handshake ended.
     pub(crate) async fn links<A: RowApplication, B: RowApplication>(

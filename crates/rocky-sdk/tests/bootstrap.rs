@@ -368,6 +368,55 @@ async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_fa
     Ok(())
 }
 
+/// Envelopes shared after enrollment wait at the inviter, so another peer's
+/// checkpoint completes the import but not the join.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure> {
+    use rocky_sdk::transport::{Connector, Transport};
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a_path = root.path().join("a");
+    let a = Device::create(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    a.add(1, "base").await;
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    b.sync().await.expect("b joins");
+    // Enrolled by A, but no exchange with it before A goes away.
+    let gate = Arc::new(Gate {
+        inner: hub.connector("gated").start(false, [9; 32]).await?,
+        allowed: tokio::sync::watch::channel(true).0,
+        attempts: tokio::sync::watch::channel(0).0,
+        refuse: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        max_attempts: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+        pause_on_attempt: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+    });
+    let c_path = root.path().join("c");
+    let c = Device::join(&c_path, &a.invite().await, Network::Borrowed(gate.clone()))?;
+    c.close().await;
+    gate.close().await;
+    a.close().await;
+    let c = Device::open(&c_path, Some(Network::Owned(hub.connector("c"))))?;
+    c.add_peer(&b.contact().await).await.expect("c knows b");
+    let _ = c.sync().await;
+    assert_eq!(c.titles().await, ["base"]);
+    let status = c.ok(json!({"type": "status"})).await;
+    assert_eq!(status["data"]["bootstrap_pending"], true);
+
+    let a = Device::open(&a_path, Some(Network::Owned(hub.connector("a"))))?;
+    c.sync().await.expect("c meets its inviter");
+    assert_eq!(
+        c.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        false
+    );
+    for device in [c, b, a] {
+        device.close().await;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old_keys()
 -> Result<(), Failure> {

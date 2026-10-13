@@ -61,6 +61,8 @@ Make it faster first; move it only if it is a different kind of test.
 - Use the in-process hub and its deterministic faults instead of sockets and
   process restarts; Tokio's paused clock for timeouts the code under test
   drives.
+  Secure protocol tests that need loopback TCP disable Nagle's algorithm on
+  both ends, so small request frames do not wait on host delayed-ACK timers.
 - Make sizes and iteration counts configurable through existing test
   configuration. Never change production defaults, limits or timeouts, and
   never weaken an assertion.

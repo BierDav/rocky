@@ -783,6 +783,40 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     issuer.database.close().await.unwrap();
 }
 
+/// A settings file restored on its own from before a list's key arrived:
+/// opening recovers the group from the replica and the vault.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_identity_file_older_than_the_replica_recovers_its_groups() {
+    let root = tempfile::tempdir().unwrap();
+    let issuer = Peer::create(&root.path().join("issuer"));
+    issuer
+        .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
+        .await;
+    for table in TABLES {
+        write(&issuer, table, "before").await;
+    }
+    let directory = root.path().join("reader");
+    let (store, device) = prepare(&directory);
+    let supplied = issuer
+        .grant(&device, issuer.grants("A", &TABLES, &["Read"]).await)
+        .await
+        .unwrap();
+    let reader = install(&directory, store, supplied, &issuer.hub);
+    introduce(&issuer, &reader).await;
+    let older = std::fs::read(directory.join("identity.json")).unwrap();
+    issuer.share("A", &[&device]).await.unwrap();
+    reader.ok(json!({"type":"sync"})).await;
+    let expected = vec![vec!["before".to_owned()]; 3];
+    assert_eq!(rows(&reader).await, expected);
+    reader.database.close().await.unwrap();
+    std::fs::write(directory.join("identity.json"), older).unwrap();
+    let reader = Peer::reopen(&directory, SCHEMA, reader.store.clone(), reader.hub.clone());
+    assert_eq!(rows(&reader).await, expected);
+    assert_eq!(reader.epochs("A").await.0, json!([1]));
+    reader.database.close().await.unwrap();
+    issuer.database.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants() {
     let root = tempfile::tempdir().unwrap();

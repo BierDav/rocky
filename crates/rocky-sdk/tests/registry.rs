@@ -846,3 +846,39 @@ async fn horizon_participants_come_from_unsynced_registry_records() -> Result<()
     a.close().await;
     Ok(())
 }
+
+/// A join whose answer was lost, after which the issuer replaced its
+/// invitation: the directory does not open, the spent invitation is refused,
+/// and the newer one enrolls a new device.
+#[tokio::test]
+async fn a_newer_invitation_supersedes_an_interrupted_join() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let root = root.path();
+    let hub = Arc::new(Hub::default());
+    let a = create(&root.join("a"), memory(&hub, "a"))?;
+    let directory = root.join("m");
+    let requesting = Arc::new(Faults::default());
+    let spent = a.invite().await;
+    *requesting.receipt.lock().unwrap() = Some(Protocol::Pair);
+    assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
+    let ghosts = devices(&a).await;
+    let Err(unfinished) = Database::open(open(&directory, None)) else {
+        panic!("an unfinished join opened");
+    };
+    assert!(
+        unfinished.to_string().contains("unfinished"),
+        "{unfinished}"
+    );
+    let newer = a.invite().await;
+    assert!(join(&directory, faulty(&hub, "m", &requesting), &spent).is_err());
+    let member = join(&directory, faulty(&hub, "m", &requesting), &newer)?;
+    let node = member.node().await;
+    assert!(!ghosts.contains_key(&node));
+    assert!(devices(&a).await.contains_key(&node));
+    a.add(1, "after").await;
+    synced(&member).await?;
+    assert_eq!(member.titles().await, ["after"]);
+    member.close().await;
+    a.close().await;
+    Ok(())
+}

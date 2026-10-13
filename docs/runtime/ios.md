@@ -109,3 +109,9 @@ Local discovery uses system Bonjour without the multicast entitlement. Consumers
 declare `_rocky._udp` and a usage description in their app plist and obtain
 local-network permission; see [discovery](discovery.md#apple-application-configuration)
 and [the physical-device gate](discovery-devices.md).
+
+The `qualification` feature uses a 10 ms initial QUIC RTT for explicitly bound
+loopback endpoints. This reduces failed-dial draining while exercising real
+sockets, cancellation and rebind. Published builds and non-loopback endpoints
+retain iroh's defaults. The lifecycle gate verifies that every selected test
+completed and applies its tier's budget.

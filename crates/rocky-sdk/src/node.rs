@@ -53,6 +53,9 @@ const MET: usize = 64;
 /// How long a closing network service lets its work finish before it
 /// cancels what remains.
 const DRAIN: Duration = Duration::from_secs(5);
+/// How long a staged checkpoint import waits for its linked signer without
+/// a new page before another peer may restart it from its own checkpoint.
+const IMPORT_SOURCE: Duration = Duration::from_secs(180);
 
 /// A definite refusal: retrying the same call cannot succeed.
 #[derive(Debug)]
@@ -285,6 +288,11 @@ pub(crate) struct Node {
     /// still arrive by renewal, so the next sync pass renews once.
     learned: AtomicBool,
     handover: std::sync::Mutex<std::collections::BTreeSet<PublicKey>>,
+    /// By scope, the last staged row of an import another peer would
+    /// restart and when it was last seen to move.
+    import_sources: std::sync::Mutex<
+        BTreeMap<ResourceScope, (Option<rocky_core::Commitment>, tokio::time::Instant)>,
+    >,
     choices: std::sync::Mutex<BTreeMap<PublicKey, &'static str>>,
     /// Signals that the discovery topics may have changed.
     topics: watch::Sender<u64>,
@@ -353,6 +361,7 @@ impl Node {
             met: std::sync::Mutex::new(BTreeMap::new()),
             learned: AtomicBool::new(false),
             handover: std::sync::Mutex::new(Default::default()),
+            import_sources: std::sync::Mutex::new(Default::default()),
             choices: std::sync::Mutex::new(BTreeMap::new()),
             topics: watch::channel(0).0,
             announcing: AtomicBool::new(false),
@@ -2377,6 +2386,9 @@ impl Node {
             .into_iter()
             .filter(|scope| !self.domain.partitioned_table(scope))
             .collect();
+        // A pass that failed after importing checkpoint pages goes on soon.
+        let imports = self.replica.observe_imports().await;
+        let imported = *imports.borrow();
         let mut covered = std::collections::BTreeSet::new();
         let mut targets = targets;
         let mut results = Vec::new();
@@ -2468,14 +2480,15 @@ impl Node {
                     .as_ref()
                     .is_err_and(|error| !error.is::<ServiceError>())
             };
-            // Renewing cannot repair a broken stream and would cancel other active links.
+            // Renewing cannot repair a broken or stalled stream, or a replaced
+            // checkpoint, and would cancel other active links.
             let renewal_peer = results
                 .iter()
                 .filter(|(_, _, _, result)| {
                     failed(result)
                         && !result.as_ref().is_err_and(|error| {
                             matches!(error.downcast_ref::<Error>(), Some(Error::Io(_)))
-                                || matches!(error.downcast_ref::<Error>(), Some(Error::Rejected(reason)) if reason.starts_with("link "))
+                                || matches!(error.downcast_ref::<Error>(), Some(Error::Rejected(reason)) if reason.starts_with("link ") || reason.ends_with(" timeout") || reason.starts_with("checkpoint superseded"))
                         })
                 })
                 .min_by_key(|(peer, _, _, _)| !settings.issuers.contains(peer))
@@ -2542,6 +2555,10 @@ impl Node {
                         Ok((_, true, _)) => {
                             state.pending = true;
                             state.retry.failed();
+                        }
+                        Err(_) if *imports.borrow() != imported => {
+                            state.pending = true;
+                            state.retry.soon();
                         }
                         Err(_) => state.retry.failed(),
                     }
@@ -2696,6 +2713,34 @@ impl Node {
             .await;
         Ok(())
     }
+    /// Whether a staged import of `signer`'s checkpoint, at `cursor`, goes on
+    /// with that signer rather than restarting from another peer's
+    /// checkpoint: while the signer is linked and the import moved within
+    /// `IMPORT_SOURCE`.
+    fn keeps_import_source(
+        &self,
+        scope: ResourceScope,
+        signer: PublicKey,
+        cursor: Option<rocky_core::Commitment>,
+    ) -> bool {
+        let linked = self
+            .current()
+            .is_some_and(|service| service.live.contains(signer));
+        let mut sources = self
+            .import_sources
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !linked {
+            sources.remove(&scope);
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let seen = sources.entry(scope).or_insert((cursor, now));
+        if seen.0 != cursor {
+            *seen = (cursor, now);
+        }
+        now.duration_since(seen.1) < IMPORT_SOURCE
+    }
     /// Syncs with one peer, then keeps the revocations its sessions brought.
     async fn reconcile(
         &self,
@@ -2821,6 +2866,7 @@ impl Node {
             let settings = self.settings.lock().await;
             !settings.issuer() || !settings.issuers.is_empty()
         };
+        let keep = |scope, signer, cursor| self.keeps_import_source(scope, signer, cursor);
         let upstream = Upstream {
             link,
             peer,
@@ -2829,6 +2875,7 @@ impl Node {
                 true => Some(revocations),
                 false => None,
             },
+            keep: Some(&keep),
         };
         let reconcile = upstream.link.begin_reconcile().await?;
         let coordinator = self

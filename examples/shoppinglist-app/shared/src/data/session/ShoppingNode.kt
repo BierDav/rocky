@@ -57,8 +57,10 @@ class ShoppingNode private constructor(
     internal val failure: Deferred<Throwable>,
     private val backgroundErrors: CoroutineExceptionHandler,
 ) {
+    /** Flows the household shares between collectors; cancelled before Rocky closes. */
+    private val shared = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundErrors)
     val repository = ShoppingRepository(room.room, rocky)
-    val household = Household(room.room, rocky, self)
+    val household = Household(room.room, rocky, self, shared)
     val approvals = Approvals(room.room, rocky, household, self, commands != null)
     val isTrusted: Boolean get() = rocky.isIssuer
     var kind: NodeKind? = initialKind
@@ -81,6 +83,7 @@ class ShoppingNode private constructor(
 
     suspend fun close() = withContext(NonCancellable) {
         work.cancelAndJoin()
+        shared.coroutineContext.job.cancelAndJoin()
         try {
             closed(rocky)
             room.close()

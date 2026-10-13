@@ -1171,6 +1171,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None => Ok(None),
         }
     }
+    /// The node that signed the checkpoint being imported for a scope.
+    pub async fn rebootstrap_signer(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<PublicKey>, Error> {
+        let inner = self.inner.lock().await;
+        let Some(id) = inner.find_scope_id(scope).await? else {
+            return Ok(None);
+        };
+        Ok(inner
+            .staging(id)
+            .await?
+            .map(|staging| staging.signed.signer()))
+    }
     /// Imports the next page of checkpoint rows; pages arrive in order.
     /// The page is opened and verified against its signer off the
     /// replica's thread. A direct import writes the rows into the scope and

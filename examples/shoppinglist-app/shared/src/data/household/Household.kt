@@ -1,7 +1,11 @@
 package org.example.examples.shopping.data.household
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -19,6 +23,7 @@ import rocky.GrantProfile
 import rocky.RockyDatabase
 import rocky.RockyEvent
 import rocky.room.settledOnRocky
+import kotlin.time.TimeSource
 
 /**
  * The household's devices and how list keys reach them, without a server: a trusted device records each device it
@@ -26,7 +31,13 @@ import rocky.room.settledOnRocky
  * alone, directly or through the custody peer, and that device installs it; no row records who holds which list.
  * Partial devices receive only lists shared with them by [share], and the new epochs of a revocation's rotation.
  */
-class Household(private val database: ShoppingDatabase, private val rocky: RockyDatabase, val self: String) {
+class Household(
+    private val database: ShoppingDatabase,
+    private val rocky: RockyDatabase,
+    val self: String,
+    /** Runs the shared registry poll; a node cancels it before closing Rocky. */
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, _ -> }),
+) {
     private val notes = MutableSharedFlow<String>(extraBufferCapacity = 64)
 
     /** The trusted-only tables; a member never touches them. */
@@ -37,15 +48,32 @@ class Household(private val database: ShoppingDatabase, private val rocky: Rocky
     /** Choices by native invitation event, including enrollments the collector has not processed yet. */
     private val pending = mutableMapOf<Long, PairingCode>()
 
-    /** Registry access exists only on an issuer; members never query it or the trusted tables. */
+    /**
+     * One registry poll for every collector, stamped with when it started: reading the registry decodes every signed
+     * record on the SDK's only thread, which also answers peers.
+     */
+    private val polled: SharedFlow<Pair<TimeSource.Monotonic.ValueTimeMark, List<Device>>> by lazy {
+        flow {
+            while (true) {
+                val started = TimeSource.Monotonic.markNow()
+                emit(started to rocky.devices())
+                delay(500)
+            }
+        }.settledOnRocky().shareIn(scope, SharingStarted.WhileSubscribed(5_000), replay = 1)
+    }
+
+    /**
+     * Registry access exists only on an issuer; members never query it or the trusted tables. A collector starts from
+     * a fresh read, so a change it just made shows, then follows the shared poll's later reads. A registry row whose
+     * dependency has not arrived yet leaves it briefly unavailable; polling goes on.
+     */
     fun registry(): Flow<List<Device>> {
         check(rocky.isIssuer) { "Only trusted devices read the registry" }
         return flow {
-            while (true) {
-                emit(rocky.devices())
-                delay(500)
-            }
-        }.distinctUntilChangedBy { devices -> devices.map { it.copy(label = null) to it.label?.toList() } }
+            val started = TimeSource.Monotonic.markNow()
+            emit(rocky.devices())
+            emitAll(polled.filter { (read, _) -> read >= started }.map { (_, devices) -> devices })
+        }.settledOnRocky().distinctUntilChangedBy { devices -> devices.map { it.copy(label = null) to it.label?.toList() } }
     }
 
     fun devices(): Flow<List<DeviceRow>> {

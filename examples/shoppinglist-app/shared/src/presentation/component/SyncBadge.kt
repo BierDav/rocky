@@ -27,12 +27,15 @@ data class SyncBadgeState(
     val bootstrap: BootstrapProgress? = null,
 )
 
-/** "Bootstrapping 42%" once the offered rows are known. */
-fun bootstrapLabel(progress: BootstrapProgress?): String = progress?.let { "Bootstrapping ${it.percent}%" } ?: "Bootstrapping"
+/** "Bootstrapping 42%" once the offered rows are known; "Bootstrap paused 42%" while no peer link is open. */
+fun bootstrapLabel(progress: BootstrapProgress?, paused: Boolean = false): String {
+    val label = if (paused) "Bootstrap paused" else "Bootstrapping"
+    return progress?.let { "$label ${it.percent}%" } ?: label
+}
 
 /**
- * Shows Offline, then a bootstrap and its progress, then Live while any link is open, then the last pass. It pulses
- * while frames move.
+ * Shows a paused bootstrap, Offline, then a bootstrap and its progress, then Live while any link is open, then the last
+ * pass. It pulses while frames move.
  */
 @Composable
 fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
@@ -45,10 +48,14 @@ fun SyncBadge(state: SyncBadgeState, onClick: () -> Unit) {
             delay(500)
         }
     }
-    val moving = state.lastTransferAtEpochMillis?.let { now - it < 2_000 } == true || readiness == ReadinessState.Bootstrapping
+    val bootstrapping = readiness == ReadinessState.Bootstrapping
+    // A bootstrap moves only over an open link; offline or unlinked, its imported pages wait.
+    val paused = bootstrapping && (connection.state == ConnectionState.Offline || !state.live)
+    val moving = state.lastTransferAtEpochMillis?.let { now - it < 2_000 } == true || (bootstrapping && !paused)
     val (color, label) = when {
+        paused -> Color(0xFF9E9E9E) to bootstrapLabel(state.bootstrap, paused = true)
         connection.state == ConnectionState.Offline -> Color(0xFF9E9E9E) to "Offline"
-        readiness == ReadinessState.Bootstrapping -> Color(0xFFF9A825) to bootstrapLabel(state.bootstrap)
+        bootstrapping -> Color(0xFFF9A825) to bootstrapLabel(state.bootstrap)
         state.live -> Color(0xFF43A047) to "Live"
         connection.state == ConnectionState.Connected && connection.peers > 0 -> Color(0xFF43A047) to (if (moving) "Syncing" else "Synced")
         connection.state == ConnectionState.Connected -> Color(0xFF9E9E9E) to "No peers"

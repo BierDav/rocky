@@ -25,6 +25,10 @@ pub struct Upstream<'a> {
     /// The revocation digest this sync started from, when it renews: a
     /// session that changes the set ends the sync with `Learned`.
     pub renew_from: Option<rocky_core::Commitment>,
+    /// Whether a scope's staged import of another node's checkpoint waits
+    /// for that signer, given its last staged row, instead of restarting
+    /// from this peer's checkpoint.
+    pub keep: Option<&'a dyn Fn(ResourceScope, PublicKey, Option<rocky_core::Commitment>) -> bool>,
 }
 
 /// A session brought revocation statements. Rotated keys still arrive by
@@ -197,13 +201,31 @@ pub(crate) async fn bootstrap(
         Some(session) => session,
         None => session(replica, upstream).await?,
     };
-    let offered = planning.offered_rows(replica, scopes).await?;
+    let mut offered = planning.offered_rows(replica, scopes).await?;
     first = Some(planning);
+    for (scope, offer) in scopes.iter().zip(offered.iter_mut()) {
+        if deferred(
+            replica,
+            upstream,
+            *scope,
+            offer.map(|(checkpoint, _)| checkpoint),
+        )
+        .await?
+        {
+            *offer = None;
+        }
+    }
     let mut totals: Vec<Planned> = match saved.get("totals") {
         Some(totals) => serde_json::from_value(totals.clone())?,
         None => Vec::new(),
     };
-    totals.retain(|planned| !scopes.contains(&planned.scope));
+    // A scope this peer does not import from keeps the total it was offered.
+    totals.retain(|planned| {
+        scopes
+            .iter()
+            .zip(&offered)
+            .all(|(scope, offer)| *scope != planned.scope || offer.is_none())
+    });
     let mut planned: Vec<Planned> = scopes
         .iter()
         .zip(&offered)
@@ -296,6 +318,29 @@ pub(crate) async fn bootstrap(
     }
     Ok((importable == pending.len()).then_some(expected))
 }
+/// Whether `scope` holds pages of another node's checkpoint than the one
+/// `offered` that should go on with that signer: two peers signing the same
+/// rows still offer different checkpoints, and switching discards the pages.
+async fn deferred(
+    replica: &EncryptedReplica<TypedCommands>,
+    upstream: &Upstream<'_>,
+    scope: ResourceScope,
+    offered: Option<rocky_core::Commitment>,
+) -> Result<bool, Failure> {
+    let Some(keep) = upstream.keep else {
+        return Ok(false);
+    };
+    let Some((staged, cursor, _)) = replica.rebootstrap_progress(scope).await? else {
+        return Ok(false);
+    };
+    if offered == Some(staged) || cursor.is_none() {
+        return Ok(false);
+    }
+    Ok(match replica.rebootstrap_signer(scope).await? {
+        Some(signer) => signer != upstream.peer && keep(scope, signer, cursor),
+        None => false,
+    })
+}
 /// A request channel on the link with the upstream peer. The link handshake
 /// left `replica` holding every revocation statement the peer sent; see
 /// `Learned`.
@@ -347,6 +392,14 @@ async fn rows(
                 bytes: pulled.bytes,
                 ..Moved::default()
             };
+            if pulled.behind
+                && !pulled.exhausted
+                && deferred(replica, upstream, *scope, None).await?
+            {
+                // Its staged import goes on with that import's signer.
+                transfer.add(*scope, moved);
+                continue;
+            }
             if pulled.behind && !pulled.exhausted {
                 progress(true);
                 let report = session

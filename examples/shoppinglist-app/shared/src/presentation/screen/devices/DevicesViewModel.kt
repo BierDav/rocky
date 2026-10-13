@@ -19,6 +19,7 @@ import rocky.Device
 import rocky.NetworkStatus
 import rocky.Peer
 import rocky.SessionStatus
+import rocky.room.settledOnRocky
 
 /** One device of the household as this device sees it: what a trusted device recorded and how sync reaches it. */
 data class HouseholdDevice(
@@ -74,7 +75,7 @@ class DevicesViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 )
                 withTimeoutOrNull(2_000) { refresh.first() }
             }
-        }
+        }.settledOnRocky()
         val recorded = combine(if (node.isTrusted) node.household.devices() else flowOf(emptyList()), node.household.invitations(), ::Pair)
         val sent = if (node.isTrusted) node.household.sent() else flowOf(emptyMap())
         combine(recorded, sent, node.repository.lists(), reach, invitation) { (rows, opened), sent, lists, reach, code ->

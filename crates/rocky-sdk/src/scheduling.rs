@@ -12,6 +12,12 @@ impl Retry {
         self.failures = self.failures.saturating_add(1);
         self.deadline = Some(Instant::now() + Duration::from_secs(seconds));
     }
+    /// Work that failed after it made progress retries shortly, without
+    /// growing the backoff.
+    pub fn soon(&mut self) {
+        self.failures = 0;
+        self.deadline = Some(Instant::now() + Duration::from_secs(1));
+    }
     pub fn reset(&mut self) {
         *self = Self::default();
     }

@@ -714,3 +714,82 @@ async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> 
     a.close().await;
     Ok(())
 }
+
+/// A join cut mid-import, with edits on both sides meanwhile, resumes at the
+/// page it reached instead of starting over, and keeps both edits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    for handle in 0..60 {
+        a.add(handle, &format!("{handle}:{}", "x".repeat(12_000)))
+            .await;
+    }
+    let b = Arc::new(Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?);
+    let mut status = b.ok(json!({"type": "status"})).await;
+    while status["bootstrap"]["rows_done"].as_u64().unwrap_or(0) == 0 {
+        status = b
+            .ok(json!({"type": "status_next", "after": status["token"]}))
+            .await;
+    }
+    hub.cut_after(Some(0));
+    a.add(200, "edited on a while cut").await;
+    b.add(201, "edited on b while cut").await;
+    let paused = b.ok(json!({"type": "status"})).await;
+    assert_eq!(paused["state"], "bootstrapping");
+    let done = paused["bootstrap"]["rows_done"].as_u64().expect("progress");
+    assert!(done > 0, "{paused}");
+    hub.cut_after(None);
+    let observer = {
+        let b = b.clone();
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            let mut status = b.ok(json!({"type": "status"})).await;
+            while status["state"] != "ready" {
+                seen.push(status["bootstrap"].clone());
+                status = b
+                    .ok(json!({"type": "status_next", "after": status["token"]}))
+                    .await;
+            }
+            seen
+        })
+    };
+    // Going online again ends the backoff the cut caused.
+    b.ok(json!({"type": "connection", "online": false})).await;
+    b.ok(json!({"type": "connection", "online": true})).await;
+    b.sync().await.expect("resume the join");
+    for progress in observer
+        .await?
+        .iter()
+        .filter(|progress| !progress.is_null())
+    {
+        assert!(
+            progress["rows_done"].as_u64() >= Some(done),
+            "restarted: {progress}"
+        );
+        assert_eq!(progress["rows_total"], paused["bootstrap"]["rows_total"]);
+    }
+    a.sync().await.expect("a pulls b's edit");
+    let edits = json!({"type": "read", "query": {"sql": "SELECT title FROM items WHERE length(title) < 100 ORDER BY title", "values": [], "max_rows": 16}});
+    for device in [&*b, &a] {
+        let rows = device.ok(edits.clone()).await["rows"].clone();
+        let titles: Vec<_> = rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row[0]["value"].as_str())
+            .collect();
+        assert_eq!(titles, ["edited on a while cut", "edited on b while cut"]);
+    }
+    b.close().await;
+    a.close().await;
+    Ok(())
+}

@@ -233,6 +233,16 @@ impl Node {
         }
         let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let registry = self.registry().await?;
+        // Building the domain compiles the schema: once, not per pseudonym.
+        let collections: BTreeMap<_, _> = settings
+            .domain()
+            .map(|domain| {
+                domain
+                    .scopes()
+                    .map(|(name, scope)| (scope.table, name.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let devices: Vec<Value> = registry
             .records
             .iter()
@@ -256,7 +266,7 @@ impl Node {
                         "grant": grant.grant, "delegations": grant.delegations,
                     })).collect::<Vec<_>>(),
                     "pseudonyms": record.pseudonyms.iter().map(|pseudonym| json!({
-                        "collection": settings.collection_name(pseudonym.table),
+                        "collection": collections.get(&pseudonym.table),
                         "key": pseudonym.key.to_hex(),
                         "author": pseudonym.author,
                     })).collect::<Vec<_>>(),

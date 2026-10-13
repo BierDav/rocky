@@ -51,7 +51,12 @@ imports populated scopes smallest first, followed by empty scopes, and pulls eac
 ordinary tail. Each [verified page](checkpoint-import.md) of a collection the
 device held nothing of is readable as it commits. A writable source creates the
 checkpoint on demand, including an empty one. Interrupted transfers resume at
-the next page on sync or reopen;
+the next page on sync or reopen. Two peers that sign the same rows still offer
+different checkpoints, so a scope with staged pages keeps importing from their
+signer while that signer is linked. Another peer restarts the scope from its own
+checkpoint only after the signer is unlinked or the import has not moved for
+three minutes. A pass that fails after it stored pages retries after one second
+instead of backing off;
 Each completed scope is recorded after catch-up and a local flush, so retries
 resume only incomplete scopes. Intent clears after all scopes complete. Session rollover resumes
 the tail after a completed import instead of repeatedly importing its base. A

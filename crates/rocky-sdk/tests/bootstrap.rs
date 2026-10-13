@@ -468,8 +468,8 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
             .len(),
         1
     );
-    // The empty scope imported first: the one holding the row is pending.
-    assert!(member.titles().await.is_empty());
+    // Rows are already readable while the empty scope waits for another session.
+    assert_eq!(member.titles().await, ["first scope"]);
     member.close().await;
     let member = Device::new(Database::open(Open {
         directory: &path,
@@ -482,6 +482,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         member.ok(json!({"type": "status"})).await["state"],
         "bootstrapping"
     );
+    assert_eq!(member.titles().await, ["first scope"]);
     let before = *attempts.borrow_and_update();
     gate.max_attempts.store(u64::MAX, Ordering::SeqCst);
     member

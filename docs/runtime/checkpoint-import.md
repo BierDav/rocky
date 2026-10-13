@@ -124,3 +124,6 @@ about 1 KiB of a `WITHOUT ROWID` table to an overflow page of its own.
 Measured on a Mac, release build, 10,000 one-line items over the
 in-memory transport: first rows readable 0.39 s after the join began, all rows
 after 2.1 s. Before signed pages the same join showed nothing for 7.9 s.
+The [Android measurement](checkpoint-import-evidence.md) records a fresh
+10,000-item join over LTE, progressive visibility, live-edit latency and the
+remaining first-data delay.

@@ -401,6 +401,57 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
 }
 
 #[tokio::test]
+async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it_back()
+-> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
+    a.call(json!({"type":"authors"})).await?;
+    a.call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = a
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Own list')",
+        )
+        .await?;
+    let invitation = a
+        .call(json!({"type":"pairing","profile":{"kind":"issuer"}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let b =
+        Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
+    b.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        b.column("SELECT title FROM lists").await?,
+        [json!("Own list")]
+    );
+    let node = a.call(json!({"type":"session"})).await?["node"].clone();
+    b.call(
+        json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}),
+    )
+    .await?;
+    a.call(json!({"type":"sync"})).await?;
+    let activity = a.call(json!({"type":"activity"})).await?;
+    assert!(
+        !kinds(&activity).contains(&"partition_bootstrap".to_owned()),
+        "{activity}"
+    );
+    assert!(!root.path().join("a/bootstrap.json").exists());
+    assert_ne!(
+        a.call(json!({"type":"status"})).await?["state"],
+        "bootstrapping"
+    );
+    for peer in [b, a] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());

@@ -283,10 +283,6 @@ impl Node {
         }
         let holding: BTreeMap<ResourceScope, rocky_secure::Holding> =
             self.replica.subscriptions().await?.into_iter().collect();
-        let held = partition
-            .members
-            .iter()
-            .all(|member| holding.get(&member.scope) == Some(&rocky_secure::Holding::Held));
         let first_epoch = self
             .settings
             .lock()
@@ -294,6 +290,16 @@ impl Node {
             .groups
             .get(&crate::groups::record_key(&partition.record.address))
             .is_none_or(|record| record.epochs.is_empty());
+        let full = self.replica.role().await?.role == rocky_secure::ReplicaRole::Full;
+        // Full replicas implicitly hold known partitions, including their own.
+        let held = partition
+            .members
+            .iter()
+            .all(|member| match holding.get(&member.scope) {
+                Some(rocky_secure::Holding::Held) => true,
+                Some(rocky_secure::Holding::Evicting | rocky_secure::Holding::Evicted) => false,
+                Some(rocky_secure::Holding::Left) | None => full && !first_epoch,
+            });
         let bootstrap = !held && (contents.reason == Reason::Share || first_epoch);
         let installed = self
             .install_envelope(

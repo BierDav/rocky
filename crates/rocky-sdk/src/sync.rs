@@ -175,8 +175,8 @@ pub(crate) struct Planned {
     pub rows: u64,
 }
 /// Checkpoint-first enrollment, resumed from the runtime's staged pages.
-/// The peer's offers come first: the smallest scopes import first, so rows
-/// appear soonest, and the intent records each scope's rows for progress.
+/// The peer's offers come first: populated scopes import smallest first,
+/// followed by empty scopes. The intent records each scope's rows for progress.
 /// `None` when the peer offers no checkpoint for some scope, as a keyless
 /// custody peer: the remaining intent waits for a peer that does.
 pub(crate) async fn bootstrap(
@@ -215,7 +215,7 @@ pub(crate) async fn bootstrap(
             })
         })
         .collect();
-    planned.sort_by_key(|planned| planned.rows);
+    planned.sort_by_key(|planned| (planned.rows == 0, planned.rows));
     totals.extend(planned.iter().cloned());
     let importable = planned.len();
     let pending: Vec<ResourceScope> = planned

@@ -47,7 +47,7 @@ the history its checkpoint replaces.
 Enrollment persists checkpoint-first intent before installing an identity. Join
 starts a sync in the background; applications may also call `sync`. It first
 asks its peer which checkpoint it offers for every granted collection, then
-imports them smallest first, so the first rows appear soonest, and pulls each
+imports populated scopes smallest first, followed by empty scopes, and pulls each
 ordinary tail. Each [verified page](checkpoint-import.md) of a collection the
 device held nothing of is readable as it commits. A writable source creates the
 checkpoint on demand, including an empty one. Interrupted transfers resume at
@@ -60,6 +60,13 @@ failed join sync leaves that intent in place, never claiming completion.
 Intent covers only collections the device reads in whole; a keyless custody node
 syncs its ciphertext rows without one. Such a peer offers no checkpoint, so a
 joining device exchanges rows with it and keeps its intent for a peer that does.
+
+Partition envelope delivery starts bootstrap only for a partition the device
+does not already hold. A full replica implicitly holds partitions whose group
+keys it already has, including partitions it created itself; receiving their
+keys again does not create checkpoint-first intent. A first group key still
+starts bootstrap, as does sharing an unsubscribed partition with a partial
+replica.
 
 Enrollment and renewal send only the current reader key for each granted
 collection. Existing devices retain the epochs they already hold. Renewal that

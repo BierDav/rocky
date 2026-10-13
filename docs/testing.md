@@ -54,7 +54,8 @@ Make it faster first; move it only if it is a different kind of test.
 - Build expensive state once per binary behind a `OnceLock` and copy it:
   keys, signed chains, template databases.
 - Queue independent fixture operations in log order so they share group commits;
-  keep every operation and row.
+  keep every operation and row. Query independent domains in bounded batches
+  across their file workers, retaining each domain's row and isolation checks.
   Archive confirmations preserve each package's remapped `CARGO_BIN_EXE_*` paths.
 - Test a boundary on constructed state instead of driving hundreds of real
   operations; keep one full-size run in e2e.

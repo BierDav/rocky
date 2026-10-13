@@ -33,6 +33,10 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     let [b, c, d] = &members[..] else {
         return Err("members".into());
     };
+    // Finish issuer bootstrap before exercising roster-free peer admission.
+    for device in &members {
+        device.sync().await.map_err(|error| error.to_string())?;
+    }
     let (b_node, d_node) = (b.node().await, d.node().await);
     let c_contact = c.contact().await;
     for device in [&a, b, d] {

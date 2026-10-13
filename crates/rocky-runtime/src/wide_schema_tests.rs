@@ -209,31 +209,40 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     for receipt in pending {
         receipt.committed().await.unwrap();
     }
-    for domain in 0..256 {
-        let replica = runtime.domain(test_scope(domain)).unwrap();
-        let snapshot = replica.query().await.unwrap();
-        assert_eq!(snapshot.rows.len(), 1);
-        assert_eq!(
-            snapshot.rows[0].1,
-            if domain == 0 {
-                "original".into()
-            } else {
-                format!("domain-{domain}")
-            }
-        );
-        assert_eq!(snapshot.revision.get(), 1);
-        assert!(matches!(
-            replica
-                .read(
-                    BoundQuery {
-                        sql: "SELECT * FROM drafts".into(),
-                        values: vec![]
-                    },
-                    ReadOptions::new(test_scope((domain + 1) % 256), 10)
-                )
-                .await,
-            Err(Error::Protocol(ProtocolError::ForeignScope))
-        ));
+    // Query independent domains across the four file workers in bounded batches.
+    for first in (0..256).step_by(8) {
+        let mut reads = tokio::task::JoinSet::new();
+        for domain in first..first + 8 {
+            let replica = runtime.domain(test_scope(domain)).unwrap();
+            reads.spawn(async move {
+                let snapshot = replica.query().await.unwrap();
+                assert_eq!(snapshot.rows.len(), 1);
+                assert_eq!(
+                    snapshot.rows[0].1,
+                    if domain == 0 {
+                        "original".into()
+                    } else {
+                        format!("domain-{domain}")
+                    }
+                );
+                assert_eq!(snapshot.revision.get(), 1);
+                assert!(matches!(
+                    replica
+                        .read(
+                            BoundQuery {
+                                sql: "SELECT * FROM drafts".into(),
+                                values: vec![]
+                            },
+                            ReadOptions::new(test_scope((domain + 1) % 256), 10)
+                        )
+                        .await,
+                    Err(Error::Protocol(ProtocolError::ForeignScope))
+                ));
+            });
+        }
+        while let Some(result) = reads.join_next().await {
+            result.unwrap();
+        }
     }
     assert!(runtime.domain(test_scope(256)).is_err());
     runtime.close().await.unwrap();

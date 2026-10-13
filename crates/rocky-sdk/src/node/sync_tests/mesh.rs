@@ -103,7 +103,7 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
                 .await?;
             drop(link);
             let dials = hub.dials_to("a");
-            assert_eq!(pass(&b).await?["peers"], 1);
+            assert_eq!(completed_peers(&pass(&b).await?), 1);
             assert_eq!(hub.dials_to("a"), dials);
             let peers = b.peers().await;
             assert_eq!(
@@ -154,9 +154,9 @@ async fn an_unreachable_contact_costs_no_dial_during_its_backoff() -> Result<(),
                 )
             })
             .await?;
-            assert!(pass(&a).await.is_err());
+            assert_eq!(completed_peers(&pass(&a).await?), 0);
             let dials = hub.dials_to("gone");
-            assert!(pass(&a).await.is_err());
+            assert_eq!(completed_peers(&pass(&a).await?), 0);
             assert_eq!(hub.dials_to("gone"), dials);
             assert_eq!(a.peers().await[0]["choice"], "backoff");
             a.detach(None).await;

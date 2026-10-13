@@ -69,20 +69,19 @@ the [coordinator image](coordinator-operations.md#container-image-and-deployment
 
 ## Change-driven sync
 
-The peer enables one sync worker for its network service. Kotlin enables it
-with `automaticSync = true` or `syncContinuously()`; the latter observes native
-status and has no interval parameter. Cancelling that observer leaves the
-service's worker running until disabled or detached. Rust/JSON clients enable
-it with `{"type":"sync_start","enabled":true}` and disable it with `false`.
-`sync_next` waits for a changed status token; `network.sync` shows the last pass.
-Explicit `sync` remains a single pass with its existing response shape.
+The service has one native sync worker. Kotlin enables it with
+`automaticSync = true` or `setAutomaticSync(true)`; Rust/JSON uses
+`{"type":"sync_start","enabled":true}`. Status observers leave this control
+unchanged. `network.lastReconciliation` retains the last report; explicit
+`syncOnce()` returns its own report. Disabled and suspended controls remain
+separate from per-peer attempt outcomes.
 
 Committed local writes, new incoming ciphertext (including keyless custody),
 peer configuration, network attachment and connectivity changes wake the worker.
 Duplicate incoming frames do not. iroh watches endpoint address changes; other
 adapters may supply `Transport::connectivity`. On TCP or a foreign adapter,
-call `setOnline(true)` / `{"type":"connection","online":true}` when the
-application learns connectivity returned. Offline mode suspends attempts.
+call `setNetworkingEnabled(true)` / `{"type":"networking_control","enabled":true}` when the
+application learns connectivity returned. Disabling networking suspends attempts.
 
 With the worker enabled, admitted peers keep an authenticated
 [live link](live-links.md). A committed frame is pushed over it after flush;
@@ -92,15 +91,15 @@ reconciles before steady live traffic. A refused link, a busy one included,
 backs off and is dialed again; nothing else syncs. Explicit sync reuses or
 opens a link, keeping it while both workers run. With either worker disabled,
 it uses a short link, which is not repeatedly reopened at idle. Links close on
-authority changes, offline mode, disabling the worker and detach. Idle persistent links run only
+authority changes, disabled networking, disabling the worker and detach. Idle persistent links run only
 their 15-second ping.
 
 A pass reconciles at most four peers concurrently. Each peer has its own
 back-off: 1, 2, 4, 8, 16, 32 and then 60 seconds. A local write wakes the
 worker but leaves a failed peer's deadline intact. Connectivity and
-`setOnline(true)` reset all peers; a peer configuration change or an
-authenticated inbound session or verified renewal response resets that peer alone. Reachability is recorded
-as each peer answers; the pass status follows once all dialed peers finish.
+`setNetworkingEnabled(true)` reset all peers; a peer configuration change or an
+authenticated inbound session or verified renewal response resets that peer alone. Each operation records its dated outcome; the reconciliation report follows
+once the selected attempts finish.
 
 Data-pass retry timers run only for pending changes, requested metadata refresh
 or bounded continuation; an idle failed data peer waits for a signal, as does a
@@ -112,7 +111,7 @@ its cancellation within one second. Committed frames stay whole and the next
 pass repeats interrupted work. Enabling starts a pass immediately, resetting
 back-off. Cancelling a Kotlin status observer alone does not disable the worker.
 Tokio's controllable clock qualifies the schedule. Committed observation and sync notifications never
-substitute for the runtime's durable export fence. Ordinary row and readiness
+substitute for the runtime's durable export fence. Ordinary row and status
 observers also wait on events; credential expiry uses a single deadline.
 
 Command-result fetch failures and bounded continuation retain retry work without

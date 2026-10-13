@@ -9,7 +9,6 @@ import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.util.epochMillis
 import org.example.examples.shopping.util.moveDirectory
 import org.example.examples.shopping.util.removeDirectory
-import rocky.ReadinessState
 import rocky.RockyDatabase
 
 /** Where the app stands: setting up, opening, open, revoked, resetting, or failed. */
@@ -105,7 +104,7 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
             val failure = try {
                 merge(
                     flow<Throwable?> { emit(node.failure.await()) },
-                    node.rocky.observeReadiness().filter { it.state == ReadinessState.Revoked }.map { null },
+                    node.rocky.observeStatus().filter { it.authority.verifiedRevocation != null }.map { null },
                 ).first()
             } catch (cancelled: CancellationException) {
                 throw cancelled

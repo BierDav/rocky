@@ -32,14 +32,14 @@ class SimulatorDiscoveryTest {
         val owner = RockyDatabase.create("$root/owner", definition, local(), automaticSync = false)
         try {
             withTimeout(10_000) { while (!owner.discovery().announcing) delay(20) }
-            assertEquals(DiscoveryPath(DiscoveryPathState.On), owner.discovery().local)
+            assertEquals(DiscoveryPath(DiscoveryPathState.On, null), owner.discovery().local)
             // No lookup service is configured, and the status says so instead of staying silent.
             assertEquals(DiscoveryPathState.Unavailable, owner.discovery().topic.state)
             assertNotNull(owner.discovery().topic.reason)
             owner.enterBackground()
-            assertEquals(DiscoveryPath(DiscoveryPathState.Off), owner.discovery().local)
+            assertEquals(DiscoveryPath(DiscoveryPathState.Off, null), owner.discovery().local)
             owner.enterForeground()
-            assertEquals(DiscoveryPath(DiscoveryPathState.On), owner.discovery().local)
+            assertEquals(DiscoveryPath(DiscoveryPathState.On, null), owner.discovery().local)
         } finally {
             owner.close()
             NSFileManager.defaultManager.removeItemAtPath(root, null)
@@ -62,7 +62,7 @@ class SimulatorDiscoveryTest {
                 peer
             }
             assertFalse(found.isIssuer)
-            assertEquals(DiscoveryPath(DiscoveryPathState.On), owner.discovery().local)
+            assertEquals(DiscoveryPath(DiscoveryPathState.On, null), owner.discovery().local)
             withTimeout(60_000) { while (!NSFileManager.defaultManager.fileExistsAtPath("$shared/host-found")) delay(50) }
             write("$shared/simulator-found", found.node)
         } finally {

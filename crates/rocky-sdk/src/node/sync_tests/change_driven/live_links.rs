@@ -99,7 +99,8 @@ async fn committed_edit_pushes_one_message_without_a_stream_or_receiver_reconcil
                     .as_array()
                     .ok_or("events")?
                     .iter()
-                    .all(|event| event["kind"] != "peer_reached" && event["kind"] != "rows_synced")
+                    .all(|event| event["kind"] != "peer_reconciliation_completed"
+                        && event["kind"] != "rows_synced")
             );
             // An idle link opens no new streams as time passes.
             let idle = hub.counts();
@@ -185,7 +186,7 @@ async fn explicit_sync_without_the_worker_closes_its_short_link() -> Result<(), 
             add(&a, 1).await?;
             let links = hub.protocol_dials("b", "a", Protocol::Link);
             let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
-            assert_eq!(synced["state"], "connected");
+            assert_eq!(completed_peers(&synced), 1);
             assert_eq!(rows(&b).await?, ["1"]);
             assert_eq!(hub.protocol_dials("b", "a", Protocol::Link), links + 1);
             // The reconcile ended the short link on both sides.
@@ -273,7 +274,7 @@ async fn authority_offline_disable_and_detach_end_owned_links() -> Result<(), Fa
             );
             a.dispatch(
                 &*a.client(1)?,
-                &json!({"type":"connection", "online":false}),
+                &json!({"type":"networking_control", "enabled":false}),
             )
             .await?;
             until(|| service.live.len() == 0).await;
@@ -327,7 +328,28 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
             let peer = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
             let status = a.readiness().await?;
             assert_eq!(status["network"]["peers"][0]["link"]["state"], "open");
-            assert!(status["network"]["peers"][0]["link"]["opened"].is_string());
+            assert!(status["network"]["peers"][0]["link"]["opened_at_epoch_seconds"].is_u64());
+            let contact = a.settings.lock().await.peers.remove(&peer);
+            let met = a
+                .met
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&peer);
+            let observed = a.observed_network().await?;
+            assert_eq!(observed.connected_peer_count, 1);
+            assert!(observed.peers.iter().any(
+                |node| node.node == peer.to_hex() && node.link.state == crate::LinkState::Open
+            ));
+            if let Some(contact) = contact {
+                a.settings.lock().await.peers.insert(peer, contact);
+            }
+            if let Some(met) = met {
+                a.met
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(peer, met);
+            }
+
             // The hub measures no paths; iroh's are covered by its liveness gate.
             assert_eq!(service.live.status(peer)["paths"], json!([]));
             assert!(service.live.status(peer)["round_trip_ms"].is_null());
@@ -485,8 +507,8 @@ async fn simultaneous_short_syncs_reconcile_after_a_duplicate_stream_ends() -> R
             let ta = transport(&a).await?;
             let tb = transport(&b).await?;
             let (first, second) = tokio::join!(a.sync(&*ta), b.sync(&*tb));
-            assert_eq!(first?.0["state"], "connected");
-            assert_eq!(second?.0["state"], "connected");
+            assert_eq!(completed_peers(&first?.0), 1);
+            assert_eq!(completed_peers(&second?.0), 1);
             assert_eq!(rows(&b).await?, ["1"]);
             a.detach(None).await;
             b.detach(None).await;
@@ -616,16 +638,59 @@ async fn stream_eof_does_not_renew_credentials() -> Result<(), Failure> {
             .await?;
             let authority = b.replica.observe_authority().await;
             let renewals = hub.protocol_dials("b", "a", Protocol::Renew);
-            let error = b.sync(&EofLinks(transport(&b).await?)).await.unwrap_err();
-            assert!(matches!(
-                error.downcast_ref::<Error>(),
-                Some(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
-            ));
+            let (report, _) = b.sync(&EofLinks(transport(&b).await?)).await?;
+            assert!(
+                report["peers"]
+                    .as_array()
+                    .ok_or("peers")?
+                    .iter()
+                    .any(|peer| {
+                        peer["attempts"].as_array().is_some_and(|attempts| {
+                            attempts
+                                .iter()
+                                .any(|attempt| attempt["failure"]["kind"] == "transport")
+                        })
+                    })
+            );
             assert!(
                 !authority.has_changed()?,
                 "a failed stream must leave authority intact"
             );
             assert_eq!(hub.protocol_dials("b", "a", Protocol::Renew), renewals);
+            assert!(
+                report["peers"]
+                    .as_array()
+                    .ok_or("peers")?
+                    .iter()
+                    .any(|peer| {
+                        peer["attempts"].as_array().is_some_and(|attempts| {
+                            attempts.iter().any(|attempt| {
+                                attempt["operation"] == "reconcile"
+                                    && attempt["stage"] == "admission"
+                                    && attempt["outcome"] == "failed"
+                            })
+                        })
+                    })
+            );
+            let peer = PrivateKey::from_bytes(&a.vault.get("node")?).public_key();
+            let no_route = Contact { routes: Vec::new() };
+            assert!(
+                b.reconcile(&*transport(&b).await?, peer, &no_route)
+                    .await
+                    .is_err()
+            );
+            let last = b
+                .observations
+                .snapshot()
+                .into_iter()
+                .filter(|attempt| attempt.operation == crate::AttemptOperation::Reconcile)
+                .max_by_key(|attempt| attempt.id)
+                .ok_or("reconcile observation")?;
+            assert_eq!(last.stage, crate::AttemptStage::ResolveRoute);
+            assert_eq!(
+                last.failure.ok_or("failure")?.code.as_deref(),
+                Some("rejected")
+            );
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1067,7 +1132,7 @@ async fn a_busy_link_backs_off_without_another_sync_path_and_reopens_when_a_slot
             // Explicit sync fails too; nothing else carries the row.
             add(&a, 1).await?;
             let transport = transport(&c).await?;
-            assert!(c.sync(&*transport).await.is_err());
+            assert!(failed_report(&c.sync(&*transport).await?.0));
             assert!(rows(&c).await?.is_empty());
             drop(full);
             let deadline = backoff().ok_or("back-off")?;
@@ -1233,9 +1298,7 @@ async fn revocation_learned_mid_push_cancels_the_partial_frame_and_its_authority
             hub.cut_after(None);
             hub.hold_cut.store(false, Ordering::SeqCst);
             let error = b.sync(&*transport(&b).await?).await.unwrap_err();
-            assert!(
-                error.is::<crate::enrollment::Revoked>() || error.to_string().contains("revoked")
-            );
+            assert!(error.is::<crate::enrollment::Revoked>());
             assert!(rows(&b).await?.is_empty());
             assert_eq!(
                 rows(&a).await?,
@@ -1274,7 +1337,7 @@ async fn a_verified_renewal_releases_only_its_issuers_data_backoff() -> Result<(
             let a_port = transport(&a).await?;
             let b_port = transport(&b).await?;
             a_port.listen(false);
-            assert!(b.sync(&*b_port).await.is_err());
+            assert!(failed_report(&b.sync(&*b_port).await?.0));
             assert!(
                 b.retries.lock().unwrap_or_else(PoisonError::into_inner)[&peer]
                     .retry
@@ -1491,7 +1554,7 @@ async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result
             ];
             c.dispatch(
                 &*c.client(1)?,
-                &json!({"type":"connection", "online":false}),
+                &json!({"type":"networking_control", "enabled":false}),
             )
             .await?;
             until(|| a_service.live.len() == 1 && b_service.live.len() == 1).await;
@@ -1530,4 +1593,17 @@ async fn one_offline_peer_preserves_the_other_link_and_local_commits() -> Result
             Ok(())
         }))
         .await
+}
+
+fn failed_report(report: &Value) -> bool {
+    report["peers"].as_array().is_some_and(|peers| {
+        peers.iter().any(|peer| {
+            peer["skip"] == "backoff"
+                || peer["attempts"].as_array().is_some_and(|attempts| {
+                    attempts
+                        .iter()
+                        .any(|attempt| attempt["outcome"] == "failed")
+                })
+        })
+    })
 }

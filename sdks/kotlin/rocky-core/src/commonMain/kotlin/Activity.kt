@@ -52,10 +52,10 @@ sealed interface RockyEvent {
     data class LinkClosed(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val reason: String, val error: String?) : RockyEvent
 
     /** [peer] answered again after an error or for the first time. */
-    data class PeerReached(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
+    data class PeerReconciliationCompleted(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
 
     /** [peer] stopped answering, or failed differently than before. */
-    data class PeerUnreachable(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
+    data class PeerAttemptFailed(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
 
     /** A sync with [peer] skipped [scopes]: one side may not hold them, or [peer] has not learned that partition yet. Empty once nothing is refused. */
     data class ScopesRefused(
@@ -113,7 +113,7 @@ sealed interface RockyEvent {
         val values: List<String>,
         val detail: JsonObject,
     ) : RockyEvent
-    data class Connection(override val sequence: Long, override val atEpochMillis: Long, val online: Boolean) : RockyEvent
+    data class NetworkingControl(override val sequence: Long, override val atEpochMillis: Long, val enabled: Boolean) : RockyEvent
 
     /**
      * One delivery round with [peer]: envelopes it acknowledged ([handed]), deposits it stored or [refused] as a
@@ -166,9 +166,9 @@ sealed interface RockyEvent {
 
                 "link_closed" -> LinkClosed(sequence, at, text("peer"), text("reason"), event["error"]?.jsonPrimitive?.contentOrNull)
 
-                "peer_reached" -> PeerReached(sequence, at, text("peer"))
+                "peer_reconciliation_completed" -> PeerReconciliationCompleted(sequence, at, text("peer"))
 
-                "peer_unreachable" -> PeerUnreachable(sequence, at, text("peer"), text("error"))
+                "peer_attempt_failed" -> PeerAttemptFailed(sequence, at, text("peer"), text("error"))
 
                 "scopes_refused" -> ScopesRefused(
                     sequence,
@@ -204,7 +204,7 @@ sealed interface RockyEvent {
 
                 "author_assigned" -> AuthorAssigned(sequence, at, text("node"), text("collection"))
 
-                "online", "offline" -> Connection(sequence, at, kind == "online")
+                "networking_enabled", "networking_disabled" -> NetworkingControl(sequence, at, kind == "networking_enabled")
 
                 "envelopes_delivered" -> EnvelopesDelivered(sequence, at, text("peer"), int("handed"), int("deposited"), int("refused"), int("received"), int("receipts"))
 

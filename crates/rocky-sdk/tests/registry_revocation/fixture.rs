@@ -74,7 +74,7 @@ pub(super) async fn sync(device: &Device) -> Result<(), Failure> {
 }
 pub(super) async fn settle(device: &Device) {
     let mut status = device.ok(json!({"type":"status"})).await;
-    while status["state"] != "ready" {
+    while status["data"]["bootstrap_pending"] == true {
         status = device
             .ok(json!({"type":"status_next","after":status["token"]}))
             .await;

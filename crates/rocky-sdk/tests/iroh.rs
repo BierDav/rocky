@@ -85,21 +85,22 @@ async fn a_database_borrows_an_application_endpoint_and_leaves_it_open() -> Resu
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
     let status = a.ok(json!({"type": "network"})).await;
     assert_eq!(
-        (&status["kind"], &status["owned"]),
-        (&json!("iroh"), &json!(false))
+        (&status["kind"], &status["ownership"]),
+        (&json!("iroh"), &json!("application"))
     );
 
     // Closing Rocky's service stops sync and nothing else.
     a.network.as_ref().ok_or("attached")?.close().await;
     a.add(3, "Jam").await;
-    assert!(b.sync().await.is_err());
+    assert!(common::exchange_failed(&b.sync().await));
     assert_eq!(echo(&caller, endpoint.addr()).await?, b"hello");
     // The same attachment serves again once a service uses it.
     a.database
         .attach(Network::Borrowed(attachment.transport()))
         .await?;
     // The application signals renewed reachability; explicit passes respect backoff.
-    b.ok(json!({"type": "connection", "online": true})).await;
+    b.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(b.titles().await, ["Eggs", "Jam", "Milk"]);
 

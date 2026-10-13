@@ -88,8 +88,8 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             .await?;
             until(async || c.settings.lock().await.peers.contains_key(&b_key)).await?;
             let dials = hub.dials_to("a");
-            assert_eq!(pass(&c).await?["peers"], 1);
-            assert_eq!(pass(&b).await?["peers"], 1);
+            assert_eq!(completed_peers(&pass(&c).await?), 1);
+            assert_eq!(completed_peers(&pass(&b).await?), 1);
             assert_eq!(titles(&b).await?, titles(&c).await?);
             assert_eq!(titles(&c).await?.as_array().map(Vec::len), Some(1));
             assert_eq!(hub.dials_to("a"), dials);
@@ -105,9 +105,9 @@ async fn members_converge_with_discovery_as_their_only_source_of_contacts() -> R
             );
             let status = b.readiness().await?["network"]["discovery"].clone();
             assert_eq!(status["announcing"], true);
-            assert_eq!(status["paths"]["local"], json!({"state": "on"}));
-            assert_eq!(status["paths"]["topic"]["state"], "unavailable");
-            assert!(status["paths"]["topic"]["reason"].is_string());
+            assert_eq!(status["local"], json!({"state": "on", "reason": null}));
+            assert_eq!(status["topic"]["state"], "unavailable");
+            assert!(status["topic"]["reason"].is_string());
             // A found route stays in the identity file; no replica table holds it.
             assert!(std::fs::read_to_string(&b.path)?.contains(c_route));
             let db = rusqlite::Connection::open(root.path().join("b/rocky.sqlite"))?;
@@ -239,7 +239,7 @@ async fn a_transport_without_the_capability_reports_each_path_unavailable() -> R
             }
             assert!(hub.topics("b").is_empty());
             // Contacts still carry the sync.
-            assert_eq!(pass(&b).await?["peers"], 1);
+            assert_eq!(completed_peers(&pass(&b).await?), 1);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())

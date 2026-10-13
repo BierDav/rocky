@@ -82,21 +82,21 @@ class ShoppingIntegrationTest {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a!!.pairing(writer).uri, local(), automaticSync = false)
             a.author()
             a.add("Milk")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), b.titles())
             assertEquals("hello", echo())
-            assertFalse(a.network().owned)
+            assertEquals(rocky.NetworkOwnership.Application, a.network().ownership)
             // Closing Rocky leaves the endpoint and the application's protocol running.
             a.close()
             a = null
             assertEquals("hello", echo())
-            assertEquals(ConnectionState.Unavailable, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { it.outcome == rocky.AttemptOutcome.Failed } || peer.skip == rocky.SkipReason.Backoff })
             // The same endpoint, and so the same address, serves the database again.
             a = RockyDatabase.resume(File(root, "a"), ItemsSchema, PeerTransport.Endpoint(endpoint), automaticSync = false)
             a.add("Eggs")
             // The application signals renewed reachability; an explicit sync respects back-off.
-            b.setOnline(true) // The reattached endpoint is a connectivity change; clear its back-off.
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            b.setNetworkingEnabled(true) // The reattached endpoint is a connectivity change; clear its back-off.
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Eggs", "Milk"), b.titles())
         } finally {
             b?.close()
@@ -123,27 +123,28 @@ class ShoppingIntegrationTest {
             // A device of the domain is served without being a contact: only the dialing side needs one.
             c.add("Eggs")
             a.close()
-            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Eggs"), b.titles())
             assertFalse(b.peers().single { it.node == c.session().node }.isConfigured)
             b.addPeer(c.contact().uri)
             b.add("Milk")
-            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Eggs", "Milk"), b.titles())
             assertEquals(b.titles(), c.titles())
             val peers = c.peers()
-            assertEquals("unreachable", peers.single { it.isIssuer }.state)
-            assertEquals("connected", peers.single { !it.isIssuer }.state)
+            assertTrue(peers.single { it.isIssuer }.attempts.any { it.outcome == rocky.AttemptOutcome.Failed })
+            assertTrue(peers.single { !it.isIssuer }.attempts.any { it.operation == rocky.AttemptOperation.Reconcile && it.outcome == rocky.AttemptOutcome.Completed })
             assertEquals("iroh", peers.single { !it.isIssuer }.routes.single().transport)
             val network = c.network()
-            assertTrue(network.attached && network.owned)
+            assertEquals(rocky.AttachmentState.Attached, network.attachment)
+            assertEquals(rocky.NetworkOwnership.Rocky, network.ownership)
             assertEquals("iroh", network.kind)
-            assertEquals(32, network.inboundLimit)
+            assertEquals(32uL, network.inbound?.limit)
             b.removePeer(peers.single { it.isIssuer }.node)
             assertEquals(listOf(c.session().node), b.peers().map { it.node })
-            assertFalse(b.observeReadiness().first().issuerContact)
+            assertFalse(b.observeStatus().first().authority.renewalRoutes.isNotEmpty())
             b.add("Bread")
-            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Bread", "Eggs", "Milk"), c.titles())
             b.removePeer(c.session().node)
             assertTrue(b.peers().none { it.isConfigured })
@@ -186,9 +187,9 @@ class ShoppingIntegrationTest {
             a.add("Milk")
             s.add("Eggs")
             d.add("Jam")
-            assertEquals(ConnectionState.Connected, s.syncOnce().state)
-            assertEquals(ConnectionState.Connected, d.syncOnce().state)
-            assertEquals(ConnectionState.Connected, s.syncOnce().state)
+            assertTrue(s.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(s.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Eggs", "Jam", "Milk"), a.titles())
             assertEquals(a.titles(), d.titles())
             // A delegated chain is renewed by its delegator, here narrower: the delegate now only reads.
@@ -217,7 +218,7 @@ class ShoppingIntegrationTest {
     /** Shares [list] from [owner] with [reader] through one envelope, which the reader's next sync delivers. */
     private suspend fun share(owner: ShoppingRepository, reader: RockyDatabase, list: Long) {
         // A joined device finishes its own bootstrap before it starts a list from a checkpoint.
-        assertEquals(ConnectionState.Connected, reader.syncOnce().state)
+        assertTrue(reader.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         owner.share(list, listOf(reader.session().node))
     }
 
@@ -283,25 +284,25 @@ class ShoppingIntegrationTest {
             val list = ra.createList("Groceries")
             share(ra, b, list)
             val id = ra.add(list, "Milk")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Groceries"), db.lists().all().map { it.title })
             assertEquals(listOf("Milk"), db.items().all(list).map { it.title })
-            a.setOnline(false)
-            b.setOnline(false)
+            a.setNetworkingEnabled(false)
+            b.setNetworkingEnabled(false)
             ra.rename(list, id, "Oat milk")
             rb.check(list, id, true)
             rb.add(list, "Eggs")
             assertEquals(2, db.items().all(list).size)
-            assertEquals(ConnectionState.Offline, b.syncOnce().state)
-            a.setOnline(true)
-            b.setOnline(true)
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertEquals(rocky.SkipReason.NetworkingDisabled, b.syncOnce().skip)
+            a.setNetworkingEnabled(true)
+            b.setNetworkingEnabled(true)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(da.items().all(list), db.items().all(list))
             assertEquals("Oat milk" to true, da.items().all(list).first { it.id == id }.let { it.title to it.completed })
-            a.setOnline(false)
+            a.setNetworkingEnabled(false)
             ra.delete(list, id)
             rb.rename(list, id, "Late rename")
-            a.setOnline(true)
+            a.setNetworkingEnabled(true)
             b.syncOnce()
             assertEquals(listOf("Eggs"), db.items().all(list).map { it.title })
             assertEquals(da.items().all(list), db.items().all(list))
@@ -331,7 +332,7 @@ class ShoppingIntegrationTest {
             following = launch(Dispatchers.IO) { db.followRocky(b) }
             val synced = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe(list, "tea", false).first { it.isNotEmpty() } } }
             val id = owner.add(list, "Green Tea")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(id, synced.await().single().id)
             val checked = async(Dispatchers.IO) { withTimeout(20_000) { repository.observe(list, "tea", false).first { it.isEmpty() } } }
             repository.check(list, id, true)
@@ -387,7 +388,7 @@ class ShoppingIntegrationTest {
             assertFailsWith<Exception> { RockyDatabase.join(File(root, "wrong"), ItemsSchema, invitation.uri, local(), automaticSync = false) }
             b = RockyDatabase.join(File(root, "b"), schema, invitation.uri, local(), automaticSync = false)
             b.author(issuer = a, table = "products")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             // A scoped writer of products cannot write categories.
             assertFailsWith<RockyException> { b.category("Forged") }
             assertEquals(Long.MAX_VALUE, Row.decode(b.read(products.query())).single().integer("quantity"))
@@ -467,10 +468,10 @@ class ShoppingIntegrationTest {
             assertTrue(a.devices().single { it.revoked }.node == c.session().node)
             a.author()
             a.add("After revocation")
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
-            assertEquals(session.revocations.statements + 1, b.session().revocations.statements)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertEquals(session.revocations.statements + 1uL, b.session().revocations.statements)
             assertEquals(1, Row.decode(b.read(ItemsSchema.table("items").query())).size)
-            assertEquals(ConnectionState.Revoked, c.syncOnce().state)
+            assertEquals("revoked", assertFailsWith<rocky.RockyException> { c.syncOnce() }.code)
             assertFailsWith<RockyException> { c.renew() }
             assertTrue(Row.decode(c.read(ItemsSchema.table("items").query())).isEmpty())
 
@@ -505,7 +506,7 @@ class ShoppingIntegrationTest {
             a.author()
             repeat(40) { a.add("$it:" + "x".repeat(12_000)) }
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, local(), automaticSync = false)
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals((0 until 40).toSet(), Row.decode(b.read(items.query())).map { it.text("title").substringBefore(':').toInt() }.toSet())
         } finally {
             b?.close()

@@ -72,6 +72,41 @@ pub struct NativeDatabaseSession {
 }
 #[uniffi::export]
 impl NativeDatabaseSession {
+    pub async fn network(&self) -> Result<rocky_sdk::NetworkStatus, NativeError> {
+        self.session.network().await.map_err(failure)
+    }
+    pub async fn peers(&self) -> Result<Vec<rocky_sdk::Peer>, NativeError> {
+        self.session.peers().await.map_err(failure)
+    }
+    pub async fn discovery(&self) -> Result<rocky_sdk::DiscoveryStatus, NativeError> {
+        self.session.discovery().await.map_err(failure)
+    }
+
+    pub async fn status(&self) -> Result<rocky_sdk::DatabaseStatus, NativeError> {
+        self.session.status().await.map_err(failure)
+    }
+    pub async fn status_after(
+        &self,
+        token: String,
+    ) -> Result<rocky_sdk::DatabaseStatus, NativeError> {
+        self.session.status_after(token).await.map_err(failure)
+    }
+    pub async fn sync_once(&self) -> Result<rocky_sdk::ReconciliationReport, NativeError> {
+        self.session.sync_once().await.map_err(failure)
+    }
+    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<(), NativeError> {
+        self.session
+            .set_networking_enabled(enabled)
+            .await
+            .map_err(failure)
+    }
+    pub async fn set_automatic_sync(&self, enabled: bool) -> Result<(), NativeError> {
+        self.session
+            .set_automatic_sync(enabled)
+            .await
+            .map_err(failure)
+    }
+
     /// Versioned SDK calls, including raw grants, delegation, executor
     /// registration and the `pseudonym_*` credential primitives.
     pub async fn call(&self, request: String) -> Result<String, NativeError> {

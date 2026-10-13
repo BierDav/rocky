@@ -44,7 +44,8 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     introduce(&a, &relay).await;
     introduce(&b, &relay).await;
     issuer.close().await;
-    b.ok(json!({"type": "connection", "online": false})).await;
+    b.ok(json!({"type": "networking_control", "enabled": false}))
+        .await;
     a.add(1, "Milk").await;
     a.sync().await.expect("upload");
     assert!(
@@ -55,14 +56,18 @@ async fn devices_never_online_together_converge_via_keyless_custody() -> Result<
     );
     relay.close().await;
     let relay = Device::open(&root.path().join("relay"), net("relay"))?;
-    a.ok(json!({"type": "connection", "online": false})).await;
-    b.ok(json!({"type": "connection", "online": true})).await;
+    a.ok(json!({"type": "networking_control", "enabled": false}))
+        .await;
+    b.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     b.sync().await.expect("catch up");
     assert_eq!(b.titles().await, ["Milk"]);
     b.add(2, "Eggs").await;
     b.sync().await.expect("upload");
-    b.ok(json!({"type": "connection", "online": false})).await;
-    a.ok(json!({"type": "connection", "online": true})).await;
+    b.ok(json!({"type": "networking_control", "enabled": false}))
+        .await;
+    a.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     a.sync().await.expect("catch up");
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     // A keyless custodian cannot issue enrollment or renewal.

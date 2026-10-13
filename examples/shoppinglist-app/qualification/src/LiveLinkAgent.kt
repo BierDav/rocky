@@ -61,8 +61,8 @@ class LiveLinkAgent(
             }
         }
         scope.launch {
-            opened.rocky.observeReadiness()
-                .map { readiness -> readiness.peers.associate { it.node to it.link.state } }
+            opened.rocky.observeStatus()
+                .map { readiness -> readiness.network.peers.associate { it.node to it.link.state } }
                 .distinctUntilChanged()
                 .collect { states ->
                     val line = buildJsonObject {
@@ -86,14 +86,15 @@ class LiveLinkAgent(
     }
 
     private suspend fun status(): JsonObject {
-        val readiness = opened.rocky.observeReadiness().first()
+        val readiness = opened.rocky.observeStatus().first()
         val network = opened.rocky.network()
         return buildJsonObject {
             put("at", epochMicros())
-            put("state", readiness.state.name)
-            put("revision", readiness.revision)
-            put("inboundServed", network.inboundServed)
-            put("inboundRefused", network.inboundRefused)
+            put("networkingEnabled", readiness.network.networkingEnabled)
+            put("bootstrapPending", readiness.data.bootstrapPending)
+            put("revision", readiness.data.revision.toLong())
+            put("inboundServed", network.inbound?.served?.toLong())
+            put("inboundRefused", network.inbound?.refused?.toLong())
             put("peers", JsonArray(network.peers.map(::peer)))
         }
     }
@@ -102,11 +103,11 @@ class LiveLinkAgent(
         put("node", peer.node)
         put("configured", peer.isConfigured)
         put("source", peer.source)
-        put("state", peer.state)
-        put("error", peer.error)
+        put("attempts", peer.attempts.toString())
+        put("error", peer.attempts.lastOrNull()?.failure?.detail)
         put("link", peer.link.state.name)
-        put("opened", peer.link.openedAtEpochSeconds)
-        put("roundTripMs", peer.link.roundTripMillis)
+        put("opened", peer.link.openedAtEpochSeconds?.toLong())
+        put("roundTripMs", peer.link.roundTripMillis?.toLong())
         put("routes", JsonArray(peer.routes.map { JsonPrimitive("${it.transport} ${it.address}") }))
     }
 
@@ -174,7 +175,7 @@ class LiveLinkAgent(
                 val peer = text("peer")
                 fun matches(state: LinkState) = if (wanted == "NotOpen") state != LinkState.Open else state == LinkState.valueOf(wanted)
                 val reached = withTimeoutOrNull(long("timeoutMs")) {
-                    opened.rocky.observeReadiness().first { readiness -> readiness.peers.any { it.node == peer && matches(it.link.state) } }
+                    opened.rocky.observeStatus().first { readiness -> readiness.network.peers.any { it.node == peer && matches(it.link.state) } }
                 }
                 buildJsonObject {
                     put("reached", reached != null)

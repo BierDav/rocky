@@ -106,7 +106,7 @@ impl Device {
             .to_owned())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        self.ok(json!({"type":"connection","online":online}))
+        self.ok(json!({"type":"networking_control","enabled":online}))
             .await
             .map(drop)
     }
@@ -272,7 +272,7 @@ async fn join(
     // The join's own first sync runs in the background: let it finish, so
     // that no pass still in flight meets a later share.
     let mut status = device.ok(json!({"type":"status"})).await?;
-    while status["state"] != "ready" {
+    while status["data"]["bootstrap_pending"] == true {
         status = device
             .ok(json!({"type":"status_next","after":status["token"]}))
             .await?;

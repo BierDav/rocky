@@ -15,12 +15,10 @@ import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.data.session.ShoppingSession
 import org.example.examples.shopping.presentation.screen.NodeViewModel
-import rocky.ConnectionState
-import rocky.ConnectionStatus
+import rocky.DatabaseStatus
 import rocky.Device
 import rocky.NetworkStatus
 import rocky.Peer
-import rocky.Readiness
 import rocky.RockyEvent
 import rocky.SessionStatus
 import rocky.room.settledOnRocky
@@ -56,8 +54,7 @@ data class DevicesState(
     val invitation: PairingCode? = null,
     /** On a trusted device: every trusted device's open invitation, soonest to expire first. */
     val invitations: List<OpenInvitation> = emptyList(),
-    val readiness: Readiness? = null,
-    val connection: ConnectionStatus = ConnectionStatus(ConnectionState.Unavailable),
+    val snapshot: DatabaseStatus? = null,
     val lastTransferAtEpochMillis: Long? = null,
     val domain: String = "",
 )
@@ -121,8 +118,8 @@ class DevicesViewModel(private val session: ShoppingSession) : NodeViewModel(ses
         }
         val lastTransfer = node.rocky.activity().filterIsInstance<RockyEvent.Synced>()
             .map<RockyEvent.Synced, Long?> { it.atEpochMillis }.onStart { emit(null) }
-        combine(devices, node.rocky.observeReadiness(), node.rocky.status, lastTransfer) { state, readiness, connection, transfer ->
-            state.copy(readiness = readiness, connection = connection, lastTransferAtEpochMillis = transfer, domain = node.rocky.domain)
+        combine(devices, node.rocky.observeStatus(), lastTransfer) { state, snapshot, transfer ->
+            state.copy(snapshot = snapshot, lastTransferAtEpochMillis = transfer, domain = node.rocky.domain)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DevicesState())
 
@@ -134,7 +131,7 @@ class DevicesViewModel(private val session: ShoppingSession) : NodeViewModel(ses
         invitation.value = null
     }
 
-    fun setOnline(online: Boolean) = write { rocky.setOnline(online) }
+    fun setNetworkingEnabled(online: Boolean) = write { rocky.setNetworkingEnabled(online) }
     fun reset() = session.reset()
 
     /** Sends a partial device the key of [list]. */

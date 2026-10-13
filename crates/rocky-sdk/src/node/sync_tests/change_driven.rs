@@ -33,7 +33,7 @@ async fn contact(node: &Node) -> Result<String, Failure> {
         .await?
         .0)
 }
-async fn targets(a: &Node, peers: &[Arc<Node>]) -> Result<(), Failure> {
+pub(super) async fn targets(a: &Node, peers: &[Arc<Node>]) -> Result<(), Failure> {
     for peer in peers {
         let contact = contact(peer).await?;
         a.configure(|settings| settings.add_peer(&a.vault, &contact))
@@ -41,14 +41,14 @@ async fn targets(a: &Node, peers: &[Arc<Node>]) -> Result<(), Failure> {
     }
     Ok(())
 }
-async fn start(node: &Node, enabled: bool) -> Result<Value, Failure> {
+pub(super) async fn start(node: &Node, enabled: bool) -> Result<Value, Failure> {
     node.dispatch(
         &*node.client(1)?,
         &json!({"type":"sync_start", "enabled":enabled}),
     )
     .await
 }
-async fn transport(node: &Node) -> Result<Arc<dyn Transport>, Failure> {
+pub(super) async fn transport(node: &Node) -> Result<Arc<dyn Transport>, Failure> {
     Ok(node
         .network
         .read()
@@ -698,8 +698,11 @@ async fn at_most_four_peers_are_in_flight_and_online_resets_backoff() -> Result<
                     .all(|state| !state.retry.ready())
             );
             let before = hub.counts()[1];
-            a.dispatch(&*a.client(1)?, &json!({"type":"connection", "online":true}))
-                .await?;
+            a.dispatch(
+                &*a.client(1)?,
+                &json!({"type":"networking_control", "enabled":true}),
+            )
+            .await?;
             until(|| hub.counts()[1] >= before + 5).await;
             start(&a, false).await?;
             a.detach(None).await;
@@ -741,16 +744,22 @@ async fn going_online_does_not_republish_offline() -> Result<(), Failure> {
             start(&a, true).await?;
             settled(&a).await;
             let client = a.client(1)?;
-            a.dispatch(&client, &json!({"type":"connection", "online":false}))
-                .await?;
-            until(|| a.sync_status.borrow()["state"] == "offline").await;
-            a.dispatch(&client, &json!({"type":"connection", "online":true}))
-                .await?;
+            a.dispatch(
+                &client,
+                &json!({"type":"networking_control", "enabled":false}),
+            )
+            .await?;
+            until(|| a.sync_status.borrow()["state"] == "networking_disabled").await;
+            a.dispatch(
+                &client,
+                &json!({"type":"networking_control", "enabled":true}),
+            )
+            .await?;
             for _ in 0..64 {
                 tokio::task::yield_now().await;
             }
             settled(&a).await;
-            assert_ne!(a.sync_status.borrow()["state"], "offline");
+            assert_ne!(a.sync_status.borrow()["state"], "networking_disabled");
             start(&a, false).await?;
             a.detach(None).await;
             Ok(())

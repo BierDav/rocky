@@ -21,6 +21,11 @@ val bindings = tasks.register<GenerateBindings>("generateBindings") {
     hostLibrary.set(output.map { it.dir("host") })
 }
 
+// IDE imports need the same native declarations as compilation, including after a clean checkout.
+tasks.named("prepareKotlinIdeaImport") {
+    dependsOn(bindings)
+}
+
 // The in-repository simulator tests need the runtime's fault injection; published builds never have it.
 val faultInjection = providers.gradleProperty("rocky.qualification").map(String::toBoolean).orElse(false)
 
@@ -62,16 +67,17 @@ kotlin {
         }
     }
 
+    @OptIn(ExperimentalKotlinGradlePluginApi::class)
     sourceSets {
         commonMain {
-            kotlin.srcDir(bindings.flatMap { it.common })
+            generatedKotlin.srcDir(bindings.flatMap { it.common })
             dependencies {
                 api(libs.kotlinx.coroutines.core)
                 api(libs.kotlinx.serialization.json)
             }
         }
         named("jnaMain") {
-            kotlin.srcDir(bindings.flatMap { it.jna })
+            generatedKotlin.srcDir(bindings.flatMap { it.jna })
             dependencies {
                 implementation(libs.jna)
             }
@@ -88,7 +94,7 @@ kotlin {
             }
         }
         iosMain {
-            kotlin.srcDir(bindings.flatMap { it.ios })
+            generatedKotlin.srcDir(bindings.flatMap { it.ios })
             dependencies {
                 implementation(libs.atomicfu)
             }

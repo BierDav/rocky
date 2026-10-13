@@ -58,49 +58,70 @@ async fn enrolled_peers_sync_directly_while_the_creator_is_offline() -> Result<(
     b.add(1, "Milk").await;
     c.add(2, "Eggs").await;
     let synced = c.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(synced, json!({"state": "connected", "peers": 1}));
+    assert!(common::reconciled(&synced));
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.items().await, c.items().await);
     // The network reports each peer on its own; the database is unaffected.
-    assert_eq!(c.peer(&b.node().await).await["state"], "connected");
+    assert!(
+        c.peer(&b.node().await).await["attempts"]
+            .as_array()
+            .expect("attempts")
+            .iter()
+            .any(|attempt| attempt["outcome"] == "completed")
+    );
     let creator = c.ok(json!({"type": "session"})).await;
     let creators: Vec<Value> = c.ok(json!({"type": "peers"})).await["peers"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|peer| peer["issuer"] == json!(true))
+        .filter(|peer| peer["is_issuer"] == json!(true))
         .cloned()
         .collect();
     assert_eq!(creators.len(), 1);
-    assert_eq!(creators[0]["state"], "unreachable");
+    assert!(
+        creators[0]["attempts"]
+            .as_array()
+            .expect("attempts")
+            .iter()
+            .any(|attempt| attempt["outcome"] == "failed")
+    );
     assert_ne!(creators[0]["node"], creator["node"]);
     let network = c.ok(json!({"type": "network"})).await;
-    assert_eq!(network["attached"], json!(true));
+    assert_eq!(network["attachment"], "attached");
     assert_eq!(network["kind"], "memory");
     assert_eq!(network["inbound"]["limit"], 32);
 
-    assert_eq!(c.peer(&b.node().await).await["configured"], true);
+    assert_eq!(c.peer(&b.node().await).await["is_configured"], true);
     // A removed contact is no longer dialed; it is still served.
     b.ok(json!({"type": "peer_remove", "node": c.node().await}))
         .await;
     b.add(4, "Tea").await;
-    assert!(b.sync().await.is_err());
+    assert!(common::exchange_failed(&b.sync().await));
     assert_eq!(c.titles().await, ["Eggs", "Milk"]);
     c.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(c.titles().await, ["Eggs", "Milk", "Tea"]);
     // Any issuer renews any device: the last one can be removed, and the
-    // member then reports that it has no issuer contact.
+    // member then lists no known renewal candidates.
     let creator_node = creators[0]["node"].clone();
-    assert_eq!(b.ok(json!({"type": "peers"})).await["issuer_contact"], true);
+    assert!(
+        !b.ok(json!({"type": "peers"})).await["renewal_routes"]
+            .as_array()
+            .ok_or("routes")?
+            .is_empty()
+    );
     b.ok(json!({"type": "peer_remove", "node": creator_node}))
         .await;
-    assert_eq!(
-        b.ok(json!({"type": "peers"})).await["issuer_contact"],
-        false
+    assert!(
+        b.ok(json!({"type": "peers"})).await["renewal_routes"]
+            .as_array()
+            .ok_or("routes")?
+            .is_empty()
     );
-    assert_eq!(
-        b.ok(json!({"type": "status"})).await["authority"]["issuer_contact"],
-        false
+    assert!(
+        b.ok(json!({"type": "status"})).await["authority"]["renewal_routes"]
+            .as_array()
+            .expect("routes")
+            .is_empty()
     );
     for device in [b, c] {
         device.close().await;
@@ -179,9 +200,9 @@ async fn a_revoked_peer_stays_denied_without_the_creator() -> Result<(), Failure
 
     b.add(1, "Fresh").await;
     c.add(2, "Late").await;
-    assert!(c.sync().await.is_err());
+    assert!(common::exchange_failed(&c.sync().await));
     // Its still-configured peer neither takes its rows nor gives it any.
-    assert!(b.sync().await.is_err());
+    assert!(common::exchange_failed(&b.sync().await));
     assert_eq!(b.titles().await, ["Fresh"]);
     assert_eq!(c.titles().await, ["Late"]);
     b.close().await;
@@ -251,7 +272,7 @@ async fn a_domain_survives_a_change_of_routes_and_transport_kind() -> Result<(),
         .await
         .map_err(|e| e.to_string())?;
     b.add(3, "Jam").await;
-    assert!(b.sync().await.is_err());
+    assert!(common::exchange_failed(&b.sync().await));
     assert!(c.titles().await.is_empty());
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     for device in [&a, &b, &c] {
@@ -369,8 +390,8 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
             .attach(Network::Borrowed(transport.clone()))
             .await?;
         assert_eq!(
-            a.ok(json!({"type": "network"})).await["owned"],
-            json!(false)
+            a.ok(json!({"type": "network"})).await["ownership"],
+            json!("application")
         );
         a.close().await;
         assert!(hub.listens("a"));

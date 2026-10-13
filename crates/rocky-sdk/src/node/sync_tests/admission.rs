@@ -94,8 +94,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             }
             // A configured peer syncs afterwards.
             let synced = b.dispatch(&*b.client(1)?, &json!({"type":"sync"})).await?;
-            assert_eq!(synced["state"], "connected");
-            assert_eq!(synced["peers"], 1);
+            assert_eq!(completed_peers(&synced), 1);
             assert!(link.served.load(Ordering::Relaxed) > served + 64);
             assert_eq!(link.refused.load(Ordering::Relaxed), refused + 32);
             dialer.close().await;

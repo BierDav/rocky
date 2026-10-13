@@ -28,7 +28,17 @@ pub(super) fn adapt(path: &Utf8Path, ci: &ComponentInterface) -> Result<()> {
     }
     for e in ci.enum_definitions() {
         let name = super::render::public_name(ci, e.name());
-        remove(&mut source, &format!("sealed class {name}"))?;
+        remove(
+            &mut source,
+            &format!(
+                "{} {name}",
+                if e.is_flat() && !ci.is_name_used_as_error(e.name()) {
+                    "enum class"
+                } else {
+                    "sealed class"
+                }
+            ),
+        )?;
         if ci.is_name_used_as_error(e.name()) {
             source = source
                 .replace(&format!("{name}.ErrorHandler"), &format!("{name}Handler"))

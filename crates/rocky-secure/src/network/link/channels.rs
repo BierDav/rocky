@@ -232,7 +232,7 @@ impl Reconcile {
             )),
         )
         .await
-        .map_err(|_| denied("link reconcile close timeout"))?
+        .map_err(|_| timed_out("link reconcile close timeout"))?
         .map_err(|_| denied("link ended"))?;
         let mut events = self.handle.events.subscribe();
         timeout(TIMEOUT, async {
@@ -255,7 +255,7 @@ impl Reconcile {
             }
         })
         .await
-        .map_err(|_| denied("link reconcile finish timeout"))??;
+        .map_err(|_| timed_out("link reconcile finish timeout"))??;
         self.mark_closed();
         Ok(())
     }
@@ -325,7 +325,7 @@ impl Handle {
             )),
         )
         .await
-        .map_err(|_| denied("link reconcile start timeout"))?
+        .map_err(|_| timed_out("link reconcile start timeout"))?
         .map_err(|_| denied("link ended"))?;
         Ok(lease)
     }
@@ -347,7 +347,7 @@ impl Handle {
             }
         })
         .await
-        .map_err(|_| denied("link drain timeout"))?
+        .map_err(|_| timed_out("link drain timeout"))?
     }
 
     /// Captures one bounded page after a committed cursor, without querying the peer.
@@ -400,7 +400,7 @@ impl Handle {
         }
         timeout(TIMEOUT, self.send.send(frame))
             .await
-            .map_err(|_| denied("link push write timeout"))?
+            .map_err(|_| timed_out("link push write timeout"))?
             .map_err(|_| denied("link ended"))?;
         Ok(page.next.is_none())
     }
@@ -489,7 +489,7 @@ impl Handle {
             }
         })
         .await
-        .map_err(|_| denied("link channel quota timeout"))??;
+        .map_err(|_| timed_out("link channel quota timeout"))??;
         let session = self.session(key, generation, receive)?;
         self.send_frame(key, Packet::Open { generation }).await?;
         Ok(session)
@@ -546,7 +546,7 @@ impl Handle {
             }),
         )
         .await
-        .map_err(|_| denied("link channel write timeout"))?
+        .map_err(|_| timed_out("link channel write timeout"))?
         .map_err(|_| denied("link ended"))
     }
 }
@@ -573,7 +573,7 @@ impl Io {
     pub async fn receive(&mut self) -> Result<Vec<u8>, Error> {
         timeout(TIMEOUT, self.receive.recv())
             .await
-            .map_err(|_| denied("link channel read timeout"))?
+            .map_err(|_| timed_out("link channel read timeout"))?
             .ok_or_else(|| Error::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)))
     }
     pub async fn close(&mut self) -> Result<(), Error> {
@@ -607,7 +607,7 @@ impl Io {
             }
         })
         .await
-        .map_err(|_| denied("link channel close timeout"))?
+        .map_err(|_| timed_out("link channel close timeout"))?
     }
     fn mark_closed(&mut self) {
         self.closed = true;

@@ -39,6 +39,8 @@ pub enum ServiceError {
     NoRoute { peer: &'static str, network: String },
     /// No known route answered; a later attempt may succeed.
     Unreachable(String),
+    /// A dial exceeded its deadline; no global reachability conclusion follows.
+    TimedOut(String),
     /// A member's credentials expired: open with a network to renew them.
     CredentialsExpired,
     /// The named handle was closed.
@@ -50,13 +52,13 @@ impl ServiceError {
         match self {
             Self::NetworkRequired(_) | Self::CredentialsExpired => "network_required",
             Self::NetworkAttached | Self::NoRoute { .. } => "rejected",
-            Self::Unreachable(_) => "unreachable",
+            Self::Unreachable(_) | Self::TimedOut(_) => "unreachable",
             Self::Closed(_) => "closed",
         }
     }
     /// Whether the same call may succeed later without reconfiguration.
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Unreachable(_))
+        matches!(self, Self::Unreachable(_) | Self::TimedOut(_))
     }
 }
 impl std::fmt::Display for ServiceError {
@@ -71,6 +73,7 @@ impl std::fmt::Display for ServiceError {
                 "{peer} has no {network} route; attach its transport or add a current contact"
             ),
             Self::Unreachable(cause) => write!(f, "peer unreachable: {cause}"),
+            Self::TimedOut(cause) => write!(f, "dial timed out: {cause}"),
             Self::CredentialsExpired => {
                 f.write_str("credentials expired; open with a network that reaches an issuer")
             }

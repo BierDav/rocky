@@ -83,6 +83,11 @@ Implemented guides live under `runtime/`, wire/behavior contracts under
 
 ## Status of the proposals
 
+[Observable status](proposals/observable-status.md) defines the replacement of aggregate
+connection/readiness verdicts with local authority, data progress, network
+controls, live links and dated service observations, with generated native
+contracts shared by Kotlin.
+
 [V4](proposals/architecture-proposal-v4.md) is the accepted architectural direction.
 [V3](proposals/architecture-proposal-v3.md), [V2](proposals/architecture-proposal-v2.md)
 and the [original proposal](proposals/architecture-proposal.md) are historical.

@@ -18,8 +18,9 @@ const RESULTS: usize = 64;
 const HEAD: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One device's view of a peer: the link that proved the `peer` key.
-pub struct Upstream<'a> {
+pub(crate) struct Upstream<'a> {
     pub link: Handle,
+    pub observations: &'a crate::status::Observations,
     pub peer: PublicKey,
     pub contacts: Option<&'a dyn rocky_secure::network::ContactHandler>,
     /// The revocation digest this sync started from, when it renews: a
@@ -66,7 +67,7 @@ impl Moved {
     }
 }
 /// What a reconcile did, by scope, in first-change order.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Transfer {
     pub scopes: Vec<(ResourceScope, Moved)>,
     /// Scopes the peer and this device did not exchange: one side's
@@ -78,6 +79,7 @@ pub(crate) struct Transfer {
     pub waiting: Vec<ResourceScope>,
     /// Why the confirmed results pass failed; rows still synced.
     pub results: Option<String>,
+    pub results_failure: Option<crate::AttemptFailure>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
@@ -93,6 +95,7 @@ impl Transfer {
         }
         if other.results.is_some() {
             self.results = other.results;
+            self.results_failure = other.results_failure;
         }
     }
     fn refuse(&mut self, scopes: &[ResourceScope]) {
@@ -137,7 +140,7 @@ pub(crate) async fn reconcile(
     first: Option<NativeSession>,
 ) -> Result<(bool, bool, Transfer), Failure> {
     let mut transfer = Transfer::default();
-    let newer = Box::pin(rows(
+    let rows_result = Box::pin(rows(
         replica,
         upstream,
         scopes,
@@ -145,29 +148,54 @@ pub(crate) async fn reconcile(
         &mut transfer,
         first,
     ))
-    .await?;
+    .await;
+    let newer = match rows_result {
+        Ok(newer) => newer,
+        Err(error) => {
+            upstream
+                .observations
+                .record_partial(upstream.peer.to_hex(), transfer);
+            return Err(error);
+        }
+    };
     // Rows stay in sync while a coordinator is unreachable or a peer holds
     // no results; a ticket then stays `confirmed` until a later sync.
-    let retry = match coordinator {
-        Some(coordinator) => match results(replica, upstream, scopes, coordinator).await {
-            Ok(retry) => retry,
-            // A peer without coordination holds no results to pull.
-            Err(error)
-                if matches!(
-                    error.downcast_ref(),
-                    Some(rocky_secure::Error::Rejected(reason))
-                        if reason == rocky_secure::network::NO_COORDINATION
-                ) =>
-            {
-                false
+    let retry =
+        match coordinator {
+            Some(coordinator) => {
+                let attempt = upstream.observations.begin(
+                    upstream.peer.to_hex(),
+                    crate::AttemptOperation::PullResults,
+                    crate::AttemptStage::ResultRetrieval,
+                );
+                let result = results(replica, upstream, scopes, coordinator).await;
+                attempt.finish(result.as_ref().err().map(|error| {
+                    crate::status::failure(error, &crate::AttemptStage::ResultRetrieval)
+                }));
+                match result {
+                    Ok(retry) => retry,
+                    // A peer without coordination holds no results to pull.
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref(),
+                            Some(rocky_secure::Error::Rejected(reason))
+                                if reason == rocky_secure::network::NO_COORDINATION
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(error) => {
+                        transfer.results = Some(error.to_string());
+                        transfer.results_failure = Some(crate::status::failure(
+                            &error,
+                            &crate::AttemptStage::ResultRetrieval,
+                        ));
+                        true
+                    }
+                }
             }
-            Err(error) => {
-                transfer.results = Some(error.to_string());
-                true
-            }
-        },
-        None => false,
-    };
+            None => false,
+        };
     Ok((newer, retry, transfer))
 }
 /// One scope of a bootstrap: the checkpoint its peer offered and the

@@ -5,50 +5,29 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
-import kotlin.time.Clock
+import rocky.internal.native.NativeDatabaseSession
 
 /** One enrolled device's secure database: the native engine, its enrollment and background sync. */
-open class RockySession internal constructor(internal val client: RockyClient, override val domain: String, val isIssuer: Boolean) :
+open class RockySession internal constructor(private val nativeSession: NativeDatabaseSession, internal val client: RockyClient, override val domain: String, val isIssuer: Boolean) :
     RuntimePort,
     CommandPort {
-    private val lifetime = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var synchronization: Job? = null
-    private val connection = Mutex()
     private val closing = Mutex()
 
     // One SQL transaction at a time on this session.
     private val writing = Mutex()
     private var closed = false
-    private val mutableStatus = MutableStateFlow(ConnectionStatus(ConnectionState.Unavailable))
-    val status: StateFlow<ConnectionStatus> = mutableStatus.asStateFlow()
     val credentials: Credentials get() = Credentials(this)
     val partitions: Partitions get() = client.partitions
     val horizons: Horizons get() = client.horizons
     val commands: CommandPort get() = this
-    fun readiness(): Flow<JsonObject> = client.readiness()
-
-    /** [readiness] as typed values, each once it changed. */
-    fun observeReadiness(): Flow<Readiness> = client.readiness().map { status ->
-        val authority = status.getValue("authority").jsonObject
-        Readiness(
-            ReadinessState.valueOf(status.text("state").replaceFirstChar(Char::uppercase)),
-            status.text("revision").toLong(),
-            revocations(authority.getValue("revocations").jsonObject),
-            authority.text("expires").toLong(),
-            profile(authority.getValue("profile").jsonObject),
-            status.getValue("network").jsonObject.getValue("attached").jsonPrimitive.boolean,
-            authority["issuer_contact"]?.jsonPrimitive?.boolean ?: true,
-            discovery(status.getValue("network").jsonObject.getValue("discovery").jsonObject),
-            status.getValue("network").jsonObject.getValue("peers").jsonArray.map { peer(it.jsonObject) },
-            (status["bootstrap"] as? JsonObject)?.let { progress ->
-                BootstrapProgress(
-                    progress.getValue("rows_done").jsonPrimitive.long,
-                    progress.getValue("rows_total").jsonPrimitive.long,
-                    progress.getValue("scopes_done").jsonPrimitive.int,
-                    progress.getValue("scopes_total").jsonPrimitive.int,
-                )
-            },
-        )
+    suspend fun status(): DatabaseStatus = nativeCall { nativeSession.status() }
+    suspend fun statusAfter(token: String): DatabaseStatus = nativeCall { nativeSession.statusAfter(token) }
+    fun observeStatus(): Flow<DatabaseStatus> = client.observation {
+        var snapshot = status()
+        while (true) {
+            emit(snapshot)
+            snapshot = statusAfter(snapshot.token)
+        }
     }
 
     /** What the database did in the background: the kept events, then each new one. See [RockyEvent]. */
@@ -213,32 +192,19 @@ open class RockySession internal constructor(internal val client: RockyClient, o
      */
     suspend fun addPeer(contact: String): String = client.call(request("peer_add") { put("contact", contact) }).text("node")
 
-    /** Forgets a peer, an issuer included: any issuer renews any device. [Readiness.issuerContact] reports a member left without one. */
+    /** Forgets a peer, an issuer included: any issuer renews any device. [AuthorityStatus.renewalRoutes] reports known renewal routes. */
     suspend fun removePeer(node: String) {
         client.call(request("peer_remove") { put("node", node) })
     }
 
     /** Every peer met or kept as a contact; [Peer.isConfigured] tells them apart. */
-    suspend fun peers(): List<Peer> = client.call(request("peers")).getValue("peers").jsonArray.map { peer(it.jsonObject) }
+    suspend fun peers(): List<Peer> = nativeCall { nativeSession.peers() }
 
     /** Each discovery path as on, off or unavailable with its reason; a found peer appears in [peers] with source `discovery`. */
-    suspend fun discovery(): DiscoveryStatus = discovery(client.call(request("peers")).getValue("discovery").jsonObject)
+    suspend fun discovery(): DiscoveryStatus = nativeCall { nativeSession.discovery() }
 
     /** The network service's state and bounds, independent of the database's. */
-    suspend fun network(): NetworkStatus = client.call(request("network")).let { status ->
-        val inbound = status["inbound"]?.jsonObject
-        NetworkStatus(
-            status.getValue("attached").jsonPrimitive.boolean,
-            status["kind"]?.jsonPrimitive?.content,
-            status["owned"]?.jsonPrimitive?.boolean ?: false,
-            inbound?.getValue("active")?.jsonPrimitive?.int ?: 0,
-            inbound?.getValue("limit")?.jsonPrimitive?.int ?: 0,
-            inbound?.text("served")?.toLong() ?: 0,
-            inbound?.text("refused")?.toLong() ?: 0,
-            status.getValue("peers").jsonArray.map { peer(it.jsonObject) },
-            discovery(status.getValue("discovery").jsonObject),
-        )
-    }
+    suspend fun network(): NetworkStatus = nativeCall { nativeSession.network() }
 
     /**
      * Signs a revocation statement ending a device's authority and starts a new key epoch for the tables it read;
@@ -253,58 +219,9 @@ open class RockySession internal constructor(internal val client: RockyClient, o
     suspend fun logout(purge: Boolean = false) {
         client.call(request("logout") { put("purge", purge) })
     }
-    suspend fun setOnline(online: Boolean) = connection.withLock {
-        client.call(request("connection") { put("online", online) })
-        mutableStatus.value = ConnectionStatus(if (online) ConnectionState.Unavailable else ConnectionState.Offline)
-    }
-    suspend fun syncOnce(): ConnectionStatus = connection.withLock {
-        try {
-            val result = client.call(request("sync"))
-            mutableStatus.value = ConnectionStatus(
-                when (result.getValue("state").jsonPrimitive.content) {
-                    "offline" -> ConnectionState.Offline
-                    "revoked" -> ConnectionState.Revoked
-                    else -> ConnectionState.Connected
-                },
-                peers = result["peers"]?.jsonPrimitive?.int ?: 0,
-                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
-            )
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            mutableStatus.value = ConnectionStatus(
-                if (error is RockyException && error.code == "revoked") ConnectionState.Revoked else ConnectionState.Unavailable,
-                error.message,
-                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
-            )
-        }
-        mutableStatus.value
-    }
-
-    /** Enables native change-driven sync; cancellation stops this status observer. */
-    suspend fun syncContinuously() {
-        observeSync(setAutomaticSync(true))
-    }
-
-    internal suspend fun setAutomaticSync(enabled: Boolean): JsonObject = client.call(request("sync_start") { put("enabled", enabled) })
-
-    internal suspend fun observeSync(initial: JsonObject) {
-        var result = initial
-        while (currentCoroutineContext().isActive) {
-            mutableStatus.value = ConnectionStatus(
-                when (result["state"]?.jsonPrimitive?.content) {
-                    "connected" -> ConnectionState.Connected
-                    "offline" -> ConnectionState.Offline
-                    "revoked" -> ConnectionState.Revoked
-                    else -> ConnectionState.Unavailable
-                },
-                result["error"]?.jsonPrimitive?.contentOrNull,
-                peers = result["peers"]?.jsonPrimitive?.int ?: 0,
-                atEpochMillis = Clock.System.now().toEpochMilliseconds(),
-            )
-            result = client.call(request("sync_next") { put("after", result.getValue("token")) })
-        }
-    }
+    suspend fun setNetworkingEnabled(enabled: Boolean) = nativeCall { nativeSession.setNetworkingEnabled(enabled) }
+    suspend fun syncOnce(): ReconciliationReport = nativeCall { nativeSession.syncOnce() }
+    suspend fun setAutomaticSync(enabled: Boolean) = nativeCall { nativeSession.setAutomaticSync(enabled) }
 
     /** The owner's control of this domain on its coordination service, with the tenant's control key. */
     fun service(tenant: ByteArray): ServiceOwner = ServiceOwner(this, tenant)
@@ -348,64 +265,15 @@ open class RockySession internal constructor(internal val client: RockyClient, o
         ),
     )
     private fun JsonObject.blob(name: String): ByteArray = getValue(name).jsonArray.let { array -> ByteArray(array.size) { array[it].jsonPrimitive.int.toByte() } }
-    suspend fun connect() = setOnline(true)
-    suspend fun disconnect() = setOnline(false)
     open suspend fun close() = withContext(NonCancellable) {
         closing.withLock {
             if (!closed) {
                 closed = true
-                lifetime.cancel()
-                synchronization?.join()
                 client.close()
             }
         }
     }
     companion object {
-        private fun peer(value: JsonObject) = Peer(
-            value.text("node"),
-            value.getValue("issuer").jsonPrimitive.boolean,
-            value.getValue("configured").jsonPrimitive.boolean,
-            value.text("source"),
-            value.text("choice"),
-            routes(value),
-            value.getValue("local").jsonPrimitive.boolean,
-            value.text("state"),
-            value.getValue("checked").jsonPrimitive.contentOrNull?.toLong(),
-            value.getValue("error").jsonPrimitive.contentOrNull,
-            value.getValue("link").jsonObject.let {
-                PeerLink(
-                    LinkState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)),
-                    it.getValue("opened").jsonPrimitive.contentOrNull?.toLong(),
-                    it.getValue("round_trip_ms").jsonPrimitive.contentOrNull?.toLong(),
-                    it.getValue("paths").jsonArray.map { path -> linkPath(path.jsonObject) },
-                )
-            },
-        )
-        private fun linkPath(value: JsonObject): LinkPath {
-            fun count(name: String) = value.text(name).toLong()
-            return LinkPath(
-                value.getValue("selected").jsonPrimitive.boolean,
-                value.text("kind"),
-                value.text("remote"),
-                value.getValue("local").jsonPrimitive.contentOrNull,
-                count("rtt_us"),
-                value.text("mtu").toInt(),
-                count("window"),
-                count("sent_bytes"),
-                count("sent_datagrams"),
-                count("received_bytes"),
-                count("received_datagrams"),
-                count("lost_packets"),
-                count("lost_bytes"),
-                count("congestion_events"),
-            )
-        }
-        private fun discovery(value: JsonObject): DiscoveryStatus {
-            fun path(name: String) = value.getValue("paths").jsonObject.getValue(name).jsonObject.let {
-                DiscoveryPath(DiscoveryPathState.valueOf(it.text("state").replaceFirstChar(Char::uppercase)), it["reason"]?.jsonPrimitive?.contentOrNull)
-            }
-            return DiscoveryStatus(value.getValue("announcing").jsonPrimitive.boolean, path("local"), path("topic"))
-        }
         private fun routes(value: JsonObject) = value.getValue("routes").jsonArray.map { it.jsonObject }.map { Route(it.text("transport"), it.text("address")) }
         private fun JsonObject.text(name: String): String = getValue(name).jsonPrimitive.content
         internal fun GrantProfile.json(): JsonObject = buildJsonObject {
@@ -442,7 +310,7 @@ open class RockySession internal constructor(internal val client: RockyClient, o
                 }
             },
         )
-        internal fun revocations(value: JsonObject) = RevocationStatus(value.text("digest"), value.getValue("statements").jsonPrimitive.int)
+        internal fun revocations(value: JsonObject) = RevocationStatus(value.text("digest"), value.getValue("statements").jsonPrimitive.content.toULong())
         internal fun profile(value: JsonObject): GrantProfile {
             fun tables() = value.getValue("scopes").jsonArray.map { it.jsonPrimitive.content }.toSet()
             return when (val kind = value.text("kind")) {

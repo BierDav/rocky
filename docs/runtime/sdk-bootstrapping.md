@@ -89,33 +89,21 @@ new one installs successfully.
 
 ## Readiness
 
-The `status` call and Kotlin `readiness()` Flow carry `state`: `bootstrapping`
-while checkpoint-first intent or a staged import remains, `syncing` during an
-ordinary pass, `ready` when idle with valid authority, `revoked` after a verified
-[revocation notice](sdk-enrollment.md#renewal-revocation-and-logout), or `unavailable` after
-logout, expiry or during a generation rebuild. `ready` is true only in the
-`ready` state. During a join, rows are readable page by page while the state
-stays `bootstrapping`; a collection that already held rows keeps its previous
-projection until its import switches. A new join is not complete until
-bootstrap finishes. A failed bootstrap remains `bootstrapping` across reopen.
-Cancelling an ordinary sync clears its activity.
+Native `DatabaseStatus.data` and Kotlin `observeStatus()` expose bootstrap
+intent and counts independently of network activity and authority. There is
+no aggregate `ready` flag. Rows are readable page by page during a new import;
+a collection with a prior projection retains it until the import switches.
+A pending bootstrap survives reopen.
 
-While bootstrapping, `bootstrap` reports progress once a peer offered a
-checkpoint, and is `null` before that and in every other state:
+`bootstrapPending` is true before offers supply totals. `bootstrap` is null
+until progress is known, and otherwise retains `rowsDone`, `rowsTotal`,
+`scopesDone` and `scopesTotal`. Counts describe imported checkpoint rows;
+operations pulled afterward are separate. SDKs expose the native counts;
+applications may derive a percentage. Each committed page wakes observers.
 
-| Field | Meaning |
-| --- | --- |
-| `rows_done`, `rows_total` | Stored rows imported, of all offered checkpoints |
-| `scopes_done`, `scopes_total` | Collections whose import and catch-up completed |
-
-`rows_total` is fixed when the offers arrive; `rows_done` only grows, page by
-page, and each page wakes `status_next`. Kotlin exposes
-`Readiness.bootstrap: BootstrapProgress?` with a whole `percent`. The totals
-are kept in the bootstrap intent, so progress survives a reopen. Operations
-pulled after a checkpoint are not counted.
-
-`status_next` wakes on sync state changes as well as committed revisions; its
-token covers the state. Offline local databases can be ready without a network.
+Per-scope imports retain checkpoint/cursor evidence and generation rebuilds
+have separate progress. Query/write admission is checked by each operation.
+See [observable status](../proposals/observable-status.md) for the full contract.
 
 ## Bootstrap signers
 

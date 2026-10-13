@@ -30,7 +30,7 @@ class ActivityFiltersTest {
 
     @Test fun `native connection errors are classified as problems while graceful closure is not`() {
         fun entry(event: RockyEvent) = describe(event, emptyMap(), emptyMap(), emptyMap())
-        assertTrue(entry(RockyEvent.PeerUnreachable(1, 1, "node", "timeout")).isProblem)
+        assertTrue(entry(RockyEvent.PeerAttemptFailed(1, 1, "node", "timeout")).isProblem)
         assertTrue(entry(RockyEvent.LinkClosed(2, 2, "node", "failure", "stream reset")).isProblem)
         assertFalse(entry(RockyEvent.LinkClosed(3, 3, "node", "background", null)).isProblem)
     }

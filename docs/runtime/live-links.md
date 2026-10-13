@@ -8,7 +8,7 @@ defines the request lifecycle. Pair, Renew and Command retain their own streams.
 
 ## Authentication and ownership
 
-`rocky/link/2` reuses credential admission, revocation exchange and
+`rocky/link/3` reuses credential admission, revocation exchange and
 session-bound holding proofs, with a distinct signed handshake identity.
 Other versions are refused. Every data request retains the native authorization,
 page, chain, dependency and transaction checks. A changed authority ends the link.
@@ -23,7 +23,7 @@ Proved holdings and advertised state agree exactly. A proof of a peer's
 partition does not subscribe a reader to it. Unknown partitions are registered
 only by authorized keyless custody; readers install them through envelopes.
 
-The database's network service owns links. Detach, database close, offline mode
+The database's network service owns links. Detach, database close, disabled networking
 and disabling the worker close persistent links. Borrowed application transports,
 endpoints and routers remain open. Both workers must request persistence to
 keep a link. Explicit sync reuses the open link or opens one. When both workers
@@ -50,33 +50,23 @@ bounded batches and finishes healthy peers even when another publication fails.
 
 ## Status and lifecycle
 
-Network status and readiness expose each peer's `link`: `state` is `open`,
-`opening` during a dial/admission, or `closed`; `opened` is Unix seconds and
-`round_trip_ms` the selected path's round trip, both decimal strings or null.
-`paths` lists the transport's network paths, the selected one first, measured
-when status is read:
+Native network status exposes each peer's `link`, with `Open`, `Opening`,
+`Closing` or `Closed` state. `openedAtEpochSeconds` and `roundTripMillis` are
+nullable unsigned integers. `paths` retains selected path, direct/relay kind,
+local/remote addresses, round-trip microseconds, MTU, window and lifetime
+sent/received/lost/congestion counters. See the generated native
+[`PeerLink` and `LinkPath`](../../crates/rocky-sdk/src/status.rs) declarations.
 
-| Field | Meaning |
-| --- | --- |
-| `selected` | Whether data uses this path now |
-| `kind` | `direct` (IP) or `relay` |
-| `remote`, `local` | The peer's socket address or relay URL; this node's address or null |
-| `rtt_us` | Smoothed round trip in microseconds |
-| `mtu`, `window` | Current MTU and congestion window, in bytes |
-| `sent_bytes`, `sent_datagrams`, `received_bytes`, `received_datagrams` | Path lifetime totals |
-| `lost_packets`, `lost_bytes`, `congestion_events` | Path lifetime totals |
+An opening or closed link has no live paths. Closing links can retain their
+measurements until drained, but do not count as open. Cancelling a dial clears
+`Opening`. Lifecycle transitions wake status waits; measurement-only changes
+do not advance tokens. Explicit snapshots refresh measurements.
 
-Integers are decimal strings. Closed and opening links, and transports that
-measure nothing, such as the test hub, have an empty list. Cancelling a dial
-clears `opening`. Opening and closing wake the existing sync-status and
-readiness waits. Measurements do not advance tokens; poll status to follow
-them.
 `link_opened` and `link_closed` activity includes the peer and reason; an error
 close also carries the error. Duplicate replacement closes the displaced link.
 
-Disabling the worker waits for its pass and links to drain. Android's
-`enterBackground` uses that operation and blocks further inbound or outbound
-link admission; foreground allows links and enables the worker again.
+Disabling the worker waits for its pass and links to drain. `enterBackground` suspends admission and closes links while retaining the
+worker's enabled control. Foreground allows admission and resumes an enabled worker.
 The file, sessions and application-owned transport stay open. Desktop workers
 keep links open while online. See [Android](android.md#lifecycle).
 

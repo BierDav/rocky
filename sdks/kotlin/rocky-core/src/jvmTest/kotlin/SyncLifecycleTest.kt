@@ -21,8 +21,8 @@ class SyncLifecycleTest {
         try {
             b = RockyDatabase.join(File(root, "b"), definition, a.pairing(GrantProfile.Issuer).uri, PeerTransport.Iroh.isolated())
             a.addPeer(b.contact().uri)
-            val opened = withTimeout(5_000) { a.observeReadiness().first { it.peers.any { peer -> peer.link.state == LinkState.Open } } }
-            val link = opened.peers.first { it.link.state == LinkState.Open }.link
+            val opened = withTimeout(5_000) { a.observeStatus().first { it.network.peers.any { peer -> peer.link.state == LinkState.Open } } }
+            val link = opened.network.peers.first { it.link.state == LinkState.Open }.link
             assertNotNull(link.openedAtEpochSeconds)
             // The loopback connection reports its one direct path.
             val path = a.network().peers.first { it.link.state == LinkState.Open }.link.paths.first()
@@ -31,10 +31,10 @@ class SyncLifecycleTest {
             assertTrue(path.remote.startsWith("127.0.0.1:"))
             withTimeout(1_000) { a.enterBackground() }
             assertTrue(a.network().peers.all { it.link.state == LinkState.Closed && it.link.paths.isEmpty() })
-            val closed = withTimeout(1_000) { a.activity().first { it is RockyEvent.LinkClosed && it.reason == "offline" } } as RockyEvent.LinkClosed
+            val closed = withTimeout(1_000) { a.activity().first { it is RockyEvent.LinkClosed && it.reason == "suspended" } } as RockyEvent.LinkClosed
             assertNull(closed.error)
             a.enterForeground()
-            withTimeout(5_000) { a.observeReadiness().first { it.peers.any { peer -> peer.link.state == LinkState.Open } } }
+            withTimeout(5_000) { a.observeStatus().first { it.network.peers.any { peer -> peer.link.state == LinkState.Open } } }
         } finally {
             a.enterBackground()
             b?.enterBackground()
@@ -59,19 +59,19 @@ class SyncLifecycleTest {
             a.addPeer(b.contact().uri)
             // Nobody answers the closed peer's route, so a's dial stays open until cancelled.
             b.close()
-            fun dialing(readiness: Readiness) = readiness.peers.any { it.link.state == LinkState.Opening }
-            a.setOnline(true)
-            withTimeout(5_000) { a.observeReadiness().first(::dialing) }
+            fun dialing(readiness: DatabaseStatus) = readiness.network.peers.any { it.link.state == LinkState.Opening }
+            a.setNetworkingEnabled(true)
+            withTimeout(5_000) { a.observeStatus().first(::dialing) }
             val before = System.nanoTime()
             withTimeout(1_000) { a.enterBackground() }
             val background = System.nanoTime() - before
             assertTrue(background < 1_000_000_000)
             assertTrue(a.network().peers.none { it.link.state == LinkState.Opening })
             val foreground = System.nanoTime()
-            // Foregrounding itself enables the worker; no timer or explicit sync is supplied.
+            // Foregrounding resumes the enabled worker without an explicit sync.
             withTimeout(1_000) {
                 a.enterForeground()
-                a.observeReadiness().first(::dialing)
+                a.observeStatus().first(::dialing)
             }
             println("background cancelled in ${background / 1_000_000} ms; foreground dial in ${(System.nanoTime() - foreground) / 1_000_000} ms")
             withTimeout(1_000) { a.enterBackground() }

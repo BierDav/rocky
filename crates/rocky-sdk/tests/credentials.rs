@@ -349,9 +349,9 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     assert_eq!(identity(root, "w")?["keys"], json!({"notes": [1]}));
 
     // The revoked reader gets neither the new key nor new rows.
-    assert!(c.sync().await.is_err());
+    assert!(common::exchange_failed(&c.sync().await));
     assert!(c.call(json!({"type": "renew"})).await.is_err());
-    assert_eq!(c.ok(json!({"type": "status"})).await["state"], "revoked");
+    assert!(!c.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null());
     assert_eq!(secret(root, "c", "reader.items.2")?, None);
     assert!(secrets(root, "c")?.iter().all(|name| !name.ends_with(".2")));
     assert_eq!(identity(root, "c")?["keys"], json!({"items": [1]}));
@@ -366,9 +366,8 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
     }
 
     let reopened = reopen(root, &hub, "c")?;
-    assert_eq!(
-        reopened.ok(json!({"type": "status"})).await["state"],
-        "revoked"
+    assert!(
+        !reopened.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null()
     );
     reopened.close().await;
     // A local file cannot forge a publisher's revocation notice.
@@ -511,7 +510,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     assert_eq!(secret(root, "b", "reader.items.2")?, Some(made));
     assert_eq!(items(&b).await?, ["After", "Before"]);
     let c = reopen(root, &hub, "c")?;
-    assert!(c.sync().await.is_err());
+    assert!(common::exchange_failed(&c.sync().await));
     assert_eq!(secret(root, "c", "reader.items.2")?, None);
     for device in [&a, &b, &c] {
         device.close().await;

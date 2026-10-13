@@ -47,8 +47,11 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     b.sync().await.map_err(|error| error.to_string())?;
     assert_eq!(c.titles().await, ["Milk"]);
     let met = c.peer(&b_node).await;
-    assert_eq!(met["configured"], false, "{met}");
-    assert_eq!(met["state"], "connected", "{met}");
+    assert_eq!(met["is_configured"], false, "{met}");
+    assert!(
+        met["last_authenticated_exchange_at_epoch_seconds"].is_number(),
+        "{met}"
+    );
 
     // A revokes D while D is away and tells C, then is gone.
     a.ok(json!({"type": "revoke", "node": d_node})).await;
@@ -60,7 +63,7 @@ async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_r
     d.add(2, "Jam").await;
     let refused = d.sync().await.err().ok_or("a revoked device synced")?;
     assert_eq!(refused["code"], "revoked", "{refused}");
-    assert_eq!(d.ok(json!({"type": "status"})).await["state"], "revoked");
+    assert!(!d.ok(json!({"type": "status"})).await["authority"]["verified_revocation"].is_null());
     assert_eq!(c.titles().await, ["Milk"]);
     assert_eq!(c.peer(&d_node).await, serde_json::Value::Null);
     // D stops syncing: it is refused before it dials.

@@ -1,3 +1,4 @@
+mod status;
 use super::*;
 use crate::{
     FileSecretStore,
@@ -645,4 +646,21 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
             Ok(())
         })
         .await
+}
+
+fn completed_peers(report: &Value) -> usize {
+    report["peers"]
+        .as_array()
+        .expect("native peer reports")
+        .iter()
+        .filter(|peer| {
+            peer["attempts"]
+                .as_array()
+                .expect("native attempts")
+                .iter()
+                .any(|attempt| {
+                    attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                })
+        })
+        .count()
 }

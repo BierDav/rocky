@@ -73,7 +73,7 @@ async fn devices(issuer: &Device) -> BTreeMap<String, Value> {
 /// automatic first sync has finished.
 async fn settle(device: &Device) -> Value {
     let mut status = device.ok(json!({"type": "status"})).await;
-    while status["state"] != "ready" {
+    while status["data"]["bootstrap_pending"] == true {
         status = device
             .ok(json!({"type": "status_next", "after": status["token"]}))
             .await;
@@ -82,7 +82,7 @@ async fn settle(device: &Device) -> Value {
 }
 async fn online(device: &Device, online: bool) {
     device
-        .ok(json!({"type": "connection", "online": online}))
+        .ok(json!({"type": "networking_control", "enabled": online}))
         .await;
 }
 async fn synced(device: &Device) -> Result<Value, Failure> {
@@ -315,9 +315,14 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     assert_eq!(record["expires"], after["expires"]);
 
     m.ok(json!({"type": "peer_remove", "node": a_node})).await;
-    assert_eq!(m.ok(json!({"type": "peers"})).await["issuer_contact"], true);
+    assert!(
+        !m.ok(json!({"type": "peers"})).await["renewal_routes"]
+            .as_array()
+            .ok_or("routes")?
+            .is_empty()
+    );
     m.add(1, "Milk").await;
-    assert_eq!(synced(&m).await?["peers"], 1);
+    assert_eq!(common::identity::completed_peers(&synced(&m).await?), 1);
     assert_eq!(b.titles().await, ["Milk"]);
     for device in [&b, &m] {
         device.close().await;
@@ -459,9 +464,11 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     settle(&m).await;
     let m_node = m.node().await;
     m.ok(json!({"type": "renew"})).await;
-    a.ok(json!({"type": "connection", "online": false})).await;
+    a.ok(json!({"type": "networking_control", "enabled": false}))
+        .await;
     m.ok(json!({"type": "renew"})).await;
-    a.ok(json!({"type": "connection", "online": true})).await;
+    a.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     assert_eq!(devices(&b).await[&m_node]["kind"], "renewed");
     synced(&a).await?;
     let (at_a, at_b) = (devices(&a).await, devices(&b).await);

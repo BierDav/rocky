@@ -80,14 +80,37 @@ impl Drop for ShortLink<'_> {
     }
 }
 impl Registry {
+    pub fn nodes(&self) -> Vec<PublicKey> {
+        let mut nodes: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        nodes.extend(
+            self.opening
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .keys()
+                .copied(),
+        );
+        nodes
+    }
     pub fn status(&self, peer: PublicKey) -> Value {
         let source = {
             let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries
-                .get(&peer)
-                .map(|entry| (entry.opened_at, entry.paths.clone()))
+            entries.get(&peer).map(|entry| {
+                (
+                    entry.opened_at,
+                    entry.paths.clone(),
+                    entry.close.borrow().is_some()
+                        || entry.handle.is_closed()
+                        || entry.authority.has_changed().unwrap_or(true),
+                )
+            })
         };
-        if let Some((opened, source)) = source {
+        if let Some((opened, source, closing)) = source {
             // Measured now, outside the registry lock.
             let paths = source.map(|source| source.paths()).unwrap_or_default();
             let round_trip = paths
@@ -95,7 +118,7 @@ impl Registry {
                 .find(|path| path.selected)
                 .map(|path| path.rtt.as_millis().to_string());
             return json!({
-                "state": "open",
+                "state": if closing { "closing" } else { "open" },
                 "opened": opened.to_string(),
                 "round_trip_ms": round_trip,
                 "paths": paths.iter().map(path_json).collect::<Vec<_>>(),
@@ -312,6 +335,11 @@ impl Node {
                         return;
                     }
                     let _opening = node.opening(&service, peer);
+                    let mut attempt = node.observations.begin(
+                        peer.to_hex(),
+                        crate::AttemptOperation::OpenLink,
+                        crate::AttemptStage::Dial,
+                    );
                     let result = async {
                         let stream = crate::enrollment::dial(
                             &*service.transport,
@@ -319,10 +347,16 @@ impl Node {
                             Protocol::Link,
                         )
                         .await?;
+                        attempt.stage(crate::AttemptStage::Admission);
                         node.admit_link(service.clone(), stream, Some(peer), settings, None)
                             .await
                     }
                     .await;
+                    let failure = result
+                        .as_ref()
+                        .err()
+                        .map(|error| crate::status::failure(error, &attempt.current_stage()));
+                    attempt.finish(failure);
                     if let Err(error) = result {
                         {
                             let mut retries =
@@ -337,7 +371,7 @@ impl Node {
                         }
                         // Reconciliation retries the link; only busy refusal permits native sync.
                         node.activity.record_changed(
-                            "link_unavailable",
+                            "link_attempt_failed",
                             json!({"peer":peer.to_hex(),"error":error.to_string()}),
                         );
                     }

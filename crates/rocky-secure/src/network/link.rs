@@ -13,7 +13,9 @@ pub const SIGNAL_SCOPES: usize = 64;
 pub enum CloseReason {
     Authority,
     Duplicate,
-    Offline,
+    NetworkingDisabled,
+    Suspended,
+    WorkerDisabled,
     Detached,
     Busy,
 }
@@ -135,6 +137,9 @@ impl std::fmt::Display for Busy {
     }
 }
 impl std::error::Error for Busy {}
+fn timed_out(message: &'static str) -> Error {
+    Error::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
+}
 impl Link {
     /// Both ends confirm their independent link budget before any data channel opens.
     pub async fn ready(&mut self, persistent: bool) -> Result<bool, Error> {
@@ -144,7 +149,7 @@ impl Link {
             .await;
         let frame = timeout(TIMEOUT, self.reader.receive())
             .await
-            .map_err(|_| denied("link ready timeout"))??;
+            .map_err(|_| timed_out("link ready timeout"))??;
         match frame.message {
             Message::Ready { persistent: remote } if frame.direction != self.direction => {
                 sent?;
@@ -535,7 +540,7 @@ impl Writer {
     pub async fn finish(&mut self) -> Result<(), Error> {
         timeout(TIMEOUT, self.stream.shutdown())
             .await
-            .map_err(|_| denied("link finish timeout"))?
+            .map_err(|_| timed_out("link finish timeout"))?
             .map_err(Error::Io)
     }
     pub async fn send(&mut self, frame: Frame) -> Result<(), Error> {
@@ -557,7 +562,7 @@ impl Writer {
             self.stream.flush().await
         })
         .await
-        .map_err(|_| denied("link write timeout"))?
+        .map_err(|_| timed_out("link write timeout"))?
         .map_err(Error::Io)?;
         self.sequence = self
             .sequence
@@ -603,7 +608,7 @@ impl Reader {
             Ok(frame)
         })
         .await
-        .map_err(|_| denied("link read timeout"))?
+        .map_err(|_| timed_out("link read timeout"))?
     }
 }
 #[cfg(test)]
@@ -612,7 +617,7 @@ mod tests {
     #[test]
     fn channels_are_bounded_and_control_has_its_own_channel() {
         let close = || Message::Close {
-            reason: CloseReason::Offline,
+            reason: CloseReason::NetworkingDisabled,
         };
         assert!(Frame::new(false, close()).validate().is_ok());
         assert!(
@@ -711,12 +716,13 @@ mod tests {
     }
     #[test]
     fn only_current_link_name_and_handshake_label() {
-        // Frames without Ping and Pong took the new name; the handshake is unchanged.
+        // Explicit control close reasons use the current wire name; admission is unchanged.
         assert_eq!(
-            rocky_core::net::Protocol::named(b"rocky/link/2"),
+            rocky_core::net::Protocol::named(b"rocky/link/3"),
             Some(rocky_core::net::Protocol::Link)
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
+        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
         assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v1");
     }
 }

@@ -4,8 +4,6 @@ import androidx.room.Room
 import androidx.room.immediateTransaction
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteException
-import androidx.sqlite.driver.bundled.BundledSQLiteDriver
-import androidx.sqlite.driver.bundled.SQLITE_OPEN_READONLY
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import rocky.*
@@ -50,11 +48,17 @@ class ConfirmedRowsTest {
         commands = CommandSet(listOf(Restock))
     }
     private fun loopback(): PeerTransport = PeerTransport.Iroh.isolated()
-    private fun bundles(directory: File): Long = BundledSQLiteDriver().open(File(directory, "rocky.sqlite").path, SQLITE_OPEN_READONLY).use { file ->
-        file.prepare("SELECT count(DISTINCT handle) FROM secure_bundle_handles").use {
-            it.step()
-            it.getLong(0)
+    private fun bundles(directory: File): Long {
+        // Keep another SQLite library out of the process while Rocky holds the WAL.
+        val process = ProcessBuilder("sqlite3", "-readonly", File(directory, "rocky.sqlite").path, "SELECT count(DISTINCT handle) FROM secure_bundle_handles").start()
+        check(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+            process.destroyForcibly().waitFor()
+            "SQLite inspection timed out"
         }
+        val output = process.inputStream.bufferedReader().readText()
+        val error = process.errorStream.bufferedReader().readText()
+        check(process.exitValue() == 0) { error }
+        return output.trim().toLong()
     }
 
     @Test fun daosReadConfirmedRowsAndTheirWritesFail() = runBlocking {

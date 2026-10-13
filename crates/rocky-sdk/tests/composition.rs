@@ -239,10 +239,9 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
     let serving = creator.attach(Network::Owned(memory(&hub, "a"))).await?;
     let syncing = member.attach(Network::Owned(memory(&hub, "b"))).await?;
     let (creator_client, member_client) = (Client::new(&creator)?, Client::new(&member)?);
-    assert_eq!(
-        member_client.sync().await.map_err(|e| e.to_string())?["state"],
-        "connected"
-    );
+    assert!(support::reconciled(
+        &member_client.sync().await.map_err(|e| e.to_string())?
+    ));
     assert_eq!(member_client.titles().await, ["1.0", "1.1", "2.0", "2.1"]);
     assert_eq!(creator_client.titles().await, member_client.titles().await);
     syncing.close().await;

@@ -14,7 +14,7 @@ val db = RockyDatabase.local(directory, schema, secrets = mySecretStore)
 val session = db.openSession()
 val authority = session.credentials.status()
 val reads = session.observe(schema.table("items").query())
-val progress = session.readiness()
+val progress = session.observeStatus()
 val network = db.attach(PeerTransport.Endpoint(myEndpoint))
 network.close() // database and application endpoint continue
 session.close() // other sessions continue
@@ -54,12 +54,10 @@ change. After renewal, fresh calls use current authority and old
 continuations refuse. Errors carry stable `code`, `retryable` and a
 diagnostic `message`.
 
-`readiness()` is a cold conflated Flow of committed revision, generation and
-backfill progress, credential epoch/expiry/logout/revocation, open-ticket counts, network
-attachment and [bootstrap/sync state](sdk-bootstrapping.md#readiness), built on
-`status` and `status_next(after = token)` so registration cannot miss a racing
-revision. Authority changes without a revision are seen within one second.
-`ready` describes local installation and credentials, not remote completeness.
+`observeStatus()` is a cold Flow adapting native `statusAfter(token)` waits.
+It exposes independent authority, data, network and coordination facts through
+generated native types. Expiry and runtime transitions wake observers without
+health polling. See [observable status](../proposals/observable-status.md).
 
 Foreign cancellation abandons the wait; admitted writes keep running. Persist
 the `handle` passed to `write` before writing, then `session.reconcile(handle)`
@@ -78,7 +76,7 @@ jars, `Consumer.kt`, `consumer.jar`, a launcher and a SHA-256 inventory.
 [Releases](../releasing.md) publish the jar to GitHub Packages as
 `rocky:rocky-core-jvm` and the directory as a release asset. `sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:qualifyPackage` copies
 only artifacts outside the repository and runs with an empty environment and
-only Java on `PATH`. It covers local sessions, readiness Flow and cancellation,
+only Java on `PATH`. It covers local sessions, status Flow and cancellation,
 handle reconciliation, Kotlin handlers, durable tickets, network ownership,
 fresh restore and additive upgrade with reopen, on a development coordinator.
 The issuer backup is restored with an issuer invitation, preserving access to

@@ -16,21 +16,19 @@ import rocky.internal.native.prepareDevice
 /** Database ownership is independent of sessions and of an optional network. */
 class RockyDatabase private constructor(
     private val native: NativeDatabase,
+    nativeSession: NativeDatabaseSession,
     client: RockyClient,
     domain: String,
     issuer: Boolean,
-) : RockySession(client, domain, issuer) {
-    private val lifetime = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+) : RockySession(nativeSession, client, domain, issuer) {
     private val lifecycle = Mutex()
     private var closed = false
-    private var automaticSync = false
-    private var synchronizing: Job? = null
 
     /** The service attached by create/join/open; closing it leaves the database open. */
     val openedNetwork: RockyNetworkService? = native.openedNetwork()?.let(::RockyNetworkService)
 
     /** Each session owns its observations and cancellation, while sharing committed storage. */
-    fun openSession(): RockySession = RockySession(RockyClient(SessionTransport(native.session(), domain)), domain, isIssuer)
+    fun openSession(): RockySession = native.session().let { session -> RockySession(session, RockyClient(SessionTransport(session, domain)), domain, isIssuer) }
     suspend fun attach(transport: PeerTransport): RockyNetworkService {
         currentCoroutineContext().ensureActive()
         var attached: RockyNetworkService? = null
@@ -51,19 +49,12 @@ class RockyDatabase private constructor(
      * endpoint stay open, and reads and writes continue; acknowledged writes are already durable.
      */
     suspend fun enterBackground() = lifecycle.withLock {
-        setAutomaticSync(false)
-        synchronizing?.cancelAndJoin()
-        synchronizing = null
         client.call(request("network_background"))
     }
 
     /** Allows live links again and resumes automatic sync with an immediate pass if opened with it. */
     suspend fun enterForeground() = lifecycle.withLock {
         client.call(request("network_foreground"))
-        if (automaticSync && synchronizing == null) {
-            val status = setAutomaticSync(true)
-            synchronizing = lifetime.launch { observeSync(status) }
-        }
     }
 
     /**
@@ -81,7 +72,6 @@ class RockyDatabase private constructor(
         lifecycle.withLock {
             if (!closed) {
                 closed = true
-                lifetime.cancel()
                 try {
                     super.close()
                 } finally {
@@ -104,9 +94,10 @@ class RockyDatabase private constructor(
                     val native = nativeCall { open() }
                     try {
                         val domain = native.scope()
-                        val client = RockyClient(SessionTransport(native.session(), domain))
+                        val session = native.session()
+                        val client = RockyClient(SessionTransport(session, domain))
                         val info = client.call(request("domain"))
-                        RockyDatabase(native, client, domain, info.getValue("issuer").jsonPrimitive.boolean).also { opened = it }
+                        RockyDatabase(native, session, client, domain, info.getValue("issuer").jsonPrimitive.boolean).also { opened = it }
                     } catch (error: Throwable) {
                         native.closeAfterFailure()
                         throw error
@@ -114,7 +105,7 @@ class RockyDatabase private constructor(
                 }
                 currentCoroutineContext().ensureActive()
                 if (automaticSync) {
-                    database.automaticSync = true
+                    database.setAutomaticSync(true)
                     database.enterForeground()
                 }
                 return database
@@ -286,8 +277,10 @@ private fun network(peers: PeerTransport): NativeNetwork = when (peers) {
         }.toString(),
     )
 }
-private suspend fun <T> nativeCall(call: suspend () -> T): T = try {
+internal suspend fun <T> nativeCall(call: suspend () -> T): T = try {
     call()
+} catch (error: NativeException.Request) {
+    throw RockyException(error.code, error.retryable, error.detail)
 } catch (error: NativeException.Failure) {
     throw RockyException("storage", true, error.detail)
 }

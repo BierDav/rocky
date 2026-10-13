@@ -19,6 +19,7 @@ mod scheduling;
 mod schema;
 mod secrets;
 mod service;
+mod status;
 mod sync;
 pub mod transport;
 mod typed;
@@ -45,6 +46,7 @@ pub use rocky_core::{
 pub use rocky_credentials as credentials;
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
+pub use status::*;
 pub use typed::{Access, Located, MAX_OBSERVED, TypedApp, TypedError, TypedRow};
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// Rocky's handlers for an application-owned iroh endpoint, and the iroh

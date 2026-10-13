@@ -61,7 +61,7 @@ class LocalAvailabilityTest {
                 println("LOCAL items=${withTimeoutOrNull(1_000) { phone.repository.observe(list).first() }}")
                 throw error
             }
-            laptop.rocky.setOnline(false)
+            laptop.rocky.setNetworkingEnabled(false)
             repeat(10) { index ->
                 val completed = index % 2 == 0
                 val started = System.nanoTime()

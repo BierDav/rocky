@@ -10,6 +10,7 @@ mod mesh;
 mod partition;
 mod registry;
 mod shared;
+mod status;
 use crate::{
     Failure,
     domain::Domain,
@@ -303,6 +304,11 @@ pub(crate) struct Node {
     pub(crate) discovery_skew: AtomicU64,
     /// The application's coordinator, when it composed strong commands.
     coordinator: Option<Arc<dyn Coordinator>>,
+    observations: crate::status::Observations,
+    node_identity: Result<String, String>,
+    #[cfg(test)]
+    status_clock: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
+    last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
     /// Takes an unassigned domain of a coordination service for this
     /// executing device, once per fencing epoch.
     acquire: Option<Acquire>,
@@ -326,7 +332,43 @@ impl Node {
         coordinator: Option<Arc<dyn Coordinator>>,
         acquire: Option<Acquire>,
     ) -> Self {
+        let observations = crate::status::Observations::default();
+        let coordinator = coordinator.map(|inner| {
+            Arc::new(crate::status::ObservedCoordinator {
+                inner,
+                observations: observations.clone(),
+            }) as Arc<dyn Coordinator>
+        });
+        let acquire = acquire.map(|inner| {
+            let observations = observations.clone();
+            Arc::new(move |scope, epoch| {
+                let future = inner(scope, epoch);
+                let attempt = observations.begin(
+                    "coordinator".into(),
+                    crate::AttemptOperation::CoordinatorAcquire,
+                    crate::AttemptStage::CoordinatorRequest,
+                );
+                Box::pin(async move {
+                    let result = future.await;
+                    attempt.finish(
+                        result
+                            .as_ref()
+                            .err()
+                            .map(crate::status::coordination_failure),
+                    );
+                    result
+                }) as rocky_core::CoordinationFuture<'static, ()>
+            }) as Acquire
+        });
         Self {
+            #[cfg(test)]
+            status_clock: Default::default(),
+            node_identity: vault
+                .get("node")
+                .map(|key| PrivateKey::from_bytes(&key).public_key().to_hex())
+                .map_err(|error| error.to_string()),
+            last_reconciliation: Default::default(),
+            observations,
             owner: Default::default(),
             replica,
             granted: std::sync::Mutex::new(settings.granted(&domain)),
@@ -706,7 +748,7 @@ impl Node {
                     Ok(json!({"uri": uri, "node": node.to_hex(), "routes": routes}))
                 }
                 _ => self
-                    .sync(transport.ok_or(ServiceError::NetworkRequired("sync"))?)
+                    .sync_optional(transport)
                     .await
                     .map(|(report, _)| report),
             }
@@ -729,7 +771,13 @@ impl Node {
         if self.ended.lock().await.is_some()
             && !matches!(
                 kind,
-                "domain" | "network" | "status" | "status_next" | "activity" | "activity_next"
+                "domain"
+                    | "network"
+                    | "peers"
+                    | "status"
+                    | "status_next"
+                    | "activity"
+                    | "activity_next"
             )
         {
             return Err(refused("this device logged out of the domain"));
@@ -804,7 +852,7 @@ impl Node {
                     if let Some(service) = self.current() {
                         service
                             .live
-                            .close(rocky_secure::network::link::CloseReason::Offline);
+                            .close(rocky_secure::network::link::CloseReason::WorkerDisabled);
                     }
                     // Acknowledge only after the worker has dropped its pass.
                     let mut running = self.worker_running.subscribe();
@@ -814,24 +862,7 @@ impl Node {
                     }
                     self.synced(json!({"state": "idle", "retry": false}));
                 }
-                Ok(self.sync_status.borrow().clone())
-            }
-            "sync_next" => {
-                let after = request["after"]
-                    .as_str()
-                    .ok_or_else(|| refused("after must be a sync token"))?;
-                let mut status = self.sync_status.subscribe();
-                let mut closing = client.closing.subscribe();
-                loop {
-                    let current = status.borrow_and_update().clone();
-                    if current["token"].as_str() != Some(after) {
-                        return Ok(current);
-                    }
-                    tokio::select! {
-                        _ = status.changed() => {},
-                        _ = closing.wait_for(|closing| *closing) => return Err(ServiceError::Closed("session").into()),
-                    }
-                }
+                Ok(json!({"enabled": enabled}))
             }
             #[cfg(feature = "qualification")]
             "network_fault_close" => {
@@ -857,16 +888,19 @@ impl Node {
             }
             "network_background" => {
                 self.foreground.store(false, Ordering::SeqCst);
+                self.control_sync();
+                let mut running = self.worker_running.subscribe();
+                running.wait_for(|running| !running).await?;
                 if let Some(service) = self.current() {
                     service
                         .live
-                        .close(rocky_secure::network::link::CloseReason::Offline);
+                        .close(rocky_secure::network::link::CloseReason::Suspended);
                     service.live.wait_empty().await;
                 }
                 self.discovery_foreground(false).await;
                 Ok(json!({}))
             }
-            "network" => Ok(self.network_status().await),
+            "network" => Ok(serde_json::to_value(self.observed_network().await?)?),
             "pairing" | "renew" | "sync" | "contact" | "authors" => {
                 self.networked(client, kind, request).await
             }
@@ -903,13 +937,11 @@ impl Node {
                 )
             }
             "peers" => {
-                if let Some(link) = self.current() {
-                    Box::pin(self.resolve_saved_contacts(&*link.transport)).await;
-                }
+                let network = self.observed_network().await?;
                 Ok(json!({
-                    "peers": self.peers().await,
-                    "discovery": self.discovery_status(),
-                    "issuer_contact": self.settings.lock().await.issuer_contact(),
+                    "peers": network.peers,
+                    "discovery": network.discovery,
+                    "renewal_routes": self.settings.lock().await.renewal_routes(),
                 }))
             }
             "enrollment_route" => Ok(json!({"uri": crate::route_enrollment(
@@ -1004,31 +1036,37 @@ impl Node {
                 self.logout(request["purge"].as_bool().unwrap_or(false))
                     .await
             }
-            "connection" => {
-                let enabled = request["online"]
+            "networking_control" => {
+                let enabled = request["enabled"]
                     .as_bool()
-                    .ok_or("online must be boolean")?;
+                    .ok_or("enabled must be boolean")?;
                 if self.online.swap(enabled, Ordering::SeqCst) != enabled {
-                    self.activity
-                        .record(if enabled { "online" } else { "offline" }, json!({}));
+                    self.activity.record(
+                        if enabled {
+                            "networking_enabled"
+                        } else {
+                            "networking_disabled"
+                        },
+                        json!({}),
+                    );
                 }
                 if enabled {
                     self.reset_retry(None);
                     // A pass with nothing to dial republishes the current status.
-                    if self.sync_status.borrow()["state"] == "offline" {
+                    if self.sync_status.borrow()["state"] == "networking_disabled" {
                         self.synced(json!({"state": "idle", "retry": false}));
                     }
                 }
                 if !enabled && let Some(service) = self.current() {
                     service
                         .live
-                        .close(rocky_secure::network::link::CloseReason::Offline);
+                        .close(rocky_secure::network::link::CloseReason::NetworkingDisabled);
                 }
                 self.control_sync();
                 if !enabled && let Some(service) = self.current() {
                     service.live.wait_empty().await;
                 }
-                Ok(json!({"online": enabled}))
+                Ok(json!({"enabled": enabled}))
             }
 
             "mutation_progress" => {
@@ -1092,6 +1130,7 @@ impl Node {
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
         *settings = draft;
+        self.observations.touch();
         Ok(result)
     }
     /// Issues raw grants or a profile to a prepared device, as the
@@ -1228,18 +1267,22 @@ impl Node {
         self.forget_readers().await;
         self.status(client).await
     }
-    /// Every peer met or kept as a contact: its routes, whether it is a
-    /// configured contact, and the last attempt to sync with it. A peer met
-    /// only through its own session has no routes.
+    /// Contacts, retained peer history and current link resources.
+    /// Link resources remain visible after their history is evicted.
     async fn peers(&self) -> Vec<Value> {
         let settings = self.settings.lock().await;
         let reached = self.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+        let live_nodes = self
+            .current()
+            .map(|service| service.live.nodes())
+            .unwrap_or_default();
         let nodes: std::collections::BTreeSet<PublicKey> = settings
             .peers
             .keys()
             .chain(met.keys())
-            .filter(|node| !settings.revocations.revokes(node))
+            .chain(live_nodes.iter())
+            .filter(|node| live_nodes.contains(node) || !settings.revocations.revokes(node))
             .copied()
             .collect();
         nodes
@@ -1258,7 +1301,7 @@ impl Node {
                     "issuer": settings.issuers.contains(&node),
                     "configured": contact.is_some(),
                     "local": settings.contact_meta.get(&node).is_some_and(|meta| meta.local),
-                    "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else { "session" }, |meta| meta.source.as_str()),
+                    "source": settings.contact_meta.get(&node).map_or(if contact.is_some() { "enrollment" } else if met.contains_key(&node) { "session" } else { "link" }, |meta| meta.source.as_str()),
                     "choice": self.choices.lock().unwrap_or_else(PoisonError::into_inner).get(&node).copied().unwrap_or("not_considered"),
                     "routes": contact.map(|contact| contact.routes.clone()).unwrap_or_default(),
                     "link": self.current().map_or_else(|| json!({"state":"closed","opened":null,"round_trip_ms":null,"paths":[]}), |service| service.live.status(node)),
@@ -1268,29 +1311,6 @@ impl Node {
                 })
             })
             .collect()
-    }
-    /// The network service, whatever the state of the database's sessions.
-    async fn network_status(&self) -> Value {
-        let peers = self.peers().await;
-        let Some(link) = self.current() else {
-            return json!({"attached": false, "peers": peers, "discovery": self.discovery_status()});
-        };
-        json!({
-            "attached": true,
-            "kind": link.transport.kind(),
-            "owned": link.owned,
-            "online": self.online.load(Ordering::SeqCst),
-            "sync": self.sync_status.borrow().clone(),
-            "draining": *link.stage.borrow() != Stage::Open,
-            "discovery": self.discovery_status(),
-            "inbound": {
-                "limit": INBOUND,
-                "active": INBOUND - link.active.available_permits(),
-                "served": link.served.load(Ordering::Relaxed).to_string(),
-                "refused": link.refused.load(Ordering::Relaxed).to_string(),
-            },
-            "peers": peers,
-        })
     }
     fn current(&self) -> Option<Arc<Link>> {
         self.current
@@ -1477,72 +1497,8 @@ impl Node {
             "authors": settings.minting,
         }))
     }
-    /// What an application shows of a database besides its rows: whether
-    /// it is ready, its generation, authority and unsettled tickets, and
-    /// the committed revision. `token` changes whenever any of it does.
     async fn readiness(&self) -> Result<Value, Failure> {
-        let generation = self.generation().await?;
-        let settings = self.settings.lock().await.clone();
-        let logged_out = self.ended.lock().await.is_some() || settings.logged_out;
-        let revocation = settings.revocation(&self.path)?;
-        let expired = settings.expires() <= now()?;
-        let mut tickets = BTreeMap::<String, u64>::new();
-        for ticket in self.replica.open_tickets(usize::MAX).await? {
-            let state = crate::commands::ticket_json(&self.domain.app, &ticket)?["state"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            *tickets.entry(state).or_default() += 1;
-        }
-        let revision = *self.replica.observe_revision().borrow();
-        let mut bootstrapping = self.path.with_file_name("bootstrap.json").exists()
-            || *self.sync_state.borrow() == "bootstrapping";
-        for scope in &self.scopes() {
-            bootstrapping |= self.replica.rebootstrap_progress(*scope).await?.is_some()
-                || self.replica.horizon_rebootstrap_required(*scope).await?;
-        }
-        let state = if revocation.is_some() {
-            "revoked"
-        } else if logged_out || expired || !generation["rebuilding"].is_null() {
-            "unavailable"
-        } else if bootstrapping {
-            "bootstrapping"
-        } else if *self.sync_state.borrow() == "syncing" {
-            "syncing"
-        } else {
-            "ready"
-        };
-        let mut status = json!({
-            "state": state,
-            "ready": state == "ready",
-            "bootstrap": self.bootstrap_progress().await?,
-            "revision": revision.to_string(),
-            "generation": generation,
-            "authority": {
-                "revocations": settings.revocation_status()?,
-                "expires": settings.expires().to_string(),
-                "expired": expired,
-                "logged_out": logged_out,
-                "revoked": revocation.is_some(),
-                "profile": settings.profile,
-                "issuer_contact": settings.issuer_contact(),
-            },
-            "key_epochs": settings.keys.iter().map(|(collection, epochs)| json!({"collection":collection,"epochs":epochs,"current":epochs.iter().max()})).collect::<Vec<_>>(),
-            "tickets": tickets,
-            "network": {"attached": self.current().is_some(), "discovery": self.discovery_status(), "peers": self.peers().await, "link_revision": self.link_revision.load(Ordering::SeqCst).to_string()},
-        });
-        let mut token_status = status.clone();
-        if let Some(peers) = token_status["network"]["peers"].as_array_mut() {
-            // Path measurements change continuously and must not move the token.
-            for peer in peers {
-                peer["link"]["round_trip_ms"] = Value::Null;
-                peer["link"]["paths"] = json!([]);
-            }
-        }
-        let token = HEXLOWER
-            .encode(&commitment("rocky.sdk.status.v1", token_status.to_string().as_bytes())[..16]);
-        status["token"] = json!(token);
-        Ok(status)
+        Ok(serde_json::to_value(self.observed_status().await?)?)
     }
     /// How far the bootstrap intent has imported, in the stored rows of the
     /// checkpoints its peer offered; `null` until a peer offered one.
@@ -1584,11 +1540,18 @@ impl Node {
     async fn readiness_after(&self, client: &Client, after: &str) -> Result<Value, Failure> {
         let mut revisions = self.replica.observe_revision();
         let mut imports = self.replica.observe_imports().await;
+        let mut authority = self.replica.observe_authority().await;
         let mut sync_state = self.sync_state.subscribe();
         let mut closing = client.closing.subscribe();
         let mut events = self.sync_events.subscribe();
         let mut network = self.sync_status.subscribe();
+        let mut observations = self.observations.subscribe();
+        let mut worker = self.worker_running.subscribe();
+        let mut control = self.sync_control.subscribe();
         loop {
+            let mut transport = self
+                .current()
+                .and_then(|service| service.transport.connectivity());
             let status = self.readiness().await?;
             if status["token"] != after {
                 return Ok(status);
@@ -1605,13 +1568,20 @@ impl Node {
                 }
                 _ = events.changed() => {},
                 _ = network.changed() => {},
+                _ = observations.changed() => {},
+                _ = worker.changed() => {},
+                _ = authority.changed() => {},
+                _ = control.changed() => {},
+                _ = async { match transport.as_mut() { Some(events) => { let _ = events.changed().await; }, None => std::future::pending().await } } => {},
                 changed = imports.changed() => {
                     changed.map_err(|_| ServiceError::Closed("database"))?
                 }
                 _ = async {
-                    let expires = status["authority"]["expires"].as_str().ok_or("missing expiry")?.parse::<u64>()?;
-                    let time = now()?;
-                    if expires > time {
+                    let time = self.status_time()?;
+                    let settings = self.settings.lock().await;
+                    let expires = std::iter::once(settings.expires()).chain(settings.revocations.statements().map(|notice| notice.statement.expiry_day().saturating_mul(rocky_credentials::DAY))).filter(|expires| *expires > time).min();
+                    drop(settings);
+                    if let Some(expires) = expires {
                         tokio::time::sleep(Duration::from_secs(expires - time)).await;
                     } else {
                         std::future::pending().await
@@ -1899,7 +1869,7 @@ impl Node {
             .ok_or(ServiceError::NetworkRequired("bootstrap"))?;
         let mut stage = link.stage.subscribe();
         tokio::select! {
-            result = self.sync(&*link.transport) => result.map(|_| ()),
+            result = self.sync_optional(Some(&*link.transport)) => result.map(|_| ()),
             _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => Err(ServiceError::Closed("network service").into()),
         }
     }
@@ -1953,7 +1923,7 @@ impl Node {
                 let error = error.to_string();
                 if before.flatten().as_ref() != Some(&error) {
                     self.activity.record(
-                        "peer_unreachable",
+                        "peer_attempt_failed",
                         json!({"peer": peer_hex, "error": error}),
                     );
                 }
@@ -1961,7 +1931,7 @@ impl Node {
             Ok((_, _, transfer)) => {
                 if !matches!(before, Some(None)) {
                     self.activity
-                        .record("peer_reached", json!({"peer": peer_hex}));
+                        .record("peer_reconciliation_completed", json!({"peer": peer_hex}));
                 }
                 // Recorded when the set changes, not on every sync.
                 if transfer.refused != refused_before {
@@ -2170,7 +2140,10 @@ impl Node {
                 retry_only = false;
             }
             events.borrow_and_update();
-            if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) {
+            if self.automatic.load(Ordering::SeqCst)
+                && self.online.load(Ordering::SeqCst)
+                && self.foreground.load(Ordering::SeqCst)
+            {
                 self.worker_running.send_replace(true);
                 let running = WorkerActivity(self.worker_running.clone());
                 let result = tokio::select! {
@@ -2203,7 +2176,7 @@ impl Node {
                 };
                 self.synced(status);
             } else if !self.online.load(Ordering::SeqCst) {
-                self.synced(json!({"state": "offline", "retry": false}));
+                self.synced(json!({"state": "networking_disabled", "retry": false}));
             }
             retry_only = false;
             let deadline = self.retry_deadline();
@@ -2225,17 +2198,24 @@ impl Node {
                         Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending().await,
                     }
-                }, if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) => { retry_only = true; }
+                }, if self.automatic.load(Ordering::SeqCst) && self.online.load(Ordering::SeqCst) && self.foreground.load(Ordering::SeqCst) => { retry_only = true; }
             }
         }
     }
 
-    /// Syncs with every configured peer. One reachable peer is enough;
-    /// what each attempt did is kept for `peers` and `network`.
-    async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
-        let result = self.sync_pass(transport, false, false).await;
+    /// Reconciles selected peers and records each attempted exchange.
+    async fn sync_optional(
+        &self,
+        transport: Option<&dyn Transport>,
+    ) -> Result<(Value, bool), Failure> {
+        let result = self.reconciliation_pass(transport, false, false).await;
         self.topics_changed();
-        result
+        let (report, _, retry) = result?;
+        Ok((serde_json::to_value(report)?, retry))
+    }
+    #[cfg(test)]
+    async fn sync(&self, transport: &dyn Transport) -> Result<(Value, bool), Failure> {
+        self.sync_optional(Some(transport)).await
     }
     async fn sync_pass(
         &self,
@@ -2243,11 +2223,23 @@ impl Node {
         automatic: bool,
         retry_only: bool,
     ) -> Result<(Value, bool), Failure> {
+        self.reconciliation_pass(Some(transport), automatic, retry_only)
+            .await
+            .map(|(_, status, retry)| (status, retry))
+    }
+    async fn run_sync_pass(
+        &self,
+        transport: &dyn Transport,
+        automatic: bool,
+        retry_only: bool,
+        report: &std::sync::Mutex<Vec<crate::PeerReconciliation>>,
+        first_attempt_id: u64,
+    ) -> Result<(Value, bool), Failure> {
         if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
             return Err(Box::new(crate::enrollment::Revoked(statement)));
         }
         if !self.online.load(Ordering::SeqCst) {
-            return Ok((json!({"state": "offline"}), false));
+            return Ok((json!({"state": "networking_disabled"}), false));
         }
         if automatic
             && retry_only
@@ -2270,7 +2262,6 @@ impl Node {
                 self.retry_deadline().is_some(),
             ));
         }
-        let _syncing = self.syncing.lock().await;
         let _activity = SyncActivity(self.sync_state.clone());
         self.sync_state.send_replace("syncing");
         Box::pin(self.resolve_saved_contacts(transport)).await;
@@ -2287,9 +2278,10 @@ impl Node {
                 }
                 .into());
             }
-            return Err(
-                ServiceError::Unreachable("saved contacts could not be resolved".into()).into(),
-            );
+            return Ok((
+                json!({"state":"unavailable", "error":"saved contact resolution produced no route"}),
+                true,
+            ));
         }
         let settings = self.settings.lock().await.clone();
         let member = !settings.issuer();
@@ -2349,7 +2341,6 @@ impl Node {
                 after = next;
             }
         }
-        let has_contacts = !targets.is_empty();
         let targets: Vec<_> = {
             let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
             retries.retain(|peer, _| targets.iter().any(|(node, _)| node == peer));
@@ -2360,22 +2351,29 @@ impl Node {
                         pending: has_frames,
                         ..PeerRetry::default()
                     });
-                    (state.retry.ready()
-                        && (!automatic || !retry_only || state.pending)
-                        && (!automatic
-                            || !self
-                                .current()
-                                .is_some_and(|service| service.live.inbound_short(peer))))
-                    .then_some((peer, contact, state.generation))
+                    let skip = if !state.retry.ready() {
+                        Some(crate::SkipReason::Backoff)
+                    } else if automatic && retry_only && !state.pending {
+                        Some(crate::SkipReason::NoPendingWork)
+                    } else if automatic
+                        && self
+                            .current()
+                            .is_some_and(|service| service.live.inbound_short(peer))
+                    {
+                        Some(crate::SkipReason::InboundReconciliation)
+                    } else {
+                        None
+                    };
+                    if let Some(skip) = skip {
+                        Self::add_peer_report(report, Self::skipped_peer(peer.to_hex(), skip));
+                        None
+                    } else {
+                        Some((peer, contact, state.generation))
+                    }
                 })
                 .collect()
         };
-        if !automatic && has_contacts && targets.is_empty() {
-            return Err(
-                ServiceError::Unreachable("all selected contacts are in backoff".into()).into(),
-            );
-        }
-        if automatic && targets.is_empty() {
+        if targets.is_empty() {
             return Ok((
                 self.sync_status.borrow().clone(),
                 self.retry_deadline().is_some(),
@@ -2412,6 +2410,10 @@ impl Node {
                     let mut choices = self.choices.lock().unwrap_or_else(PoisonError::into_inner);
                     for (peer, _, _) in batch.into_iter().chain(remaining) {
                         choices.insert(peer, "covered");
+                        Self::add_peer_report(
+                            report,
+                            Self::skipped_peer(peer.to_hex(), crate::SkipReason::Covered),
+                        );
                     }
                     break;
                 }
@@ -2441,6 +2443,10 @@ impl Node {
                     .buffer_unordered(4);
                 tokio::pin!(attempts);
                 while let Some((peer, contact, generation, result)) = attempts.next().await {
+                    Self::add_peer_report(
+                        report,
+                        self.peer_reconciliation(peer, &result, first_attempt_id),
+                    );
                     let error = result.as_ref().err().map(ToString::to_string);
                     let (refused, waiting, received) = match &result {
                         Ok((_, _, transfer)) => (
@@ -2577,7 +2583,10 @@ impl Node {
         }
         retry |= first.is_some();
         match first {
-            Some(error) if connected == 0 => Err(error),
+            Some(error) if connected == 0 => Ok((
+                json!({"state":"unavailable", "error":error.to_string()}),
+                true,
+            )),
             // A peer runs a newer generation: local changes wait for an upgrade.
             _ if newer => Ok((
                 json!({"state": "connected", "peers": connected, "upgrade": true}),
@@ -2748,10 +2757,51 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
+        let _ = self.observations.partial_transfer(&peer.to_hex());
+        let mut result = self.reconcile_observed(transport, peer, contact).await;
+        if let Ok((_, _, transfer)) = &mut result
+            && let Some(partial) = self.observations.partial_transfer(&peer.to_hex())
+        {
+            transfer.extend(partial);
+        }
+        result
+    }
+    async fn reconcile_observed(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+    ) -> Result<(bool, bool, sync::Transfer), Failure> {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
             let revocations = self.replica.revocation_digest().await?;
-            result = self.exchange(transport, peer, contact).await;
+            let first_attempt_id = self.observations.next_id();
+            let mut attempt = self.observations.begin(
+                peer.to_hex(),
+                crate::AttemptOperation::Reconcile,
+                crate::AttemptStage::ResolveRoute,
+            );
+            result = self.exchange(transport, peer, contact, &mut attempt).await;
+            if result.is_err()
+                && attempt.current_stage() == crate::AttemptStage::ResolveRoute
+                && let Some(link) = self
+                    .observations
+                    .snapshot()
+                    .into_iter()
+                    .filter(|item| {
+                        item.target == peer.to_hex()
+                            && item.operation == crate::AttemptOperation::OpenLink
+                            && item.id >= first_attempt_id
+                    })
+                    .max_by_key(|item| item.id)
+            {
+                attempt.stage(link.stage);
+            }
+            let failure = result
+                .as_ref()
+                .err()
+                .map(|error| crate::status::failure(error, &attempt.current_stage()));
+            attempt.finish(failure);
             self.absorb_revocations(result.as_ref().err()).await?;
             if result.is_err() && self.replica.revocation_digest().await? != revocations {
                 result = Err(Box::new(sync::Learned));
@@ -2796,6 +2846,26 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
     ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
+        let mut attempt = None;
+        let result = self
+            .request_link_observed(transport, peer, contact, &mut attempt)
+            .await;
+        if let Some(attempt) = attempt {
+            let failure = result
+                .as_ref()
+                .err()
+                .map(|error| crate::status::failure(error, &attempt.current_stage()));
+            attempt.finish(failure);
+        }
+        result
+    }
+    async fn request_link_observed(
+        &self,
+        transport: &dyn Transport,
+        peer: PublicKey,
+        contact: &Contact,
+        attempt: &mut Option<crate::status::Attempt>,
+    ) -> Result<rocky_secure::network::link::channels::Handle, Failure> {
         if !self.foreground.load(Ordering::SeqCst) {
             return Err("live links are disabled in the background".into());
         }
@@ -2816,6 +2886,11 @@ impl Node {
                 return Ok(open);
             }
             let _opening = self.opening(&service, peer);
+            let current_attempt = attempt.insert(self.observations.begin(
+                peer.to_hex(),
+                crate::AttemptOperation::OpenLink,
+                crate::AttemptStage::Dial,
+            ));
             let stream = crate::enrollment::dial(transport, &addresses, Protocol::Link).await?;
             let owner = self
                 .owner
@@ -2823,6 +2898,7 @@ impl Node {
                 .and_then(std::sync::Weak::upgrade)
                 .ok_or("network owner ended")?;
             let link_settings = self.settings.lock().await.clone();
+            current_attempt.stage(crate::AttemptStage::Admission);
             let admitted = Box::pin(owner.admit_link(
                 service.clone(),
                 stream,
@@ -2836,6 +2912,10 @@ impl Node {
                     matches!(error, rocky_secure::Error::Application(cause) if cause.is::<rocky_secure::network::link::AuthorityChanged>())
                 });
                 if changed {
+                    if let Some(attempt) = attempt.take() {
+                        let failure = crate::status::failure(&error, &attempt.current_stage());
+                        attempt.finish(Some(failure));
+                    }
                     self.absorb_revocations(Some(&error)).await?;
                     continue;
                 }
@@ -2855,12 +2935,14 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
+        attempt: &mut crate::status::Attempt,
     ) -> Result<(bool, bool, sync::Transfer), Failure> {
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
         let link = self.request_link(transport, peer, contact).await?;
+        attempt.stage(crate::AttemptStage::Reconciliation);
         let _short = service.live.short(peer);
         let renewable = {
             let settings = self.settings.lock().await;
@@ -2868,6 +2950,7 @@ impl Node {
         };
         let keep = |scope, signer, cursor| self.keeps_import_source(scope, signer, cursor);
         let upstream = Upstream {
+            observations: &self.observations,
             link,
             peer,
             contacts: Some(self),
@@ -2904,7 +2987,7 @@ impl Node {
                     json!({"peer": peer.to_hex(), "scopes": pending.len()}),
                 );
                 // `None`: this peer offers no checkpoint; intent stays for another.
-                if let Some(completed) = sync::bootstrap(
+                let completed = sync::bootstrap(
                     &self.replica,
                     &upstream,
                     &pending,
@@ -2913,8 +2996,10 @@ impl Node {
                     &mut bootstrapped,
                     first.take(),
                 )
-                .await?
-                {
+                .await;
+                self.observations
+                    .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
+                if let Some(completed) = completed? {
                     self.replica.flush().await?;
                     if std::fs::read(&marker)? != completed {
                         return Err("bootstrap authority changed; retry with the new intent".into());
@@ -2956,15 +3041,17 @@ impl Node {
         )
         .await?;
         bootstrapped.extend(transfer);
+        self.observations
+            .record_partial(peer.to_hex(), bootstrapped);
         reconcile.close().await?;
         upstream.link.drain().await?;
-        Ok((newer, retry, bootstrapped))
+        Ok((newer, retry, sync::Transfer::default()))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
     /// and commands. Synchronization runs on live links.
     pub async fn serve(&self, protocol: Protocol, stream: Stream) -> Result<(), Failure> {
         if !self.online.load(Ordering::SeqCst) || self.ended.lock().await.is_some() {
-            return Err("this node is offline".into());
+            return Err("networking is disabled or this device logged out".into());
         }
         match protocol {
             Protocol::Pair => {
@@ -3152,7 +3239,26 @@ impl Node {
             activation,
             request,
         };
-        service.call(kind, domain).await
+        let operation = match kind {
+            "command_service_register" => crate::AttemptOperation::CoordinatorRegister,
+            "command_service_control" => crate::AttemptOperation::CoordinatorControl,
+            "command_service_close" => crate::AttemptOperation::CoordinatorClose,
+            "command_service_usage" => crate::AttemptOperation::CoordinatorUsage,
+            "command_service_activate" => crate::AttemptOperation::CoordinatorActivate,
+            _ => return Err(refused("unknown coordination service request")),
+        };
+        let attempt = self.observations.begin(
+            "coordinator".into(),
+            operation,
+            crate::AttemptStage::CoordinatorRequest,
+        );
+        let result = service.call(kind, domain).await;
+        attempt.finish(
+            result.as_ref().err().map(|error| {
+                crate::status::failure(error, &crate::AttemptStage::CoordinatorRequest)
+            }),
+        );
+        result
     }
     #[cfg(not(feature = "iroh"))]
     async fn service_call(

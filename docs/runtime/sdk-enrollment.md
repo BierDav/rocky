@@ -180,7 +180,7 @@ only what it already decrypted. See [key rotation](credentials.md#revocation-in-
 After a refused renewal, a device requests the issuer's public revocation set
 with `rocky.sdk.policy.v1`. It verifies the pinned publisher and application
 and finds the statement that revokes its credential chain before reporting
-`revoked`. That statement is kept in `revoked.json` (version 2), so readiness
+`revoked`. That statement is kept in `revoked.json` (version 2), so status
 remains revoked after reopening; sync returns the non-retryable `revoked`
 error. Earlier decrypted data stays readable locally. Offline devices learn
 this only when an issuer becomes reachable. A fresh invitation enrolls a new
@@ -216,7 +216,7 @@ Unrecoverable:
 - **A revoked issuer's publisher key.** Revocation recovers from loss, not
   theft; a stolen issuer needs a new domain.
 - **The last issuer.** Members sync until credentials expire, then stop for
-  good. A member that removed every issuer reports `issuer_contact: false`.
+  good. A member that removed every issuer lists no known renewal candidates.
 - **A device that knew only the lost issuer** and did not renew since: add a
   remaining issuer's contact with `addPeer`.
 - **The revoked issuer's own writes**, earlier ones included. Peers that
@@ -245,13 +245,13 @@ every request.
   sessions, each with `configured`; a peer met that way has no routes.
 - A device refuses a contact a held statement revokes; an issuer also one its
   registry tombstoned.
-- Limits: 64 contacts, 16 selected per sync pass, 64 peers met listed,
+- Limits: 64 contacts, 16 selected per sync pass, 64 historical peers met retained, with active/opening links listed independently,
   8 issuers, 4 routes per contact,
   2,048-byte addresses. The replica keeps horizon credentials and frontiers of
   at most 256 unconfigured peers ([transport bounds](sdk-transports.md#bounds)).
 - Any contact can be removed, the last issuer included; it is no longer dialed
-  and is still served. `peers` and readiness (`authority.issuer_contact`)
-  report a member left without issuer contact.
+  and is still served. `authority.renewalRoutes` lists the remaining known renewal candidates,
+  without claiming that any issuer answers.
 - Sessions pass on at most 16 recently reached contacts and filter revoked
   nodes. Learned routes have a source (`handover`, `request`, `enrollment`, or
   `discovery`) and learning time. They age after 30 days and the
@@ -293,14 +293,13 @@ a device learns a revocation from any admitted peer; one that learns its own
 reports `revoked` and stops syncing. Checkpoints and catch-up are in
 [SDK bootstrapping](sdk-bootstrapping.md).
 
-Kotlin `create`/`join`/`resume` default to `automaticSync = true`, enabling and
-observing the native [change-driven worker](always-on-peer.md#change-driven-sync)
-while foregrounded. `syncContinuously()` enables the same worker and observes
-its status. Both automatic and explicit passes respect per-peer back-off. An explicit pass
-with only backed-off contacts reports `unreachable` without dialing. Connectivity
-changes and an explicit worker restart reset it. The sync response shape is
-unchanged. `enterBackground` cancels
-the automatic pass within one second; `enterForeground` starts one immediately.
+Kotlin starters default to `automaticSync = true`, enabling the native
+[change-driven worker](always-on-peer.md#change-driven-sync). Explicit
+`setAutomaticSync` controls the same worker. Observing status does not enable
+it. Both automatic and explicit passes respect backoff; skipped peers carry
+`Backoff` without a fabricated failure. Connectivity changes and an explicit
+worker restart reset retries. Background suspension cancels the automatic pass
+while retaining its enabled control; foreground resumes it.
 
 A session that brought revocation statements or refused credentials triggers
 one renewal after the concurrent attempts finish: rotated keys arrive with it.
@@ -346,8 +345,9 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `authors` | Newly installed table authors; see [above](#author-installation) |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
-| `connection` with `online`, `sync` | `offline`, or `connected` with the number of `peers` reached |
-| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; contacts and peers met with `issuer`, `configured`, routes, `source`, `local`, `choice`, `state`, `checked`, `error`, `issuer_contact`, and the [discovery status](discovery.md#status) |
+| `networking_control` with `enabled` | The application's networking control value; no reachability measurement |
+| `sync` | Native `ReconciliationReport` with selected peers, attempts, skips and transfer receipts; local preconditions remain typed errors |
+| `contact`; `peer_add`, `peer_remove`, `peers` | Own contact `uri`, `node`, `routes`; native `Peer` records, known `renewal_routes`, and typed [discovery status](discovery.md#status) |
 | `contact_request` with hexadecimal `id` | Learned `node` key, or null |
 | `network` | See [network status](sdk-composition.md#network-status) |
 | `mutate`, `mutation_progress` | A durable create, set or delete by handle |

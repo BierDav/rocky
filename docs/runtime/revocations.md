@@ -90,10 +90,10 @@ renews first when a served session brought statements. New statements start a
 checkpoint bootstrap for the rows of revoked authors. A device refused renewal
 fetches the set with `rocky.sdk.policy.v1`, and one a session revoked holds the
 statement from the handshake; either keeps it in `revoked.json` and reports
-`revoked`. Status, readiness and the
-`renewed` activity report `revocations`: the digest and the live statement
-count; Kotlin's `SessionStatus` and `Readiness` carry them as
-`RevocationStatus`.
+a typed revocation failure. `DatabaseStatus.authority.verifiedRevocation`
+retains the evidence identity and signed statement. Its `revocations` and the
+`renewed` activity retain the held set digest and live statement count.
+Revocation is an authority fact, independent of links or networking controls.
 
 ## Limits
 

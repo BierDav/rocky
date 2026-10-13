@@ -94,7 +94,7 @@ class RockyClient(private val transport: Transport) {
     fun observe(queries: Flow<JsonObject>): Flow<JsonObject> = queries.distinctUntilChanged().flatMapLatest { observe(it) }
 
     /** Committed revision, generation progress and current authority; cancellation releases only this wait. */
-    fun readiness(): Flow<JsonObject> = observation {
+    internal fun statusChanges(): Flow<JsonObject> = observation {
         var value = call(request("status"))
         while (true) {
             emit(value)

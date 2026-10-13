@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import org.example.examples.shopping.presentation.component.LinkPaths
 import org.example.examples.shopping.util.ago
 import org.example.examples.shopping.util.date
+import rocky.AttemptOutcome
 import rocky.LinkState
 import rocky.Peer
 
@@ -27,8 +28,8 @@ internal fun DeviceConnection(peer: Peer, now: Long) {
     val summary = connectionSummary(peer, now)
     val color = when (summary.state) {
         LinkState.Open -> Color(0xFF43A047)
-        LinkState.Opening -> Color(0xFFF9A825)
-        LinkState.Closed -> if (peer.state == "unreachable") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+        LinkState.Opening, LinkState.Closing -> Color(0xFFF9A825)
+        LinkState.Closed -> if (peer.attempts.any { it.outcome == AttemptOutcome.Failed }) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(Modifier.size(8.dp).background(color, CircleShape))
@@ -53,21 +54,15 @@ internal fun DeviceConnection(peer: Peer, now: Long) {
 internal data class ConnectionSummary(val state: LinkState, val title: String, val error: String?)
 
 internal fun connectionSummary(peer: Peer, now: Long): ConnectionSummary {
-    val checked = ago(peer.checkedAtEpochSeconds?.times(1_000), now)
+    val attempt = peer.attempts.maxWithOrNull(compareBy({ it.endedAtEpochMillis ?: it.startedAtEpochMillis }, { it.id }))
+    val checked = ago(attempt?.endedAtEpochMillis?.toLong(), now)
     val title = when (peer.link.state) {
-        LinkState.Open -> peer.link.openedAtEpochSeconds?.let { "Live for ${connectionDuration(it, now)}" } ?: "Live"
-
-        LinkState.Opening -> "Connecting"
-
-        LinkState.Closed -> when (peer.state) {
-            "connected" -> "Link closed · last reached $checked"
-            "unreachable" -> "Unreachable · checked $checked"
-            else -> "Not connected yet"
-        }
+        LinkState.Open -> peer.link.openedAtEpochSeconds?.let { "Link open for ${connectionDuration(it.toLong(), now)}" } ?: "Link open"
+        LinkState.Opening -> "Opening link"
+        LinkState.Closing -> "Closing link"
+        LinkState.Closed -> "Link closed" + (attempt?.let { " · last ${it.operation}: ${it.outcome ?: it.stage} $checked" } ?: "")
     }
-    val error = peer.error?.let {
-        if (peer.link.state == LinkState.Closed && peer.state == "unreachable") "Last error: $it" else "Last attempt failed $checked: $it"
-    }
+    val error = attempt?.failure?.let { "${attempt.stage} failed: ${it.detail}" }
     return ConnectionSummary(peer.link.state, title, error)
 }
 
@@ -112,8 +107,8 @@ internal fun DeviceDetails(node: String, peer: Peer?) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Node $node", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                 peer?.let {
-                    Text("Last check: ${it.state} · ${it.checkedAtEpochSeconds?.let(::date) ?: "never"}", style = MaterialTheme.typography.labelSmall)
-                    it.link.openedAtEpochSeconds?.let { opened -> Text("Link opened: ${date(opened)}", style = MaterialTheme.typography.labelSmall) }
+                    it.attempts.forEach { attempt -> Text("${attempt.operation} · ${attempt.stage} · ${attempt.outcome ?: "in progress"} · ${attempt.endedAtEpochMillis?.let { at -> date(at.toLong() / 1000) } ?: "not ended"}", style = MaterialTheme.typography.labelSmall) }
+                    it.link.openedAtEpochSeconds?.let { opened -> Text("Link opened: ${date(opened.toLong())}", style = MaterialTheme.typography.labelSmall) }
                     it.link.roundTripMillis?.let { rtt -> Text("Round trip: $rtt ms", style = MaterialTheme.typography.labelSmall) }
                     Text("Source: ${it.source} · selection: ${it.choice} · saved contact: ${it.isConfigured}", style = MaterialTheme.typography.labelSmall)
                     if (it.routes.isEmpty()) Text("No saved dialing route", style = MaterialTheme.typography.labelSmall)

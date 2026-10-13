@@ -37,6 +37,20 @@ callback contracts and expect objects, UniFFI's JNA implementation for the
 JVM/Android, and Rocky's cinterop implementation for iOS. It adapts JNA's
 platform declarations to the common contract without replacing JNA's ABI
 implementation. Compiling common consumers on both platforms checks drift.
+Status records and enums originate in `crates/rocky-sdk/src/status.rs`.
+`sdks/native/build.rs` generates UniFFI remote declarations from those native
+definitions; the binding generator emits public Kotlin aliases in
+`RockyStatus.kt`. Fields, variants and nullability have one declaration source.
+See [observable status](../proposals/observable-status.md).
+
+The binding directories are registered as generated Kotlin source roots.
+Gradle's `prepareKotlinIdeaImport` generates them before IDE import, including
+after a clean checkout. Reload the SDK's Gradle project after changing its build
+configuration. The shopping application consumes Maven packages: republish the
+SDK to Maven local and reload the application's Kotlin Toolchain project after
+SDK changes. Another checkout publishing the same development version replaces
+those local artifacts.
+
 Per-target tasks build the static archive before cinterop. Generated artifacts
 remain under ignored `build/` or `local/` directories.
 

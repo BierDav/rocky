@@ -168,3 +168,76 @@ async fn foreground_reports_a_dead_borrowed_endpoint() -> Result<(), Failure> {
     assert_eq!(attachment.endpoint().id(), endpoint.id());
     Ok(())
 }
+
+#[tokio::test]
+async fn relay_notifications_preserve_an_existing_direct_stream() -> Result<(), Failure> {
+    use rocky_iroh::iroh::{RelayMode, endpoint::presets, tls::CaTlsConfig};
+    let (map, url, server) = rocky_iroh::testing::run_relay_server().await?;
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Custom(map))
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
+        .bind()
+        .await?;
+    let attachment = Attachment::new(endpoint.clone());
+    let router = attachment
+        .register(Router::builder(endpoint.clone()))
+        .spawn();
+    attachment.listen(true);
+    let mut changes = attachment.connectivity().ok_or("missing relay watcher")?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if attachment.relays().is_some_and(|relays| {
+                relays
+                    .iter()
+                    .any(|relay| relay.url == url.to_string() && relay.connected)
+            }) {
+                break;
+            }
+            changes.changed().await?;
+        }
+        Ok::<_, Failure>(())
+    })
+    .await??;
+    assert_eq!(attachment.initial_relay_configuration(), None);
+    let other = local().start([61; 32]).await?;
+    let mut near = other
+        .connect(&attachment.address().await?, Protocol::Renew)
+        .await?;
+    near.write_all(b"init").await?;
+    let (_, mut far) = attachment.accept().await.ok_or("closed")?;
+    let mut initial = [0; 4];
+    far.read_exact(&mut initial).await?;
+    assert!(
+        near.paths()
+            .ok_or("missing paths")?
+            .paths()
+            .iter()
+            .any(|path| path.selected && path.kind == "direct")
+    );
+    server.shutdown().await?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if attachment
+                .relays()
+                .is_some_and(|relays| !relays.iter().any(|relay| relay.connected))
+            {
+                break;
+            }
+            changes.changed().await?;
+        }
+        Ok::<_, Failure>(())
+    })
+    .await??;
+    near.write_all(b"ping").await?;
+    let mut request = [0; 4];
+    far.read_exact(&mut request).await?;
+    assert_eq!(&request, b"ping");
+    drop((near, far));
+    other.close().await;
+    attachment.close().await;
+    assert!(!endpoint.is_closed());
+    router.shutdown().await?;
+    Ok(())
+}

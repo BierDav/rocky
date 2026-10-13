@@ -126,24 +126,34 @@ private class DeviceProcess {
             }
 
             "online" -> {
-                database.setOnline(request.getValue("online").jsonPrimitive.boolean)
+                database.setNetworkingEnabled(request.getValue("online").jsonPrimitive.boolean)
                 JsonNull
             }
 
             "sync" -> {
-                val status = database.syncOnce()
+                val report = database.syncOnce()
                 buildJsonObject {
-                    put("state", status.state.name)
+                    put("skip", report.skip?.name)
                     put(
                         "peers",
                         JsonArray(
-                            database.peers().map { peer ->
+                            report.peers.map { peer ->
                                 buildJsonObject {
                                     put("node", peer.node)
-                                    put("issuer", peer.isIssuer)
-                                    put("configured", peer.isConfigured)
-                                    put("state", peer.state)
-                                    put("error", peer.error)
+                                    put("skip", peer.skip?.name)
+                                    put(
+                                        "attempts",
+                                        JsonArray(
+                                            peer.attempts.map { attempt ->
+                                                buildJsonObject {
+                                                    put("operation", attempt.operation.name)
+                                                    put("stage", attempt.stage.name)
+                                                    put("outcome", attempt.outcome?.name)
+                                                    put("error", attempt.failure?.detail)
+                                                }
+                                            },
+                                        ),
+                                    )
                                 }
                             },
                         ),

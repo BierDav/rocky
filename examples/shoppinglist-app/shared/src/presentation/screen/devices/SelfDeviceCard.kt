@@ -18,21 +18,20 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import org.example.examples.shopping.presentation.component.KindChip
 import org.example.examples.shopping.presentation.component.ResetShoppingButton
-import org.example.examples.shopping.presentation.component.SyncBadge
-import org.example.examples.shopping.presentation.component.SyncBadgeState
+import org.example.examples.shopping.presentation.component.bootstrapPercent
 import org.example.examples.shopping.presentation.screen.sync.profile
 import org.example.examples.shopping.util.ago
 import org.example.examples.shopping.util.date
-import rocky.ConnectionState
-import rocky.LinkState
 
 /** Local identity, connection controls and diagnostics in one card. */
 @Composable
 internal fun SelfDeviceCard(me: HouseholdDevice, state: DevicesState, now: Long, onOnline: (Boolean) -> Unit, onReset: () -> Unit) {
     var expanded by rememberSaveable(me.node) { mutableStateOf(false) }
-    val readiness = state.readiness
+    val snapshot = state.snapshot
+    val authority = snapshot?.authority
+    val data = snapshot?.data
     val self = state.self
-    val connection = state.connection
+    val report = snapshot?.network?.lastReconciliation
     ElevatedCard(Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -41,22 +40,26 @@ internal fun SelfDeviceCard(me: HouseholdDevice, state: DevicesState, now: Long,
                 me.kind?.let { KindChip(it) }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Online", style = MaterialTheme.typography.labelLarge)
+                Text("Networking enabled", style = MaterialTheme.typography.labelLarge)
                 Spacer(Modifier.width(8.dp))
-                Switch(connection.state != ConnectionState.Offline, onOnline, Modifier.semantics { contentDescription = "Online" })
+                Switch(snapshot?.network?.networkingEnabled == true, onOnline, Modifier.semantics { contentDescription = "Networking enabled" }, enabled = snapshot != null)
             }
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("${readiness?.state?.name?.lowercase() ?: "starting"} · revision ${readiness?.revision ?: "…"} · ${self?.transport ?: "no transport"}", style = MaterialTheme.typography.bodySmall)
-                    Text("Last sync ${ago(connection.atEpochMillis, now)} · ${connection.peers} peers reached", style = MaterialTheme.typography.labelSmall)
+                    Text("revision ${data?.revision ?: "…"} · ${self?.transport ?: "no transport"}", style = MaterialTheme.typography.bodySmall)
+                    Text("Last reconciliation ${ago(report?.endedAtEpochMillis?.toLong(), now)} · ${report?.peers?.count { it.skip == null } ?: 0} peers attempted", style = MaterialTheme.typography.labelSmall)
                     Text("Last transfer ${ago(state.lastTransferAtEpochMillis, now)}", style = MaterialTheme.typography.labelSmall)
-                    connection.error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
-                    readiness?.bootstrap?.let { progress ->
-                        Text("Bootstrap ${progress.percent}% · ${progress.rowsDone}/${progress.rowsTotal} rows · ${progress.scopesDone}/${progress.scopesTotal} scopes", style = MaterialTheme.typography.labelSmall)
+                    authority?.let {
+                        if (it.verifiedRevocation != null) Text("Verified revocation ${it.verifiedRevocation?.id}", color = MaterialTheme.colorScheme.error)
+                        if (it.expired) Text("Credentials expired", color = MaterialTheme.colorScheme.error)
+                        if (it.loggedOut) Text("Logged out", color = MaterialTheme.colorScheme.error)
+                    }
+                    data?.bootstrap?.let { progress ->
+                        Text("Bootstrap ${bootstrapPercent(progress)}% · ${progress.rowsDone}/${progress.rowsTotal} rows · ${progress.scopesDone}/${progress.scopesTotal} scopes", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
-            readiness?.bootstrap?.let { progress -> LinearProgressIndicator(progress = { progress.percent / 100f }, modifier = Modifier.fillMaxWidth()) }
+            data?.bootstrap?.let { progress -> LinearProgressIndicator(progress = { bootstrapPercent(progress) / 100f }, modifier = Modifier.fillMaxWidth()) }
             Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Identity and access", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
                 Icon(if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore, if (expanded) "Hide local device details" else "Show local device details")
@@ -68,11 +71,22 @@ internal fun SelfDeviceCard(me: HouseholdDevice, state: DevicesState, now: Long,
                         Text("Node ${me.node}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                         Text("Domain ${state.domain}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                         self?.let {
-                            Text("Grants: ${profile(readiness?.profile ?: it.profile)} · ${readiness?.revocations?.statements ?: it.revocations.statements} revocations", style = MaterialTheme.typography.bodySmall)
-                            Text("Credentials until ${date(readiness?.expiresAtEpochSeconds ?: it.expiresAtEpochSeconds)}", style = MaterialTheme.typography.labelSmall)
-                            Text("Revocation digest: ${readiness?.revocations?.digest ?: it.revocations.digest}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+                            Text("Grants: ${authority?.profile?.let { profile -> "${profile.kind}: ${profile.scopes.joinToString()}" } ?: profile(it.profile)} · ${authority?.revocations?.statements ?: it.revocations.statements} revocations", style = MaterialTheme.typography.bodySmall)
+                            Text("Credentials until ${date(authority?.expiresAtEpochSeconds?.toLong() ?: it.expiresAtEpochSeconds)}", style = MaterialTheme.typography.labelSmall)
+                            Text("Revocation digest: ${authority?.revocations?.digest ?: it.revocations.digest}", style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
                         }
-                        readiness?.let { Text("Issuer route for renewal: ${if (it.issuerContact) "available" else "missing"}", style = MaterialTheme.typography.labelSmall) }
+                        authority?.let { Text("Known renewal routes: ${it.renewalRoutes.size}", style = MaterialTheme.typography.labelSmall) }
+                        snapshot?.let {
+                            Text("Attachment: ${it.network.attachment} · worker enabled: ${it.network.workerEnabled} · running: ${it.network.workerRunning}", style = MaterialTheme.typography.labelSmall)
+                            Text("Coordinator: ${it.coordination.mode}", style = MaterialTheme.typography.labelSmall)
+                            it.coordination.attempts.forEach { attempt -> Text("${attempt.operation}: ${attempt.outcome ?: attempt.stage} ${attempt.failure?.detail.orEmpty()}", style = MaterialTheme.typography.labelSmall) }
+                            val relays = it.network.relay.relays
+                            if (relays == null) {
+                                Text("Home relay status not observed", style = MaterialTheme.typography.labelSmall)
+                            } else {
+                                relays.forEach { relay -> Text("${relay.url}: connected=${relay.connected} ${relay.authDeniedReason ?: relay.lastError.orEmpty()}", style = MaterialTheme.typography.labelSmall) }
+                            }
+                        }
                         if (me.lists.isNotEmpty()) Text("Keys received: ${me.lists.joinToString()}", style = MaterialTheme.typography.bodySmall)
                     }
                 }

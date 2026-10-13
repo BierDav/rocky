@@ -18,7 +18,7 @@ token, renewals are signed, and sync runs on mutually authenticated
 [live links](live-links.md) carrying encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings, used as QUIC ALPNs: `rocky/sdk-pair/1`, `rocky/link/2`,
+Protocols are versioned strings, used as QUIC ALPNs: `rocky/sdk-pair/1`, `rocky/link/3`,
 `rocky/sdk-renew/2`, `rocky/command/2`, and `rocky/coordinator/1`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream, a retired one included. A link stream
@@ -89,13 +89,12 @@ lost packets and bytes, and congestion events. Link status shows them; see
 
 ## Sync wakeups
 
-The optional `Transport::connectivity` watch reports reachability changes;
-iroh supplies it from endpoint address updates. Without a transport signal,
-the application calls `setOnline` / the native `connection` request. See
+The optional `Transport::connectivity` watch wakes retries;
+iroh supplies it from endpoint address and home-relay updates, which do not prove a peer
+or service is reachable. Without a transport signal,
+the application calls `setNetworkingEnabled` / the native `networking_control` request. See
 [change-driven sync](always-on-peer.md#change-driven-sync). Connectivity and
-`setOnline(true)` reset per-peer back-off; committed local writes do not.
-`setOnline(true)` also replaces an `offline` sync status with `idle` at once,
-so a pass with nothing to dial never reports the device offline again.
+`setNetworkingEnabled(true)` reset per-peer back-off; committed local writes do not.
 Pausing the worker cancels outstanding dials and links without closing the
 attached transport.
 

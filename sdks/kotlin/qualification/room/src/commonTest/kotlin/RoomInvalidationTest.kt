@@ -74,7 +74,7 @@ class RoomInvalidationTest {
             until(listOf("Milk"))
             // Another device's write arrives by sync, never through Room's connection.
             val eggs = roomA.shop().createItems(listOf(item("i2", "Eggs"))).single()
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             until(listOf("Eggs", "Milk"))
             roomA.shop().update(eggs.copy(title = "Free-range eggs"))
             b.syncOnce()

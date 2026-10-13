@@ -7,60 +7,41 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
-import org.example.examples.shopping.util.epochMillis
+import androidx.room.Database
 import rocky.BootstrapProgress
-import rocky.ConnectionState
-import rocky.ConnectionStatus
-import rocky.Readiness
-import rocky.ReadinessState
-import kotlin.time.Duration.Companion.milliseconds
+import rocky.DatabaseStatus
+import rocky.LinkState
 
-/** What the sync badge needs: the connection, bootstrapping and its progress, and the last transfer. */
-data class SyncBadgeState(
-    val connection: ConnectionStatus = ConnectionStatus(ConnectionState.Unavailable),
-    val readiness: Readiness? = null,
-    val lastTransferAtEpochMillis: Long? = null,
-)
+/** The native snapshot and the last observed transfer event. */
+data class SyncBadgeState(val snapshot: DatabaseStatus? = null)
 
-/** "Bootstrapping 42%" once the offered rows are known; "Bootstrap paused 42%" while no peer link is open. */
+fun bootstrapPercent(progress: BootstrapProgress): Int = if (progress.rowsTotal == 0uL) 100 else (progress.rowsDone.toDouble() * 100 / progress.rowsTotal.toDouble()).toInt()
 fun bootstrapLabel(progress: BootstrapProgress?, paused: Boolean = false): String {
-    val label = if (paused) "Bootstrap paused" else "Bootstrapping"
-    return progress?.let { "$label ${it.percent}%" } ?: label
+    val label = if (paused) "Bootstrap paused" else "Importing"
+    return progress?.let { "$label ${bootstrapPercent(it)}%" } ?: label
 }
 
-/**
- * Shows a paused bootstrap, Offline, then a bootstrap and its progress, then Live while any link is open, then the last
- * pass. It pulses while frames move.
- */
 @Composable
-fun SyncBadge(state: SyncBadgeState, onClick: (() -> Unit)? = null) {
-    val connection = state.connection
-    val readiness = state.readiness
-    var now by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            now = epochMillis()
-            delay(500.milliseconds)
-        }
-    }
+fun SyncBadge(state: DatabaseStatus?, onClick: (() -> Unit)? = null) {
+    val open = state?.network?.peers?.count { it.link.state == LinkState.Open } ?: 0
     val (color, label) = when {
-        connection.state == ConnectionState.Offline -> Color(0xFF9E9E9E) to "Offline"
-        readiness?.state == ReadinessState.Bootstrapping-> Color(0xFFF9A825) to bootstrapLabel(readiness.bootstrap,connection.state == ConnectionState.Offline)
-        connection.state == ConnectionState.Connected && connection.peers > 0 -> Color(0xFF43A047) to "${connection.peers} Peers"
-        connection.state == ConnectionState.Connected -> Color(0xFF9E9E9E) to "No peers"
-        connection.atEpochMillis == null -> Color(0xFF9E9E9E) to "Starting"
-        else -> Color(0xFFE53935) to "Unreachable"
+        state == null -> Color(0xFF9E9E9E) to "Observing status"
+        !state.network.networkingEnabled -> Color(0xFF9E9E9E) to "Networking disabled"
+        !state.network.foreground -> Color(0xFF9E9E9E) to "Suspended in background"
+        state.data.bootstrapPending -> Color(0xFFF9A825) to bootstrapLabel(state.data.bootstrap)
+        open > 0 -> Color(0xFF43A047) to "$open peer links"
+        state.network.peers.any { it.link.state == LinkState.Opening } -> Color(0xFFF9A825) to "Opening peer links"
+        else -> Color(0xFF9E9E9E) to "No peer links"
     }
     val animated by animateColorAsState(color)
     val content: @Composable () -> Unit = {
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.size(10.dp).background(animated, CircleShape))
-            Text(if (connection.peers > 1 && label == "Synced") "$label · ${connection.peers} peers" else label)
+            Text(label)
         }
     }
     if (onClick == null) {

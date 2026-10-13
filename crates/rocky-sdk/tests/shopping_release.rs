@@ -79,13 +79,21 @@ impl Peer {
         Ok(self.call(json!({"type":"session"})).await?["node"].clone())
     }
     async fn online(&self, online: bool) -> Result<(), Failure> {
-        self.call(json!({"type":"connection","online":online}))
+        self.call(json!({"type":"networking_control","enabled":online}))
             .await
             .map(drop)
     }
     async fn sync(&self) -> Result<(), Failure> {
         let status = self.call(json!({"type":"sync"})).await?;
-        if status["state"] != "connected" {
+        if !status["peers"].as_array().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["attempts"].as_array().is_some_and(|attempts| {
+                    attempts.iter().any(|attempt| {
+                        attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                    })
+                })
+            })
+        }) {
             return Err(format!("sync: {status}").into());
         }
         Ok(())

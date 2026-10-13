@@ -92,7 +92,7 @@ cancellation cannot strand the token. `observe(Flow<Query>)` changes bound queri
 with `flatMapLatest`, releasing the previous registration. Suspend-call cancellation
 abandons the wait; admitted mutations/requests continue and can be recovered.
 A Flow snapshot is a local read; strong reads are explicit suspend calls.
-Kotlin client close cancels query, readiness and activity collectors and waits for
+Kotlin client close cancels query, status and activity collectors and waits for
 their cleanup before closing its transport. Database close closes its owning
 Kotlin session before shutting down the native database.
 

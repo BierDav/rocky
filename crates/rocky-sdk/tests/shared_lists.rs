@@ -278,7 +278,7 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
     let seen = kinds(&activity);
     for kind in [
         "author_installed",
-        "peer_reached",
+        "peer_reconciliation_completed",
         "partition_key_installed",
         "partition_bootstrap",
         "checkpoint_imported",
@@ -310,9 +310,9 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
     let waiting = writer.call(json!({"type":"activity_next","after":token}));
     let (next, _) = tokio::join!(
         waiting,
-        writer.call(json!({"type":"connection","online":false}))
+        writer.call(json!({"type":"networking_control","enabled":false}))
     );
-    assert_eq!(kinds(&next?), ["offline"]);
+    assert_eq!(kinds(&next?), ["networking_disabled"]);
     for peer in [writer, issuer] {
         peer.database.close().await?;
     }
@@ -441,9 +441,9 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
         "{activity}"
     );
     assert!(!root.path().join("a/bootstrap.json").exists());
-    assert_ne!(
-        a.call(json!({"type":"status"})).await?["state"],
-        "bootstrapping"
+    assert_eq!(
+        a.call(json!({"type":"status"})).await?["data"]["bootstrap_pending"],
+        false
     );
     for peer in [b, a] {
         peer.database.close().await?;

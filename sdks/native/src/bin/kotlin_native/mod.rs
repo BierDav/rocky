@@ -5,6 +5,7 @@ mod render;
 use anyhow::{Context, Result, ensure};
 use camino::Utf8Path;
 use uniffi_bindgen::{BindgenLoader, BindgenPaths, GlobalConfig};
+include!(concat!(env!("OUT_DIR"), "/status_names.rs"));
 
 pub fn generate(library: &Utf8Path, out: &Utf8Path) -> Result<()> {
     let loader = BindgenLoader::new(BindgenPaths::default(), GlobalConfig::default());
@@ -58,6 +59,14 @@ kotlin_target_version = "2.4.20"
     let bindings = render::generate_bindings(&config, ci)?;
     std::fs::create_dir_all(out)?;
     std::fs::write(out.join("RockyTypes.kt"), bindings.common)?;
+    let aliases = format!(
+        "package rocky\n\n// Generated aliases of the native SDK status contract.\n{}",
+        STATUS_TYPE_NAMES
+            .iter()
+            .map(|name| format!("typealias {name} = rocky.internal.native.{name}\n"))
+            .collect::<String>()
+    );
+    std::fs::write(out.join("RockyStatus.kt"), aliases)?;
     std::fs::write(
         out.join("RockyNative.kt"),
         inherit_throws(&bindings.native.context("missing native binding")?),

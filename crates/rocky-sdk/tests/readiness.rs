@@ -19,8 +19,8 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
     let scope: Value = serde_json::from_str(&device.database.scope())?;
     let session = device.database.session();
     let status = device.ok(json!({"type": "status"})).await;
-    assert_eq!(status["ready"], true);
-    assert_eq!(status["network"]["attached"], false);
+    assert_eq!(status["authority"]["expired"], false);
+    assert_eq!(status["network"]["attachment"], "detached");
     device.add(1, "apples").await;
     // A revision racing registration is returned immediately, never lost.
     let next = call(
@@ -57,7 +57,7 @@ async fn status_tracks_committed_work_and_logout_and_session_close_ends_only_its
     member.ok(json!({"type": "logout", "purge": false})).await;
     let logged_out = member.ok(json!({"type": "status"})).await;
     assert_eq!(logged_out["authority"]["logged_out"], true);
-    assert_eq!(logged_out["ready"], false);
+    assert_eq!(logged_out["network"]["connected_peer_count"], 0);
     member.close().await;
     issuer.close().await;
     Ok(())

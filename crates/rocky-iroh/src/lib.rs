@@ -154,6 +154,7 @@ struct Shared {
     router: std::sync::Mutex<Option<Router>>,
     /// Whether an address waits for a home relay.
     relays: bool,
+    initial_relay_configuration: Option<String>,
     /// The protocols this attachment answers.
     protocols: Vec<Protocol>,
     /// Present only when the attachment was asked to find peers.
@@ -176,23 +177,30 @@ impl Attachment {
     /// Uses `endpoint` to dial. Nothing is accepted until the handler is
     /// registered on a router.
     pub fn new(endpoint: Endpoint) -> Self {
-        Self::build(endpoint, false, Protocol::ALL.to_vec(), Discover::default())
+        Self::build(
+            endpoint,
+            false,
+            Protocol::ALL.to_vec(),
+            Discover::default(),
+            None,
+        )
     }
     /// Like `new`, and finds peers as `discover` asks. Rocky announces
     /// beside the endpoint: its own lookup services stay as they are.
     pub fn discovering(endpoint: Endpoint, discover: Discover) -> Self {
-        Self::build(endpoint, false, Protocol::ALL.to_vec(), discover)
+        Self::build(endpoint, false, Protocol::ALL.to_vec(), discover, None)
     }
     /// Answers `protocols` instead of a database's, such as a coordinator
     /// voter's `Protocol::Coordinate`. Dialing is unrestricted.
     pub fn serving(endpoint: Endpoint, protocols: Vec<Protocol>) -> Self {
-        Self::build(endpoint, false, protocols, Discover::default())
+        Self::build(endpoint, false, protocols, Discover::default(), None)
     }
     fn build(
         endpoint: Endpoint,
         relays: bool,
         protocols: Vec<Protocol>,
         discover: Discover,
+        initial_relay_configuration: Option<String>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(PENDING);
         let endpoint = watch::channel(endpoint).0;
@@ -213,6 +221,7 @@ impl Attachment {
             refused: AtomicU64::new(0),
             router: std::sync::Mutex::new(None),
             relays,
+            initial_relay_configuration,
             protocols,
         }))
     }
@@ -320,14 +329,18 @@ impl Transport for Attachment {
     fn connectivity(&self) -> Option<watch::Receiver<()>> {
         let (events, receiver) = watch::channel(());
         let mut endpoints = self.0.endpoint.subscribe();
-        let mut addresses = self.endpoint().watch_addr();
+        let mut addresses = self
+            .endpoint()
+            .watch_addr()
+            .or(self.endpoint().home_relay_status());
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = events.closed() => break,
                     changed = endpoints.changed() => {
                         if changed.is_err() { break; }
-                        addresses = endpoints.borrow_and_update().watch_addr();
+                        let endpoint = endpoints.borrow_and_update();
+                        addresses = endpoint.watch_addr().or(endpoint.home_relay_status());
                         events.send_replace(());
                     }
                     changed = addresses.updated() => {
@@ -337,7 +350,8 @@ impl Transport for Attachment {
                                 _ = events.closed() => break,
                                 changed = endpoints.changed() => { if changed.is_err() { break; } }
                             }
-                            addresses = endpoints.borrow_and_update().watch_addr();
+                            let endpoint = endpoints.borrow_and_update();
+                        addresses = endpoint.watch_addr().or(endpoint.home_relay_status());
                         }
                         events.send_replace(());
                     }
@@ -347,6 +361,24 @@ impl Transport for Attachment {
         Some(receiver)
     }
 
+    fn initial_relay_configuration(&self) -> Option<String> {
+        self.0.initial_relay_configuration.clone()
+    }
+    fn relays(&self) -> Option<Vec<rocky_core::net::RelayStatus>> {
+        Some(
+            self.endpoint()
+                .home_relay_status()
+                .get()
+                .iter()
+                .map(|relay| rocky_core::net::RelayStatus {
+                    url: relay.url().to_string(),
+                    connected: relay.is_connected(),
+                    last_error: relay.last_error().map(ToString::to_string),
+                    auth_denied_reason: relay.auth_denied_reason().map(str::to_owned),
+                })
+                .collect(),
+        )
+    }
     fn discovery(&self) -> Option<Arc<dyn Discovery>> {
         let finder = self.0.finder.clone()?;
         Some(Arc::new(finder))
@@ -608,8 +640,13 @@ impl Options {
         protocols: Vec<Protocol>,
     ) -> Result<Attachment, Failure> {
         let endpoint = self.bind(secret).await?;
-        let attachment =
-            Attachment::build(endpoint.clone(), self.relays(), protocols, self.discover());
+        let attachment = Attachment::build(
+            endpoint.clone(),
+            self.relays(),
+            protocols,
+            self.discover(),
+            Some(self.relay.clone().unwrap_or_else(|| "default".into())),
+        );
         *attachment.0.restart.lock().await = Some((self.clone(), secret));
         let router = attachment.register(Router::builder(endpoint)).spawn();
         *attachment

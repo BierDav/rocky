@@ -79,7 +79,7 @@ What a killed process loses, and what the next open does:
 
 | Lost with the process | On the next `open`/`resume` |
 | --- | --- |
-| The reactor thread, sessions, subscriptions and readiness waits | Opened again; observers subscribe again |
+| The reactor thread, sessions, subscriptions and status waits | Opened again; observers subscribe again |
 | The attached network service, its sockets and a starter iroh endpoint | Started again; the transport key is in the secret store, so the identity is the same |
 | An application-owned `RockyEndpoint` | The application binds it again with its own secret |
 | A sync pass in flight | Repeated; sync is idempotent |

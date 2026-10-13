@@ -19,10 +19,8 @@ import org.example.examples.shopping.data.session.SessionState
 import org.example.examples.shopping.data.session.ShoppingNode
 import org.example.examples.shopping.data.session.ShoppingPlatform
 import org.example.examples.shopping.data.session.ShoppingSession
-import rocky.ConnectionState
 import rocky.DeliveryState
 import rocky.PeerTransport
-import rocky.ReadinessState
 import rocky.RockyDatabase
 import rocky.RockyEvent
 import rocky.query
@@ -202,7 +200,7 @@ class HouseholdTest {
             removed.awaitTitles(list, "Milk")
             remaining.awaitTitles(list, "Milk")
             val epoch = trusted.rocky.list(list).status().epochs.max()
-            removed.rocky.setOnline(false)
+            removed.rocky.setNetworkingEnabled(false)
             trusted.household.revoke(removed.self)
             assertTrue(removed.self in trusted.household.revokedDevices().first())
             val rotated = trusted.rocky.list(list).status().epochs.max()
@@ -220,9 +218,9 @@ class HouseholdTest {
                 }
             }
             assertEquals(listOf("Milk"), removed.titles(list))
-            removed.rocky.setOnline(true)
-            assertEquals(ConnectionState.Revoked, removed.rocky.syncOnce().state)
-            assertEquals(ReadinessState.Revoked, removed.rocky.observeReadiness().first().state)
+            removed.rocky.setNetworkingEnabled(true)
+            assertEquals("revoked", assertFailsWith<rocky.RockyException> { removed.rocky.syncOnce() }.code)
+            assertNotNull(removed.rocky.observeStatus().first().authority.verifiedRevocation)
             removed.close()
             opened -= removed
             val session = ShoppingSession(platform(root, "removed"))
@@ -341,7 +339,7 @@ class HouseholdTest {
             // Screen collectors may outlive reset's database close until navigation disposes them.
             val observers = listOf(
                 launch { open.node.rocky.observe(rocky.query("SELECT id FROM lists")).collect { snapshot.complete(Unit) } },
-                launch { open.node.rocky.observeReadiness().collect { readiness.complete(Unit) } },
+                launch { open.node.rocky.observeStatus().collect { readiness.complete(Unit) } },
                 launch(start = CoroutineStart.UNDISPATCHED) { open.node.rocky.activity().collect() },
             )
             withTimeout(2_000) {
@@ -431,12 +429,12 @@ class HouseholdTest {
             val desk = ShoppingNode.create(platform(root, "desk")).also { opened += it }
             val phone = ShoppingNode.join(platform(root, "phone"), desk.household.invite(NodeKind.Trusted, "Phone")).also { opened += it }
             // Each holds a list the other has never seen when they next sync: neither direction may refuse it.
-            for (node in opened) node.rocky.setOnline(false)
+            for (node in opened) node.rocky.setNetworkingEnabled(false)
             val fromDesk = desk.repository.createList("From desk")
             desk.repository.add(fromDesk, "Milk")
             val fromPhone = phone.repository.createList("From phone")
             phone.repository.add(fromPhone, "Eggs")
-            for (node in opened) node.rocky.setOnline(true)
+            for (node in opened) node.rocky.setNetworkingEnabled(true)
             for (node in opened) {
                 node.awaitTitles(fromDesk, "Milk")
                 node.awaitTitles(fromPhone, "Eggs")

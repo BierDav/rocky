@@ -177,14 +177,26 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     assert_eq!(revocations(&n).await, both);
     n.sync().await.map_err(|error| error.to_string())?;
     m.sync().await.map_err(|error| error.to_string())?;
-    assert_eq!(m.peer(&n.node().await).await["error"], Value::Null);
+    assert_eq!(
+        m.peer(&n.node().await).await["attempts"]
+            .as_array()
+            .ok_or("attempts")?
+            .iter()
+            .rev()
+            .find(|attempt| attempt["operation"] == "reconcile")
+            .ok_or("reconciliation")?["outcome"],
+        "completed"
+    );
     for (name, device) in [("m", &m), ("n", &n)] {
         assert_eq!(
             identity(root, name)?["keys"],
             json!({"items": [1, 2], "notes": [1, 2]}),
             "{name}"
         );
-        assert_eq!(device.ok(json!({"type": "status"})).await["state"], "ready");
+        assert_eq!(
+            device.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+            false
+        );
     }
     // Rows flow under both new epochs, through either issuer's members.
     create_row(
@@ -208,10 +220,10 @@ async fn partitioned_revocations_merge(a_first: bool) -> Result<(), Failure> {
     );
     // Each revoked device is told why by its own issuer and reads no more.
     for device in [&x, &y] {
-        assert!(device.sync().await.is_err());
-        assert_eq!(
-            device.ok(json!({"type": "status"})).await["state"],
-            "revoked"
+        assert!(common::exchange_failed(&device.sync().await));
+        assert!(
+            !device.ok(json!({"type": "status"})).await["authority"]["verified_revocation"]
+                .is_null()
         );
     }
     assert_eq!(

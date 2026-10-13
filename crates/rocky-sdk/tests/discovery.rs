@@ -69,7 +69,7 @@ async fn enrolled(root: &Path) -> Result<(), Failure> {
         assert!(
             peers["peers"]
                 .as_array()
-                .is_some_and(|peers| peers.iter().all(|peer| peer["configured"] == false))
+                .is_some_and(|peers| peers.iter().all(|peer| peer["is_configured"] == false))
         );
     }
     tokio::join!(a.close(), b.close(), issuer.close());
@@ -202,8 +202,8 @@ async fn two_processes_find_each_other_over_mdns_and_converge() -> Result<(), Fa
     assert_eq!(report["found"]["local"], true);
     assert_eq!(report["peer"]["choice"], "selected_local");
     assert_eq!(report["discovery"]["announcing"], true);
-    assert_eq!(report["discovery"]["paths"]["local"]["state"], "on");
-    assert_eq!(report["discovery"]["paths"]["topic"]["state"], "off");
+    assert_eq!(report["discovery"]["local"]["state"], "on");
+    assert_eq!(report["discovery"]["topic"]["state"], "off");
     a.close().await;
     Ok(())
 }
@@ -234,8 +234,8 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
     assert_eq!(report["titles"], json!(["Milk"]));
     assert_eq!(report["found"]["node"], a.node().await);
     assert_eq!(report["found"]["local"], false);
-    assert_eq!(report["discovery"]["paths"]["topic"]["state"], "on");
-    assert_eq!(report["discovery"]["paths"]["local"]["state"], "off");
+    assert_eq!(report["discovery"]["topic"]["state"], "on");
+    assert_eq!(report["discovery"]["local"]["state"], "off");
     // Both members merged their contact into the one record.
     assert_eq!(server.contacts(&topic), 2);
     a.close().await;
@@ -277,8 +277,8 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     .await?;
     let discovery = a.ok(json!({"type": "network"})).await["discovery"].clone();
     assert_eq!(discovery["announcing"], true);
-    assert_eq!(discovery["paths"]["topic"]["state"], "on");
-    assert_eq!(discovery["paths"]["local"]["state"], "off");
+    assert_eq!(discovery["topic"]["state"], "on");
+    assert_eq!(discovery["local"]["state"], "off");
     assert_eq!(endpoint.address_lookup()?.len(), services);
     a.network.as_ref().ok_or("attached")?.close().await;
     assert_eq!(endpoint.address_lookup()?.len(), services);
@@ -297,9 +297,9 @@ async fn an_attached_endpoint_has_the_same_lookup_services_after_a_database_deta
     let discovery = a.ok(json!({"type": "network"})).await["discovery"].clone();
     assert_eq!(discovery["announcing"], false);
     for path in ["local", "topic"] {
-        assert_eq!(discovery["paths"][path]["state"], "unavailable");
+        assert_eq!(discovery[path]["state"], "unavailable");
         assert_eq!(
-            discovery["paths"][path]["reason"],
+            discovery[path]["reason"],
             "the iroh transport has no discovery"
         );
     }
@@ -346,7 +346,10 @@ async fn two_endpoints_without_a_direct_path_converge_through_a_relay() -> Resul
     a.add(1, "Milk").await;
     b.add(2, "Eggs").await;
     let pass = b.call(json!({"type": "sync"})).await;
-    assert_eq!(pass.map_err(|error| error.to_string())?["peers"], 1);
+    assert_eq!(
+        common::identity::completed_peers(&pass.map_err(|error| error.to_string())?),
+        1
+    );
     assert_eq!(a.titles().await, ["Eggs", "Milk"]);
     assert_eq!(b.titles().await, ["Eggs", "Milk"]);
     // No direct path existed at any point: neither endpoint has an IP transport.

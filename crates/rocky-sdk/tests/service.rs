@@ -386,7 +386,12 @@ async fn devices_run_typed_commands_through_a_registered_service_domain() -> Res
     let contact = call(&c, &scope, json!({"type": "contact"})).await?["uri"].clone();
     call(&a, &scope, json!({"type": "peer_add", "contact": contact})).await?;
     // The return route is ready; retry any bootstrap attempted during join.
-    call(&c, &scope, json!({"type": "connection", "online": true})).await?;
+    call(
+        &c,
+        &scope,
+        json!({"type": "networking_control", "enabled": true}),
+    )
+    .await?;
     call(&c, &scope, json!({"type": "sync"})).await?;
     let rows = call(
         &c,

@@ -25,7 +25,7 @@ class DiscoveryTest {
         try {
             withTimeout(10_000) { while (!a.discovery().announcing) delay(20) }
             val status = a.discovery()
-            assertEquals(DiscoveryPath(DiscoveryPathState.On), status.local)
+            assertEquals(DiscoveryPath(DiscoveryPathState.On, null), status.local)
             assertEquals(DiscoveryPathState.Unavailable, status.topic.state)
             assertNotNull(status.topic.reason)
             assertEquals(status, a.network().discovery)

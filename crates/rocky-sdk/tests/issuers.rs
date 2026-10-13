@@ -110,7 +110,13 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     assert_issuers(root, "early", &[&a_node, &b_node])?;
     // The second issuer serves a device it never saw: its chain admits it.
     synced(&late).await?;
-    assert_eq!(b.peer(&late.node().await).await["state"], "connected");
+    assert!(
+        b.peer(&late.node().await).await["attempts"]
+            .as_array()
+            .expect("attempts")
+            .iter()
+            .any(|attempt| attempt["outcome"] == "completed")
+    );
     assert_eq!(
         identity(root, "late")?["contact_refs"]
             .as_object()

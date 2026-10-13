@@ -1,7 +1,7 @@
 # SDK background activity
 
 `RockyDatabase.activity()` and `RockySession.activity()` expose a
-`Flow<RockyEvent>` describing background work: changed peer reachability,
+`Flow<RockyEvent>` describing background work: peer attempt outcomes,
 changed sets of scopes a peer refused, failed result pulls, nonempty transfers, checkpoint imports, bootstrap, horizon finalization,
 enrollment, renewal, revocation, author assignment and partition key/holding
 changes. Events follow successful local work; they are diagnostic observations,
@@ -36,13 +36,24 @@ expose that loss; there is no persisted audit trail or replay across opens.
 The Kotlin adapter buffers a bounded channel. Idle sync passes produce no
 transfer events; unchanged peer failures and repeated bootstrap starts are
 suppressed. Successful earlier parts of a sync that later fails may not appear
-as transfer events. Current readiness, holdings and network status remain the
+as transfer events. Current status, holdings and network status remain the
 source for the current device state.
 
+`PeerReconciliationCompleted` (`peer_reconciliation_completed`) records a
+completed exchange, and `PeerAttemptFailed` (`peer_attempt_failed`) records a
+failed attempt. Neither is a reachability state. `link_attempt_failed` records
+a failed link-opening attempt.
+
 `LinkOpened` (`link_opened`) records a peer with reason `dialed` or `accepted`.
-`LinkClosed` (`link_closed`) records `offline`, `detached`, `authority`,
-`duplicate`, or `error`; an error close includes the diagnostic error. Link
-transitions wake readiness; path measurements emit no activity.
+
+The activity kinds `networking_enabled` and `networking_disabled` record the
+application's networking control. Kotlin `RockyEvent.NetworkingControl.enabled`
+carries the value. They do not measure internet reachability.
+
+`LinkClosed` (`link_closed`) records `networking_disabled`, `suspended`,
+`worker_disabled`, `detached`, `authority`, `duplicate`, `busy` or `error`.
+An error close includes the diagnostic. Link transitions wake status waits;
+path measurements emit no activity.
 
 `ScopesRefused` (`scopes_refused`) lists the scopes a sync with a peer skipped
 because one side may not hold them, typically a list the peer has not been

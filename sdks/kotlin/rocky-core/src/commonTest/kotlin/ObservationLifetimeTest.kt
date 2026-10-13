@@ -67,7 +67,7 @@ class ObservationLifetimeTest {
     }
 
     @Test
-    fun closeCancelsReadinessAndActivityWaitsWithoutCancellingTheirOwner() = runBlocking {
+    fun closeCancelsStatusAndActivityWaitsWithoutCancellingTheirOwner() = runBlocking {
         withTimeout(2_000) {
             val readinessWaiting = CompletableDeferred<Unit>()
             val activityWaiting = CompletableDeferred<Unit>()
@@ -97,7 +97,7 @@ class ObservationLifetimeTest {
                     assertEquals(0, waits)
                 }
             })
-            val readiness = launch { client.readiness().collect() }
+            val readiness = launch { client.statusChanges().collect() }
             val activity = launch { client.activity().collect() }
             readinessWaiting.await()
             activityWaiting.await()

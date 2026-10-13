@@ -50,18 +50,18 @@ class RosterFreeTest {
             repository.add(list, "Milk")
             repository.share(list, listOf(left.session().node))
             // Handover advertises peers the issuer has successfully reconciled with.
-            assertEquals(ConnectionState.Connected, right.syncOnce().state)
+            assertTrue(right.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertFalse(right.list(list).status().isKeyed)
-            assertEquals(ConnectionState.Connected, issuer.syncOnce().state)
-            assertEquals(ConnectionState.Connected, left.syncOnce().state)
+            assertTrue(issuer.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(left.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), leftRoom.items().all(list).map { it.title })
             assertTrue(left.peers().any { it.node == right.session().node && it.source == "handover" }, left.peers().toString())
             household.share(list, right.session().node)
-            assertEquals(ConnectionState.Connected, left.syncOnce().state, left.peers().toString())
-            assertEquals(ConnectionState.Connected, right.syncOnce().state)
+            assertTrue(left.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(right.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), rightRoom.items().all(list).map { it.title })
-            issuer.setOnline(false)
-            assertEquals(ConnectionState.Connected, left.syncOnce().state, left.peers().toString())
+            issuer.setNetworkingEnabled(false)
+            assertTrue(left.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), rightRoom.items().all(list).map { it.title })
         } finally {
             rooms.asReversed().forEach { it.close() }
@@ -104,8 +104,8 @@ class RosterFreeTest {
             val recording = launch(start = CoroutineStart.UNDISPATCHED) { first.activity().collect { events += it } }
             issuer.addPeer(first.contact().uri)
             try {
-                assertEquals(ConnectionState.Connected, issuer.syncOnce().state, issuer.peers().toString())
-                assertEquals(ConnectionState.Connected, first.syncOnce().state, first.peers().toString())
+                assertTrue(issuer.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+                assertTrue(first.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             } catch (error: Throwable) {
                 println("first events=$events")
                 throw error
@@ -114,11 +114,11 @@ class RosterFreeTest {
             }
             val second = RockyDatabase.join(File(root, "second"), ShoppingSchema, issuer.pairing(NodeKind.Full.profile).uri, transport(), secrets = keys(), automaticSync = false).also(nodes::add)
             // Enrollment supplies just the issuer. The first authenticated pass hands over its other contact.
-            assertEquals(ConnectionState.Connected, second.syncOnce().state)
+            assertTrue(second.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertTrue(second.peers().any { it.node == first.session().node && it.source == "handover" }, second.peers().toString())
-            issuer.setOnline(false)
-            assertEquals(ConnectionState.Connected, second.syncOnce().state)
-            assertTrue(second.peers().any { it.node == first.session().node && it.state == "connected" })
+            issuer.setNetworkingEnabled(false)
+            assertTrue(second.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(second.peers().any { it.node == first.session().node && it.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         } finally {
             nodes.asReversed().forEach { it.close() }
             root.deleteRecursively()

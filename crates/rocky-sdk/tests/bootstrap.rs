@@ -84,7 +84,16 @@ async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Re
     common::introduce(&a, &c).await;
     a.sync().await.expect("push to a behind peer");
     let behind = c.node().await;
-    assert!(a.peer(&behind).await["error"].is_null());
+    assert_eq!(
+        a.peer(&behind).await["attempts"]
+            .as_array()
+            .ok_or("attempts")?
+            .iter()
+            .rev()
+            .find(|attempt| attempt["operation"] == "reconcile")
+            .ok_or("reconciliation")?["outcome"],
+        "completed"
+    );
     let activity = a.ok(json!({"type": "activity"})).await;
     assert!(
         activity["events"]
@@ -215,7 +224,7 @@ async fn post_revocation_join_reads_earlier_rows_without_rotated_out_keys() -> R
     a.add(2, "tail").await;
     member.sync().await.expect("ordinary tail sync");
     assert_eq!(member.titles().await, ["before revocation", "tail"]);
-    assert!(revoked.sync().await.is_err());
+    assert!(common::exchange_failed(&revoked.sync().await));
     member.close().await;
     let member = Device::open(&member_path, None)?;
     assert_eq!(member.titles().await, ["before revocation", "tail"]);
@@ -273,7 +282,7 @@ impl rocky_sdk::transport::Transport for Gate {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_failed_join()
+async fn status_separates_bootstrap_progress_and_reconciliation_and_resumes_a_failed_join()
 -> Result<(), Failure> {
     use rocky_sdk::transport::{Connector, Transport};
     let root = tempfile::tempdir()?;
@@ -296,22 +305,20 @@ async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_fa
     let member = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone()))?;
     attempts.wait_for(|count| *count > 0).await?;
     let status = member.ok(json!({"type": "status"})).await;
-    assert_eq!(status["state"], "bootstrapping");
-    assert_eq!(status["ready"], false);
+    assert_eq!(status["data"]["bootstrap_pending"], true);
     gate.allowed.send_replace(true);
     member.sync().await.expect("finish join");
     let ready = member
         .ok(json!({"type": "status_next", "after": status["token"]}))
         .await;
-    assert_eq!(ready["state"], "ready");
-    assert_eq!(ready["ready"], true);
+    assert_eq!(ready["data"]["bootstrap_pending"], false);
     gate.allowed.send_replace(false);
     let previous = *attempts.borrow_and_update();
     let sync = member.sync();
     let observe = async {
         attempts.wait_for(|count| *count > previous).await?;
         let status = member.ok(json!({"type": "status"})).await;
-        assert_eq!(status["state"], "syncing");
+        assert_eq!(status["network"]["reconciling"], true);
         gate.allowed.send_replace(true);
         Ok::<_, Failure>(())
     };
@@ -332,16 +339,16 @@ async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_fa
     });
     let path = root.path().join("retry");
     let retry = Device::join(&path, &a.invite().await, Network::Borrowed(gate.clone()))?;
-    assert!(retry.sync().await.is_err());
+    assert!(common::exchange_failed(&retry.sync().await));
     assert_eq!(
-        retry.ok(json!({"type": "status"})).await["state"],
-        "bootstrapping"
+        retry.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        true
     );
     retry.close().await;
     let retry = Device::open(&path, None)?;
     assert_eq!(
-        retry.ok(json!({"type": "status"})).await["state"],
-        "bootstrapping"
+        retry.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        true
     );
     gate.refuse
         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -350,7 +357,10 @@ async fn readiness_distinguishes_checkpoint_join_sync_and_ready_and_resumes_a_fa
         .attach(Network::Borrowed(gate.clone()))
         .await?;
     retry.sync().await.expect("resume checkpoint-first join");
-    assert_eq!(retry.ok(json!({"type": "status"})).await["state"], "ready");
+    assert_eq!(
+        retry.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        false
+    );
     assert_eq!(retry.titles().await, ["base"]);
     retry.close().await;
     gate.close().await;
@@ -389,8 +399,8 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     }
     b.ok(json!({"type": "renew"})).await;
     assert_eq!(
-        b.ok(json!({"type": "status"})).await["state"],
-        "bootstrapping"
+        b.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        true
     );
     let identity: serde_json::Value =
         serde_json::from_slice(&std::fs::read(b_path.join("identity.json"))?)?;
@@ -406,7 +416,10 @@ async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old
     b.sync().await.expect("checkpoint refresh after renewal");
     assert_eq!(a.items().await, b.items().await);
     assert_eq!(b.titles().await.len(), 3);
-    assert_eq!(b.ok(json!({"type": "status"})).await["state"], "ready");
+    assert_eq!(
+        b.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        false
+    );
     b.close().await;
     a.close().await;
     Ok(())
@@ -458,7 +471,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         &invitation,
     )?)?;
     attempts.wait_for(|count| *count >= 2).await?;
-    assert!(member.sync().await.is_err());
+    assert!(common::exchange_failed(&member.sync().await));
     let progress: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path.join("bootstrap.json"))?)?;
     assert_eq!(
@@ -479,8 +492,8 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         commands: None,
     })?)?;
     assert_eq!(
-        member.ok(json!({"type": "status"})).await["state"],
-        "bootstrapping"
+        member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        true
     );
     assert_eq!(member.titles().await, ["first scope"]);
     let before = *attempts.borrow_and_update();
@@ -496,7 +509,10 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
     // Resume one scope, then reconcile normally. Resolving the saved route
     // answers on the link stream before any channel opens.
     assert_eq!(*attempts.borrow() - before, 2);
-    assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
+    assert_eq!(
+        member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        false
+    );
     assert!(!path.join("bootstrap.json").exists());
     assert_eq!(member.titles().await, ["first scope"]);
     member.close().await;
@@ -553,11 +569,11 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     // Fault at the renewal durability boundary: intent is newer than the identity.
     rocky_credentials::write_private(&path.join("bootstrap.json"), b"2")?;
     gate.allowed.send_replace(true);
-    assert!(member.sync().await.is_err());
+    assert!(common::exchange_failed(&member.sync().await));
     assert_eq!(std::fs::read(path.join("bootstrap.json"))?, b"2");
     assert_eq!(
-        member.ok(json!({"type": "status"})).await["state"],
-        "bootstrapping"
+        member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        true
     );
     // Once the issuer supplies epoch 2, renewal resets all scopes and catches up.
     let c_path = root.path().join("revoked");
@@ -580,10 +596,13 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     member.ok(json!({"type": "renew"})).await;
     // Retry after restoring authority explicitly signals connectivity again.
     member
-        .ok(json!({"type": "connection", "online": true}))
+        .ok(json!({"type": "networking_control", "enabled": true}))
         .await;
     member.sync().await.expect("fresh intent under epoch 2");
-    assert_eq!(member.ok(json!({"type": "status"})).await["state"], "ready");
+    assert_eq!(
+        member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
+        false
+    );
     assert_eq!(member.titles().await, ["base"]);
     member.close().await;
     c.close().await;
@@ -654,15 +673,14 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
     )?;
     let device = Device::open(root.path(), None)?;
     let status = device.ok(json!({"type": "status"})).await;
-    assert_eq!(status["state"], "bootstrapping");
-    assert!(status["bootstrap"].is_null(), "{status}");
+    assert_eq!(status["data"]["bootstrap_pending"], true);
+    assert!(status["data"]["bootstrap"].is_null(), "{status}");
     device.close().await;
     Ok(())
 }
 
 /// Bootstrap progress counts the stored rows of the offered checkpoints: it
-/// only grows, with a stable total, and the status turns ready when the
-/// intent completes.
+/// only grows, with a stable total, and the pending intent clears on completion.
 #[tokio::test(flavor = "multi_thread")]
 async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
@@ -685,8 +703,8 @@ async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> 
         tokio::spawn(async move {
             let mut seen = Vec::new();
             let mut status = b.ok(json!({"type": "status"})).await;
-            while status["state"] != "ready" {
-                seen.push(status["bootstrap"].clone());
+            while status["data"]["bootstrap_pending"] == true {
+                seen.push(status["data"]["bootstrap"].clone());
                 status = b
                     .ok(json!({"type": "status_next", "after": status["token"]}))
                     .await;
@@ -696,7 +714,7 @@ async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> 
     };
     b.sync().await.expect("join sync");
     let (seen, ready) = observer.await?;
-    assert!(ready["bootstrap"].is_null(), "{ready}");
+    assert!(ready["data"]["bootstrap"].is_null(), "{ready}");
     let progress: Vec<_> = seen.iter().filter(|progress| !progress.is_null()).collect();
     assert!(progress.len() > 2, "{seen:?}");
     let total = progress[0]["rows_total"].clone();
@@ -735,7 +753,11 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         Network::Owned(hub.connector("b")),
     )?);
     let mut status = b.ok(json!({"type": "status"})).await;
-    while status["bootstrap"]["rows_done"].as_u64().unwrap_or(0) == 0 {
+    while status["data"]["bootstrap"]["rows_done"]
+        .as_u64()
+        .unwrap_or(0)
+        == 0
+    {
         status = b
             .ok(json!({"type": "status_next", "after": status["token"]}))
             .await;
@@ -744,8 +766,10 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
     a.add(200, "edited on a while cut").await;
     b.add(201, "edited on b while cut").await;
     let paused = b.ok(json!({"type": "status"})).await;
-    assert_eq!(paused["state"], "bootstrapping");
-    let done = paused["bootstrap"]["rows_done"].as_u64().expect("progress");
+    assert_eq!(paused["data"]["bootstrap_pending"], true);
+    let done = paused["data"]["bootstrap"]["rows_done"]
+        .as_u64()
+        .expect("progress");
     assert!(done > 0, "{paused}");
     hub.cut_after(None);
     let observer = {
@@ -753,8 +777,8 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         tokio::spawn(async move {
             let mut seen = Vec::new();
             let mut status = b.ok(json!({"type": "status"})).await;
-            while status["state"] != "ready" {
-                seen.push(status["bootstrap"].clone());
+            while status["data"]["bootstrap_pending"] == true {
+                seen.push(status["data"]["bootstrap"].clone());
                 status = b
                     .ok(json!({"type": "status_next", "after": status["token"]}))
                     .await;
@@ -763,8 +787,10 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
         })
     };
     // Going online again ends the backoff the cut caused.
-    b.ok(json!({"type": "connection", "online": false})).await;
-    b.ok(json!({"type": "connection", "online": true})).await;
+    b.ok(json!({"type": "networking_control", "enabled": false}))
+        .await;
+    b.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     b.sync().await.expect("resume the join");
     for progress in observer
         .await?
@@ -775,7 +801,10 @@ async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Resul
             progress["rows_done"].as_u64() >= Some(done),
             "restarted: {progress}"
         );
-        assert_eq!(progress["rows_total"], paused["bootstrap"]["rows_total"]);
+        assert_eq!(
+            progress["rows_total"],
+            paused["data"]["bootstrap"]["rows_total"]
+        );
     }
     a.sync().await.expect("a pulls b's edit");
     let edits = json!({"type": "read", "query": {"sql": "SELECT title FROM items WHERE length(title) < 100 ORDER BY title", "values": [], "max_rows": 16}});

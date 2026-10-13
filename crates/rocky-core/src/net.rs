@@ -121,7 +121,7 @@ impl Protocol {
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Link => b"rocky/link/2",
+            Self::Link => b"rocky/link/3",
             Self::Renew => b"rocky/sdk-renew/2",
             Self::Command => b"rocky/command/2",
             Self::Coordinate => b"rocky/coordinator/1",
@@ -157,6 +157,14 @@ pub trait Transport: Send + Sync {
     fn connectivity(&self) -> Option<tokio::sync::watch::Receiver<()>> {
         None
     }
+    /// The attachment's initial relay configuration, if it owns that configuration.
+    fn initial_relay_configuration(&self) -> Option<String> {
+        None
+    }
+    /// Actual home-relay observations; None if the adapter cannot expose them.
+    fn relays(&self) -> Option<Vec<RelayStatus>> {
+        None
+    }
     /// Finds peers whose address this node does not know. Transports
     /// without it work from contacts.
     fn discovery(&self) -> Option<Arc<dyn Discovery>> {
@@ -177,6 +185,15 @@ pub trait Transport: Send + Sync {
     }
     /// Releases what the transport itself started. Its owner calls this.
     fn close(&self) -> BoxFuture<'_, ()>;
+}
+
+/// One home relay's actual connection observation, supplied by the endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayStatus {
+    pub url: String,
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub auth_denied_reason: Option<String>,
 }
 
 /// The discovery path of the local network, as `Discovery::paths` names it.

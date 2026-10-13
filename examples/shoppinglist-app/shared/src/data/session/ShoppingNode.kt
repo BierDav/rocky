@@ -14,7 +14,6 @@ import org.example.examples.shopping.util.readText
 import org.example.examples.shopping.util.replaceText
 import rocky.CommandRuntime
 import rocky.PeerTransport
-import rocky.ReadinessState
 import rocky.RockyDatabase
 import rocky.SecretStore
 import rocky.room.RockyRoom
@@ -112,7 +111,7 @@ class ShoppingNode private constructor(
         suspend fun resume(platform: ShoppingPlatform): ShoppingNode = open(platform) { commands ->
             RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), commands = commands)
         }.configure {
-            if (isTrusted && rocky.observeReadiness().first().state != ReadinessState.Revoked && household.devices().first().none { it.node == self }) {
+            if (isTrusted && rocky.observeStatus().first().authority.verifiedRevocation == null && household.devices().first().none { it.node == self }) {
                 household.record(self, platform.deviceName, NodeKind.Trusted)
             }
         }

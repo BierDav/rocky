@@ -133,7 +133,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         .await
         .map_err(|error| format!("remaining writer after revocation: {error}"))?;
     assert_eq!(w.titles().await, ["after", "before"]);
-    assert!(m.sync().await.is_err());
+    assert!(common::exchange_failed(&m.sync().await));
     assert_eq!(m.titles().await, ["before"]);
     assert_eq!(identity(root, "m")?["keys"]["items"], json!([1]));
     // The enrolling issuer returns, learns the statement and tombstone in one sync.
@@ -238,7 +238,7 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
     let chain: CredentialChain =
         serde_json::from_value(identity(root, "a")?["credentials"].clone())?;
     // A's own request for renewal is refused; self-renewal retains only its old keys.
-    assert!(a.sync().await.is_err());
+    assert!(common::exchange_failed(&a.sync().await));
     assert_eq!(identity(root, "a")?["keys"]["issuer_registry"], json!([1]));
     let set: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(identity(root, "b")?["revocations"].clone())?;

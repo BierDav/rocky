@@ -225,3 +225,32 @@ where
     raw(json!({"type":"pseudonym_install","pseudonym":pseudonym})).await?;
     Ok(())
 }
+
+pub fn reconciled(report: &Value) -> bool {
+    report["peers"].as_array().is_some_and(|peers| {
+        peers.iter().any(|peer| {
+            peer["attempts"].as_array().is_some_and(|attempts| {
+                attempts.iter().any(|attempt| {
+                    attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                })
+            })
+        })
+    })
+}
+
+pub fn completed_peers(report: &Value) -> usize {
+    report["peers"]
+        .as_array()
+        .expect("native peer reports")
+        .iter()
+        .filter(|peer| {
+            peer["attempts"]
+                .as_array()
+                .expect("native attempts")
+                .iter()
+                .any(|attempt| {
+                    attempt["operation"] == "reconcile" && attempt["outcome"] == "completed"
+                })
+        })
+        .count()
+}

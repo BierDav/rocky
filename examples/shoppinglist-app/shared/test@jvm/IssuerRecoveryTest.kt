@@ -29,7 +29,7 @@ class IssuerRecoveryTest {
     }
 
     /** A joined device finishes its own bootstrap before it starts a list from a checkpoint. */
-    private suspend fun RockyDatabase.joined() = also { assertEquals(ConnectionState.Connected, syncOnce().state) }
+    private suspend fun RockyDatabase.joined() = also { assertTrue(syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } }) }
     private suspend fun close(runtime: RockyDatabase) {
         rooms.remove(runtime)?.close()
         runtime.close()
@@ -54,8 +54,8 @@ class IssuerRecoveryTest {
             val expiring = d.session()
             a.share(b, d)
             a.add("Milk")
-            assertEquals(ConnectionState.Connected, d.syncOnce().state)
-            assertEquals(ConnectionState.Connected, b.syncOnce().state)
+            assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), b.titles())
 
             // The creator device is destroyed, keys included; the second issuer revokes it.
@@ -64,14 +64,14 @@ class IssuerRecoveryTest {
             opened -= a
             assertTrue(File(root, "a").deleteRecursively())
             b.revoke(creator)
-            assertEquals(expiring.revocations.statements + 1, b.session().revocations.statements)
+            assertEquals(expiring.revocations.statements + 1uL, b.session().revocations.statements)
             assertTrue(b.peers().none { it.node == creator })
 
             val c = join(File(root, "c"), b.pairing(writer)).withRoom(File(root, "c")).also { opened += it }.joined()
             // Revocation rotated the list's secret; the second issuer shares the new epoch with the device
             // enrolled since, which starts the list from its checkpoint, as it rejects the revoked creator's frames.
             b.share(c)
-            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), c.titles())
 
             val renewed = d.renew()
@@ -80,12 +80,12 @@ class IssuerRecoveryTest {
             assertTrue(d.peers().none { it.node == creator })
             // The rotation sealed the new epoch to the recorded reader itself: the held list gains it at the
             // next sync, and renewal's bootstrap then restarts it from a checkpoint.
-            assertEquals(ConnectionState.Connected, d.syncOnce().state)
+            assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             // Its authors ended with the revoked epoch: the second issuer assigns new ones over the network.
             d.installAuthors()
             d.add("Eggs")
-            assertEquals(ConnectionState.Connected, d.syncOnce().state)
-            assertEquals(ConnectionState.Connected, c.syncOnce().state)
+            assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
+            assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Eggs", "Milk"), c.titles())
         } finally {
             opened.forEach { close(it) }
@@ -114,10 +114,10 @@ class IssuerRecoveryTest {
             assertFailsWith<RockyException> { x.revoke(a.session().node) }
             a.share(x)
             // The list arrives before an item can reference it.
-            assertEquals(ConnectionState.Connected, x.syncOnce().state)
+            assertTrue(x.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             x.repository.share(list, listOf(a.session().node))
             x.add("Milk")
-            assertEquals(ConnectionState.Connected, x.syncOnce().state)
+            assertTrue(x.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), a.titles())
             // The creator still holds the only publisher key and keeps its logout guard.
             assertFailsWith<RockyException> { a.logout() }

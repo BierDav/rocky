@@ -180,14 +180,14 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
     assert_eq!(member.scope, creator.scope);
 
     let milk = creator.add(1, "Milk").await;
-    assert_eq!(member.sync().await["state"], "connected");
+    assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&member.items().await), ["Milk"]);
 
     // Offline edits of different fields converge; a delete is permanent.
     member
-        .ok(json!({"type": "connection", "online": false}))
+        .ok(json!({"type": "networking_control", "enabled": false}))
         .await;
-    assert_eq!(member.sync().await["state"], "offline");
+    assert_eq!(member.sync().await["skip"], "networking_disabled");
     creator
         .mutate(
             2,
@@ -206,7 +206,7 @@ async fn converge(at: fn(u16) -> Value) -> Result<(), Failure> {
         .map_err(|error| error.to_string())?;
     member.add(4, "Eggs").await;
     member
-        .ok(json!({"type": "connection", "online": true}))
+        .ok(json!({"type": "networking_control", "enabled": true}))
         .await;
     member.sync().await;
     assert_eq!(creator.items().await, member.items().await);
@@ -470,7 +470,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     let member = open("b", json!({"mode": "join", "invitation": invitation}), "b")?;
     creator.add(1, "Milk").await;
     member.add(2, "Eggs").await;
-    assert_eq!(member.sync().await["state"], "connected");
+    assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&creator.items().await), ["Eggs", "Milk"]);
     assert_eq!(creator.items().await, member.items().await);
 
@@ -480,7 +480,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
     let creator = open("a", json!({"mode": "resume"}), "a")?;
     let member = open("b", json!({"mode": "resume"}), "b")?;
     creator.add(3, "Jam").await;
-    assert_eq!(member.sync().await["state"], "connected");
+    assert!(support::reconciled(&member.sync().await));
     assert_eq!(titles(&member.items().await), ["Eggs", "Jam", "Milk"]);
     member.close().await;
     creator.close().await;

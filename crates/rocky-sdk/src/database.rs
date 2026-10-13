@@ -272,6 +272,7 @@ impl Database {
     pub fn session(&self) -> Session {
         Session {
             shared: self.shared.clone(),
+            scope: self.scope.clone(),
             id: self.shared.sessions.fetch_add(1, Ordering::Relaxed),
             closed: Arc::new(AtomicBool::new(false)),
         }
@@ -423,10 +424,73 @@ impl Drop for Connection {
 /// One caller's view of a shared database: the JSON calls of the native ABI.
 pub struct Session {
     shared: Arc<Shared>,
+    scope: String,
     id: u64,
     closed: Arc<AtomicBool>,
 }
 impl Session {
+    async fn request(&self, request: Value) -> Result<Value, Failure> {
+        let call = json!({"version":1,"scope":serde_json::from_str::<Value>(&self.scope)?,"request":request});
+        let response: Value = serde_json::from_str(&self.call(call.to_string()).await?)?;
+        if response["status"] != "ok" {
+            return Err(Box::new(crate::CallFailure {
+                code: response["error"]["code"]
+                    .as_str()
+                    .ok_or("missing failure code")?
+                    .into(),
+                retryable: response["error"]["retryable"]
+                    .as_bool()
+                    .ok_or("missing retryability")?,
+                detail: response["error"]["message"]
+                    .as_str()
+                    .ok_or("missing failure detail")?
+                    .into(),
+            }));
+        }
+        Ok(response["value"].clone())
+    }
+    pub async fn network(&self) -> Result<crate::NetworkStatus, Failure> {
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"network"})).await?,
+        )?)
+    }
+    pub async fn peers(&self) -> Result<Vec<crate::Peer>, Failure> {
+        let response = self.request(json!({"type":"peers"})).await?;
+        Ok(serde_json::from_value(response["peers"].clone())?)
+    }
+    pub async fn discovery(&self) -> Result<crate::DiscoveryStatus, Failure> {
+        Ok(self.network().await?.discovery)
+    }
+    /// Observes owned runtime facts without dialing or starting a worker.
+    pub async fn status(&self) -> Result<crate::DatabaseStatus, Failure> {
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"status"})).await?,
+        )?)
+    }
+    /// Waits for a changed snapshot; closing this session ends only its waits.
+    pub async fn status_after(&self, token: String) -> Result<crate::DatabaseStatus, Failure> {
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"status_next","after":token}))
+                .await?,
+        )?)
+    }
+    /// Reconciles selected peers and preserves each attempt's outcome.
+    pub async fn sync_once(&self) -> Result<crate::ReconciliationReport, Failure> {
+        Ok(serde_json::from_value(
+            self.request(json!({"type":"sync"})).await?,
+        )?)
+    }
+    pub async fn set_networking_enabled(&self, enabled: bool) -> Result<(), Failure> {
+        self.request(json!({"type":"networking_control","enabled":enabled}))
+            .await
+            .map(drop)
+    }
+    pub async fn set_automatic_sync(&self, enabled: bool) -> Result<(), Failure> {
+        self.request(json!({"type":"sync_start","enabled":enabled}))
+            .await
+            .map(drop)
+    }
+
     pub async fn call(&self, request: String) -> Result<String, Failure> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ServiceError::Closed("session").into());
@@ -947,7 +1011,7 @@ async fn run(
                 // Only a subscription's wait stops when its caller goes
                 // away; admitted mutations run to completion.
                 let waits = serde_json::from_slice::<Value>(&bytes).is_ok_and(|call| {
-                    ["next", "status_next", "sync_next", "activity_next"]
+                    ["next", "status_next", "activity_next"]
                         .contains(&call["request"]["type"].as_str().unwrap_or(""))
                 });
                 let client = if waits && ending.load(Ordering::SeqCst) {

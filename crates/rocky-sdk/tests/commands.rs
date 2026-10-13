@@ -168,7 +168,7 @@ impl Device {
     }
     async fn ready(&self) {
         let mut status = self.ok(json!({"type":"status"})).await;
-        while status["state"] != "ready" {
+        while status["data"]["bootstrap_pending"] == true {
             status = self
                 .ok(json!({"type":"status_next","after":status["token"]}))
                 .await;
@@ -329,17 +329,17 @@ async fn an_unknown_head_leaves_an_idle_reader_unchanged() -> Result<(), Failure
     // A pass without a head asks to retry; going online again resets that back-off.
     let sync = async || {
         pair.b
-            .ok(json!({"type": "connection", "online": true}))
+            .ok(json!({"type": "networking_control", "enabled": true}))
             .await;
         pair.b.ok(json!({"type": "sync"})).await;
     };
     sync().await;
-    let before = pair.b.ok(json!({"type": "status"})).await["revision"].clone();
+    let before = pair.b.ok(json!({"type": "status"})).await["data"]["revision"].clone();
     for _ in 0..3 {
         sync().await;
     }
     assert_eq!(
-        pair.b.ok(json!({"type": "status"})).await["revision"],
+        pair.b.ok(json!({"type": "status"})).await["data"]["revision"],
         before
     );
     assert_eq!(pair.b.rows("stock").await["rows"][0][1], integer(3));

@@ -17,6 +17,7 @@ fun Project.rustSources(): List<Any> = listOf(
     "vendor",
     "crates",
     "sdks/native/Cargo.toml",
+    "sdks/native/build.rs",
     "sdks/native/Cargo.lock",
     "sdks/native/uniffi.toml",
     "sdks/native/askama.toml",

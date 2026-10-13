@@ -23,7 +23,7 @@ class DatabaseObservationLifetimeTest {
                 val readiness = CompletableDeferred<Unit>()
                 val collectors = listOf(
                     launch { database.observe(query("SELECT id FROM items")).collect { snapshot.complete(Unit) } },
-                    launch { database.observeReadiness().collect { readiness.complete(Unit) } },
+                    launch { database.observeStatus().collect { readiness.complete(Unit) } },
                     launch(start = CoroutineStart.UNDISPATCHED) { database.activity().collect() },
                 )
                 snapshot.await()

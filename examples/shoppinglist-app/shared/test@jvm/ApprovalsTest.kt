@@ -61,7 +61,7 @@ class ApprovalsTest {
             assertEquals("This device", decision.requester)
             assertEquals("Another device", decision.decider)
             assertTrue(Row.decode(executor.read(ShoppingSchema.table("devices").query())).isEmpty())
-            assertEquals(ConnectionState.Connected, executor.syncOnce().state)
+            assertTrue(executor.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             val foreignHex = executor.session().node
             val foreignKey = foreignHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             memberRoom.close()

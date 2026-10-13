@@ -86,27 +86,25 @@ Combinations that cannot work fail before anything is stored or started.
 | `CredentialsExpired` | `network_required` | A member opens with expired credentials and no network |
 | `NoRoute` | `rejected` | No route of the attached kind for the peer or in the invitation |
 | `NetworkAttached` | `rejected` | A second network is attached |
-| `Unreachable` | `unreachable` | No known route answered |
+| `Unreachable` | `unreachable` | Known route attempts failed |
+| `TimedOut` | `unreachable` | A route attempt timed out |
 | `Closed` | `closed` | A call on a closed session, database or network service |
 
-Only `Unreachable` is retryable as the same call.
+`Unreachable` and `TimedOut` are retryable as the same call.
 
 ## Network status
 
-The `network` call answers immediately, whatever the database state, also
-after logout:
+Native `network()` returns `NetworkStatus`, also after logout. It exposes
+attachment lifecycle and optional ownership, explicit networking/foreground
+controls, optional inbound service counters, discovery, live peer links,
+relay observations and retained dated attempts. An absent service has no
+invented zero counters. Peer history does not become a `connected` or
+`unreachable` state; only an open authenticated link counts as connected.
 
-```json
-{"attached": true, "kind": "iroh", "owned": false, "online": true, "draining": false,
- "inbound": {"limit": 32, "active": 1, "served": "12", "refused": "0"},
- "peers": [{"node": "…", "issuer": true, "creator": true, "routes": […], "state": "connected", "checked": "1791273600", "error": null}]}
-```
-
-`state` is `unknown` before the first sync, then `connected` or `unreachable`
-with the last `error`. Each peer also carries live `link` state and measurements
-([live links](live-links.md#status-and-lifecycle)); this distinguishes a current
-link from an earlier successful pass. A checkpoint-first join reports `bootstrapping` until
-its base is imported ([readiness](sdk-bootstrapping.md#readiness)).
+`DatabaseStatus` adds independent authority and data observations, and
+`syncOnce()` returns a per-peer `ReconciliationReport`. See the
+[observable status contract](../proposals/observable-status.md) for semantics,
+unknown observations and generated Kotlin parity.
 
 ## The starter engine
 

@@ -90,7 +90,7 @@ class RoomGateTest {
         assertEquals(before + 1, bundles(File(directory, "a")))
         // Registered before the sync, so the bundle's commit on the peer is among the events.
         val events = b.driverTableEvents()
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         val applied = withTimeout(10_000) {
             var change = events.next()
             while ("items" !in change.tables) change = events.next()
@@ -132,7 +132,7 @@ class RoomGateTest {
         val ids = created.items.sortedBy { it.key }.map { it.id }
         assertEquals(listOf(1L, 2L), ids.map { it and 0xFFFF_FFFFL })
         assertNotEquals(created.list.id ushr 32, ids.first() ushr 32, "each table has its own author")
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         assertEquals(created, roomB.shop().withItems("l1"), "peers see the issued ids")
         // Another device issues under its own author.
         val fromB = roomB.shop().createItems(listOf(item("i3", "Jam"))).single()
@@ -156,7 +156,7 @@ class RoomGateTest {
         // An entity whose id Rocky did not issue is refused, and nothing is published.
         assertFailsWith<SQLiteException> { roomA.shop().insertItems(listOf(item("i5", "Unissued"))) }
         assertFailsWith<SQLiteException> { roomA.shop().insertItems(listOf(item("i5", "Skipped").copy(id = released + 2))) }
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         assertEquals(listOf("i1", "i2", "i3", "i4"), roomB.shop().items("l1").map { it.key }.sorted())
         assertEquals(roomB.shop().items("l1"), roomA.shop().items("l1"))
     }
@@ -181,7 +181,7 @@ class RoomGateTest {
         // Both devices write the whole entity, each changing one column, before they sync.
         roomA.shop().update(stale.copy(title = "Oat milk"))
         roomB.shop().update(roomB.shop().items("l1").single().copy(completed = true, quantity = 3))
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         val expected = stale.copy(title = "Oat milk", completed = true, quantity = 3)
         assertEquals(expected, roomA.shop().items("l1").single())
         assertEquals(expected, roomB.shop().items("l1").single())
@@ -223,11 +223,11 @@ class RoomGateTest {
     @Test fun kotlinHorizonsFinalizeThroughTheNativeBridgeAndRoomKeepsConvergedRows() = pair {
         roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs")))
         roomA.shop().delete(roomA.shop().items("l1").first { it.key == "i2" })
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         val declared = a.horizons.declare("items", setOf(b.session().node))
         assertFalse(declared.getValue("finalized").jsonPrimitive.boolean)
         b.horizons.admit("items", declared.getValue("statement").jsonPrimitive.content)
-        assertEquals(ConnectionState.Connected, b.syncOnce().state)
+        assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         assertTrue(b.horizons.status("items").getValue("finalized").jsonPrimitive.boolean)
         assertTrue(a.horizons.finalize("items").getValue("finalized").jsonPrimitive.boolean)
         assertEquals(a.horizons.status("items").getValue("statement"), b.horizons.status("items").getValue("statement"))

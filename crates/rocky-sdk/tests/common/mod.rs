@@ -178,3 +178,23 @@ pub async fn introduce(left: &Device, right: &Device) {
     left.add_peer(&right.contact().await).await.expect("peer");
     right.add_peer(&left.contact().await).await.expect("peer");
 }
+
+pub fn reconciled(report: &Value) -> bool {
+    identity::reconciled(report)
+}
+#[allow(dead_code)]
+pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(report) => report["peers"].as_array().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["skip"] == "backoff"
+                    || peer["attempts"].as_array().is_some_and(|attempts| {
+                        attempts
+                            .iter()
+                            .any(|attempt| attempt["outcome"] == "failed")
+                    })
+            })
+        }),
+    }
+}

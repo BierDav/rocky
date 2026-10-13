@@ -32,10 +32,10 @@ class ShareRecipientTest {
             choice = "not_considered",
             routes = listOf(Route("iroh", "route")),
             isLocal = source == "discovery",
-            state = "unknown",
-            checkedAtEpochSeconds = null,
-            error = null,
-            link = PeerLink(LinkState.Closed, null, null),
+            attempts = emptyList(),
+            lastAuthenticatedExchangeAtEpochSeconds = null,
+            retry = null,
+            link = PeerLink(LinkState.Closed, null, null, emptyList()),
         )
         val peers = listOf(peer("self", "discovery"), peer("nearby", "discovery"), peer("remote", "handover"), peer("nearby", "discovery"))
         val recipients = discoveredRecipients("self", peers)

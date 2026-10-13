@@ -153,29 +153,29 @@ fun main(args: Array<String>) = runBlocking {
         ),
     )
     var db = RockyDatabase.local(directory, schema, commands = runtime)
-    check(!db.network().attached)
+    check(db.network().attachment == rocky.AttachmentState.Detached)
     val a = db.openSession()
     val b = db.openSession()
     val identity = db.commandIdentity()
     coordinator.register(identity)
     val node = a.credentials.status().node
     check(a.credentials.status().isIssuer)
-    val initial = a.readiness().first()
-    val revision = initial.getValue("revision").jsonPrimitive.long
+    val initial = a.observeStatus().first()
+    val revision = initial.data.revision
     val changed = async(start = CoroutineStart.UNDISPATCHED) {
-        a.readiness().first { it.getValue("revision").jsonPrimitive.long > revision }
+        a.observeStatus().first { it.data.revision > revision }
     }
     // The issuer assigns its own author; inserts are signed under it.
     a.credentials.installPseudonym(a.credentials.assignPseudonym(a.credentials.pseudonymRequest("items")))
     val action = handle(1)
     suspend fun apples() = b.write(action) { execute("INSERT INTO items(id, title) VALUES(?, ?)", nextId("items"), "apples") }
     apples()
-    check(withTimeout(5000) { changed.await() }.getValue("ready").jsonPrimitive.boolean)
+    check(withTimeout(5000) { changed.await() }.data.revision > revision)
     // Lost foreign acknowledgment: reconcile the handle rather than writing again. Another transaction under it is refused.
     check(b.reconcile(action).getValue("committed").jsonPrimitive.boolean)
     check(runCatching { apples() }.exceptionOrNull() is RockyException)
     check(titles(b) == listOf("apples"))
-    val waiting = async(start = CoroutineStart.UNDISPATCHED) { a.readiness().first { false } }
+    val waiting = async(start = CoroutineStart.UNDISPATCHED) { a.observeStatus().first { false } }
     waiting.cancelAndJoin()
     a.close()
     check(titles(b) == listOf("apples"))
@@ -187,9 +187,9 @@ fun main(args: Array<String>) = runBlocking {
     check(b.commands.cancel(add, handle(3)).state == TicketState.Cancelled)
     val endpoint = RockyEndpoint.bind(ByteArray(32) { 42 }, relay = "disabled", lookup = "disabled", bind = "127.0.0.1:0")
     val attached = db.attach(PeerTransport.Endpoint(endpoint))
-    check(db.network().attached && !db.network().owned)
+    check(db.network().attachment == rocky.AttachmentState.Attached && db.network().ownership == rocky.NetworkOwnership.Application)
     attached.close()
-    check(!db.network().attached)
+    check(db.network().attachment == rocky.AttachmentState.Detached)
     check(endpoint.address().isNotEmpty())
     val owned = db.attach(PeerTransport.Iroh.isolated())
     // An issuer backup includes the registry projection, so restore with issuer read grants.

@@ -41,7 +41,7 @@ class IosShoppingTest {
         )
         var node = ShoppingNode.create(platform)
         try {
-            node.rocky.setOnline(false)
+            node.rocky.setNetworkingEnabled(false)
             val list = node.repository.createList("Offline groceries")
             node.repository.add(list, "Milk")
             node.rocky.enterBackground()

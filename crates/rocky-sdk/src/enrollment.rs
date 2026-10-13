@@ -1100,21 +1100,42 @@ impl Settings {
     pub fn transport_key(vault: &Vault) -> Result<[u8; 32], Failure> {
         Ok(vault.get("transport")?)
     }
-    /// Whether this device can reach an issuer to renew: it is one, or a
-    /// configured issuer has routes.
-    pub fn issuer_contact(&self) -> bool {
-        self.issuer()
-            || self.contact_refs.iter().any(|(id, entry)| {
-                !self.resolved_refs.contains(id)
-                    && entry.issuer
-                    && (!entry.contact.routes.is_empty() || entry.enrollment.is_some())
+    pub(crate) fn renewal_routes(&self) -> Vec<crate::RenewalRoute> {
+        let routes = |contact: &Contact| {
+            contact
+                .routes
+                .iter()
+                .map(|route| crate::Route {
+                    transport: route.transport.clone(),
+                    address: route.address.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut candidates: Vec<_> = self
+            .issuers
+            .iter()
+            .map(|node| crate::RenewalRoute {
+                target: node.to_hex(),
+                routes: self.peers.get(node).map(routes).unwrap_or_default(),
+                enrollment_routes: self
+                    .enrollment_routes
+                    .get(node)
+                    .map(routes)
+                    .unwrap_or_default(),
             })
-            || self.issuers.iter().any(|issuer| {
-                self.peers
-                    .get(issuer)
-                    .is_some_and(|contact| !contact.routes.is_empty())
-                    || self.enrollment_routes.contains_key(issuer)
-            })
+            .collect();
+        candidates.extend(
+            self.contact_refs
+                .iter()
+                .filter(|(id, entry)| !self.resolved_refs.contains(id) && entry.issuer)
+                .map(|(id, entry)| crate::RenewalRoute {
+                    target: HEXLOWER.encode(id.as_bytes()),
+                    routes: routes(&entry.contact),
+                    enrollment_routes: entry.enrollment.as_ref().map(routes).unwrap_or_default(),
+                }),
+        );
+        candidates.retain(|route| !route.routes.is_empty() || !route.enrollment_routes.is_empty());
+        candidates
     }
     /// Whether another holder of the publisher key is known.
     pub fn another_issuer(&self, registry: &Registry, own: PublicKey) -> bool {
@@ -3797,14 +3818,30 @@ pub async fn dial(
     protocol: Protocol,
 ) -> Result<Stream, Failure> {
     let mut failure = None;
+    let mut timed_out = false;
     for address in addresses {
         match tokio::time::timeout(TIMEOUT, transport.connect(address, protocol)).await {
             Ok(Ok(stream)) => return Ok(stream),
-            Ok(Err(error)) => failure = Some(error.to_string()),
-            Err(_) => failure = Some("the dial timed out".into()),
+            Ok(Err(error)) => {
+                timed_out = error.is::<tokio::time::error::Elapsed>()
+                    || error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut);
+                failure = Some(error.to_string());
+            }
+            Err(_) => {
+                timed_out = true;
+                failure = Some("the dial timed out".into());
+            }
         }
     }
-    Err(ServiceError::Unreachable(failure.unwrap_or_else(|| "no route".into())).into())
+    let cause = failure.unwrap_or_else(|| "no route".into());
+    Err(if timed_out {
+        ServiceError::TimedOut(cause)
+    } else {
+        ServiceError::Unreachable(cause)
+    }
+    .into())
 }
 /// One request and its answer on a fresh stream: the reply's bytes, or
 /// the peer's refusal.

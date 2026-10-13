@@ -48,9 +48,10 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
     let mut failed = 0;
     // Cuts during the handshake, the push and the pull.
     for bytes in [0, 300, 3_000, 9_000, 20_000, 45_000] {
-        b.ok(json!({"type": "connection", "online": true})).await;
+        b.ok(json!({"type": "networking_control", "enabled": true}))
+            .await;
         hub.cut_after(Some(bytes));
-        failed += usize::from(b.sync().await.is_err());
+        failed += usize::from(common::exchange_failed(&b.sync().await));
         hub.cut_after(None);
         // `items` reads both fields of every row; a partial row would fail it.
         let (ours, theirs) = (b.items().await, a.items().await);
@@ -58,17 +59,19 @@ async fn a_cut_stream_loses_nothing_and_applies_nothing_in_part() -> Result<(), 
         assert!(ours.iter().chain(&theirs).all(|row| union().contains(row)));
     }
     assert!(failed >= 3, "only {failed} cuts interrupted a sync");
-    assert_eq!(
-        b.peer(&a.node().await).await["state"],
-        if b.items().await == union() {
-            "connected"
-        } else {
-            "unreachable"
-        }
-    );
+    let peer = b.peer(&a.node().await).await;
+    let last = peer["attempts"]
+        .as_array()
+        .expect("attempts")
+        .iter()
+        .rev()
+        .find(|attempt| attempt["operation"] == "reconcile")
+        .expect("reconciliation");
+    assert_eq!(last["outcome"] == "completed", b.items().await == union());
 
     // The interrupted sync repeats safely, and a duplicate changes nothing.
-    b.ok(json!({"type": "connection", "online": true})).await;
+    b.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
     for _ in 0..2 {
         b.sync().await.map_err(|error| error.to_string())?;
         assert_eq!(b.items().await, union());

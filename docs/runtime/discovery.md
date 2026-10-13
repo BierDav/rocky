@@ -53,12 +53,12 @@ and the test hub's default have no discovery and work from contacts.
 
 ## Status
 
-`peers()`/`network()` and readiness report each path:
+`network()` and `DatabaseStatus.network.discovery` report each path:
 
 ```json
 {"announcing": true,
- "paths": {"local": {"state": "on"},
-           "topic": {"state": "unavailable", "reason": "the topic needs the lookup service, which is disabled"}}}
+ "local": {"state": "on"},
+           "topic": {"state": "unavailable", "reason": "the topic needs the lookup service, which is disabled"}}
 ```
 
 `on` means asked for and running, `off` not asked for, detached or stopped in
@@ -67,7 +67,7 @@ disabled lookup service, a failed mDNS socket, a lookup service that did not
 answer, a transport without discovery or denied local-network access. `announcing` is
 false until the device holds the discovery root, and for a device that is
 logged out or knows it is revoked. Kotlin: `RockySession.discovery()`,
-`NetworkStatus.discovery`, `Readiness.discovery` and `Peer.isLocal`.
+`NetworkStatus.discovery`, `DatabaseStatus.network.discovery` and `Peer.isLocal`.
 
 ## Revocation
 

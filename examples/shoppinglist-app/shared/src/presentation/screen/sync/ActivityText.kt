@@ -60,9 +60,9 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
 
         is RockyEvent.LinkClosed -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Link closed with ${device(event.peer)}", event.error ?: event.reason, isProblem = event.error != null)
 
-        is RockyEvent.PeerReached -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Reached ${device(event.peer)}")
+        is RockyEvent.PeerReconciliationCompleted -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerUp, "Reconciled with ${device(event.peer)}")
 
-        is RockyEvent.PeerUnreachable -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Cannot reach ${device(event.peer)}", event.error, isProblem = true)
+        is RockyEvent.PeerAttemptFailed -> ActivityEntry(key, event.atEpochMillis, EntryKind.PeerDown, "Reconciliation with ${device(event.peer)} failed", event.error, isProblem = true)
 
         is RockyEvent.ScopesRefused -> ActivityEntry(
             key,
@@ -125,7 +125,7 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             ActivityEntry(key, event.atEpochMillis, EntryKind.Key, "$list: ${PARTITION_ACTIONS[event.action] ?: event.action.replace('_', ' ')}")
         }
 
-        is RockyEvent.Connection -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, if (event.online) "Went online" else "Went offline")
+        is RockyEvent.NetworkingControl -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, if (event.enabled) "Networking enabled" else "Networking disabled")
 
         is RockyEvent.EnvelopesDelivered -> ActivityEntry(
             key,

@@ -61,9 +61,9 @@ trusted devices see the removal after sync. A trusted device chooses:
 | Partial | Receives only lists shared with it from a trusted device's Devices tab |
 
 The Devices tab starts with one compact **This device** card: its name and kind,
-connection badge and **Online** toggle, readiness/revision, last sync with peer
-count and last transfer. Bootstrap progress and connection errors appear when
-present. **Identity and access** expands to its full selectable node/domain IDs,
+**Networking enabled** toggle, committed revision, last reconciliation with
+attempted-peer count and last transfer. Bootstrap progress, verified revocation
+and credential expiry appear independently. **Identity and access** expands to its full selectable node/domain IDs,
 grants, revocation count/digest, credential expiry, renewal route and reset
 control. This works before a trusted device's record of it has synced.
 
@@ -278,8 +278,9 @@ A member without an application device description is treated as partial.
 Full and partial members have the same SDK grants; only an explicit full
 description enables automatic sharing of every list.
 
-The Sync and Devices tabs show **Live** per peer while its authenticated link is
-open. The top badge shows **Live** whenever any link is open, using the existing
-readiness flow. Connected without Live describes an earlier successful pass.
+The Sync and Devices tabs show the native link lifecycle and dated operation
+outcomes per peer. The top badge derives a peer-link count, disabled networking,
+suspension or bootstrap progress from `observeStatus()`. A past successful
+reconciliation does not imply a currently open link.
 The activity feed includes link open and close reasons. See
 [live-link status](../../docs/runtime/live-links.md#status-and-lifecycle).

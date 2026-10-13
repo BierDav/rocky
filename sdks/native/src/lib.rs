@@ -9,6 +9,7 @@ mod database;
 #[cfg(feature = "iroh")]
 mod endpoint;
 mod sql;
+mod status;
 pub use commands::{
     DevelopmentCoordinator, NativeCommandHandler, NativeCommands, NativeHandlerReads,
 };
@@ -24,13 +25,33 @@ pub use sql::{
 pub enum NativeError {
     #[error("{detail}")]
     Failure { detail: String },
+    #[error("{detail}")]
+    Request {
+        code: String,
+        retryable: bool,
+        detail: String,
+    },
     /// A statement failed; `code` is SQLite's result code.
     #[error("Error code: {code}, message: {detail}")]
     Sql { code: i32, detail: String },
 }
 pub(crate) fn failure(error: Box<dyn std::error::Error + Send + Sync>) -> NativeError {
-    NativeError::Failure {
-        detail: error.to_string(),
+    if let Some(service) = error.downcast_ref::<rocky_sdk::ServiceError>() {
+        return NativeError::Request {
+            code: service.code().into(),
+            retryable: service.retryable(),
+            detail: service.to_string(),
+        };
+    }
+    match error.downcast::<rocky_sdk::CallFailure>() {
+        Ok(error) => NativeError::Request {
+            code: error.code,
+            retryable: error.retryable,
+            detail: error.detail,
+        },
+        Err(error) => NativeError::Failure {
+            detail: error.to_string(),
+        },
     }
 }
 impl From<uniffi::UnexpectedUniFFICallbackError> for NativeError {

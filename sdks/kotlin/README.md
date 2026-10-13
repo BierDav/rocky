@@ -24,7 +24,7 @@ application-specific operation codec is needed. Start with the
 [integration contract](../../docs/runtime/room-integration.md).
 
 `RockyDatabase.local` opens without networking. `openSession()` gives an independent
-`RockySession`, with `credentials`, `commands` and committed `readiness()` Flow.
+`RockySession`, with `credentials`, `commands` and native `observeStatus()` Flow.
 `attach` returns a separately closable network service; borrowed endpoints stay
 application-owned. Starter `create/join/resume` share this implementation.
 `ServiceCoordinator` pins a certified service trust bundle. Independent credential

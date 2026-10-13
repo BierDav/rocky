@@ -5,18 +5,22 @@ use tokio::time::{Duration, Instant};
 pub(crate) struct Retry {
     failures: u32,
     deadline: Option<Instant>,
+    epoch_millis: Option<u64>,
 }
 impl Retry {
     pub fn failed(&mut self) {
         let seconds = (1_u64 << self.failures.min(6)).min(60);
         self.failures = self.failures.saturating_add(1);
         self.deadline = Some(Instant::now() + Duration::from_secs(seconds));
+        self.epoch_millis =
+            crate::status::epoch_millis().map(|time| time.saturating_add(seconds * 1000));
     }
     /// Work that failed after it made progress retries shortly, without
     /// growing the backoff.
     pub fn soon(&mut self) {
         self.failures = 0;
         self.deadline = Some(Instant::now() + Duration::from_secs(1));
+        self.epoch_millis = crate::status::epoch_millis().map(|time| time.saturating_add(1000));
     }
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -24,6 +28,9 @@ impl Retry {
     pub fn ready(&self) -> bool {
         self.deadline
             .is_none_or(|deadline| deadline <= Instant::now())
+    }
+    pub fn deadline_epoch_millis(&self) -> Option<u64> {
+        self.epoch_millis
     }
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline

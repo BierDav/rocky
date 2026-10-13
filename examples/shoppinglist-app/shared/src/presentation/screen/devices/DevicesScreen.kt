@@ -55,7 +55,7 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             state.me?.let { me ->
                 item { SectionTitle("This device") }
-                item { SelfDeviceCard(me, state, now, onOnline = model::setOnline, onReset = model::reset) }
+                item { SelfDeviceCard(me, state, now, onOnline = model::setNetworkingEnabled, onReset = model::reset) }
             }
             item { SectionTitle(if (state.trusted) "Household" else "Discovered devices") }
             if (state.devices.isEmpty()) {
@@ -99,9 +99,9 @@ fun DevicesScreen(model: DevicesViewModel = metroViewModel()) {
             }
             state.network?.let { network ->
                 item {
-                    SectionTitle("Network", "${network.kind ?: "no"} transport, ${if (network.owned) "owned by Rocky" else "owned by the app"}")
+                    SectionTitle("Network", "${network.kind ?: "no"} transport, ${network.ownership?.name ?: "no attachment"}")
                     Text(
-                        "Inbound sessions: ${network.inboundActive} of ${network.inboundLimit} active, ${network.inboundServed} served, ${network.inboundRefused} refused",
+                        "Inbound sessions: ${network.inbound?.active ?: "unobserved"} of ${network.inbound?.limit ?: "unobserved"} active, ${network.inbound?.served ?: "unobserved"} served, ${network.inbound?.refused ?: "unobserved"} refused",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

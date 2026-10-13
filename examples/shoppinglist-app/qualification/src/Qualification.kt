@@ -139,7 +139,7 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
 
     /** One sync pass that must reach a peer; returns each peer's state. */
     fun sync(): JsonObject = call("sync").jsonObject.also {
-        expect(it.getValue("state").jsonPrimitive.content == "Connected") { "$name sync: $it" }
+        expect(it.getValue("peers").jsonArray.any { peer -> peer.jsonObject.getValue("attempts").jsonArray.any { attempt -> attempt.jsonObject["operation"]?.jsonPrimitive?.content == "Reconcile" && attempt.jsonObject["outcome"]?.jsonPrimitive?.content == "Completed" } }) { "$name sync: $it" }
     }
     fun items(list: Long): List<String> = call("items", "list" to list).jsonArray.map { item ->
         val fields = item.jsonObject
@@ -452,7 +452,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         a.call("add", "list" to shared, "title" to "After revocation")
         b.sync()
         expect(b.items(shared) == listOf("After revocation", "Milk")) { "B ${b.items(shared)}" }
-        expect(c.call("sync").jsonObject.getValue("state").jsonPrimitive.content != "Connected") { "a revoked device still syncs" }
+        expect(runCatching { c.call("sync") }.isFailure) { "a revoked device still syncs" }
         expect(c.items(shared) == listOf("Milk")) { "C read a row after its revocation: ${c.items(shared)}" }
         notes += "revoked C cannot sync and never reads rows written after revocation"
     }

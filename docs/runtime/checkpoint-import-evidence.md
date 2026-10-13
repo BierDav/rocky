@@ -2,6 +2,9 @@
 
 Measured on 2026-10-13 with the [progressive importer](checkpoint-import.md).
 This is one device run, not a latency or throughput qualification gate.
+The run used the former aggregate readiness API; the current
+[status contract](../proposals/observable-status.md) exposes import progress
+independently and has no `Ready` verdict.
 
 ## Setup
 

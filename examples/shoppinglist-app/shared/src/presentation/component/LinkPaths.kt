@@ -39,7 +39,7 @@ internal fun LinkPaths(link: PeerLink, modifier: Modifier = Modifier) {
             Text(
                 buildString {
                     append(link.paths.size).append(if (link.paths.size == 1) " path" else " paths")
-                    selected?.let { append(" · ").append(it.kind).append(" · ").append(millis(it.roundTripMicros)) }
+                    selected?.let { append(" · ").append(it.kind).append(" · ").append(millis(it.roundTripMicros.toLong())) }
                 },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -77,7 +77,7 @@ private fun PathRow(path: LinkPath) {
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier.weight(1f),
                 )
-                Text(millis(path.roundTripMicros), style = MaterialTheme.typography.labelLarge, fontFamily = FontFamily.Monospace)
+                Text(millis(path.roundTripMicros.toLong()), style = MaterialTheme.typography.labelLarge, fontFamily = FontFamily.Monospace)
                 Icon(
                     if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     if (expanded) "Hide path counters" else "Show path counters",
@@ -89,12 +89,12 @@ private fun PathRow(path: LinkPath) {
             path.local?.let { Mono("from $it") }
             if (expanded) {
                 Spacer(Modifier.height(4.dp))
-                Fact("Round trip", "${millis(path.roundTripMicros)} smoothed")
+                Fact("Round trip", "${millis(path.roundTripMicros.toLong())} smoothed")
                 Fact("MTU", "${path.mtu} B")
-                Fact("Congestion window", bytes(path.window))
-                Fact("Sent", "${bytes(path.sentBytes)} in ${path.sentDatagrams} datagrams")
-                Fact("Received", "${bytes(path.receivedBytes)} in ${path.receivedDatagrams} datagrams")
-                Fact("Lost", "${path.lostPackets} packets · ${bytes(path.lostBytes)} · ${lossRate(path)}")
+                Fact("Congestion window", bytes(path.window.toLong()))
+                Fact("Sent", "${bytes(path.sentBytes.toLong())} in ${path.sentDatagrams} datagrams")
+                Fact("Received", "${bytes(path.receivedBytes.toLong())} in ${path.receivedDatagrams} datagrams")
+                Fact("Lost", "${path.lostPackets} packets · ${bytes(path.lostBytes.toLong())} · ${lossRate(path)}")
                 Fact("Congestion events", path.congestionEvents.toString())
             }
         }
@@ -126,7 +126,7 @@ internal fun bytes(count: Long): String = when {
     else -> "$count B"
 }
 
-private fun lossRate(path: LinkPath): String = if (path.sentDatagrams == 0L) "no datagrams sent" else "${decimal(path.lostPackets * 100.0 / path.sentDatagrams)} % of sent"
+private fun lossRate(path: LinkPath): String = if (path.sentDatagrams == 0uL) "no datagrams sent" else "${decimal(path.lostPackets.toDouble() * 100.0 / path.sentDatagrams.toDouble())} % of sent"
 
 /** One decimal place; common Kotlin has no `String.format`. */
 private fun decimal(value: Double): String {

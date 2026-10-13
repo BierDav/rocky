@@ -56,9 +56,13 @@ async fn idle_old_member_still_reports_a_newer_peer_generation() -> Result<(), F
     b.sync().await.expect("initial idle sync");
     a.close().await;
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
-    assert_eq!(
-        b.sync().await.expect("idle generation sync")["upgrade"],
-        true
+    let report = b.sync().await.expect("idle generation sync");
+    assert!(
+        report["peers"]
+            .as_array()
+            .ok_or("peer reports")?
+            .iter()
+            .any(|peer| peer["upgrade_required"] == true)
     );
     b.close().await;
     a.close().await;
@@ -108,7 +112,13 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
     // The member, one generation behind, pulls; it cannot verify the
     // issuer's newer credentials, so bread waits for its upgrade.
     let synced = b.sync().await.expect("sync");
-    assert_eq!(synced["upgrade"], true);
+    assert!(
+        synced["peers"]
+            .as_array()
+            .ok_or("peer reports")?
+            .iter()
+            .any(|peer| peer["upgrade_required"] == true)
+    );
     assert_eq!(a.titles().await, ["apples"]);
     assert_eq!(b.titles().await, ["apples", "bread"]);
     b.close().await;

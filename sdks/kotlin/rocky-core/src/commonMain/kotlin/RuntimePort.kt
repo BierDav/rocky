@@ -122,88 +122,8 @@ interface ByteStream {
     suspend fun close()
 }
 
-/** One way to reach a device. A hint: whoever answers must still prove the device's key. */
-data class Route(val transport: String, val address: String)
-
-/**
- * A peer met or kept as a contact: its source, last selection reason, issuer/contact flags, routes and what
- * the last sync with it did: `connected`, `unreachable` or `unknown`. A peer met only through its own session has no routes.
- */
-data class Peer(
-    val node: String,
-    val isIssuer: Boolean,
-    val isConfigured: Boolean,
-    val source: String,
-    val choice: String,
-    val routes: List<Route>,
-    /** Found on the local network by discovery; such peers are tried first. */
-    val isLocal: Boolean = false,
-    val state: String,
-    val checkedAtEpochSeconds: Long?,
-    val error: String?,
-    val link: PeerLink,
-)
-
-enum class LinkState { Open, Opening, Closed }
-
-/**
- * Link lifetime and its network paths, measured by the transport when status is read. [roundTripMillis] is the
- * selected path's. Measurements alone do not emit readiness changes.
- */
-data class PeerLink(
-    val state: LinkState,
-    val openedAtEpochSeconds: Long?,
-    val roundTripMillis: Long?,
-    val paths: List<LinkPath> = emptyList(),
-)
-
-/**
- * One network path of an open link, the selected one first. [kind] is `direct` for an IP path or `relay`; [remote]
- * is the peer's socket address or relay URL. Counters cover the path's lifetime; [window] is the congestion window.
- */
-data class LinkPath(
-    val selected: Boolean,
-    val kind: String,
-    val remote: String,
-    val local: String?,
-    val roundTripMicros: Long,
-    val mtu: Int,
-    val window: Long,
-    val sentBytes: Long,
-    val sentDatagrams: Long,
-    val receivedBytes: Long,
-    val receivedDatagrams: Long,
-    val lostPackets: Long,
-    val lostBytes: Long,
-    val congestionEvents: Long,
-)
-
 /** A `rocky://peer/…` URI naming this device and its current route. It grants nothing. */
 data class Contact(val uri: String, val node: String, val routes: List<Route>)
-
-enum class DiscoveryPathState { On, Off, Unavailable }
-
-/** One way of finding peers: whether it runs and, when it cannot, why. */
-data class DiscoveryPath(val state: DiscoveryPathState, val reason: String? = null)
-
-/**
- * How this device finds domain members it has no contact for: on the [local] network and through the [topic]'s
- * rendezvous record. [announcing] is false until an admitted session handed over the domain's discovery root.
- */
-data class DiscoveryStatus(val announcing: Boolean, val local: DiscoveryPath, val topic: DiscoveryPath)
-
-/** The network service, reported whatever the state of the database. */
-data class NetworkStatus(
-    val attached: Boolean,
-    val kind: String?,
-    val owned: Boolean,
-    val inboundActive: Int,
-    val inboundLimit: Int,
-    val inboundServed: Long,
-    val inboundRefused: Long,
-    val peers: List<Peer>,
-    val discovery: DiscoveryStatus,
-)
 
 /** Platform storage for an installation's keys, such as a keychain. Names use only `[a-z0-9._-]`. */
 interface SecretStore {
@@ -211,9 +131,6 @@ interface SecretStore {
     fun store(name: String, secret: ByteArray)
     fun delete(name: String)
 }
-
-/** The revocations a device holds: the lowercase hex [digest] of the live set, which two devices share when they hold the same statements, and how many [statements] are live. */
-data class RevocationStatus(val digest: String, val statements: Int)
 
 /** The authority this device holds. Keys are lowercase hex; `expiresAtEpochSeconds` ends its credentials. `transport` is the attached network's kind. */
 data class SessionStatus(val principal: String, val node: String, val revocations: RevocationStatus, val expiresAtEpochSeconds: Long, val isIssuer: Boolean, val profile: GrantProfile, val transport: String)
@@ -233,36 +150,6 @@ data class Device(
     val command: String? = null,
     val label: ByteArray? = null,
 )
-
-enum class ConnectionState { Connected, Offline, Unavailable, Revoked }
-
-/** `Syncing` while a sync pass runs, `Bootstrapping` while a scope restarts from a checkpoint. */
-enum class ReadinessState { Ready, Syncing, Bootstrapping, Unavailable, Revoked }
-
-/** The database's committed [revision], its state and the authority it acts under. */
-data class Readiness(
-    val state: ReadinessState,
-    val revision: Long,
-    val revocations: RevocationStatus,
-    val expiresAtEpochSeconds: Long,
-    val profile: GrantProfile,
-    val networkAttached: Boolean,
-    /** False on a member that can reach no issuer to renew its credentials. */
-    val issuerContact: Boolean = true,
-    val discovery: DiscoveryStatus = DiscoveryStatus(false, DiscoveryPath(DiscoveryPathState.Off), DiscoveryPath(DiscoveryPathState.Off)),
-    val peers: List<Peer> = emptyList(),
-    /** How far a checkpoint bootstrap has imported; null until its peer's offers are known. */
-    val bootstrap: BootstrapProgress? = null,
-)
-
-/** Rows imported of all offered checkpoints of a bootstrap, and whole scopes done. */
-data class BootstrapProgress(val rowsDone: Long, val rowsTotal: Long, val scopesDone: Int, val scopesTotal: Int) {
-    /** Whole percent imported, 100 for a bootstrap with no rows. */
-    val percent: Int get() = if (rowsTotal == 0L) 100 else (rowsDone * 100 / rowsTotal).toInt()
-}
-
-/** The last sync: its state, its error, how many [peers] it reached and when it ended. */
-data class ConnectionStatus(val state: ConnectionState, val error: String? = null, val peers: Int = 0, val atEpochMillis: Long? = null)
 
 /** Unique operation identity, not a credential. Persist it with the queued action. */
 fun newMutationHandle(): String = kotlin.random.Random.Default.nextBytes(32)

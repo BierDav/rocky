@@ -135,8 +135,25 @@ impl Node {
         };
         let saved = self.settings.lock().await.clone();
         for (id, _) in &ready {
-            if let Ok(Some(node)) = saved.resolve_saved_route(transport, *id).await {
-                self.settings.lock().await.bind_saved_contact(node);
+            let attempt = self.observations.begin(
+                HEXLOWER.encode(id.as_bytes()),
+                crate::AttemptOperation::ResolveContact,
+                crate::AttemptStage::ResolveRoute,
+            );
+            match saved.resolve_saved_route(transport, *id).await {
+                Ok(Some(node)) => {
+                    self.settings.lock().await.bind_saved_contact(node);
+                    attempt.finish(None);
+                }
+                Ok(None) => {
+                    attempt.finish_empty();
+                }
+                Err(error) => {
+                    attempt.finish(Some(crate::status::failure(
+                        &error,
+                        &crate::AttemptStage::ResolveRoute,
+                    )));
+                }
             }
         }
         for (id, _) in ready
@@ -155,9 +172,29 @@ impl Node {
             }
             let mut bytes = [0; 16];
             bytes.copy_from_slice(&id.as_bytes()[..16]);
-            let _ = self
+            let attempt = self.observations.begin(
+                HEXLOWER.encode(id.as_bytes()),
+                crate::AttemptOperation::ResolveContact,
+                crate::AttemptStage::ResolveRoute,
+            );
+            match self
                 .request_contact(transport, rocky_core::NodeId(bytes))
-                .await;
+                .await
+            {
+                Ok(value) => {
+                    if value["node"].is_null() {
+                        attempt.finish_empty();
+                    } else {
+                        attempt.finish(None);
+                    }
+                }
+                Err(error) => {
+                    attempt.finish(Some(crate::status::failure(
+                        &error,
+                        &crate::AttemptStage::ResolveRoute,
+                    )));
+                }
+            }
         }
         let unresolved = self.settings.lock().await.unresolved_contacts();
         let mut retries = self

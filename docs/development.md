@@ -345,7 +345,8 @@ the jobs after it build what they still run themselves. One Rust cache holds
 Cargo downloads and cleaned compiled crates. A source-tree comment in the generated
 Cargo configuration refreshes its save key for every tree while retaining the
 compatible toolchain restore prefix. The build job saves it; shopping saves its
-separate x64 cache. Consumers restore it only when they need to compile.
+separate cache for its Kotlin and native compilation. Consumers restore it only
+when they need to compile.
 
 Gitea archives stamp every file with the commit time. `scripts/ci/source-times`
 records content hashes and timestamps in the Rust cache's registry directory.

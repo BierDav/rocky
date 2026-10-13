@@ -451,9 +451,13 @@ impl VoterService {
             .iter()
             .find(|v| v.id == self.node)
             .ok_or(CoordinationError::Configuration)?;
-        let listener = TcpListener::bind(&voter.address)
-            .await
-            .map_err(|_| CoordinationError::Unavailable)?;
+        let listener = TcpListener::bind(&voter.address).await.map_err(|error| {
+            log(
+                self.node,
+                &format!("bind voters at {}: {error}", voter.address),
+            );
+            CoordinationError::Unavailable
+        })?;
         let slots = Arc::new(Semaphore::new(64));
         log(self.node, &format!("serving voters at {}", voter.address));
         loop {

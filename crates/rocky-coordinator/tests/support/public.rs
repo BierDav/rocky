@@ -63,11 +63,13 @@ impl PublicCluster {
         let admin = PrivateKey::new();
         let provider = PrivateKey::new();
         let mut voters = Vec::new();
+        let mut reservations = Vec::new();
         for id in 1..=3u64 {
             let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
             let (tcp_address, udp_address) = (tcp.local_addr().unwrap(), udp.local_addr().unwrap());
-            drop((tcp, udp));
+            // Keep every address distinct and unavailable throughout certification.
+            reservations.push((tcp, udp));
             let keys = dir.path().join(format!("keys-{id}"));
             let printed: serde_json::Value = serde_json::from_str(&run(&[
                 Path::new("keys"),
@@ -137,11 +139,18 @@ impl PublicCluster {
             limits,
             children: (0..3).map(|_| None).collect(),
         };
-        for id in 1..=3 {
-            cluster.spawn(id, true);
-        }
         let admin = cluster.admin();
-        for id in 1..=3 {
+        for (index, reservation) in reservations.into_iter().enumerate() {
+            let id = index as u64 + 1;
+            drop(reservation);
+            cluster.spawn(id, true);
+            // Do not let a status connection claim the released ephemeral port
+            // as its source address before the voter has bound it.
+            cluster
+                .wait(&format!("voter {id} listening"), async || {
+                    cluster.log(id).contains("serving voters at")
+                })
+                .await;
             cluster.wait_online(id, &admin).await;
         }
         admin.initialize(1).await.unwrap();

@@ -285,10 +285,9 @@ workflow's call, not for pull requests. Its `lint` job runs `scripts/tools` and
 `build`, `check`, `e2e`
 and `shopping` jobs also run on Linux. The `ios` job uses an arm64 macOS host
 for the static target matrix and simulator checks.
-On GitHub they use `ubuntu-latest`; on Gitea `build`, `check` and `e2e` use
-`ubuntu-24.04-arm` to exchange architecture-specific nextest archives.
-`shopping` uses the x64 `ubuntu-latest` runner for the Android NDK and builds
-its own custody peer on Gitea; `lint` uses `ubuntu-latest-any-arch`.
+The `build`, `check`, `e2e` and `shopping` jobs use the x64 `ubuntu-latest`
+runner on both forges, so they can share nextest archives and the custody peer.
+On Gitea, `lint` uses `ubuntu-latest-any-arch`.
 The `build` job compiles the baseline workspace. It downloads an archive of
 the exact event revision and runs `scripts/check --build`: strict workspace
 Clippy and the test binaries as nextest archives. The workspace test build
@@ -313,15 +312,16 @@ The Gitea installer uses a pinned GitHub release directly, caches the binary
 alongside Cargo registry data, and falls back to a locked source installation
 when release downloads fail.
 Before archiving, `scripts/ci/test-profile` optimizes the CPU-heavy workspace
-test crates while retaining debug assertions and overflow checks. Artifact
+test crates, including the secure holding-proof path, while retaining debug
+assertions and overflow checks. Artifact
 fallback builds use the same test profile. Production profiles and test budgets
 are unchanged.
 
 `check` downloads both test archives and runs `scripts/check --from` them:
 `cargo fmt --all -- --check` and the unit and integration tiers, without
-compiling. `e2e` downloads both for the end-to-end tier. GitHub `shopping`
-downloads only the x64 `rocky-peer`, while on Gitea it builds its own; `android`
-needs no Rust artifact and keeps its own Gradle and native caches. The downloads
+compiling. `e2e` downloads both for the end-to-end tier. `shopping` downloads
+only the x64 `rocky-peer`; `android` needs no Rust artifact and keeps its own
+Gradle and native caches. The downloads
 are best-effort: Gitea's artifact service sometimes fails to finalize an
 artifact, and a job that finds one missing rebuilds the test binaries from the
 dependency cache (`check` runs `scripts/check --no-clippy` so it does not repeat

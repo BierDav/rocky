@@ -308,6 +308,9 @@ They install it themselves only when that artifact is missing. The fallback
 GitHub installer is pinned to a commit to avoid Gitea action-cache races when its
 tag moves. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
+The Gitea installer uses a pinned GitHub release directly, caches the binary
+alongside Cargo registry data, and falls back to a locked source installation
+when release downloads fail.
 Before archiving, `scripts/ci/test-profile` optimizes the CPU-heavy workspace
 test crates while retaining debug assertions and overflow checks. Artifact
 fallback builds use the same test profile. Production profiles and test budgets

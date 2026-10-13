@@ -31,9 +31,9 @@ command -v apt-get > /dev/null || {
 echo "install-system-deps: installing $missing" >&2
 # shellcheck disable=SC2086 # the package names are words
 if [ "$(id -u)" -eq 0 ]; then
-    apt-get update
+    apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
 else
-    sudo apt-get update
+    sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
     sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing
 fi

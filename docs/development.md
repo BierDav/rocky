@@ -317,6 +317,9 @@ dependency cache (`check` runs `scripts/check --no-clippy` so it does not repeat
 the Clippy the `build` job already ran). `check` and `e2e` compile nothing
 otherwise, so they restore the Rust cache only then.
 It needs no version-control CLI or repository history, and never invokes Git.
+Android and iOS build their own platform artifacts and start alongside the Linux
+build. Package-index requests time out after 15 seconds so an unrelated vendor
+feed cannot hold up system dependency installation.
 `scripts/ci/install-system-deps` installs the libraries a bare runner image
 lacks: `libclang` for bundled SQLite's bindgen build, and the GTK/WebKitGTK,
 X11, `libxdo` and OpenSSL development packages the Dioxus desktop example and

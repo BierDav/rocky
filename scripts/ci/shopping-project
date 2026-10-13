@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a JVM/Android-only Amper workspace over the original application sources."""
+"""Prepare the host's Amper platform matrix over the original application sources."""
 from pathlib import Path
 import re
 import shutil
@@ -8,13 +8,16 @@ import sys
 app = Path(__file__).resolve().parents[2] / 'examples/shoppinglist-app'
 project = Path(sys.argv[1]).resolve()
 project.mkdir(parents=True, exist_ok=True)
-modules = ('androidApp', 'desktopApp', 'qualification', 'shared')
+host = sys.argv[2]
+modules = {'linux': ('androidApp', 'desktopApp', 'qualification', 'shared'),
+           'ios': ('iosApp', 'shared')}[host]
+allowed = {'linux': ('jvm', 'android'), 'ios': ('iosArm64', 'iosSimulatorArm64')}[host]
 (project / 'project.yaml').write_text('modules:\n' + ''.join(f'  - {name}\n' for name in modules))
 
 
 def platforms(match):
     names = [name.strip() for name in match[2].split(',')]
-    return match[1] + ', '.join(name for name in names if name in ('jvm', 'android')) + ']'
+    return match[1] + ', '.join(name for name in names if name in allowed) + ']'
 
 
 for entry in app.iterdir():

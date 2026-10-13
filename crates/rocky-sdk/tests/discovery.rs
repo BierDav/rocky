@@ -169,7 +169,7 @@ async fn simulator_peer() -> Result<(), Failure> {
             let peers = host.ok(json!({"type": "peers"})).await;
             let local = peers["peers"]
                 .as_array()
-                .and_then(|peers| peers.iter().find(|peer| peer["local"] == true).cloned());
+                .and_then(|peers| peers.iter().find(|peer| peer["is_local"] == true).cloned());
             if let Some(found) = local {
                 return found;
             }
@@ -177,7 +177,7 @@ async fn simulator_peer() -> Result<(), Failure> {
         }
     })
     .await?;
-    assert_eq!(found["issuer"], true);
+    assert_eq!(found["is_issuer"], true);
     std::fs::write(root.join("host-found"), found.to_string())?;
     // Stay discoverable until the simulator has found this process too.
     tokio::time::timeout(WAIT, async {
@@ -199,7 +199,7 @@ async fn two_processes_find_each_other_over_mdns_and_converge() -> Result<(), Fa
     assert_eq!(report["titles"], json!(a.titles().await));
     assert_eq!(report["titles"], json!(["Milk"]));
     assert_eq!(report["found"]["node"], a.node().await);
-    assert_eq!(report["found"]["local"], true);
+    assert_eq!(report["found"]["is_local"], true);
     assert_eq!(report["peer"]["choice"], "selected_local");
     assert_eq!(report["discovery"]["announcing"], true);
     assert_eq!(report["discovery"]["local"]["state"], "on");
@@ -233,7 +233,7 @@ async fn two_processes_find_each_other_through_the_rendezvous_record_and_converg
     assert_eq!(report["titles"], json!(a.titles().await));
     assert_eq!(report["titles"], json!(["Milk"]));
     assert_eq!(report["found"]["node"], a.node().await);
-    assert_eq!(report["found"]["local"], false);
+    assert_eq!(report["found"]["is_local"], false);
     assert_eq!(report["discovery"]["topic"]["state"], "on");
     assert_eq!(report["discovery"]["local"]["state"], "off");
     // Both members merged their contact into the one record.

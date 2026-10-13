@@ -23,15 +23,7 @@ xcrun simctl bootstatus "$simulator" -b
 mkdir -p local/phase18-evidence
 xcrun simctl spawn "$simulator" "$binary" --ktest_logger=GTEST \
     '--ktest_filter=rocky.SecretsTest.*:rocky.Ios*Test.*' > local/phase18-evidence/ios-test-budgets.log
-python3 - <<'BUDGET'
-from pathlib import Path
-import re
-text = Path("local/phase18-evidence/ios-test-budgets.log").read_text()
-results = re.findall(r"\[       OK \] (.+) \((\d+) ms\)", text)
-if len(results) != 7 or any(int(ms) >= 2000 for _, ms in results):
-    raise ValueError("iOS integration tests exceed 2 s or did not all pass: " + repr(results))
-print("iOS integration budgets: " + repr(results))
-BUDGET
+python3 scripts/ci/ios-test-budgets local/phase18-evidence/ios-test-budgets.log "$simulator" "$binary"
 for point in before during after; do
     root=$(mktemp -d "${TMPDIR:-/tmp}/rocky-crash-$point.XXXXXX")
     export SIMCTL_CHILD_ROCKY_CRASH_ROOT="$root"

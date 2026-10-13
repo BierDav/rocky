@@ -296,6 +296,7 @@ already compiles the custody peer; it copies that binary before the SDK build
 without default features can replace it, avoiding a separate peer compilation. It uploads three independent artifacts -- `nextest-workspace`,
 `nextest-sdk` and `rocky-peer` -- so a failure to finalize one cannot also lose
 the others, and each consumer fetches only what it runs.
+CI disables the local Cranelift shortcut and uses the pinned LLVM toolchain.
 Linux jobs install the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. The iOS job reads that file for its official
@@ -353,6 +354,8 @@ its contents match; changed or new files receive a fresh timestamp, including
 when a rebased archive is older than cached outputs. Cargo still checks its
 normal compiler, configuration and dependency fingerprints. The regression check
 `scripts/test-source-times` verifies reuse and changed-source rebuilds with Cargo.
+The same normalization follows the Android native cache restore in Baseline,
+shopping and release jobs, keeping their shared compiled inputs reusable.
 This avoids compiling unchanged workspace crates on every push. The additional
 raw `target` overlay was removed: its 8 GB extraction repeatedly terminated Gitea
 build runners and duplicated the Rust cache. Gitea's Kubernetes runners must
@@ -365,23 +368,31 @@ distribution downloads retry transient network failures. The artifact-only iOS
 consumer retains `DEVELOPER_DIR` when restricting its environment to non-Rust
 tools, so a runner's selected full Xcode remains available. iOS keeps compiled
 workspace crates in its Rust cache even when a later qualification fails.
+The iOS cache excludes Cargo's bin directory so cache cleanup leaves the host's
+rustup executable and its Cargo proxies intact.
 On macOS hosts without zstd, GNU tar and pigz compress that cache in parallel
-while retaining compatibility with the existing gzip cache. These hosts need
-Homebrew for the compression tools. Gitea's macOS checkout moves to a stable,
+while retaining compatibility with the existing gzip cache. When Homebrew cannot
+install these optional tools, the host uses system gzip. Gitea's macOS checkout moves to a stable,
 job-owned path under `~/.cache/rocky-ci/<owner>/<repo>/ios/source`; native and Gradle build
 outputs survive replacement of the source snapshot. This avoids changing Cargo
-package identities and cache paths on every host-executor run. The source hash
+package identities and cache paths on every host-executor run. Its Java tool
+cache also uses a stable path, allowing Gradle daemons to reuse the installed JDK.
+iOS jobs serialize per repository because refs share these outputs.
+The source hash
 checks and tree-based cache refresh also apply to iOS. Cold Linux and iOS jobs
 have 90 minutes for initial cache seeding and artifact saves; test-tier budgets
 remain unchanged.
 Linux shopping checks publish only the common metadata, JVM and Android
 artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
 iOS builds while assembling that metadata. `scripts/ci/local-maven` removes
-references to unpublished native variants from the local SDK metadata: Amper
-resolves those references even for JVM qualification. `scripts/ci/shopping-linux`
-prepares an Amper workspace over the same application sources with only JVM/Android
-platforms and no iOS app module. `ROCKY_SHOPPING_PROJECT` selects it for both
-application gates, so dependency resolution never requests an iOS variant.
+references to unpublished variants from the local SDK metadata on both hosts: Amper
+resolves those references even for JVM qualification. The persistent macOS app
+also refreshes its Maven-local dependency resolution after publication, keeping
+compiled outputs while discarding the obsolete dependency graph.
+`scripts/ci/shopping-project` prepares an Amper workspace over the same application
+sources for the host's published platforms: JVM/Android on Linux, device/simulator
+iOS on macOS. `ROCKY_SHOPPING_PROJECT` selects it for build, tests and qualification,
+so resolution never requests variants absent from that host's publications.
 The macOS job publishes and tests
 the iOS artifacts; its host needs full Xcode selected with `xcode-select`, an
 installed iOS simulator runtime and an available iPhone simulator. It installs

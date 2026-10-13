@@ -112,3 +112,12 @@ when they are:
 | `sdks/kotlin/qualification/schema` | 2 | integration | about 55 s in phase 1, so over budget until made faster |
 | `examples/shoppinglist-app/shared` | 28 | integration | devices in temporary directories, six at a time |
 | shopping qualification, packaged consumer | | e2e | several JVMs and the custody peer; CI only |
+
+`sdks/native/qualify-ios-lifecycle` also checks the simulator test runner's
+reported count and completion. Keychain, committed reopen and notification tests
+retain the 2 s integration budget, with three isolated confirmations for a slow
+result. `IosResumeTest` and `IosSyncLifecycleTest` are e2e probes: they recover or
+cancel live QUIC routes and wait for production endpoint drain deadlines during
+cleanup. On the Gitea Mac runner on 2026-10-13 the latter took 3.480 s alone in
+its fastest of three runs, while cancellation took 0 ms and foreground dialing
+took 1 ms. The e2e suite keeps the 15 min budget; production deadlines are unchanged.

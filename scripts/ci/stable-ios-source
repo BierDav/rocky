@@ -9,3 +9,6 @@ rsync -a --delete --exclude='target/' --exclude='build/' \
 rm -rf source
 ln -s "$source_path" source
 printf 'ROCKY_CI_SOURCE=%s\n' "$source_path" >> "${GITHUB_ENV:?}"
+tool_cache="${HOME:?}/.cache/rocky-ci/tool-cache"
+mkdir -p "$tool_cache"
+printf 'RUNNER_TOOL_CACHE=%s\n' "$tool_cache" >> "$GITHUB_ENV"

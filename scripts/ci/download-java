@@ -16,7 +16,7 @@ esac
 metadata=$(mktemp "${RUNNER_TEMP:?}/temurin-metadata.XXXXXX")
 trap 'rm -f "$metadata"' EXIT
 archive="$RUNNER_TEMP/temurin-21-$java_os-$java_arch.tar.gz"
-curl --fail --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 \
+curl --fail --silent --show-error --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 \
     --output "$metadata" \
     "https://api.adoptium.net/v3/assets/latest/21/hotspot?architecture=$java_arch&image_type=jdk&os=$java_os&vendor=eclipse"
 url=$(python3 - "$metadata" <<'PY'
@@ -27,7 +27,7 @@ if len(assets) != 1 or assets[0]["version"]["major"] != 21:
 print(assets[0]["binary"]["package"]["link"])
 PY
 )
-curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
+curl --fail --silent --show-error --location --retry 3 --retry-all-errors --connect-timeout 15 \
     --max-time 300 --output "$archive" "$url"
 python3 - "$metadata" "$archive" "${GITHUB_OUTPUT:?}" <<'PY'
 import hashlib, json, sys

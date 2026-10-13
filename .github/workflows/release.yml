@@ -29,6 +29,9 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  ROCKY_CRANELIFT: '0'
+
 jobs:
   version:
     name: Version
@@ -451,6 +454,10 @@ jobs:
           key: android-native-${{ runner.os }}-${{ hashFiles('source/sdks/native/Cargo.lock', 'source/rust-toolchain.toml', 'source/sdks/kotlin/build-logic/src/main/kotlin/Android.kt') }}
           restore-keys: |
             android-native-${{ runner.os }}-
+
+      - name: Reuse timestamps of unchanged native inputs
+        working-directory: source
+        run: ./scripts/ci/source-times
 
       - uses: ./source/.github/actions/setup-java
 

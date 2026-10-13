@@ -4,6 +4,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import org.example.examples.shopping.di.PlatformContext
 import org.example.examples.shopping.di.ShoppingGraph
@@ -16,6 +17,7 @@ import java.awt.Desktop
  */
 fun main(args: Array<String>) {
     val graph = ShoppingGraph(PlatformContext())
+    val diagnostics = observeDiagnostics(graph.session)
     if (args.size == 1) graph.deepLinks.open(args[0])
     if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.APP_OPEN_URI)) {
         Desktop.getDesktop().setOpenURIHandler { event -> graph.deepLinks.open(event.uri.toString()) }
@@ -23,7 +25,10 @@ fun main(args: Array<String>) {
     application {
         Window(
             onCloseRequest = {
-                runBlocking { graph.session.close() }
+                runBlocking {
+                    diagnostics.cancelAndJoin()
+                    graph.session.close()
+                }
                 exitApplication()
             },
             title = "Shopping",

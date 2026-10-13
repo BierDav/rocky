@@ -13,6 +13,12 @@ threads-required = "num-test-threads"
 priority = 100
 slow-timeout = { period = "60s", terminate-after = 10 }
 
+# This gate measures proof verification latency; competing soaks distort it.
+[[profile.default.overrides]]
+filter = 'package(rocky-secure) & test(/holdings_idle_200_partition_four_table_fixture/)'
+threads-required = "num-test-threads"
+priority = 95
+
 # The soak tests confirm thousands of commands in the e2e tier; the longest,
 # they start first.
 [[profile.default.overrides]]

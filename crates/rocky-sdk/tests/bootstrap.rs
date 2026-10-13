@@ -47,7 +47,7 @@ async fn retention_defaults_preserve_sole_copies_and_configuration_survives_reop
 
 #[tokio::test(flavor = "multi_thread")]
 async fn behind_horizon_sync_restores_the_base_and_preserves_unsent_work() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
         &root.path().join("a"),
@@ -420,7 +420,7 @@ async fn a_join_stays_pending_until_it_meets_its_inviter() -> Result<(), Failure
 #[tokio::test(flavor = "multi_thread")]
 async fn renewal_after_missed_key_epochs_uses_a_checkpoint_without_acquiring_old_keys()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
         &root.path().join("a"),
@@ -732,7 +732,7 @@ async fn an_intent_without_offers_reports_no_progress() -> Result<(), Failure> {
 /// only grows, with a stable total, and the pending intent clears on completion.
 #[tokio::test(flavor = "multi_thread")]
 async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
         &root.path().join("a"),
@@ -786,7 +786,7 @@ async fn join_progress_grows_page_by_page_to_its_total() -> Result<(), Failure> 
 /// page it reached instead of starting over, and keeps both edits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cut_join_resumes_its_pages_and_keeps_edits_from_both_sides() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Device::create(
         &root.path().join("a"),

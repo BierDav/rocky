@@ -211,6 +211,8 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
         "b",
         &a.invite_as(json!({"kind": "issuer"})).await,
     )?;
+    // Finish the second issuer's key bootstrap before destroying its source.
+    synced(&b).await?;
     let keys = Database::device(&root.join("g"), None)?;
     let supplied = a
         .ok(json!({"type": "grant", "device": keys, "profile": {"kind": "writer", "scopes": ["items"]}, "ttl": 60}))
@@ -237,8 +239,8 @@ async fn a_granted_credential_close_to_expiry_renews_through_the_second_issuer()
     // The second issuer renews it for the domain's lifetime, not 60 seconds.
     assert!(renewed > granted + 24 * 60 * 60, "{granted} {renewed}");
     g.add(1, "Milk").await;
-    synced(&g).await?;
-    assert_eq!(b.titles().await, ["Milk"]);
+    let report = synced(&g).await?;
+    assert_eq!(b.titles().await, ["Milk"], "{report}");
     for device in [&b, &g] {
         device.close().await;
     }

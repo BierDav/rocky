@@ -82,7 +82,7 @@ async fn rows(device: &Device, table: &str) -> Vec<String> {
 #[tokio::test]
 async fn concurrent_group_creation_opens_every_table_and_converges_after_one_sync_each()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = Device::new(Database::create(open(&root.join("a"), &hub, "a"), None)?)?;
@@ -120,7 +120,7 @@ async fn concurrent_group_creation_opens_every_table_and_converges_after_one_syn
 #[tokio::test]
 async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_renews_once()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");
@@ -201,7 +201,7 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
         device.ok(json!({"type":"sql","sql":"INSERT INTO parts(list,key,id) VALUES ('L', ?, ?)","values":[{"type":"text","value":key},{"type":"integer","value":id["id"]}]})).await;
         device.ok(json!({"type":"sql","sql":"COMMIT"})).await;
     }
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let directory = root.join("a");

@@ -254,3 +254,12 @@ pub fn completed_peers(report: &Value) -> usize {
         })
         .count()
 }
+
+#[path = "../../src/test_directory.rs"]
+mod directory;
+pub use directory::Directory;
+
+/// Small protocol fixtures keep real SQLite files on Linux's memory filesystem.
+pub fn small_directory() -> std::io::Result<Directory> {
+    directory::small()
+}

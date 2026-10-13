@@ -71,7 +71,7 @@ async fn idle_old_member_still_reports_a_newer_peer_generation() -> Result<(), F
 
 #[tokio::test(flavor = "multi_thread")]
 async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
     let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));

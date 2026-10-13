@@ -189,7 +189,7 @@ async fn introduce(left: &Device, right: &Device) -> Result<(), Failure> {
 /// An issuer, a keyless custody peer and a writer, which meet each other
 /// only through custody unless a test introduces them.
 struct Mesh {
-    root: tempfile::TempDir,
+    root: crate::test_directory::Directory,
     hub: Arc<Hub>,
     a: Device,
     custody: Device,
@@ -197,7 +197,9 @@ struct Mesh {
 }
 impl Mesh {
     async fn new() -> Result<Self, Failure> {
-        let root = tempfile::tempdir()?;
+        Self::with_root(tempfile::tempdir()?.into()).await
+    }
+    async fn with_root(root: crate::test_directory::Directory) -> Result<Self, Failure> {
         let hub = Arc::new(Hub::default());
         let directory = root.path().join("a");
         let a = Device::new(
@@ -315,7 +317,7 @@ fn contains(bytes: &[u8], pattern: &[u8]) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_share_and_a_rotation_reach_an_offline_recipient_through_custody_alone()
 -> Result<(), Failure> {
-    let mesh = Mesh::new().await?;
+    let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let third = mesh.member("third").await?;
     let removed = mesh.member("removed").await?;
     let Mesh { a, custody, b, .. } = &mesh;
@@ -406,7 +408,7 @@ fn encodings(key: &[u8]) -> Vec<Vec<u8>> {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_envelope_delivered_directly_and_through_two_mailboxes_installs_once()
 -> Result<(), Failure> {
-    let mesh = Mesh::new().await?;
+    let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let Mesh { a, custody, b, .. } = &mesh;
     let second = join(
         &mesh.root,
@@ -448,7 +450,7 @@ async fn a_mailbox_serves_only_the_recipient_and_refuses_at_its_bound_while_the_
         a,
         custody,
         b,
-    } = Mesh::new().await?;
+    } = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let mesh_member = |name: &'static str| {
         let (root, hub, a, custody) = (&root, &hub, &a, &custody);
         async move {
@@ -735,7 +737,7 @@ async fn a_crash_of_the_mailbox_before_forgetting_a_taken_receipt_loses_no_envel
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_deposits_its_share_with_custody_for_an_offline_recipient() -> Result<(), Failure>
 {
-    let mesh = Mesh::new().await?;
+    let mesh = Mesh::with_root(super::sync_tests::small_directory()?).await?;
     let member = mesh.member("sharer").await?;
     let recipient = mesh.b.node().await?;
     mesh.a.ok(share(&[&member.node().await?])).await?;

@@ -5,15 +5,27 @@ use std::collections::BTreeMap;
 #[tokio::test]
 async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     let f = Fixture::new();
+    let template = TempDir::new().unwrap();
+    let source = template.path().join("template.sqlite");
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(&source, f.app(), f.config(&node, f.full(), &[f.public]))
+        .await
+        .unwrap();
+    replica.checkpoint(f.public).await.unwrap();
+    replica
+        .backup_into(&template.path().join("base.sqlite"))
+        .await
+        .unwrap();
+    drop(replica);
+    let source = template.path().join("base.sqlite");
     for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
-        let node = PrivateKey::new();
+        std::fs::copy(&source, &path).unwrap();
         let replica =
             EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
                 .await
                 .unwrap();
-        replica.checkpoint(f.public).await.unwrap();
         {
             let mut inner = replica.inner.lock().await;
             let records = rows(
@@ -52,7 +64,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
     for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
-        let node = PrivateKey::new();
+        std::fs::copy(&source, &path).unwrap();
         let replica =
             EncryptedReplica::open(&path, f.app(), f.config(&node, f.full(), &[f.public]))
                 .await

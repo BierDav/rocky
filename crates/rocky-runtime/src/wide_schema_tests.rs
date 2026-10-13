@@ -197,14 +197,20 @@ async fn placement_extends_without_moving_existing_domains_and_opens_selected_fi
     )
     .await
     .unwrap();
+    let pending: Vec<_> = (1..256)
+        .map(|domain| {
+            note(
+                &runtime.domain(test_scope(domain)).unwrap(),
+                1,
+                &format!("domain-{domain}"),
+            )
+        })
+        .collect();
+    for receipt in pending {
+        receipt.committed().await.unwrap();
+    }
     for domain in 0..256 {
         let replica = runtime.domain(test_scope(domain)).unwrap();
-        if domain != 0 {
-            note(&replica, 1, &format!("domain-{domain}"))
-                .committed()
-                .await
-                .unwrap();
-        }
         let snapshot = replica.query().await.unwrap();
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(

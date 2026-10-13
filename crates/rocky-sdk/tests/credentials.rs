@@ -296,7 +296,7 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
 
 #[tokio::test]
 async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;
@@ -396,7 +396,7 @@ async fn revocation_rotates_the_keys_remaining_readers_receive() -> Result<(), F
 
 #[tokio::test]
 async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let a = create(root, &hub, "a")?;

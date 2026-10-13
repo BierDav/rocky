@@ -120,11 +120,9 @@ jobs:
   build:
     # Compiles once: clippy and the test binaries as nextest archives, plus the
     # custody peer. `check`, `e2e` and `shopping` run those artifacts instead of
-    # building again, each downloading only what it runs; GitHub `shopping`
-    # reuses the x64 peer, while Gitea builds its own.
-    # Those jobs consume architecture-specific binaries, so they all pin one
-    # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # building again, each downloading only what it runs. All consumers use
+    # the x64 baseline, including shopping's Android prerequisite.
+    runs-on: ubuntu-latest
     # A cold four-core build can exceed an hour, including artifact/cache saves.
     timeout-minutes: 90
     steps:
@@ -266,7 +264,7 @@ jobs:
     # A job after `build`: the source step, reuse-build, its own steps and
     # record-pass. Add a job the same way; see docs/development.md#adding-a-ci-job.
     needs: build
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Download the exact source revision
@@ -327,7 +325,7 @@ jobs:
     # the default branch; releases do not wait for it.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Download the exact source revision
@@ -386,7 +384,7 @@ jobs:
     # Releases skip it; it does not gate a release.
     needs: build
     if: ${{ !inputs.release }}
-    # The Android NDK requires x64; Gitea's build artifacts are arm64.
+    # The Android NDK and shared peer artifact use the x64 baseline.
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -416,15 +414,13 @@ jobs:
           echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       # The Kotlin build compiles the native library, which needs the
-      # restored registry even with the custody peer. The x64 baseline peer
-      # matches only the GitHub runner; Gitea's qualification builds it itself.
+      # restored registry even with the shared x64 custody peer.
       - id: reuse
         uses: ./source/.github/actions/reuse-build
         with:
           job: shopping
           tree: ${{ steps.source.outputs.tree }}
           peer: true
-          peer-github-only: true
           nextest: false
 
       - uses: ./source/.github/actions/setup-java

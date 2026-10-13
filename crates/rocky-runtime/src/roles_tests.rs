@@ -97,8 +97,23 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
     let phone = open(&dir, fixtures::PHONE, &[], 0).await;
     let server = open(&dir, SERVER, &[], 0).await;
     let mut created = Vec::new();
-    for index in 0..300 {
-        created.push(create(&laptop, &format!("todo {index}")).await);
+    for batch in (0..300).step_by(8) {
+        let pending: Vec<_> = (batch..(batch + 8).min(300))
+            .map(|index| {
+                laptop
+                    .mutate(mutation(
+                        None,
+                        Action::CreateTodo {
+                            title: format!("todo {index}"),
+                            completed: false,
+                        },
+                    ))
+                    .unwrap()
+            })
+            .collect();
+        for receipt in pending {
+            created.push(receipt.committed().await.unwrap());
+        }
     }
     assert_eq!(
         pass(&laptop, &phone, fixtures::PHONE).await,
@@ -127,8 +142,14 @@ async fn range_reconciliation_exchanges_frontiers_not_receipt_sets() {
                 .unwrap()
         }
     };
-    for envelope in &created[1..] {
-        server.receive(bytes(envelope.id).await).await.unwrap();
+    for batch in created[1..].chunks(32) {
+        let mut records = Vec::new();
+        for envelope in batch {
+            records.push(bytes(envelope.id).await);
+        }
+        for result in server.receive_page(records).await.unwrap() {
+            result.unwrap();
+        }
     }
     let state = server.sync_state().await.unwrap();
     assert_eq!(at(&state.held, fixtures::LAPTOP), 0);

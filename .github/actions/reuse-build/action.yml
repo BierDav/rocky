@@ -22,11 +22,6 @@ inputs:
   peer:
     description: "`true` to download `rocky-peer`, the custody peer binary."
     default: "false"
-  peer-github-only:
-    description: >-
-      `true` to download `rocky-peer` only on GitHub, whose x64 baseline peer
-      matches the runner; Gitea's baseline is arm64, so its job builds the peer.
-    default: "false"
   nextest:
     description: "`false` for a job that runs no nextest archives."
     default: "true"
@@ -133,7 +128,6 @@ runs:
       id: peer
       if: >-
         steps.passed.outputs.cache-hit != 'true' && inputs.peer == 'true'
-        && (inputs.peer-github-only != 'true' || github.server_url == 'https://github.com')
       uses: actions/download-artifact@v4
       continue-on-error: true
       with:

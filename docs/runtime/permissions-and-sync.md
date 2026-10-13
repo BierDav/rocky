@@ -101,7 +101,9 @@ randomness; failed attempts publish no bytes. Persisted sequences are never
 reused. Revision watches and results publish only after commit.
 
 Commits are buffered (`synchronous=NORMAL`) and counted against a durable
-watermark; a flush syncs the WAL with `F_FULLFSYNC`. `author`, `receive` and
+watermark; a flush syncs the WAL through a writable handle, using `F_FULLFSYNC`
+on Apple platforms. Windows requires write access for `FlushFileBuffers`.
+`author`, `receive` and
 `receive_all` flush before answering, and so does every method that hands data
 to a peer, the coordinator, an effect provider or a recovery export.
 `author_buffered` and `receive_buffered` skip the flush; acknowledge or send

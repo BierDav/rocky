@@ -153,7 +153,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
 
 #[tokio::test]
 async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
@@ -176,7 +176,7 @@ async fn a_partition_only_record_rotates_its_group_and_no_other_scope() -> Resul
 #[tokio::test]
 async fn an_unrecorded_delegate_uses_full_rotation_fallback_without_revoking_its_recorded_delegator()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;
@@ -251,7 +251,7 @@ async fn revoking_an_issuer_rotates_the_registry_and_refuses_its_new_key_at_rema
 #[tokio::test]
 async fn two_issuers_revoking_the_same_non_reader_leave_two_statements_and_one_tombstone()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let root = root.path();
     let hub = Arc::new(Hub::default());
     let Domain { a, b } = Domain::new(root, &hub).await?;

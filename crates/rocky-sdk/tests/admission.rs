@@ -18,7 +18,7 @@ async fn statements(device: &Device) -> serde_json::Value {
 #[tokio::test]
 async fn a_member_admits_a_peer_without_a_contact_and_refuses_one_revoked_this_round()
 -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Network::Owned(hub.connector(name));
     let a = Device::create(&root.path().join("a"), Some(network("a")))?;

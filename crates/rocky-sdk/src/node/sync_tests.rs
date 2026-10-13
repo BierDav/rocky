@@ -664,3 +664,7 @@ fn completed_peers(report: &Value) -> usize {
         })
         .count()
 }
+
+pub(super) fn small_directory() -> std::io::Result<crate::test_directory::Directory> {
+    crate::test_directory::small()
+}

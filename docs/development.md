@@ -478,9 +478,8 @@ and never `gh`. Where they differ, steps branch on `github.server_url`:
   runners of both architectures. Only the Android builds,
   the `linux-x86-64` JVM SDK and the amd64 image need x64; the Android NDK has no
   arm64 Linux host. The baseline `build`, `check` and `e2e` jobs exchange
-  architecture-specific binaries, so they pin `ubuntu-24.04-arm` rather than the
-  mixed `-any-arch` label. `shopping` uses x64 for its Android prerequisite and
-  builds its peer there instead of using the arm64 artifact.
+  architecture-specific binaries, so they pin the faster x64 `ubuntu-latest`
+  runner. `shopping` uses the same baseline peer for its Android qualification.
 - The release job that produces the `darwin-aarch64` JVM SDK still uses macOS
   because it builds a macOS native library. Other release jobs use Linux.
 - Images and Maven artifacts go to the instance's registries with the

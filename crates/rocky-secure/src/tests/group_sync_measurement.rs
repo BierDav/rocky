@@ -93,7 +93,7 @@ async fn sync(
                 for scope in reader.existence_scopes().await.unwrap() {
                     session.sync_existence(reader, scope).await.unwrap();
                 }
-                for scope in scopes {
+                for scope in &changed {
                     session
                         .acknowledge_mergeable_horizon(reader, *scope)
                         .await

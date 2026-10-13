@@ -1,4 +1,4 @@
-# QA report: irrecoverable states under faults
+# QA report: irrecoverable states under faults (Fixed)
 
 Environment: macOS arm64 (Darwin 27), working copy on top of `78763038d`
 (`refactor(sdk)!: expose native observations…`), debug build of

@@ -63,6 +63,12 @@ Make it faster first; move it only if it is a different kind of test.
   drives.
   Secure protocol tests that need loopback TCP disable Nagle's algorithm on
   both ends, so small request frames do not wait on host delayed-ACK timers.
+  Small SDK protocol fixtures use real SQLite files under `/dev/shm` on Linux
+  when available, with three cross-process reservations to bound RAM use.
+  They retain files across reopen and keep every commit/flush
+  call. Durability and storage performance gates use the normal filesystem.
+  The exhaustive byte-cut sweep copies one identity/database baseline per trial
+  and assigns independent paused-clock runtimes to bounded workers.
 - Make sizes and iteration counts configurable through existing test
   configuration. Never change production defaults, limits or timeouts, and
   never weaken an assertion.

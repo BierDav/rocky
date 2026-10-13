@@ -4,8 +4,8 @@
 use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
-#[path = "support/secrets.rs"]
-mod secrets;
+mod support;
+use support::secrets;
 
 const SCHEMA: &str = r#"{"format":4,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
@@ -226,7 +226,22 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
     // The issuer assigns its own authors; the writer asks the issuer over the network.
     let installed = |reply: Value| reply["installed"].as_array().map_or(0, Vec::len);
     assert_eq!(installed(issuer.call(json!({"type":"authors"})).await?), 3);
-    assert_eq!(installed(writer.call(json!({"type":"authors"})).await?), 3);
+    // Join bootstrap can install authors before this explicit request.
+    writer.call(json!({"type":"sync"})).await?;
+    writer.call(json!({"type":"authors"})).await?;
+    let activity = writer.call(json!({"type":"activity"})).await?;
+    let authors: std::collections::BTreeSet<_> = activity["events"]
+        .as_array()
+        .ok_or("events")?
+        .iter()
+        .filter(|event| event["kind"] == "author_installed")
+        .filter_map(|event| event["collection"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        authors,
+        TABLES.into_iter().map(str::to_owned).collect(),
+        "{activity}"
+    );
     assert_eq!(installed(writer.call(json!({"type":"authors"})).await?), 0);
 
     issuer
@@ -453,7 +468,7 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
 
 #[tokio::test]
 async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = support::small_directory()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
     let invitation = a

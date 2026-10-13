@@ -207,7 +207,7 @@ fn commands(
 /// The creator `a`, which executes, and a writer `b` that only invokes,
 /// both on one coordinator, as a provider's shared one would be.
 struct Pair {
-    root: tempfile::TempDir,
+    root: support::Directory,
     hub: Arc<Hub>,
     coordinator: Arc<MemoryCoordinator>,
     handler: Arc<Reservations>,
@@ -224,7 +224,7 @@ impl Pair {
         schema: &str,
         scopes: &[&str],
     ) -> Result<Self, Failure> {
-        let root = tempfile::tempdir()?;
+        let root = support::small_directory()?;
         let hub = Arc::new(Hub::default());
         let coordinator = Arc::new(MemoryCoordinator::default());
         let handler = Arc::new(Reservations::default());

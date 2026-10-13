@@ -307,6 +307,7 @@ impl SecureDemo {
         let address = listener.local_addr().map_err(Error::Io)?;
         let accepted = async {
             let (stream, _) = listener.accept().await.map_err(Error::Io)?;
+            stream.set_nodelay(true).map_err(Error::Io)?;
             Link::open(
                 stream,
                 self.replica(answerer),
@@ -318,6 +319,7 @@ impl SecureDemo {
         };
         let dialed = async {
             let stream = TcpStream::connect(address).await.map_err(Error::Io)?;
+            stream.set_nodelay(true).map_err(Error::Io)?;
             Link::open(
                 stream,
                 self.replica(opener),

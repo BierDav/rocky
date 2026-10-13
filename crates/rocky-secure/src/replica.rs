@@ -422,7 +422,12 @@ impl Flusher {
             return Ok(());
         }
         // `sync_all` is `F_FULLFSYNC` on Apple platforms, like `fullfsync=1`.
-        match std::fs::File::open(&self.wal) {
+        // Windows requires write access for FlushFileBuffers.
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.wal)
+        {
             Ok(wal) => wal.sync_all().map_err(Error::Io)?,
             // Without a WAL every commit is in the database file, which
             // checkpoints flush.

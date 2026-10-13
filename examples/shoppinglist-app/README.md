@@ -221,6 +221,41 @@ wrapper leaves Rocky open; `ShoppingNode.close` closes both in order. These
 helpers have no application or Compose dependency; see
 [Room integration](../../docs/runtime/room-integration.md).
 
+## Desktop JAR
+
+`./package-desktop` writes `build/dist/shopping-desktop.jar`, which runs with a
+compatible JDK and the platform's graphics libraries:
+
+```sh
+./examples/shoppinglist-app/package-desktop
+java -jar examples/shoppinglist-app/build/dist/shopping-desktop.jar
+```
+
+Amper's `executableJarJvm` names each entry of `BOOT-INF/lib` after its bare
+file name. JetBrains publishes Compose, Lifecycle and SavedState twice, as an
+empty relocation stub whose POM defers to the androidx artifact holding the
+classes and as that androidx artifact, under one file name. The flattening keeps
+the stub, drops the other, and the JAR then fails on startup with
+`NoClassDefFoundError: androidx/compose/runtime/Composer`, while `./kotlin run`
+is unaffected because a classpath tells the two apart by full path. The script
+puts the dropped artifacts back under names that cannot collide and loads their
+classes through the finished JAR, so a missing dependency fails here.
+
+The script builds and packages Rocky and Skiko for macOS and Linux on arm64
+and x86_64, and Windows on x86_64. The complete cross-build runs on macOS with
+GNU Linux toolchains and MinGW, without Docker or Zig. See
+[desktop cross-build setup](../../docs/runtime/desktop-cross-build.md) for the
+prerequisites, separate builds and verification limits. It checks all native
+resources and loads both runtimes on the build host before reporting success.
+
+Desktop sync, connection, key-delivery and renewal failures are also printed to
+the console, even with the Sync tab closed. Household failures include their
+exception stack traces. To capture a Windows failure, launch from PowerShell:
+
+```powershell
+java -jar build/dist/shopping-desktop.jar *> shopping.log
+```
+
 ## Verify
 
 ```sh

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn devices_never_online_together_converge_via_keyless_custody() -> Result<(), Failure> {
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let net = |name| Some(Network::Owned(hub.connector(name)));
     let issuer = Device::create(&root.path().join("issuer"), net("issuer"))?;
@@ -215,7 +215,7 @@ async fn container_resumes_from_configuration_and_drains_on_sigterm() -> Result<
 async fn custody_forwards_pairing_and_renewal_to_an_explicit_issuer_with_creator_offline()
 -> Result<(), Failure> {
     use rocky_sdk::route_enrollment;
-    let root = tempfile::tempdir()?;
+    let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let net = |name| Some(Network::Owned(hub.connector(name)));
     let creator = Device::create(&root.path().join("creator"), net("creator"))?;

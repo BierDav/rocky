@@ -227,19 +227,25 @@ async fn an_interrupted_migration_resumes_from_every_step() {
         let domains = vec![installation(app(3), 0), installation(app(3), 1)];
         Runtime::open_placed(path, domains, placed(file), options()).await
     };
+    let template = TempDir::new().unwrap();
+    let source = template.path().join("placed.db");
+    let runtime = serve(&source, 0).await.unwrap();
+    for domain in 0..2 {
+        let replica = runtime.domain(test_scope(domain)).unwrap();
+        let text = format!("domain-{domain}");
+        crate::wide_schema_tests::note(&replica, 1, &text)
+            .committed()
+            .await
+            .unwrap();
+    }
+    runtime.close().await.unwrap();
     for step in 1..=4 {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("placed.db");
-        let runtime = serve(&path, 0).await.unwrap();
-        for domain in 0..2 {
-            let replica = runtime.domain(test_scope(domain)).unwrap();
-            let text = format!("domain-{domain}");
-            crate::wide_schema_tests::note(&replica, 1, &text)
-                .committed()
-                .await
-                .unwrap();
+        for entry in std::fs::read_dir(template.path()).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.path().join(entry.file_name())).unwrap();
         }
-        runtime.close().await.unwrap();
         crash(&step.to_string(), dir.path());
         // Neither assignment opens while the migration is pending.
         for file in [0, 2] {

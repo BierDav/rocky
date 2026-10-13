@@ -21,6 +21,8 @@ mod secrets;
 mod service;
 mod status;
 mod sync;
+#[cfg(test)]
+mod test_directory;
 pub mod transport;
 mod typed;
 

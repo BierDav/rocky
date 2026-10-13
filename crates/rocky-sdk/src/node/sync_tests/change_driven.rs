@@ -1,8 +1,10 @@
+mod cancellation;
 use super::*;
 use std::future::Future;
 
 // SQLite runs on another thread. Keep Tokio runnable so its paused clock
-// advances only where the test explicitly advances it.
+// advances only where the test explicitly advances it. Yield host CPU to
+// SQLite between polls; spinning workers otherwise contend with its threads.
 pub(super) fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
     let mut future = Box::pin(future);
     async move {
@@ -12,6 +14,7 @@ pub(super) fn frozen<F: Future>(future: F) -> impl Future<Output = F::Output> {
                 biased;
                 result = &mut future => return result,
                 () = tokio::task::yield_now() => {
+                    std::thread::park_timeout(Duration::from_micros(50));
                     assert!(watchdog.elapsed() < Duration::from_secs(120), "test made no progress");
                 }
             }
@@ -204,7 +207,7 @@ async fn a_stalled_bootstrap_peer_does_not_hold_the_checkpoint_import_slot() -> 
 async fn peer_signals(bootstrap: bool) -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
-            let root = tempfile::tempdir()?;
+            let root = small_directory()?;
             let hub = Arc::new(Hub::default());
             let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
             let mut peers = Vec::new();
@@ -484,173 +487,14 @@ async fn metadata_work_arms_an_idle_peer_retry_without_resetting_backoff() -> Re
 
 #[tokio::test(start_paused = true)]
 async fn representative_session_cancellations_are_atomic_and_repeatable() -> Result<(), Failure> {
-    cancellation_offsets(false).await
+    cancellation::run(false).await
 }
 
 #[tokio::test(start_paused = true)]
 #[ignore = "exhaustive phase-2 gate: run this test with --release -- --ignored"]
 async fn cancellation_at_every_session_byte_is_atomic_and_the_next_pass_converges()
 -> Result<(), Failure> {
-    cancellation_offsets(true).await
-}
-
-async fn cancellation_offsets(exhaustive: bool) -> Result<(), Failure> {
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let root = tempfile::tempdir()?;
-            let hub = Arc::new(Hub::default());
-            let (a, b) = frozen(async {
-                let a = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-                let b = enrolled(
-                    &root.path().join("b"),
-                    &hub,
-                    "b",
-                    Some((&a, Profile::Issuer)),
-                )
-                .await?;
-                targets(&a, std::slice::from_ref(&b)).await?;
-                // Establish enrollment metadata before the bidirectional row session.
-                a.sync(&*transport(&a).await?).await?;
-                add(&a, 1).await?;
-                add(&b, 2).await?;
-                Ok::<_, Failure>((a, b))
-            })
-            .await?;
-            let (a_settings, b_settings) = (
-                a.settings.lock().await.clone(),
-                b.settings.lock().await.clone(),
-            );
-            let (a_vault, b_vault) = (a.vault.clone(), b.vault.clone());
-            let (a_copy, b_copy) = (
-                root.path().join("a-copy.sqlite"),
-                root.path().join("b-copy.sqlite"),
-            );
-            frozen(a.replica.backup_into(&a_copy)).await?;
-            frozen(b.replica.backup_into(&b_copy)).await?;
-            let before = *hub.written().borrow();
-            frozen(a.sync(&*transport(&a).await?)).await?;
-            let bytes = *hub.written().borrow() - before;
-            assert!(bytes > 0);
-            frozen(a.detach(None)).await;
-            frozen(b.detach(None)).await;
-            let started = std::time::Instant::now();
-            let offsets: Vec<_> = if exhaustive {
-                (0..=bytes).collect()
-            } else {
-                [0, 1, 300, 3_000, 9_000, bytes / 2, bytes - 1, bytes]
-                    .into_iter()
-                    .collect()
-            };
-            let count = offsets.len();
-            eprintln!("exercising {count} session byte offsets");
-            let trials = stream::iter(offsets)
-                .map(|offset| {
-                    let root = &root;
-                    let (a_settings, b_settings) = (&a_settings, &b_settings);
-                    let (a_vault, b_vault) = (&a_vault, &b_vault);
-                    let (a_copy, b_copy) = (&a_copy, &b_copy);
-                    frozen(async move {
-                        let hub = Arc::new(Hub::default());
-                        let trial = root.path().join("trial").join(offset.to_string());
-                        let (a_dir, b_dir) = (trial.join("a"), trial.join("b"));
-                        for (directory, copy, settings) in
-                            [(&a_dir, a_copy, a_settings), (&b_dir, b_copy, b_settings)]
-                        {
-                            std::fs::create_dir_all(directory)?;
-                            std::fs::copy(copy, directory.join("rocky.sqlite"))?;
-                            settings.save(&directory.join("identity.json"))?;
-                        }
-                        let a = node(
-                            &a_dir,
-                            (**a_settings).clone(),
-                            a_vault.clone(),
-                            hub.connector("a").start(true, [0; 32]).await?,
-                        )
-                        .await?;
-                        let b = node(
-                            &b_dir,
-                            (**b_settings).clone(),
-                            b_vault.clone(),
-                            hub.connector("b").start(true, [0; 32]).await?,
-                        )
-                        .await?;
-                        let mut written = hub.written();
-                        let before = *written.borrow_and_update();
-                        let dials = hub.dials_to("b");
-                        hub.hold_cut.store(true, Ordering::SeqCst);
-                        hub.cut_after(Some(offset));
-                        start(&a, true).await?;
-                        hub.wait_dials("b", dials + 1).await;
-                        let mut running = a.worker_running.subscribe();
-                        while *written.borrow_and_update() < before + offset {
-                            tokio::select! {
-                                changed = written.changed() => changed?,
-                                changed = running.changed() => {
-                                    changed?;
-                                    if !*running.borrow() {
-                                        assert!(*written.borrow() < before + offset, "completion raced the requested byte cut");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        let service = a.current().ok_or("service")?;
-                        let closing = service.live.closing.load(Ordering::SeqCst);
-                        {
-                        let stop = start(&a, false);
-                        tokio::pin!(stop);
-                        tokio::select! {
-                            stopped = &mut stop => { stopped?; }
-                            () = until(|| service.live.closing.load(Ordering::SeqCst) > closing) => {
-                                tokio::time::advance(Duration::from_millis(100)).await;
-                                stop.await?;
-                            }
-                        }
-                        }
-                        for scope in a.scopes() {
-                            a.replica.audit(scope).await?;
-                        }
-                        for scope in b.scopes() {
-                            b.replica.audit(scope).await?;
-                        }
-                        hub.cut_after(None);
-                        assert!(
-                            rows(&a).await?.contains(&"1".to_string()),
-                            "lost local row at {offset}"
-                        );
-                        assert!(
-                            rows(&b).await?.contains(&"2".to_string()),
-                            "lost local row at {offset}"
-                        );
-                        a.sync(&*transport(&a).await?).await?;
-                        assert_eq!(rows(&a).await?, ["1", "2"], "cut at {offset}");
-                        assert_eq!(rows(&b).await?, ["1", "2"], "cut at {offset}");
-                        a.detach(None).await;
-                        b.detach(None).await;
-                        drop(a);
-                        drop(b);
-                        std::fs::remove_dir_all(trial)?;
-                        Ok::<_, Failure>(())
-                    })
-                })
-                .buffer_unordered(8);
-            tokio::pin!(trials);
-            let mut finished = 0;
-            while let Some(result) = trials.next().await {
-                result?;
-                finished += 1;
-                if finished % 1000 == 0 {
-                    eprintln!("verified {finished} offsets in {:?}", started.elapsed());
-                }
-            }
-            eprintln!(
-                "cancelled and converged at {} byte offsets in {:?}",
-                count,
-                started.elapsed()
-            );
-            Ok(())
-        })
-        .await
+    cancellation::run(true).await
 }
 
 #[tokio::test(start_paused = true)]

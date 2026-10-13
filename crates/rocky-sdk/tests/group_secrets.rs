@@ -13,6 +13,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod support;
+
 const SCHEMA: &str = r#"{"format":4,"application":"groupsecrets","version":1,"tables":[
 {"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
 {"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"},
@@ -361,7 +363,7 @@ async fn one_envelope_shares_a_group_and_installs_only_with_read_on_every_table(
 
 #[tokio::test]
 async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_live_devices() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     for list in ["A", "B"] {
         issuer
@@ -723,7 +725,7 @@ async fn introduce(left: &Peer, right: &Peer) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_later_rows() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))
@@ -880,7 +882,7 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
 
 #[tokio::test]
 async fn a_member_with_a_delegated_grant_shares_without_the_publisher_key() {
-    let root = tempfile::tempdir().unwrap();
+    let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     issuer
         .ok(json!({"type":"partition_create","group":"list","values":values("A")}))

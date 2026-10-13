@@ -70,6 +70,32 @@ async fn open_verifies_buffered_commits_full_flushes_and_manual_checkpoints() {
 }
 
 #[tokio::test]
+async fn explicit_wal_flush_covers_buffered_writes_without_changing_contents() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("a.db");
+    let replica = open(&f, &path, &PrivateKey::new()).await;
+    let buffered = replica
+        .author_buffered([1; 32], insert(&f, 1), vec![])
+        .await
+        .unwrap();
+    assert!(replica.durable_commit().await < buffered.commit);
+    let wal = path.with_extension("db-wal");
+    let contents = std::fs::read(&wal).unwrap();
+    #[cfg(windows)]
+    assert_eq!(
+        std::fs::File::open(&wal)
+            .unwrap()
+            .sync_all()
+            .unwrap_err()
+            .raw_os_error(),
+        Some(5)
+    );
+    assert!(replica.flush().await.unwrap() >= buffered.commit);
+    assert_eq!(std::fs::read(wal).unwrap(), contents);
+}
+
+#[tokio::test]
 async fn concurrent_authors_share_one_commit_and_keep_their_own_frames() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();

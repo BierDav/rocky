@@ -15,9 +15,6 @@ import rocky.BootstrapProgress
 import rocky.DatabaseStatus
 import rocky.LinkState
 
-/** The native snapshot and the last observed transfer event. */
-data class SyncBadgeState(val snapshot: DatabaseStatus? = null)
-
 fun bootstrapPercent(progress: BootstrapProgress): Int = if (progress.rowsTotal == 0uL) 100 else (progress.rowsDone.toDouble() * 100 / progress.rowsTotal.toDouble()).toInt()
 fun bootstrapLabel(progress: BootstrapProgress?, paused: Boolean = false): String {
     val label = if (paused) "Bootstrap paused" else "Importing"

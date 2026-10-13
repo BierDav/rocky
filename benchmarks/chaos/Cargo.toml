@@ -1,0 +1,22 @@
+[package]
+name = "rocky-chaos"
+description = "Fault-injection and fuzz harness over rocky-sdk: killable node processes, trusted/full/partial roles"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Independent workspace: excluded from the application checks.
+[workspace]
+
+[dependencies]
+rocky-sdk = { path = "../../crates/rocky-sdk", features = ["qualification"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "time", "sync", "signal"] }
+rand = "=0.8.8"
+
+[patch.crates-io]
+netdev = { path = "../../vendor/netdev" }
+netwatch = { path = "../../vendor/netwatch" }
+
+[profile.dev.package."*"]
+opt-level = 2

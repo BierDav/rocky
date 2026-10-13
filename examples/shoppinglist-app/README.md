@@ -161,6 +161,10 @@ sessions without deleting the household.
 
 ## Code and SDK usage
 
+The [list screen architecture and controls](../../docs/runtime/shopping-screen.md)
+separate synchronous text editing from committed Room observations.
+
+
 Start at [ShoppingNode](shared/src/data/session/ShoppingNode.kt) for platform composition,
 [ShoppingGraph](shared/src/di/ShoppingGraph.kt) for Metro,
 [ShoppingSession](shared/src/data/session/ShoppingSession.kt) for app lifetime,

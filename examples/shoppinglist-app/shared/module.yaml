@@ -31,6 +31,7 @@ dependencies:
   - eu.anifantakis:ksafe:3.3.0
 
 test-dependencies@jvm:
+  - $compose.desktop.currentOs
   - org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0
 
 dependencies@mobile:

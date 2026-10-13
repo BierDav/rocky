@@ -1,5 +1,6 @@
 package org.example.examples.shopping.presentation.screen.lists
 
+import androidx.compose.foundation.text.input.clearText
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.zacsweers.metro.AppScope
@@ -12,23 +13,9 @@ import kotlinx.coroutines.flow.*
 import org.example.examples.shopping.data.db.DeviceRow
 import org.example.examples.shopping.data.db.entity.Category
 import org.example.examples.shopping.data.db.entity.ShoppingItem
-import org.example.examples.shopping.data.db.entity.ShoppingList
 import org.example.examples.shopping.data.session.ShoppingNode
 import org.example.examples.shopping.data.session.ShoppingSession
 import org.example.examples.shopping.presentation.screen.NodeViewModel
-
-/** What the lists screen shows. [selected] is null until a list exists. */
-data class ListsState(
-    val lists: List<ShoppingList> = emptyList(),
-    val selected: ShoppingList? = null,
-    val categories: List<Category> = emptyList(),
-    val items: List<ShoppingItem> = emptyList(),
-    val search: String = "",
-    val showCompleted: Boolean = true,
-    val category: Long? = null,
-    /** Only a trusted device creates, renames and deletes lists. */
-    val trusted: Boolean = false,
-)
 
 @Inject
 @ViewModelKey
@@ -36,8 +23,7 @@ data class ListsState(
 @OptIn(ExperimentalCoroutinesApi::class)
 class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
     private val selection = MutableStateFlow<Long?>(null)
-    private val filter = MutableStateFlow(Filter())
-    private data class Filter(val search: String = "", val showCompleted: Boolean = true, val category: Long? = null)
+    val editor = ListsEditor()
 
     val state: StateFlow<ListsState> = node.flatMapLatest { node ->
         val repository = node.repository
@@ -48,11 +34,9 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
                 } else {
                     combine(
                         repository.categories(list.id),
-                        filter.flatMapLatest { f ->
-                            repository.observe(list.id, f.search, f.showCompleted).map { f to it }
-                        },
-                    ) { categories, (f, items) ->
-                        ListsState(lists, list, categories, items, f.search, f.showCompleted, f.category?.takeIf { id -> categories.any { it.id == id } }, node.isTrusted)
+                        repository.observe(list.id),
+                    ) { categories, items ->
+                        ListsState(lists, list, categories, items, node.isTrusted)
                     }
                 }
             }
@@ -76,20 +60,35 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
 
     fun select(list: Long) {
         selection.value = list
-        filter.update { it.copy(category = null) }
+        editor.category = null
     }
-    fun search(text: String) = filter.update { it.copy(search = text) }
-    fun showCompleted(show: Boolean) = filter.update { it.copy(showCompleted = show) }
 
     /** New items go into the selected category. */
-    fun selectCategory(category: Long?) = filter.update { it.copy(category = if (it.category == category) null else category) }
+    fun selectCategory(category: Long?) {
+        editor.category = state.value.categories.firstOrNull { it.id == category }
+    }
 
     fun createList(title: String) = write { selection.value = repository.createList(title) }
     fun renameList(title: String) = onList { repository.renameList(it, title) }
     fun deleteList() = onList { repository.deleteList(it) }
-    fun addCategory(name: String) = onList { list -> repository.addCategory(list, name).also { id -> filter.update { it.copy(category = id) } } }
+    fun addCategory(name: String) = onList { list -> repository.addCategory(list, name).also { id -> if (state.value.selected?.id == list) editor.category = Category(list, id, name) } }
     fun deleteCategory(category: Long) = onList { repository.deleteCategory(it, category) }
-    fun add(title: String) = onList { repository.add(it, title, state.value.category) }
+    fun add() {
+        val list = state.value.selected?.id ?: return
+        val draft = editor.draft.text.toString()
+        val title = draft.trim().takeIf { it.isNotEmpty() } ?: return
+        if (editor.adding) return
+        val category = state.value.categories.firstOrNull { it.id == editor.category?.id && it.list == editor.category?.list }?.id
+        editor.adding = true
+        write {
+            try {
+                repository.add(list, title, category)
+                if (editor.draft.text.toString() == draft) editor.draft.clearText()
+            } finally {
+                editor.adding = false
+            }
+        }
+    }
     fun toggle(item: ShoppingItem) = write { repository.check(item.list, item.id, !item.completed) }
     fun rename(item: ShoppingItem, title: String) = write { repository.rename(item.list, item.id, title) }
     fun categorize(item: ShoppingItem, category: Long?) = write { repository.categorize(item.list, item.id, category) }

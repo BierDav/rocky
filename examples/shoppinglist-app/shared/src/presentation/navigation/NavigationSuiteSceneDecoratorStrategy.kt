@@ -5,6 +5,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavEntry
@@ -30,7 +31,8 @@ class NavigationSuiteSceneDecoratorStrategy<T : Any>(
 
     @Composable
     internal fun Chrome(content: @Composable () -> Unit) {
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        BoxWithConstraints(Modifier.fillMaxSize().imePadding()) {
             if (maxWidth >= railWidth) {
                 Row(Modifier.fillMaxSize()) {
                     NavigationRail(Modifier.fillMaxHeight()) {
@@ -45,9 +47,11 @@ class NavigationSuiteSceneDecoratorStrategy<T : Any>(
             } else {
                 Column(Modifier.fillMaxSize()) {
                     Box(Modifier.weight(1f).fillMaxWidth()) { content() }
-                    NavigationBar {
-                        items.forEach { item ->
-                            NavigationBarItem(navigator.tab == item.key, { navigator.tab = item.key }, icon = { Icon(item.icon, null) }, label = { Text(item.label) })
+                    if (!keyboardVisible) {
+                        NavigationBar {
+                            items.forEach { item ->
+                                NavigationBarItem(navigator.tab == item.key, { navigator.tab = item.key }, icon = { Icon(item.icon, null) }, label = { Text(item.label) })
+                            }
                         }
                     }
                 }

@@ -15,7 +15,11 @@ riscv64 | riscv64gc) platform=linux-riscv64 ;;
 esac
 
 mkdir -p "$destination"
-curl --fail --silent --show-error --location "https://get.nexte.st/latest/$platform" \
-    | tar -xzf - -C "$destination"
+archive="$destination/cargo-nextest.tar.gz"
+curl --fail --silent --show-error --location \
+    --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
+    --output "$archive" "https://get.nexte.st/latest/$platform"
+tar -xzf "$archive" -C "$destination"
+rm "$archive"
 "$destination/cargo-nextest" --version
 echo "$destination" >> "${GITHUB_PATH:?GITHUB_PATH must be set by the CI runner}"

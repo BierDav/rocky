@@ -299,7 +299,14 @@ the others, and each consumer fetches only what it runs.
 Linux jobs install the pinned Rust toolchain with `dtolnay/rust-toolchain`; the
 workflow names the same version as `rust-toolchain.toml`, which `rustup` still
 resolves inside the checkout. The iOS job reads that file for its official
-rustup toolchain and target installation. Gitea installs the runner-architecture nextest
+rustup toolchain and target installation. Rustup bootstrapping and nextest
+downloads retry TLS resets, and extraction starts only after a complete download.
+The bootstrap also registers Cargo and Homebrew tool paths explicitly.
+The build shares its nextest binary as `nextest-tools`, so test consumers avoid
+separate external downloads and use the same runner version as the archives.
+They install it themselves only when that artifact is missing. The fallback
+GitHub installer is pinned to a commit to avoid Gitea action-cache races when its
+tag moves. Gitea installs the runner-architecture nextest
 with `scripts/ci/install-nextest`; GitHub uses `taiki-e/install-action`.
 Before archiving, `scripts/ci/test-profile` optimizes the CPU-heavy workspace
 test crates while retaining debug assertions and overflow checks. Artifact

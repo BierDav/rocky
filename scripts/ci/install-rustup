@@ -1,0 +1,20 @@
+#!/bin/sh
+# Bootstrap before the toolchain action, retrying interrupted TLS downloads.
+set -eu
+cargo_bin="${CARGO_HOME:-${HOME:?}/.cargo}/bin"
+if [ "$(uname -s)" = Darwin ]; then
+    for directory in /opt/homebrew/bin /usr/local/bin; do
+        [ ! -d "$directory" ] || printf '%s\n' "$directory" >> "${GITHUB_PATH:?}"
+    done
+fi
+if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$cargo_bin/rustup" ]; then
+    bootstrap="${RUNNER_TEMP:?}/rustup-init.sh"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
+        --output "$bootstrap" https://sh.rustup.rs
+    for attempt in 1 2 3; do
+        sh "$bootstrap" -y --no-modify-path --profile minimal --default-toolchain none && break
+        [ "$attempt" -lt 3 ] || exit 1
+    done
+fi
+printf '%s\n' "$cargo_bin" >> "${GITHUB_PATH:?}"

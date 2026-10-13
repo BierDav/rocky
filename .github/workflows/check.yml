@@ -55,14 +55,18 @@ jobs:
           # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
+              --output "$2" \
               "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
           }
-          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       - name: Look for a passing run of this tree
         id: passed
@@ -75,6 +79,11 @@ jobs:
       # ktlint runs on the JVM.
       - uses: ./source/.github/actions/setup-java
         if: steps.passed.outputs.cache-hit != 'true'
+
+      - name: Bootstrap Rustup and register its tool paths
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/ci/install-rustup
 
       - uses: dtolnay/rust-toolchain@1.99.0
         if: steps.passed.outputs.cache-hit != 'true'
@@ -129,14 +138,18 @@ jobs:
           # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
+              --output "$2" \
               "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
           }
-          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       # A tree whose checks passed needs no build.
       - name: Look for a passing check of this tree
@@ -151,6 +164,11 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
         run: ./scripts/ci/install-system-deps
+
+      - name: Bootstrap Rustup and register its tool paths
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/ci/install-rustup
 
       - uses: dtolnay/rust-toolchain@1.99.0
         if: steps.passed.outputs.cache-hit != 'true'
@@ -177,7 +195,7 @@ jobs:
         working-directory: source
         run: ./scripts/ci/source-times
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
         with:
           tool: cargo-nextest
@@ -196,6 +214,7 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/check --build "$RUNNER_TEMP/build"
+          cp "$(command -v cargo-nextest)" "$RUNNER_TEMP/build/cargo-nextest"
 
       # One artifact per consumer so a failure to finalize the large shared
       # archive cannot also lose the small ones, and `shopping`
@@ -232,6 +251,15 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      - name: Upload the test runner
+        if: steps.passed.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-tools
+          path: ${{ runner.temp }}/build/cargo-nextest
+          retention-days: 1
+
   check:
     # A job after `build`: the source step, reuse-build, its own steps and
     # record-pass. Add a job the same way; see docs/development.md#adding-a-ci-job.
@@ -251,14 +279,18 @@ jobs:
           # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
+              --output "$2" \
               "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
           }
-          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       - id: reuse
         uses: ./source/.github/actions/reuse-build
@@ -308,14 +340,18 @@ jobs:
           # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
+              --output "$2" \
               "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
           }
-          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       - id: reuse
         uses: ./source/.github/actions/reuse-build
@@ -364,14 +400,18 @@ jobs:
           # GitHub and Gitea serve the same archive and commit endpoints.
           api() {
             curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
+              --output "$2" \
               "${GH_API_URL}/repos/${GH_REPOSITORY}/$1"
           }
-          api "tarball/${GH_REVISION}" > "$RUNNER_TEMP/source.tar.gz"
+          api "tarball/${GH_REVISION}" "$RUNNER_TEMP/source.tar.gz"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
-          echo "tree=$(api "commits/${GH_REVISION}?stat=false&files=false" | jq -r .commit.tree.sha)" >> "$GITHUB_OUTPUT"
+          api "commits/${GH_REVISION}?stat=false&files=false" "$RUNNER_TEMP/commit.json"
+          tree=$(jq -er .commit.tree.sha "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       # The Kotlin build compiles the native library, which needs the
       # restored registry even with the custody peer. The x64 baseline peer
@@ -474,6 +514,7 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             --header "Accept: application/vnd.github+json" \
             --output "$RUNNER_TEMP/source.tar.gz" \
@@ -536,6 +577,10 @@ jobs:
         working-directory: source
         run: ./scripts/ci/install-system-deps
 
+      - name: Bootstrap Rustup and register its tool paths
+        working-directory: source
+        run: ./scripts/ci/install-rustup
+
       - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
@@ -578,6 +623,7 @@ jobs:
           GH_REVISION: ${{ github.sha }}
         run: |
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             --header "Accept: application/vnd.github+json" \
             --output "$RUNNER_TEMP/source.tar.gz" \
@@ -585,14 +631,20 @@ jobs:
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
           curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             --output "$RUNNER_TEMP/commit.json" \
             "${GH_API_URL}/repos/${GH_REPOSITORY}/commits/${GH_REVISION}?stat=false&files=false"
-          echo "tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"]["tree"]["sha"])' "$RUNNER_TEMP/commit.json")" >> "$GITHUB_OUTPUT"
+          tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"]["tree"]["sha"])' "$RUNNER_TEMP/commit.json")
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
 
       - name: Use a stable source path on the macOS Gitea runner
         if: github.server_url != 'https://github.com'
         run: ./source/scripts/ci/stable-ios-source
+
+      - name: Bootstrap Rustup and register its tool paths
+        working-directory: source
+        run: ./scripts/ci/install-rustup
 
       - name: Install the repository toolchain and iOS targets
         working-directory: source

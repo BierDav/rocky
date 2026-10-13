@@ -239,7 +239,7 @@ impl Settings {
                 .cloned()
                 .unwrap_or_default();
             for (node, entry) in &candidates {
-                if !reads_group(entry, &partition) {
+                if !reads_group(domain, entry, &partition) {
                     continue;
                 }
                 let envelope = GroupSecretEnvelope::seal_recorded(
@@ -282,18 +282,28 @@ impl Settings {
 
 /// Whether a registry record reads every member of `partition` in whole: by
 /// its profile, or by one recorded grant.
-fn reads_group(record: &Record, partition: &GroupPartition) -> bool {
+fn reads_group(
+    domain: &crate::domain::Domain,
+    record: &Record,
+    partition: &GroupPartition,
+) -> bool {
     let whole = |grant: &rocky_core::ResourceGrant| {
         grant.rows == RowSelection::All && grant.rights.contains(&Right::Read)
     };
+    let profile = record.profile().map(|profile| domain.effective(profile));
+    let recorded: Vec<_> = record
+        .grants
+        .iter()
+        .map(|grant| grant.grant.clone())
+        .collect();
+    let recorded = domain.effective_partitions(&recorded);
     !record.revoked
         && partition.members.iter().all(|member| {
-            record
-                .profile()
+            profile
+                .as_ref()
                 .is_some_and(|profile| profile.reads(&member.table))
-                || record.grants.iter().any(|grant| {
+                || recorded.iter().any(|grant| {
                     grant
-                        .grant
                         .resolve(member.scope.domain, member.scope.table, &member.tuple)
                         .ok()
                         .flatten()

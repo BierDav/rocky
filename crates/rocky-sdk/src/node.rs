@@ -1196,8 +1196,8 @@ impl Node {
                 let (collection, author) = self
                     .configure(|settings| settings.hold_pseudonym(&self.vault, pseudonym.clone()))
                     .await?;
-                let key =
-                    PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{collection}"))?);
+                let role = self.settings.lock().await.pseudonym_role(&collection)?;
+                let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
                 self.replica.register_row_author(key, pseudonym).await?;
                 Ok(json!({"collection": collection, "author": author}))
             }
@@ -1891,7 +1891,8 @@ impl Node {
             let (collection, author) = self
                 .configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
                 .await?;
-            let key = PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{collection}"))?);
+            let role = self.settings.lock().await.pseudonym_role(&collection)?;
+            let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
             self.replica.register_row_author(key, chain).await?;
             self.activity.record(
                 "author_installed",

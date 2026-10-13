@@ -3,6 +3,7 @@ package org.example.examples.shopping.presentation.screen.lists
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.runtime.*
 import org.example.examples.shopping.data.db.entity.Category
+import org.example.examples.shopping.data.db.entity.ItemCategory
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.db.entity.ShoppingList
 
@@ -13,12 +14,18 @@ data class ListsState(
     val categories: List<Category> = emptyList(),
     val items: List<ShoppingItem> = emptyList(),
     val trusted: Boolean = false,
+    val links: List<ItemCategory> = emptyList(),
 ) {
+    private val linked: Map<Long, Set<Long>> = links.groupBy({ it.item }, { it.category }).mapValues { it.value.toSet() }
+
+    /** The item's categories, in category order; a link to a deleted category shows none. */
+    fun categoriesOf(item: ShoppingItem): List<Category> = linked[item.id].orEmpty().let { ids -> categories.filter { it.id in ids } }
+
     fun content(search: String, showCompleted: Boolean, category: Category?): ListContent {
         val selectedCategory = categories.firstOrNull { it.id == category?.id && it.list == category.list }
         val matches = items.filter {
             it.title.contains(search, ignoreCase = true) &&
-                (selectedCategory == null || it.category == selectedCategory.id) &&
+                (selectedCategory == null || selectedCategory.id in linked[it.id].orEmpty()) &&
                 (showCompleted || !it.completed)
         }
         return ListContent(

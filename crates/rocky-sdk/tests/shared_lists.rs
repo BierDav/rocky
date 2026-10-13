@@ -7,7 +7,7 @@ use std::{path::Path, sync::Arc};
 mod support;
 use support::secrets;
 
-const SCHEMA: &str = r#"{"format":4,"application":"lists","version":1,"tables":[
+const SCHEMA: &str = r#"{"format":5,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -21,6 +21,32 @@ const SCHEMA: &str = r#"{"format":4,"application":"lists","version":1,"tables":[
    {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
 ]}"#;
 const TABLES: [&str; 3] = ["lists", "categories", "items"];
+/// Version 2: ordered items in any number of categories, migrated from one
+/// category per item, as the shopping example's version 7.
+const ORDERED: &str = r#"{"format":5,"application":"lists","version":2,"tables":[
+ {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
+  "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
+ {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]},
+ {"name":"items","class":"mergeable","columns":[
+   {"name":"list","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"integer"},
+   {"name":"position","type":"text","not_null":true,"default":""}],
+  "primary_key":["list","id"],"partition_by":["list"],"partition_group":"list",
+  "indexes":[{"name":"index_items_list_title","unique":true,"columns":[{"name":"list","descending":false},{"name":"title","descending":false}],"on_conflict":"latest_wins"}],
+  "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},
+   {"columns":["list","category"],"table":"categories","on_delete":"set_null"}]},
+ {"name":"item_categories","class":"mergeable","columns":[
+   {"name":"list","type":"integer","not_null":true},{"name":"item","type":"integer","not_null":true},{"name":"category","type":"integer","not_null":true}],
+  "primary_key":["list","item","category"],"partition_by":["list"],"partition_group":"list",
+  "foreign_keys":[{"columns":["list","item"],"table":"items","on_delete":"cascade"},
+   {"columns":["list","category"],"table":"categories","on_delete":"cascade"}]}
+],
+"granted_like":{"item_categories":"items"},
+"migrations":[{"version":2,"statements":[
+  "UPDATE items SET position = printf('%09d5', (SELECT count(*) FROM items AS earlier WHERE earlier.list = items.list AND earlier.id < items.id))",
+  {"insert":"item_categories","select":"SELECT list, id AS item, category FROM items WHERE category IS NOT NULL"},
+  "UPDATE items SET category = NULL WHERE category IS NOT NULL"]}]}"#;
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
@@ -92,9 +118,12 @@ fn values(list: &str) -> Value {
     json!([{"type":"integer","value":list}])
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
+    at(directory, hub, name, SCHEMA)
+}
+fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> Open<'a> {
     Open {
         directory,
-        schema: SCHEMA,
+        schema,
         secrets: Some(secrets::keys(directory)),
         network: Some(Network::Owned(hub.connector(name))),
         commands: None,
@@ -510,6 +539,111 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
     // Once both hold both lists, nothing is refused any more.
     assert!(refused(&a).await?.unwrap_or_default().is_empty());
     for peer in [a, b] {
+        peer.database.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let (a, b) = (root.path().join("a"), root.path().join("b"));
+    let issuer = Peer::new(Database::create(open(&a, &hub, "a"), None)?.database)?;
+    // Raw grants name the three tables, as the shopping app's device kinds do.
+    let grants: Vec<Value> = TABLES
+        .iter()
+        .map(|table| json!({"scope": table, "rights": ["read", "insert", "update", "delete"]}))
+        .collect();
+    let invitation = issuer
+        .call(json!({"type":"pairing","profile":{"kind":"grants","grants":grants}}))
+        .await?["uri"]
+        .as_str()
+        .ok_or("uri")?
+        .to_owned();
+    let writer = Peer::new(Database::join(open(&b, &hub, "b"), &invitation)?.database)?;
+    // A partial replica holds only the lists shared with it.
+    writer
+        .call(
+            json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[],"custody":0}}),
+        )
+        .await?;
+    issuer.author(&issuer).await?;
+    writer.author(&issuer).await?;
+    issuer
+        .call(json!({"type":"partition_next","table":"lists"}))
+        .await?;
+    let list = issuer
+        .insert(
+            "lists",
+            None,
+            "INSERT INTO lists(id,title) VALUES(?,'Weekly')",
+        )
+        .await?;
+    let dairy = issuer
+        .insert(
+            "categories",
+            Some(&list),
+            &format!("INSERT INTO categories(id,list,name) VALUES(?,{list},'Dairy')"),
+        )
+        .await?;
+    for (title, category) in [("Milk", dairy.as_str()), ("Bread", "NULL")] {
+        issuer
+            .insert(
+                "items",
+                Some(&list),
+                &format!("INSERT INTO items(id,list,title,category) VALUES(?,{list},'{title}',{category})"),
+            )
+            .await?;
+    }
+    let node = writer.call(json!({"type":"session"})).await?["node"].clone();
+    issuer
+        .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    for peer in [writer, issuer] {
+        peer.database.close().await?;
+    }
+
+    let issuer = Peer::new(Database::open(at(&a, &hub, "a", ORDERED))?.database)?;
+    assert_eq!(
+        issuer
+            .column(&format!(
+                "SELECT title FROM items WHERE list = {list} ORDER BY position"
+            ))
+            .await?,
+        [json!("Milk"), json!("Bread")]
+    );
+    let linked = format!(
+        "SELECT i.title FROM item_categories c JOIN items i ON i.list = c.list AND i.id = c.item WHERE c.list = {list} AND i.list = {list} AND c.category = {dairy} ORDER BY i.title"
+    );
+    assert_eq!(issuer.column(&linked).await?, [json!("Milk")]);
+    let writer = Peer::new(Database::open(at(&b, &hub, "b", ORDERED))?.database)?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(writer.column(&linked).await?, [json!("Milk")]);
+    // The writer's grants never named `item_categories`; they follow `items`.
+    let bread = writer
+        .column(&format!(
+            "SELECT id FROM items WHERE list = {list} AND title = 'Bread'"
+        ))
+        .await?;
+    let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
+    writer
+        .call(json!({"type":"pseudonym_request","collection":"item_categories"}))
+        .await?;
+    writer
+        .insert(
+            "item_categories",
+            Some(&list),
+            &format!("INSERT INTO item_categories(id,list,item,category) VALUES(?,{list},{bread},{dairy})"),
+        )
+        .await?;
+    writer.call(json!({"type":"sync"})).await?;
+    assert_eq!(
+        issuer.column(&linked).await?,
+        [json!("Bread"), json!("Milk")]
+    );
+    for peer in [writer, issuer] {
         peer.database.close().await?;
     }
     Ok(())

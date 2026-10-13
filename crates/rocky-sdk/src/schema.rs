@@ -1,6 +1,6 @@
 use crate::Failure;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -17,6 +17,33 @@ pub struct Schema {
     /// definition: every device of a domain declares the same ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<rocky_core::CommandDefinitions>,
+    /// Tables granted like another: each grant of a profile on the value
+    /// also covers the key. Declared when the key table is added; see
+    /// `docs/runtime/generations.md#tables-granted-like-another`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub granted_like: BTreeMap<String, String>,
+    /// SQL the issuer that cuts a breaking generation runs once, before it
+    /// requires the new fields; see `docs/runtime/generations.md#breaking-generations`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<Migration>,
+}
+/// Statements leading to application schema `version`, run in order in
+/// one transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Migration {
+    pub version: u32,
+    pub statements: Vec<MigrationStep>,
+}
+/// One statement of a migration.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum MigrationStep {
+    /// SQL run as it is.
+    Sql(String),
+    /// A row of table `insert` for each row `select` returns, its columns
+    /// named like the table's, with an `id` Rocky issues.
+    Insert { insert: String, select: String },
 }
 fn identifier(name: &str) -> bool {
     !name.is_empty()
@@ -88,6 +115,45 @@ impl Schema {
                 .supported_on(rocky_core::Profile::Secure)?;
             let names: BTreeSet<_> = tables.iter().map(|table| &table.name).collect();
             self.validate_commands(&names)?;
+            self.validate_granted_like()?;
+            if let Some(table) = self
+                .migrations
+                .iter()
+                .flat_map(|migration| &migration.statements)
+                .find_map(|step| match step {
+                    MigrationStep::Insert { insert, .. }
+                        if !self.tables.iter().any(|table| {
+                            table.name == *insert
+                                && table.class == rocky_core::TableClass::Mergeable
+                        }) =>
+                    {
+                        Some(insert)
+                    }
+                    _ => None,
+                })
+            {
+                return Err(format!(
+                    "a migration inserts into {table}, which is no mergeable table"
+                )
+                .into());
+            }
+            if self.migrations.len() > 64
+                || self
+                    .migrations
+                    .windows(2)
+                    .any(|pair| pair[0].version >= pair[1].version)
+                || self.migrations.iter().any(|migration| {
+                    migration.version == 0
+                        || migration.version > self.version
+                        || migration.statements.is_empty()
+                        || migration.statements.len() > 64
+                })
+            {
+                return Err(
+                    "migrations name ascending versions up to the schema's, each with 1 to 64 statements"
+                        .into(),
+                );
+            }
             // Only confirmed commands write such a table: one must name it.
             let commanded: BTreeSet<String> = match &self.commands {
                 Some(commands) => commands
@@ -112,6 +178,27 @@ impl Schema {
         }
     }
 
+    /// Each table follows one mergeable table that follows none.
+    fn validate_granted_like(&self) -> Result<(), Failure> {
+        let mergeable = |name: &str| {
+            self.tables
+                .iter()
+                .any(|table| table.name == name && table.class == rocky_core::TableClass::Mergeable)
+        };
+        for (table, like) in &self.granted_like {
+            if table == like
+                || !mergeable(table)
+                || !mergeable(like)
+                || self.granted_like.contains_key(like)
+            {
+                return Err(format!(
+                    "{table} cannot be granted like {like}: both must be distinct mergeable tables, and {like} granted like none"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
     fn validate_commands(&self, names: &BTreeSet<&String>) -> Result<(), Failure> {
         if let Some(commands) = &self.commands {
             for descriptor in commands.build()?.descriptors() {

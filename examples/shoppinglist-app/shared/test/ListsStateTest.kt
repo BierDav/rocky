@@ -2,6 +2,7 @@ package org.example.examples.shopping
 
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import org.example.examples.shopping.data.db.entity.Category
+import org.example.examples.shopping.data.db.entity.ItemCategory
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.db.entity.ShoppingList
 import org.example.examples.shopping.presentation.screen.lists.ListsEditor
@@ -10,10 +11,25 @@ import kotlin.test.*
 
 class ListsStateTest {
     private val dairy = Category(1, 7, "Dairy")
-    private val milk = ShoppingItem(1, "milk", "Milk", false, dairy.id, 1)
-    private val bread = ShoppingItem(1, "bread", "Bread", false, null, 2)
-    private val cheese = ShoppingItem(1, "cheese", "Cheese", true, dairy.id, 3)
-    private val state = ListsState(selected = ShoppingList(1, "Weekly"), categories = listOf(dairy), items = listOf(milk, bread, cheese))
+    private val fresh = Category(1, 8, "Fresh")
+    private val milk = ShoppingItem(1, "milk", "Milk", false, id = 1)
+    private val bread = ShoppingItem(1, "bread", "Bread", false, id = 2)
+    private val cheese = ShoppingItem(1, "cheese", "Cheese", true, id = 3)
+    private val state = ListsState(
+        selected = ShoppingList(1, "Weekly"),
+        categories = listOf(dairy, fresh),
+        items = listOf(milk, bread, cheese),
+        links = listOf(ItemCategory(1, milk.id, dairy.id, 10), ItemCategory(1, cheese.id, dairy.id, 11), ItemCategory(1, milk.id, fresh.id, 12)),
+    )
+
+    @Test fun `an item shows and filters under each of its categories`() {
+        assertEquals(listOf(dairy, fresh), state.categoriesOf(milk))
+        assertEquals(emptyList(), state.categoriesOf(bread))
+        assertEquals(listOf(milk), state.content("", true, fresh).items)
+        assertEquals(listOf(milk, cheese), state.content("", true, dairy).items)
+        // A link whose category is gone shows nothing.
+        assertEquals(listOf(fresh), state.copy(categories = listOf(fresh)).categoriesOf(milk))
+    }
 
     @Test fun `filters intersect while progress describes the whole list`() {
         val content = state.content("MIL", false, dairy)
@@ -25,10 +41,10 @@ class ListsStateTest {
     }
 
     @Test fun `deleted category falls back to all items and cannot cross lists`() {
-        val removed = state.copy(categories = emptyList()).content("", true, dairy)
+        val removed = state.copy(categories = listOf(fresh)).content("", true, dairy)
         assertNull(removed.category)
         assertEquals(listOf(milk, bread, cheese), removed.items)
-        val otherList = state.copy(categories = listOf(Category(2, dairy.id, "Produce")))
+        val otherList = state.copy(categories = listOf(Category(2, dairy.id, "Produce"), fresh))
         assertNull(otherList.content("", true, dairy).category)
     }
 

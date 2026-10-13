@@ -32,7 +32,8 @@ impl Node {
             .await?;
         self.configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
             .await?;
-        let key = PrivateKey::from_bytes(&self.vault.get(&format!("pseudonym.{REGISTRY}"))?);
+        let role = self.settings.lock().await.pseudonym_role(REGISTRY)?;
+        let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
         self.replica.register_row_author(key, chain).await?;
         Ok(())
     }

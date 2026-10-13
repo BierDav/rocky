@@ -804,8 +804,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if inner.partitioned(scope) && !inner.partitions.contains_key(&scope) {
                 return Ok(None);
             }
-            // A scope still being imported has nothing whole to offer.
-            if inner.importing(scope).await? {
+            // A scope still being imported has nothing whole to offer, nor
+            // has one its owner means to replace.
+            if inner.importing.contains(&scope) || inner.importing(scope).await? {
                 return Ok(None);
             }
             let time = now()?;
@@ -827,6 +828,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?
                     .and_then(|record| record.signed)
                 && signed.signer() != peer
+                && inner.admits(signed.statement.definition).is_ok()
                 && signed.statement.key_epoch == key_epoch
                 && signed.statement.horizon == inner.mergeable_horizon(scope).await?
                 && signed.statement.strong.head == inner.capture_strong(scope).await?.head

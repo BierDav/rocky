@@ -7,7 +7,7 @@ mod common;
 #[allow(dead_code)]
 #[path = "registry_revocation/fixture.rs"]
 mod fixture;
-const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":4,"tables":[
+const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":5,"tables":[
  {"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
  {"name":"labels","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},
@@ -188,7 +188,7 @@ async fn concurrent_collection_rotations_open_both_rows_and_an_offline_writer_re
 #[tokio::test]
 async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_superseding_rows()
 -> Result<(), Failure> {
-    const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":4,"tables":[{"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
+    const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":5,"tables":[{"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
     async fn write(device: &Device, key: &str) {
         let scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
         common::identity::prepare(&scope, "parts", &|request| device.call(request))

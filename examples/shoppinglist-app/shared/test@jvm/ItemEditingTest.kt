@@ -27,7 +27,7 @@ class ItemEditingTest {
             MaterialTheme {
                 val focus = LocalFocusManager.current
                 dismissFocus = { focus.clearFocus(force = true) }
-                ItemRow(row.value, ListsState(items = listOf(row.value)), { toggled++ }, {}, {}, renamed::add, {}, {})
+                ItemRow(row.value, ListsState(items = listOf(row.value)), { toggled++ }, { _, _ -> }, {}, {}, renamed::add, {}, {})
             }
         }
         try {

@@ -146,7 +146,7 @@ internal class Device(val name: String, private val root: File) : AutoCloseable 
         buildString {
             append(fields.getValue("title").jsonPrimitive.content)
             if (fields.getValue("completed").jsonPrimitive.boolean) append(" [x]")
-            fields["category"]?.let { append(" #${it.jsonPrimitive.content}") }
+            fields["categories"]?.jsonArray?.forEach { append(" #${it.jsonPrimitive.content}") }
         }
     }
     fun lists(): List<String> = call("lists").jsonArray.map { it.jsonPrimitive.content.substringAfter(':') }
@@ -292,7 +292,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
 
     /**
      * The release gate: phones A and B are never online together and meet only the custody process. A duplicate
-     * title converges by policy, a moved item keeps an offline tick, a deleted category nulls only its reference,
+     * title converges by policy, a moved item keeps an offline tick, a deleted category hides only its links,
      * a deleted list cascades, and a horizon finalizes everything on every device. Phone C joins from a
      * checkpoint, stays offline across the horizon and rebootstraps.
      */
@@ -302,7 +302,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
             val writer = device(name)
             val keys = writer.call("prepare", "directory" to writer.directory.path)
             writer.open("install", "supplied" to a.call("grantWriter", "device" to keys))
-            for (table in listOf("categories", "items")) {
+            for (table in listOf("categories", "items", "item_categories")) {
                 val request = writer.call("authorRequest", "table" to table).jsonPrimitive.content
                 val credential = a.call("authorAssign", "request" to request)
                 writer.call("authorInstall", "credential" to credential)
@@ -377,12 +377,12 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
         val deleted = mapOf(weekly to listOf("Bread", "Butter"), weekend to listOf("Milk [x]"), party to emptyList())
         expect(lists.associateWith { b.items(it) } == deleted) { "B after deletes: ${lists.map { b.items(it) }}" }
         expect(b.lists().sorted() == listOf("Weekend", "Weekly")) { "B lists: ${b.lists()}" }
-        notes += "category delete nulled only items.category; deleting Party cascaded to its items"
+        notes += "category delete hid only its links; deleting Party cascaded to its items"
 
         // Every horizon statement and acknowledgment travels through custody.
         b.online(false)
         a.online(true)
-        val order = listOf("items", "categories", "lists")
+        val order = listOf("item_categories", "items", "categories", "lists")
         for (list in lists) {
             for (table in order) {
                 a.call("horizon", "action" to "declare", "table" to table, "list" to list, "participants" to listOf(b.node))

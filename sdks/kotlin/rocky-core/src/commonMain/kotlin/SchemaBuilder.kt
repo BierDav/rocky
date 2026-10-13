@@ -85,6 +85,12 @@ class SchemaBuilder internal constructor(private val application: String, privat
     }
     var updatePolicy: UpdatePolicy = UpdatePolicy.Changed
     var commands: CommandSet? = null
+    private val migrations = mutableListOf<Migration>()
+
+    /** Steps computing values for the fields schema [version] requires of existing rows; see [Migration]. */
+    fun migration(version: Int, block: MigrationBuilder.() -> Unit) {
+        migrations += Migration(version, MigrationBuilder().apply(block).steps.toList())
+    }
 
     /** On an imported table, this adds Rocky attributes to the existing declaration. */
     fun table(name: String, block: TableBuilder.() -> Unit): TableBuilder = tables.getOrPut(name) { TableBuilder(name) }.apply(block)
@@ -102,7 +108,7 @@ class SchemaBuilder internal constructor(private val application: String, privat
             }
         }
     }
-    internal fun build(): Schema = Schema(application, version, tables.values.map { it.build() }, commands, updatePolicy, views)
+    internal fun build(): Schema = Schema(application, version, tables.values.map { it.build() }, commands, updatePolicy, views, migrations.toList())
 }
 
 class TableBuilder internal constructor(val name: String) {
@@ -120,16 +126,24 @@ class TableBuilder internal constructor(val name: String) {
      * so a table in another reader scope may reference it. The key must be `id`; see secure SQL.
      */
     var existenceLog: Boolean = false
+
+    /**
+     * Grants naming [table] also cover this table, for devices enrolled before it existed. Declare it only when
+     * adding the table; see `docs/runtime/generations.md#tables-granted-like-another`.
+     */
+    var grantedLike: String? = null
     internal var roomIdentityIndex: List<String>? = null
     fun column(column: Column) {
         require(column.name !in setOf("id", "row_kind")) { "id and row_kind are implicit identity columns" }
         require(column.name !in columns) { "$name: duplicate column ${column.name}" }
         columns[column.name] = column
     }
-    fun text(name: String, nullable: Boolean = false) = column(Column.text(name, nullable))
-    fun integer(name: String, nullable: Boolean = false) = column(Column.integer(name, nullable))
-    fun boolean(name: String, nullable: Boolean = false) = column(Column.boolean(name, nullable))
-    fun real(name: String, nullable: Boolean = false) = column(Column.real(name, nullable))
+
+    /** A [default] fills rows that never held the column, as when an upgrade requires it. */
+    fun text(name: String, nullable: Boolean = false, default: String? = null) = column(Column.text(name, nullable).copy(default = default?.let(::JsonPrimitive)))
+    fun integer(name: String, nullable: Boolean = false, default: Long? = null) = column(Column.integer(name, nullable).copy(default = default?.let(::JsonPrimitive)))
+    fun boolean(name: String, nullable: Boolean = false, default: Boolean? = null) = column(Column.boolean(name, nullable).copy(default = default?.let(::JsonPrimitive)))
+    fun real(name: String, nullable: Boolean = false, default: Double? = null) = column(Column.real(name, nullable).copy(default = default?.let(::JsonPrimitive)))
     fun blob(name: String, nullable: Boolean = false) = column(Column.blob(name, nullable))
     fun primaryKey(vararg columns: String) {
         key = columns.toList()
@@ -220,6 +234,6 @@ class TableBuilder internal constructor(val name: String) {
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }
         require(roomIdentityIndex == null || roomIdentityIndex == identity) { "$name: Room identity index must contain partition columns followed by id" }
-        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog, partitionGroup = partitionGroup)
+        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog, partitionGroup = partitionGroup, grantedLike = grantedLike)
     }
 }

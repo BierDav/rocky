@@ -569,9 +569,14 @@ pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String 
         HEXLOWER.encode(&epoch.secret_hash)
     )
 }
-/// The key provider role of this device's pseudonym key in `collection`.
-fn pseudonym_role(collection: &str) -> String {
-    format!("pseudonym.{collection}")
+/// The key provider role of this device's pseudonym key in `collection`
+/// after the cut into schema generation `cut`, or 0 before any: each cut
+/// starts new author logs, since work behind it was dropped.
+fn pseudonym_role(collection: &str, cut: u32) -> String {
+    match cut {
+        0 => format!("pseudonym.{collection}"),
+        cut => format!("pseudonym.{collection}.{cut}"),
+    }
 }
 /// What a joining device expects to join.
 fn context(schema: &Schema) -> Result<Commitment, Failure> {
@@ -609,7 +614,7 @@ fn profile_of(grants: &[ResourceGrant], domain: &Domain) -> Profile {
 /// collections, and the registry's for an issuer (read and write) or a
 /// custody peer (ciphertext only). No other profile names the registry.
 pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
-    let mut grants = profile.grants(&domain.resources())?;
+    let mut grants = domain.effective(profile).grants(&domain.resources())?;
     let registry = domain.registry_resource();
     match profile {
         Profile::Issuer => grants.extend(Profile::Issuer.grants(&registry)?),
@@ -1063,7 +1068,14 @@ impl Settings {
             roles.push(format!("generation.reader.{name}"));
         }
         if let Ok(domain) = self.domain() {
-            roles.extend(domain.scopes().map(|(name, _)| pseudonym_role(name)));
+            let cuts = self.cuts().unwrap_or_default();
+            for (name, _) in domain.scopes() {
+                roles.extend(
+                    std::iter::once(0)
+                        .chain(cuts.iter().copied())
+                        .map(|cut| pseudonym_role(name, cut)),
+                );
+            }
         }
         for record in self.groups.values() {
             roles.push(format!(
@@ -2015,7 +2027,7 @@ impl Settings {
             .scopes()
             .find(|(name, _)| *name == collection)
             .ok_or("unknown collection")?;
-        let role = pseudonym_role(collection);
+        let role = self.pseudonym_role(collection)?;
         let key = match vault.find(&role)? {
             Some(key) => key,
             None => vault.create(&role)?,
@@ -2341,7 +2353,7 @@ impl Settings {
             .ok_or("empty pseudonym")?;
         let collection = self.collection_of(table)?;
         let key = vault
-            .find(&pseudonym_role(&collection))?
+            .find(&self.pseudonym_role(&collection)?)?
             .map(|key| PrivateKey::from_bytes(&key).public_key())
             .ok_or("this device asked for no pseudonym in that collection")?;
         let (pseudonym, _) = chain.verify_pseudonym_selectors(
@@ -2353,6 +2365,27 @@ impl Settings {
         )?;
         self.pseudonyms.insert(collection.clone(), chain);
         Ok((collection, pseudonym.author))
+    }
+    /// The key provider role of this device's current pseudonym key in
+    /// `collection`.
+    pub(crate) fn pseudonym_role(&self, collection: &str) -> Result<String, Failure> {
+        Ok(pseudonym_role(
+            collection,
+            self.cuts()?.last().copied().unwrap_or(0),
+        ))
+    }
+    /// The schema generations the domain's cuts moved to, oldest first.
+    pub(crate) fn cuts(&self) -> Result<Vec<u32>, Failure> {
+        let mut cuts = Vec::new();
+        for step in &self.lineage {
+            let bytes = HEXLOWER.decode(step.transition.as_bytes())?;
+            let transition =
+                rocky_credentials::SignedTransition::from_bytes(&bytes)?.verify(self.publisher)?;
+            if transition.breaking() {
+                cuts.push(transition.after.schema);
+            }
+        }
+        Ok(cuts)
     }
     pub(crate) fn row_authors(
         &self,
@@ -2366,7 +2399,7 @@ impl Settings {
             .filter(|(_, chain)| self.current_pseudonym(chain, manifest, time))
             .map(|(collection, chain)| {
                 Ok((
-                    PrivateKey::from_bytes(&vault.get(&pseudonym_role(collection))?),
+                    PrivateKey::from_bytes(&vault.get(&self.pseudonym_role(collection)?)?),
                     chain.clone(),
                 ))
             })
@@ -3341,6 +3374,10 @@ impl Settings {
                     .cloned()
                     .unwrap_or_else(|| profile_of(&prior.grants, &domain));
                 prior.grants = grants_of(&profile, &domain)?;
+                // Partitions it selects extend to tables that follow theirs.
+                let mut extended = prior.extended()?;
+                extended.partitions = domain.effective_partitions(&extended.partitions);
+                prior.extension = rocky_credentials::Extension::new(extended)?;
                 prior.manifest = current;
                 prior
             }
@@ -3527,7 +3564,10 @@ impl Settings {
                 .collect(),
         };
         // Only an absent record uses the full-rotation fallback.
-        let readable = record.as_ref().and_then(|record| record.profile.clone());
+        let readable = record
+            .as_ref()
+            .and_then(|record| record.profile.as_ref())
+            .map(|profile| domain.effective(profile));
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
             if record.is_some() && !readable.as_ref().is_some_and(|profile| profile.reads(name)) {
@@ -3646,7 +3686,7 @@ impl Settings {
                         record
                             .profile
                             .as_ref()
-                            .is_some_and(|profile| profile.reads(name))
+                            .is_some_and(|profile| domain.effective(profile).reads(name))
                     })
                 });
                 if !covered && read {
@@ -3675,6 +3715,7 @@ impl Settings {
                 let read = records.iter().any(|record| {
                     record.as_ref().is_none_or(|record| {
                         record.profile.as_ref().is_some_and(|profile| {
+                            let profile = domain.effective(profile);
                             partition
                                 .members
                                 .iter()

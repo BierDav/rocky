@@ -36,8 +36,8 @@ The harness's `gate` scenario: phones A and B are never online together and
 meet only the custody process, which restarts in between. A and B share three
 lists through direct envelope delivery, add the same title offline (one survives
 by `LatestWins`), and A moves an item B ticked offline: the item arrives in the
-other list ticked, its category nulled. Deleting a category nulls only
-`items.category`; deleting a list cascades to its items. A horizon on all nine
+other list ticked, without its categories. Deleting a category hides only its
+links; deleting a list cascades to its items. A horizon on all twelve
 group-partition table scopes finalizes on A and B, and phone C, which joined from
 checkpoints and stayed offline across the horizon, rebootstraps to the finalized
 state. `two_phones_never_online_together_pass_the_release_gate_through_custody`

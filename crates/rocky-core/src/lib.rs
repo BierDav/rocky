@@ -98,7 +98,7 @@ mod row_identity;
 pub use row_identity::{RowIdentity, RowIdentityError};
 
 mod typed_rows;
-pub use typed_rows::{TypedRows, TypedTable};
+pub use typed_rows::{TypedRows, TypedTable, fillable};
 
 mod handler_reads;
 pub use handler_reads::{HandlerReads, MAX_HANDLER_SCAN_ROWS};

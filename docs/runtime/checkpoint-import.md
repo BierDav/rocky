@@ -76,8 +76,11 @@ scope counts as importing while it holds no stored rows, and any scope does
 while pages of it are staged. For an importing scope the replica
 
 - reports it in its frontier exchange, so peers push it no history;
-- skips its bounded maintenance: checkpoint creation, sealing and pruning;
-- offers no checkpoint of its own.
+- skips its bounded maintenance: checkpoint creation, sealing and pruning.
+
+A named scope offers no checkpoint of its own, even while it holds rows: after a
+[cut](generations.md#breaking-generations) they are what the import replaces.
+Nor is a held checkpoint of a generation behind the horizon offered again.
 
 A session asks for the next page before it stores the one it holds, so its
 peer cuts a page while another is verified and stored. A page then costs the

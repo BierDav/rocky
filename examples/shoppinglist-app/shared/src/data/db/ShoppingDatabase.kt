@@ -3,10 +3,12 @@ package org.example.examples.shopping.data.db
 import androidx.room.*
 import org.example.examples.shopping.data.db.dao.ApprovalDao
 import org.example.examples.shopping.data.db.dao.CategoryDao
+import org.example.examples.shopping.data.db.dao.ItemCategoryDao
 import org.example.examples.shopping.data.db.dao.ListDao
 import org.example.examples.shopping.data.db.dao.ShoppingDao
 import org.example.examples.shopping.data.db.entity.Category
 import org.example.examples.shopping.data.db.entity.DecisionRow
+import org.example.examples.shopping.data.db.entity.ItemCategory
 import org.example.examples.shopping.data.db.entity.RequestRow
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.db.entity.ShoppingList
@@ -17,10 +19,10 @@ import org.example.examples.shopping.data.db.entity.ShoppingList
  */
 @Database(
     entities = [
-        ShoppingList::class, Category::class, ShoppingItem::class,
+        ShoppingList::class, Category::class, ShoppingItem::class, ItemCategory::class,
         RequestRow::class, DecisionRow::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 @ConstructedBy(ShoppingDatabaseConstructor::class)
@@ -28,6 +30,7 @@ abstract class ShoppingDatabase : RoomDatabase() {
     abstract fun lists(): ListDao
     abstract fun categories(): CategoryDao
     abstract fun items(): ShoppingDao
+    abstract fun itemCategories(): ItemCategoryDao
     abstract fun approvals(): ApprovalDao
 }
 

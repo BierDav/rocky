@@ -656,10 +656,13 @@ impl<A: RowApplication> Inner<A> {
                 };
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let manifest = frame.operation()?.header.extensions.manifest;
-                // Every frame of a revoked author is refused, so none is sent.
+                // Every frame of a revoked author is refused, so none is
+                // sent; nor is one behind this replica's horizon, which no
+                // replica past the cut admits: a cut dropped it.
                 if self
                     .generation_of(manifest, false)
                     .is_ok_and(|made| made > reach)
+                    || self.admits(manifest).is_err()
                     || self
                         .config
                         .revocations
@@ -730,6 +733,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     pub async fn role(&self) -> Result<RoleConfig, Error> {
         self.inner.lock().await.role().await
+    }
+    /// The scope's recorded holding; `None` until it was subscribed, left
+    /// or evicted.
+    pub async fn subscription(&self, scope: ResourceScope) -> Result<Option<Holding>, Error> {
+        self.inner.lock().await.holding(scope).await
     }
     /// Holds the scope from now on; an evicted scope comes back empty and
     /// fills by sync or rebootstrap.

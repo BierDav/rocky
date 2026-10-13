@@ -14,9 +14,19 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
 /// The shopping schema with a nullable note and a tags collection.
-const SECOND: &str = r#"{"application":"shopping","version":2,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const SECOND: &str = r#"{"application":"shopping","version":2,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+/// The second schema, with `tags` granted like `items`.
+const GRANTED: &str = r#"{"application":"shopping","version":2,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],"granted_like":{"tags":"items"}}"#;
+/// Requires `position`, which a migration computes from the titles, and
+/// cuts off generation 1. `BARE` requires it without a migration.
+const CUT: &str = r#"{"application":"shopping","version":2,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
+const BARE: &str = r#"{"application":"shopping","version":2,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+/// Titles are unique, the later write winning: the cut rebuilds a
+/// constrained projection.
+const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}]}"#;
+const UNIQUE_CUT: &str = r#"{"application":"shopping","version":2,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
 /// Drops a field: no transition can make that.
-const DROPPED: &str = r#"{"application":"shopping","version":3,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const DROPPED: &str = r#"{"application":"shopping","version":3,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
@@ -184,6 +194,177 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::create(&a_dir, network("a"))?;
+    // Raw grants name `items` alone, as an application's device kinds do.
+    let invitation = a
+        .invite_as(json!({"kind": "grants", "grants": [{"scope": "items", "rights": ["read", "insert", "update", "delete"]}]}))
+        .await;
+    let b = Device::join(&b_dir, &invitation, Network::Owned(hub.connector("b")))?;
+    introduce(&a, &b).await;
+    b.close().await;
+    a.close().await;
+
+    // Declaring it on a table that already exists would widen grants.
+    let existing = SCHEMA.replace(
+        r#"]}]}"#,
+        r#"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}],"granted_like":{"items":"tags"}}"#,
+    );
+    let error = Database::open(open(&a_dir, &existing, network("a")))
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("changed whom it is granted like"), "{error}");
+
+    let a = Device::new(Database::open(open(&a_dir, GRANTED, network("a")))?)?;
+    let b = Device::new(Database::open(open(&b_dir, GRANTED, network("b")))?)?;
+    b.ok(json!({
+        "type": "mutate",
+        "handle": vec![5; 32],
+        "payload": json!({"type": "create", "collection": "tags", "values": {"label": "fruit"}}).to_string().into_bytes(),
+        "entity": null,
+        "baseline": null,
+    }))
+    .await;
+    b.sync().await.expect("sync");
+    assert_eq!(
+        rows(&a, "SELECT label FROM tags").await,
+        json!([[text("fruit")]])
+    );
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_migrates_on_the_issuer_and_drops_unsynced_earlier_work() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let a = Device::create(&dirs("a"), network("a"))?;
+    let b = Device::join(
+        &dirs("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    let c = Device::join(
+        &dirs("c"),
+        &a.invite().await,
+        Network::Owned(hub.connector("c")),
+    )?;
+    introduce(&a, &b).await;
+    introduce(&a, &c).await;
+    a.add(1, "cherries").await;
+    a.add(2, "apples").await;
+    b.add(3, "bread").await;
+    b.sync().await.expect("sync");
+    c.sync().await.expect("sync");
+    // Never reaches the issuer before the cut.
+    b.add(4, "late").await;
+    b.close().await;
+    a.close().await;
+
+    // Every row needs a value: without a migration the cut is refused,
+    // and nothing beyond the nullable step happened.
+    let error = Database::open(open(&dirs("a"), BARE, network("a")))
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(error.contains("still NULL"), "{error}");
+    let a = Device::new(Database::open(open(&dirs("a"), CUT, network("a")))?)?;
+    let status = generation(&a).await;
+    assert_eq!(status["current"]["schema"], 3);
+    assert_eq!(status["horizon"], 3, "{status}");
+    let positions = json!([
+        [text("apples"), text("0000")],
+        [text("bread"), text("0001")],
+        [text("cherries"), text("0002")]
+    ]);
+    assert_eq!(
+        rows(&a, "SELECT title, position FROM items ORDER BY position").await,
+        positions
+    );
+
+    // A device still at generation 1 is refused, not merged.
+    c.add(6, "stale").await;
+    let _ = c.sync().await;
+    assert_eq!(a.titles().await, ["apples", "bread", "cherries"]);
+    c.close().await;
+
+    // The member adopts the cut and imports the issuer's rows: its
+    // unsynced item of generation 1 is gone everywhere.
+    let b = Device::new(Database::open(open(&dirs("b"), CUT, network("b")))?)?;
+    b.sync().await.expect("sync");
+    assert_eq!(
+        rows(&b, "SELECT title, position FROM items ORDER BY position").await,
+        positions
+    );
+    b.ok(json!({
+        "type": "mutate",
+        "handle": vec![5; 32],
+        "payload": json!({"type": "create", "collection": "items", "values": {"title": "dates", "completed": false, "position": "0003"}}).to_string().into_bytes(),
+        "entity": null,
+        "baseline": null,
+    }))
+    .await;
+    b.sync().await.expect("sync");
+    assert_eq!(a.titles().await, ["apples", "bread", "cherries", "dates"]);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_rebuilds_tables_with_unique_indexes() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::new(Database::create(open(root.path(), UNIQUE, None), None)?)?;
+    a.add(1, "apples").await;
+    a.add(2, "bread").await;
+    a.close().await;
+    let a = Device::new(Database::open(open(root.path(), UNIQUE_CUT, None))?)?;
+    assert_eq!(generation(&a).await["horizon"], 3);
+    assert_eq!(
+        rows(&a, "SELECT title, position FROM items ORDER BY position").await,
+        json!([
+            [text("apples"), text("APPLES")],
+            [text("bread"), text("BREAD")]
+        ])
+    );
+    // The rebuilt index still refuses a local duplicate, and the table takes new rows.
+    let duplicate = a
+        .call(json!({
+            "type": "mutate",
+            "handle": vec![3; 32],
+            "payload": json!({"type": "create", "collection": "items", "values": {"title": "apples", "completed": false, "position": "Z"}}).to_string().into_bytes(),
+            "entity": null,
+            "baseline": null,
+        }))
+        .await
+        .expect_err("unique");
+    assert!(
+        duplicate["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("UNIQUE"))
+    );
+    a.ok(json!({
+        "type": "mutate",
+        "handle": vec![4; 32],
+        "payload": json!({"type": "create", "collection": "items", "values": {"title": "cherries", "completed": false, "position": "CHERRIES"}}).to_string().into_bytes(),
+        "entity": null,
+        "baseline": null,
+    }))
+    .await;
+    assert_eq!(a.titles().await, ["apples", "bread", "cherries"]);
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::create(root.path(), None)?;
@@ -201,7 +382,7 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     Ok(())
 }
 
-const COMMANDS: &str = r#"{"application":"counter","version":1,"commands":{"format":1,"handler":1,"commands":[{"name":"Add","version":1,"handler":"counts.add.v1","arguments":[{"name":"amount","type":"integer"}],"accepted":[{"name":"value","type":"integer"}],"rejected":[],"invocation":"counts","result":"counts","resources":["counts"]}]},"format":4,"tables":[{"name":"counts","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
+const COMMANDS: &str = r#"{"application":"counter","version":1,"commands":{"format":1,"handler":1,"commands":[{"name":"Add","version":1,"handler":"counts.add.v1","arguments":[{"name":"amount","type":"integer"}],"accepted":[{"name":"value","type":"integer"}],"rejected":[],"invocation":"counts","result":"counts","resources":["counts"]}]},"format":5,"tables":[{"name":"counts","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
 
 /// Adds to one counter; `factor` stands for the handler's implementation.
 struct Counter {

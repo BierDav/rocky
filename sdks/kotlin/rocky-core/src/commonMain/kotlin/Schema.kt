@@ -2,13 +2,27 @@ package rocky
 
 import kotlinx.serialization.json.*
 
-/** A format-4 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
-data class Schema(val application: String, val version: Int = 1, val tables: List<Table>, val commands: CommandSet? = null, val updatePolicy: UpdatePolicy = UpdatePolicy.Changed, val views: Map<String, String> = emptyMap()) {
+/** A format-5 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
+data class Schema(
+    val application: String,
+    val version: Int = 1,
+    val tables: List<Table>,
+    val commands: CommandSet? = null,
+    val updatePolicy: UpdatePolicy = UpdatePolicy.Changed,
+    val views: Map<String, String> = emptyMap(),
+    val migrations: List<Migration> = emptyList(),
+) {
     init {
+        require(migrations.zipWithNext().all { (a, b) -> a.version < b.version } && migrations.all { it.version <= version }) { "migrations name ascending versions up to $version" }
         require(application.matches(IDENTIFIER) && version > 0 && tables.isNotEmpty() && tables.size <= 64)
         require(tables.map { it.name }.distinct().size == tables.size)
         validatePartitionGroups(tables)
         validateReferences(tables)
+        for (table in tables) {
+            table.grantedLike?.let { like ->
+                require(tables.any { it.name == like && it.grantedLike == null }) { "${table.name} is granted like $like, which must be a table granted like none" }
+            }
+        }
         require(tables.all { it.primaryKey.isNotEmpty() }) { "every table declares a primary key; use the schema builder" }
     }
 
@@ -16,19 +30,23 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
     fun json(): String = buildJsonObject {
         put("application", application)
         put("version", version)
-        put("format", 4)
+        put("format", 5)
         put("tables", JsonArray(tables.sortedBy { it.logical ?: it.name }.map { it.definition() }))
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
         // Part of the domain's signed definition: every device declares the same commands.
         commands?.let { put("commands", it.json()) }
+        if (migrations.isNotEmpty()) put("migrations", JsonArray(migrations.map { it.json() }))
+        tables.filter { it.grantedLike != null }.sortedBy { it.name }.takeIf { it.isNotEmpty() }?.let { followers ->
+            put("granted_like", buildJsonObject { followers.forEach { put(it.name, it.grantedLike) } })
+        }
     }.toString()
 
     /** Portable definition data, bound to the application's publisher. */
     fun definitionJson(publisher: String): String {
         require(publisher.matches(Regex("[0-9a-fA-F]{64}"))) { "publisher must be 64 hexadecimal digits" }
         return buildJsonObject {
-            put("format", 4)
+            put("format", 5)
             put("publisher", publisher.lowercase())
             put("application", application)
             if (views.isNotEmpty()) put("views", viewsJson())
@@ -46,6 +64,49 @@ data class Schema(val application: String, val version: Int = 1, val tables: Lis
     )
     fun table(name: String): Table = tables.firstOrNull { it.name == name } ?: error("unknown table $name")
 }
+
+/**
+ * What the issuer that cuts a breaking generation runs once, in one transaction, before the fields the schema
+ * now requires are enforced; see `docs/runtime/generations.md#breaking-generations`.
+ */
+data class Migration(val version: Int, val steps: List<MigrationStep>) {
+    init {
+        require(version > 0 && steps.isNotEmpty() && steps.size <= 64) { "migration $version needs 1 to 64 steps" }
+    }
+    internal fun json(): JsonObject = buildJsonObject {
+        put("version", version)
+        put("statements", JsonArray(steps.map { it.json() }))
+    }
+}
+
+/** One step of a [Migration]. */
+sealed interface MigrationStep {
+    /** SQL run as it is. */
+    data class Sql(val sql: String) : MigrationStep
+
+    /** A row of [table] for each row [select] returns, its columns named like the table's, with an `id` Rocky issues. */
+    data class Insert(val table: String, val select: String) : MigrationStep
+
+    fun json(): JsonElement = when (this) {
+        is Sql -> JsonPrimitive(sql)
+
+        is Insert -> buildJsonObject {
+            put("insert", table)
+            put("select", select)
+        }
+    }
+}
+
+/** Builds the steps of one [Migration]. */
+class MigrationBuilder internal constructor() {
+    internal val steps = mutableListOf<MigrationStep>()
+    fun sql(statement: String) {
+        steps += MigrationStep.Sql(statement)
+    }
+    fun insert(table: String, select: String) {
+        steps += MigrationStep.Insert(table, select)
+    }
+}
 internal val IDENTIFIER = Regex("[A-Za-z][A-Za-z0-9_]{0,63}")
 data class Table(
     val name: String,
@@ -59,9 +120,12 @@ data class Table(
     internal val roomIdentityIndex: List<String>? = null,
     val existenceLog: Boolean = false,
     val partitionGroup: String? = null,
+    /** The table whose grants this one follows; see [TableBuilder.grantedLike]. */
+    val grantedLike: String? = null,
 ) {
     init {
         require(name.matches(IDENTIFIER) && columns.isNotEmpty() && columns.size <= 128)
+        require(grantedLike == null || (grantedLike != name && grantedLike.matches(IDENTIFIER))) { "$name: invalid grantedLike $grantedLike" }
         require(columns.map { it.name }.distinct().size == columns.size)
     }
     internal fun definition(): JsonObject = buildJsonObject {

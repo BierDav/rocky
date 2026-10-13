@@ -165,7 +165,7 @@ private class DeviceProcess {
 
             "addCategory" -> JsonPrimitive(repository.addCategory(list(), request.text("name")))
 
-            "add" -> JsonPrimitive(repository.add(list(), request.text("title"), request.longOrNull("category")))
+            "add" -> JsonPrimitive(repository.add(list(), request.text("title"), setOfNotNull(request.longOrNull("category"))))
 
             "check" -> {
                 repository.check(list(), request.long("id"), request.getValue("completed").jsonPrimitive.boolean)
@@ -226,16 +226,19 @@ private class DeviceProcess {
 
             "lists" -> JsonArray(room!!.lists().observeAll().first().map { JsonPrimitive("${it.id}:${it.title}") })
 
-            "items" -> JsonArray(
-                room!!.items().observeAll(list()).first().sortedBy { it.title }.map { item ->
-                    buildJsonObject {
-                        put("id", item.id)
-                        put("title", item.title)
-                        put("completed", item.completed)
-                        item.category?.let { put("category", it) }
-                    }
-                },
-            )
+            "items" -> {
+                val links = room!!.itemCategories().observe(list()).first().groupBy({ it.item }, { it.category })
+                JsonArray(
+                    room!!.items().observeAll(list()).first().sortedBy { it.title }.map { item ->
+                        buildJsonObject {
+                            put("id", item.id)
+                            put("title", item.title)
+                            put("completed", item.completed)
+                            links[item.id]?.sorted()?.let { put("categories", JsonArray(it.map(::JsonPrimitive))) }
+                        }
+                    },
+                )
+            }
 
             "status" -> database.partitions.status("list", database.list(list()).values)
 

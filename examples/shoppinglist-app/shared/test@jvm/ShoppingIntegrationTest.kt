@@ -210,7 +210,7 @@ class ShoppingIntegrationTest {
     private val checkout = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }.first { File(it, "project.yaml").isFile }
 
     @Test fun `the hand-declared schema is the Room export's`() {
-        val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/6.json").readText()
+        val export = File(checkout, "shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/7.json").readText()
         assertEquals(ShoppingSchema.definitionJson("09".repeat(32)), schemaFromRoom("shopping", export, shoppingRoomOverlay).definitionJson("09".repeat(32)))
         assertEquals(ShoppingSchema.json(), schemaFromRoom("shopping", export, shoppingRoomOverlay).json())
     }
@@ -222,7 +222,7 @@ class ShoppingIntegrationTest {
         owner.share(list, listOf(reader.session().node))
     }
 
-    @Test fun `a list shares its categories and items and deleting a category nulls only the reference`() = runBlocking {
+    @Test fun `a list shares its categories and items and deleting a category hides only its links`() = runBlocking {
         val root = directory()
         val a = RockyDatabase.create(File(root, "a"), ShoppingSchema, local(), automaticSync = false)
         val da = openShoppingDatabase(File(root, "a"), a)
@@ -232,14 +232,20 @@ class ShoppingIntegrationTest {
             val other = repository.createList("Hardware")
             assertNotEquals(list, other)
             val dairy = repository.addCategory(list, "Dairy")
-            val milk = repository.add(list, "Milk", category = dairy)
+            val fresh = repository.addCategory(list, "Fresh")
+            val milk = repository.add(list, "Milk", setOf(dairy, fresh))
             val eggs = repository.add(list, "Eggs")
-            repository.categorize(list, eggs, dairy)
+            repository.categorize(list, eggs, dairy, member = true)
+            repository.categorize(list, eggs, dairy, member = true)
             // Titles are unique per list, not across lists.
             assertFailsWith<Exception> { repository.add(list, "Milk") }
             repository.add(other, "Milk")
-            assertEquals(listOf("Eggs", "Milk"), da.items().all(list).map { it.title }.sorted())
-            assertTrue(da.items().all(list).all { it.category == dairy })
+            // New items go last; placing one writes only its own key.
+            assertEquals(listOf("Milk", "Eggs"), da.items().all(list).map { it.title })
+            repository.place(list, da.items().all(list), eggs, 0)
+            assertEquals(listOf("Eggs", "Milk"), da.items().all(list).map { it.title })
+            fun links() = runBlocking { da.itemCategories().observe(list).first().map { it.item to it.category }.toSet() }
+            assertEquals(setOf(milk to dairy, milk to fresh, eggs to dairy), links())
 
             // One call: one envelope per recipient covers the list's every table, and waits here for sync.
             val reader = Credentials.prepare(File(root, "reader")).getValue("node").jsonPrimitive.content
@@ -251,9 +257,9 @@ class ShoppingIntegrationTest {
 
             repository.deleteCategory(list, dairy)
             val items = da.items().all(list)
-            assertEquals(listOf(milk, eggs).sorted(), items.map { it.id }.sorted())
-            assertTrue(items.all { it.category == null && it.list == list })
-            assertTrue(da.categories().all(list).isEmpty())
+            assertEquals(listOf(eggs, milk), items.map { it.id })
+            assertEquals(setOf(milk to fresh), links())
+            assertEquals(listOf("Fresh"), da.categories().all(list).map { it.name })
 
             repository.deleteList(list)
             assertTrue(da.items().all(list).isEmpty())

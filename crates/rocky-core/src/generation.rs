@@ -19,10 +19,29 @@ pub enum SchemaChange {
         /// `table.field`, by logical name.
         fields: BTreeSet<String>,
     },
+    /// Additions with required fields of existing tables, new or once
+    /// nullable, each with a default for rows that never held a value. Its
+    /// transition is a cut: earlier generations are no longer admitted.
+    Breaking {
+        tables: BTreeSet<String>,
+        fields: BTreeSet<String>,
+        /// `table.field` NOT NULL fields rows of the installed schema lack.
+        required: BTreeSet<String>,
+    },
 }
 impl SchemaChange {
     pub fn replicated(&self) -> bool {
-        matches!(self, Self::Additive { .. })
+        matches!(self, Self::Additive { .. } | Self::Breaking { .. })
+    }
+    /// Fields rows of the installed schema may lack: `table.field`.
+    pub fn added(&self) -> BTreeSet<String> {
+        match self {
+            Self::Additive { fields, .. } => fields.clone(),
+            Self::Breaking {
+                fields, required, ..
+            } => fields.union(required).cloned().collect(),
+            Self::Unchanged | Self::Local => BTreeSet::new(),
+        }
     }
 }
 
@@ -40,7 +59,7 @@ pub enum Unsupported {
     RemovedField(String),
     /// Type, nullability or collation of `table.field` changed.
     ChangedField(String),
-    /// A new field of an existing table must be nullable: rows written
+    /// A required field of an existing table needs a default: rows written
     /// before it hold no value for it.
     RequiredField(String),
     /// A declared command version was removed or redefined.
@@ -63,9 +82,10 @@ impl std::fmt::Display for Unsupported {
             Self::ChangedKey(table) => write!(f, "the key of {table} changed"),
             Self::RemovedField(field) => write!(f, "field {field} was removed"),
             Self::ChangedField(field) => write!(f, "field {field} changed type"),
-            Self::RequiredField(field) => {
-                write!(f, "new field {field} of an existing table must be nullable")
-            }
+            Self::RequiredField(field) => write!(
+                f,
+                "required field {field} of an existing table needs a default"
+            ),
             Self::ChangedCommand(command) => {
                 write!(f, "command {command} was removed or redefined")
             }
@@ -103,7 +123,8 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
             .find(|table| table.logical == name)
             .map(|table| table.class)
     };
-    let (mut tables, mut fields) = (BTreeSet::new(), BTreeSet::new());
+    let (mut tables, mut fields, mut required) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     for table in new.mergeable() {
         match class(old, &table.logical) {
             None => {
@@ -131,11 +152,34 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
         }
         let old_fields = logical::register_shapes(before);
         let new_fields = logical::register_shapes(after);
+        let column = |table: &crate::LogicalTable, field: &str| {
+            table
+                .columns
+                .iter()
+                .find(|column| column.logical == field)
+                .cloned()
+        };
         for (field, shape) in &old_fields {
             match new_fields.get(field) {
                 None => return Err(Unsupported::RemovedField(format!("{name}.{field}"))),
                 Some(other) if other != shape => {
-                    return Err(Unsupported::ChangedField(format!("{name}.{field}")));
+                    // Only NOT NULL may tighten, and only with a default.
+                    let (Some(was), Some(now)) = (column(before, field), column(after, field))
+                    else {
+                        return Err(Unsupported::ChangedField(format!("{name}.{field}")));
+                    };
+                    let relaxed = crate::LogicalColumn {
+                        not_null: false,
+                        default: was.default.clone(),
+                        ..now.clone()
+                    };
+                    if was.not_null || !now.not_null || relaxed != was {
+                        return Err(Unsupported::ChangedField(format!("{name}.{field}")));
+                    }
+                    if now.default.as_deref().is_none_or(|value| value == "NULL") {
+                        return Err(Unsupported::RequiredField(format!("{name}.{field}")));
+                    }
+                    required.insert(format!("{name}.{field}"));
                 }
                 Some(_) => {}
             }
@@ -144,11 +188,16 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
             .keys()
             .filter(|field| !old_fields.contains_key(*field))
         {
-            let column = after.columns.iter().find(|column| column.logical == *field);
-            if column.is_none_or(|column| column.not_null) {
+            let Some(now) = column(after, field) else {
+                return Err(Unsupported::RequiredField(format!("{name}.{field}")));
+            };
+            if !now.not_null {
+                fields.insert(format!("{name}.{field}"));
+            } else if now.default.as_deref().is_some_and(|value| value != "NULL") {
+                required.insert(format!("{name}.{field}"));
+            } else {
                 return Err(Unsupported::RequiredField(format!("{name}.{field}")));
             }
-            fields.insert(format!("{name}.{field}"));
         }
     }
     // Confirmed rows only change through commands, never a transition.
@@ -168,7 +217,14 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     {
         return Err(Unsupported::CommandTable(name.clone()));
     }
-    Ok(SchemaChange::Additive { tables, fields })
+    if required.is_empty() {
+        return Ok(SchemaChange::Additive { tables, fields });
+    }
+    Ok(SchemaChange::Breaking {
+        tables,
+        fields,
+        required,
+    })
 }
 
 /// Classifies the commands of a new definition. Every declared version
@@ -221,7 +277,8 @@ pub struct GenerationTransition {
     pub before: Generation,
     pub after: Generation,
     /// Operations of schema generations below this are refused; their
-    /// authors rebootstrap after upgrading. At most `before.schema`.
+    /// authors rebootstrap after upgrading. At most `before.schema`, or
+    /// `after.schema` for a [breaking](Self::breaking) cut.
     pub horizon: u32,
 }
 impl GenerationTransition {
@@ -287,6 +344,10 @@ impl GenerationTransition {
     pub fn id(&self) -> Commitment {
         commitment("rocky.transition.id.v1", &self.canonical())
     }
+    /// A cut: operations of every earlier schema generation are refused.
+    pub fn breaking(&self) -> bool {
+        self.horizon == self.after.schema && self.after.schema > self.before.schema
+    }
     /// A step forward: a new manifest, generations that do not go back and
     /// one of them up, and a horizon inside the generations it spans.
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
@@ -300,7 +361,7 @@ impl GenerationTransition {
             || before.schema == 0
             || before.handler == 0
             || self.horizon == 0
-            || self.horizon > before.schema
+            || (self.horizon > before.schema && !self.breaking())
         {
             return Err(crate::ProtocolError::InvalidManifest);
         }
@@ -493,6 +554,62 @@ mod tests {
         other.publisher = [2; 32];
         assert_eq!(classify(&old, &other), Err(Unsupported::Application));
     }
+    #[test]
+    fn required_fields_with_defaults_are_breaking() {
+        let defaulted = |table: &mut LogicalTable, name: &str| {
+            for column in table
+                .columns
+                .iter_mut()
+                .filter(|column| column.logical == name)
+            {
+                column.default = Some("''".into());
+            }
+        };
+        let old = schema(vec![items(&[("name", true), ("note", false)])]);
+        let mut new = schema(vec![items(&[
+            ("name", true),
+            ("note", true),
+            ("position", true),
+            ("tag", false),
+        ])]);
+        defaulted(&mut new.tables[0], "note");
+        defaulted(&mut new.tables[0], "position");
+        let change = classify(&old, &new);
+        assert_eq!(
+            change,
+            Ok(SchemaChange::Breaking {
+                tables: BTreeSet::new(),
+                fields: ["items.tag".to_string()].into(),
+                required: ["items.note".to_string(), "items.position".to_string()].into(),
+            })
+        );
+        assert_eq!(
+            change.map(|change| change.added().len()),
+            Ok(3),
+            "rows of the installed schema may lack all three"
+        );
+        // Without a default no transition makes a required field.
+        let mut bare = new.clone();
+        bare.tables[0]
+            .columns
+            .iter_mut()
+            .for_each(|column| column.default = None);
+        assert_eq!(
+            classify(&old, &bare),
+            Err(Unsupported::RequiredField("items.note".into()))
+        );
+        // Loosening, or changing the type alongside, is no tightening.
+        let mut retyped = new.clone();
+        retyped.tables[0].columns[2].affinity = Affinity::Integer;
+        assert!(matches!(
+            classify(&old, &retyped),
+            Err(Unsupported::ChangedField(_) | Unsupported::RequiredField(_))
+        ));
+        assert_eq!(
+            classify(&new, &old),
+            Err(Unsupported::ChangedField("items.note".into()))
+        );
+    }
 
     #[test]
     fn transitions_step_forward_and_round_trip() {
@@ -515,9 +632,23 @@ mod tests {
             GenerationTransition::from_canonical(&transition.canonical()),
             Ok(transition.clone())
         );
+        // A cut admits only the new generation.
+        let cut = GenerationTransition {
+            horizon: 2,
+            ..transition.clone()
+        };
+        assert!(cut.validate().is_ok() && cut.breaking() && !transition.breaking());
         for invalid in [
             GenerationTransition {
+                horizon: 3,
+                ..transition.clone()
+            },
+            GenerationTransition {
                 horizon: 2,
+                after: Generation {
+                    schema: 1,
+                    handler: 2,
+                },
                 ..transition.clone()
             },
             GenerationTransition {

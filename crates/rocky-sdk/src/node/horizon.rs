@@ -22,7 +22,7 @@ impl Node {
             };
             let grants = record
                 .profile()
-                .map(|profile| profile.raw(&self.domain.resources()))
+                .map(|profile| self.domain.effective(profile).raw(&self.domain.resources()))
                 .transpose()?
                 .unwrap_or_default();
             let whole = grants.iter().any(|grant| {

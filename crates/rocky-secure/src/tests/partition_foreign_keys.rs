@@ -25,7 +25,7 @@ impl Fixture {
     }
     fn build(logged: bool) -> Self {
         let publisher = PrivateKey::new();
-        let mut definition = serde_json::json!({"format":4,"publisher":publisher.public_key().to_string(),"application":"partition-fks","tables":[
+        let mut definition = serde_json::json!({"format":5,"publisher":publisher.public_key().to_string(),"application":"partition-fks","tables":[
             {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
             {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list"},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"category","type":"integer"},{"name":"title","type":"text"}],"primary_key":["list","id"],"partition_by":["list"],"partition_group":"list","foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"},{"columns":["list","category"],"table":"categories","on_delete":"set_null"}]}
@@ -697,7 +697,7 @@ fn partitioned_foreign_keys_refuse_nulling_the_whole_partition() {
 
 #[test]
 fn in_group_identity_accepts_text_partition_slots_and_refuses_wrong_slot_mapping() {
-    let definition = serde_json::json!({"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"text-partition-fks","tables":[
+    let definition = serde_json::json!({"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"text-partition-fks","tables":[
         {"name":"parents","class":"mergeable","columns":[{"name":"customer","type":"text","not_null":true}],"primary_key":["customer","id"],"partition_by":["customer"],"partition_group":"customer"},
         {"name":"items","class":"mergeable","columns":[{"name":"account","type":"text","not_null":true},{"name":"parent","type":"integer"}],"primary_key":["account","id"],"partition_by":["account"],"partition_group":"customer","foreign_keys":[{"columns":["account","parent"],"table":"parents","on_delete":"set_null"}]}
     ]});

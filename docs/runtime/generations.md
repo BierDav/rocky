@@ -11,12 +11,15 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
 - Adding a mergeable table or nullable field requires a publisher-signed
   `GenerationTransition`. Rows from an older definition supply null for newly
   added nullable fields. Logical names remain stable identities.
+- Requiring a field of an existing table, newly added or once nullable, is a
+  [breaking generation](#breaking-generations): the field needs a default,
+  and the schema's migrations compute its values once.
 - Handler semantics require a higher handler generation; declared command
   versions within the support horizon keep their descriptors. Adding a version
   requires a new handler generation. Removing/redefining one is refused.
 - Key rotation/revocation uses the existing explicit credential policy mechanism.
-  Generation plans refuse reader-scope remapping. Key/type changes, removals,
-  renames and nonnullable replicated field additions are unsupported.
+  Generation plans refuse reader-scope remapping. Key/type changes, removals
+  and renames are unsupported, cuts included.
 
 Partition group membership and names are immutable for existing tables, as are
 partition columns. A new mergeable table may join an existing group with matching
@@ -33,7 +36,10 @@ cannot open a different definition.
 creates shadow tables, fills 256 stored rows per transaction, verifies projections
 against canonical stored rows and switches all affected tables in one transaction.
 Concurrent committed updates also maintain the shadow. Readers see the old view
-until switch, then the complete new view. Notifications follow commit; old secure
+until switch, then the complete new view. Tables with unique indexes or foreign
+keys have no shadow: every candidate decides which rows show, so the switch
+recreates them and resolves the stored rows in one transaction, proportional to
+the domain's rows. Notifications follow commit; old secure
 sessions and cursors become stale at the authority switch.
 
 Reopen resumes the recorded plan. An incompatible pending plan is refused.
@@ -48,6 +54,56 @@ transport; an offline member needing it fails without changing its old installat
 Issuer state is saved before replica activation, so reopening with the same schema
 continues after interruption. New collections do not silently expand member grants.
 SDK lineage is capped at 32 steps; secure runtime lineage at 64.
+
+## Tables granted like another
+
+Grant profiles name tables, so a table added later is in no existing grant.
+The SDK schema's `granted_like` maps a new table to an existing one, as in
+`{"item_categories": "items"}`; Kotlin declares `grantedLike = "items"` on
+the table. Wherever the SDK turns a profile into grants or asks whether it
+reads a table (enrollment, renewal, revocation rotation, group delivery and
+horizons), a grant naming `items` in whole rows also names `item_categories`
+with the same rights, `Invoke` and `Execute` aside. Partition selectors on
+`items` select the same partitions of `item_categories`, and renewal widens a
+partition grant that covered a whole row to the fields later generations added.
+A partial replica holds the new table wherever it holds its group partition. A member renewing into the
+generation receives them. The followed table must follow none, and the entry
+is declared with the table: changing it for an existing table is refused, since
+it would change what earlier grants mean.
+
+## Breaking generations
+
+A field rows of the installed schema lack becomes required in a *cut*, signed
+with `horizon` equal to its new schema generation: no earlier generation is
+admitted. Every required field declares a default, which rows the cut never
+reached read, such as hidden unique losers or children of a deleted parent.
+
+The first issuer to open the new schema cuts, after asking its known issuers
+for the generation (a cut one already signed is adopted like a member's):
+
+1. It signs a step holding the required fields nullable, unless they already are.
+2. At open, before the network starts, it assigns its own pseudonyms for that
+   generation and runs `migrations` with versions above the installed one in one
+   SQL transaction, then refuses the cut while a live row still holds NULL. A
+   step is SQL, or `{"insert": table, "select": sql}`, which inserts a row per
+   selected row with an `id` Rocky issues in its partition. It
+   needs every partition the domain knows. `migration.json` records completion
+   until the cut is signed, so a retry does not run statements twice.
+3. It signs the schema as the cut and opens at it.
+
+A member, or an issuer that finds the cut signed, fetches the lineage, saves
+checkpoint-first [bootstrap intent](sdk-bootstrapping.md#join) before adopting
+it and imports a checkpoint of the cut. Rows the cutting issuer never received
+are gone, and the device's own unsynced work of earlier generations is dropped:
+it offers no checkpoint and serves no frame of a generation behind its horizon,
+and each cut derives new pseudonym keys, so its new writes start new author
+logs. A device that has not upgraded is refused at admission.
+
+Limits: removing or renaming a field still needs a later feature. Two issuers
+that open the new schema while unable to reach each other each cut, and their
+households diverge. A peer behind a cut sees failed admissions rather than an
+`upgrade_required` report. The migration is one transaction, so it changes at most
+[2,048 rows](sql-driver.md); see [decision 0066](../decisions/0066-breaking-generations.md).
 
 ## Old devices and pending work
 
@@ -77,6 +133,10 @@ Schema distribution and payload verification stay on application nodes.
 
 ## Evidence
 
+SDK `tests/generations.rs` also cuts with a migration, refuses a migration
+that leaves NULL, drops a member's unsynced work and refuses a device left at
+the old generation, and grants a new table like an existing one. The shopping
+example's `SchemaUpgradeTest` moves a version 6 household to version 7.
 `rocky-secure`'s `tests::generations` interrupts shadow creation, backfill, switch
 and definition activation; verifies atomic visibility, stale sessions, pending
 work, old peers/horizon and typed checkpoint recovery. Core/credentials tests
@@ -85,5 +145,6 @@ authorized exact-head activation. SDK `tests/generations.rs` exercises issuer/me
 upgrade, an offline refusal, nullable fields, scope denial and queued handler work.
 See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
 
-This does not implement arbitrary schema transforms, cross-file atomic switching,
-Room file import or cross-coordinator migration.
+This does not implement removals or renames, cross-file atomic switching,
+Room file import or cross-coordinator migration. Migrations run only on the
+cutting issuer; replicas never transform rows on their own.

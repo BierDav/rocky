@@ -681,6 +681,278 @@ async fn identity(
     }
 }
 
+/// Readies an opened replica for this identity: its readable tables,
+/// group keys, credential signer and row authors.
+async fn attach(
+    replica: &EncryptedReplica<rocky_core::TypedCommands>,
+    settings: &mut Settings,
+    vault: &crate::secrets::Vault,
+    domain: &crate::domain::Domain,
+    path: &Path,
+) -> Result<(), Failure> {
+    replica
+        .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
+        .await?;
+    // A settings file restored on its own may have lost groups the
+    // replica holds; the vault still keeps their secrets.
+    if settings.recover_groups(vault, domain, &replica.retained_partitions().await?)? {
+        settings.save(path)?;
+    }
+    // Every readable member's key derives from its group secret,
+    // including a table that joined the group in a later generation.
+    let granted = settings.granted(domain);
+    for partition in settings.partitions(domain)? {
+        for member in &partition.members {
+            if granted.contains(&member.scope) {
+                replica
+                    .register_partition(member.scope, member.tuple.clone())
+                    .await?;
+            }
+            // Newest first: earlier epochs then join its history.
+            if settings.reads_partition(member) {
+                for epoch in partition.record.epochs.iter().rev() {
+                    replica
+                        .install_key_epoch(partition.key(vault, member, *epoch)?)
+                        .await?;
+                }
+            }
+        }
+    }
+    // On a partial replica, a table that joined a group in a later
+    // generation is held wherever its group partition is.
+    if replica.role().await?.role == rocky_secure::ReplicaRole::Partial {
+        for partition in settings.partitions(domain)? {
+            let mut held = false;
+            let mut unrecorded = Vec::new();
+            for member in &partition.members {
+                match replica.subscription(member.scope).await? {
+                    Some(rocky_secure::Holding::Held) => held = true,
+                    None if settings.reads_partition(member) => unrecorded.push(member.scope),
+                    _ => {}
+                }
+            }
+            for scope in unrecorded.into_iter().filter(|_| held) {
+                replica.subscribe(scope).await?;
+            }
+        }
+    }
+    replica
+        .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
+            &vault.get("credential")?,
+        ))
+        .await?;
+    for (key, chain) in settings.row_authors(vault)? {
+        replica.register_row_author(key, chain).await?;
+    }
+    Ok(())
+}
+
+/// Completes a cut this issuer started: at the generation that holds the
+/// required fields nullable, runs the schema's migrations once in one
+/// transaction, checks that no live row lacks a required field, then signs
+/// `schema` as the cut. Nothing leaves this device in between: the network
+/// starts after the open. See `docs/runtime/generations.md#breaking-generations`.
+async fn cut(
+    directory: &Path,
+    settings: &mut Settings,
+    vault: &crate::secrets::Vault,
+    path: &Path,
+    schema: &Schema,
+) -> Result<(), Failure> {
+    let publisher = *settings.publisher.as_bytes();
+    let domain = settings.domain()?;
+    let required = match rocky_core::classify(
+        domain.logical(),
+        &crate::domain::logical(schema, publisher)?,
+    )? {
+        rocky_core::SchemaChange::Breaking { required, .. } => required,
+        _ => return Err("the installed schema is no step of a cut to this one".into()),
+    };
+    // Every partition the domain knows is migrated here, or none is.
+    for partition in settings.partitions(&domain)? {
+        if !partition
+            .members
+            .iter()
+            .all(|member| settings.reads_partition(member))
+        {
+            return Err(format!(
+                "a cut needs every partition of group {}; this issuer cannot read one",
+                partition.record.group
+            )
+            .into());
+        }
+    }
+    let replica = EncryptedReplica::open_upgrading(
+        directory.join("rocky.sqlite"),
+        domain.app.clone(),
+        settings.config(vault, &domain)?,
+        settings.upgrade(&domain)?,
+    )
+    .await?;
+    attach(&replica, settings, vault, &domain, path).await?;
+    // Pseudonyms name a generation: this issuer assigns its own anew.
+    let registry = crate::registry::read(&replica, domain.registry()).await?;
+    for collection in settings.missing_authors(&domain)? {
+        let request = settings.pseudonym_request(vault, &collection)?;
+        let (chain, _) = settings.assign_pseudonym(vault, &request, Some(&registry))?;
+        let (collection, _) = settings.hold_pseudonym(vault, chain.clone())?;
+        settings.save(path)?;
+        let key = PrivateKey::from_bytes(&vault.get(&settings.pseudonym_role(&collection)?)?);
+        replica.register_row_author(key, chain).await?;
+    }
+    let marker = path.with_file_name("migration.json");
+    let done = std::fs::read(&marker).ok() == Some(schema.version.to_string().into_bytes());
+    if !done {
+        // The installed application version: the last step's, when the
+        // nullable fields were added as a step of their own.
+        let from = match settings.lineage.last() {
+            Some(step) if settings.schema.version == schema.version => step.schema.version,
+            _ => settings.schema.version,
+        };
+        let session = replica
+            .session(
+                settings
+                    .granted(&domain)
+                    .into_iter()
+                    .filter(|scope| *scope != domain.registry())
+                    .collect(),
+            )
+            .await?;
+        let sql = session
+            .sql(rocky_secure::SqlOptions {
+                transaction_timeout: std::time::Duration::from_secs(60),
+                ..Default::default()
+            })
+            .await?;
+        sql.run("BEGIN IMMEDIATE", Vec::new()).await?;
+        for migration in schema
+            .migrations
+            .iter()
+            .filter(|migration| migration.version > from && migration.version <= schema.version)
+        {
+            for (number, step) in migration.statements.iter().enumerate() {
+                let ran = match step {
+                    crate::schema::MigrationStep::Sql(statement) => {
+                        sql.run(statement, Vec::new()).await.map(|_| ())
+                    }
+                    crate::schema::MigrationStep::Insert { insert, select } => {
+                        insert_rows(&sql, domain.logical(), insert, select).await
+                    }
+                };
+                if let Err(error) = ran {
+                    sql.cancel().await;
+                    return Err(format!(
+                        "migration to version {} failed at statement {}: {error}",
+                        migration.version,
+                        number + 1
+                    )
+                    .into());
+                }
+            }
+        }
+        for field in &required {
+            let (table, column) = field.split_once('.').ok_or("required field")?;
+            let (table, column) = sql_names(domain.logical(), table, column)?;
+            let rows = sql
+                .run(
+                    &format!("SELECT count(*) FROM \"{table}\" WHERE \"{column}\" IS NULL"),
+                    Vec::new(),
+                )
+                .await?;
+            if rows.rows.first().and_then(|row| row.first())
+                != Some(&rocky_core::SqlValue::Integer(0))
+            {
+                sql.cancel().await;
+                return Err(format!(
+                    "after the migrations {table}.{column} is still NULL in some rows; assign every row a value"
+                )
+                .into());
+            }
+        }
+        let handle = rocky_core::commitment(
+            "rocky.sdk.migration.v1",
+            &[settings.manifest.as_bytes(), &schema.version.to_le_bytes()].concat(),
+        );
+        sql.commit(handle).await?;
+        drop((sql, session));
+        replica.flush().await?;
+        rocky_credentials::write_private(&marker, schema.version.to_string().as_bytes())?;
+    }
+    drop(replica);
+    settings.cut(path, vault, schema)?;
+    std::fs::remove_file(&marker)?;
+    Ok(())
+}
+/// Inserts a row of `table` for each row of `select`, with the next id of
+/// its partition, inside the open transaction.
+async fn insert_rows(
+    sql: &rocky_secure::SecureSql<rocky_core::TypedCommands>,
+    schema: &rocky_core::LogicalSchema,
+    table: &str,
+    select: &str,
+) -> Result<(), rocky_secure::Error> {
+    let refused = |reason: String| rocky_secure::Error::Incompatible(reason);
+    let logical = schema
+        .table(table)
+        .ok_or_else(|| refused(format!("{table} is not a table")))?;
+    let rows = sql.run(select, Vec::new()).await?;
+    let partition = logical
+        .partition_by
+        .iter()
+        .map(|name| {
+            rows.columns
+                .iter()
+                .position(|column| column.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    refused(format!(
+                        "the rows for {table} lack its partition column {name}"
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+    let insert = format!(
+        "INSERT INTO {}({},\"id\") VALUES({})",
+        quoted(table),
+        rows.columns
+            .iter()
+            .map(|column| quoted(column))
+            .collect::<Vec<_>>()
+            .join(","),
+        vec!["?"; rows.columns.len() + 1].join(",")
+    );
+    for row in rows.rows {
+        let id = if partition.is_empty() {
+            sql.next_id(table).await?
+        } else {
+            let values: Vec<_> = partition.iter().map(|index| row[*index].clone()).collect();
+            sql.next_id_partition(table, &values).await?
+        };
+        let mut values = row;
+        values.push(rocky_core::SqlValue::Integer(id.integer()));
+        sql.run(&insert, values).await?;
+    }
+    Ok(())
+}
+/// The SQL names of logical `table.column`.
+fn sql_names(
+    schema: &rocky_core::LogicalSchema,
+    table: &str,
+    column: &str,
+) -> Result<(String, String), Failure> {
+    let table = schema
+        .tables
+        .iter()
+        .find(|candidate| candidate.logical == table)
+        .ok_or("required field of no table")?;
+    let column = table
+        .columns
+        .iter()
+        .find(|candidate| candidate.logical == column)
+        .ok_or("required field of no column")?;
+    Ok((table.sql_name.clone(), column.sql_name.clone()))
+}
+
 /// Verifies the archive, enrolls a fresh identity with the invitation's
 /// issuer and puts the archive's files in place. The marker, written
 /// before enrolling, names the predecessor whose file is rebound at open.
@@ -838,6 +1110,10 @@ async fn run(
             }
             None => None,
         };
+        // A cut this issuer started: migrate, then require the fields.
+        if settings.schema != setup.schema {
+            cut(&directory, &mut settings, &vault, &path, &setup.schema).await?;
+        }
         let domain = settings.domain()?.hosted(host);
         // A restored file is rebound to this device's identity first.
         let marker = directory.join(crate::backup::MARKER);
@@ -862,46 +1138,7 @@ async fn run(
             )
             .await?
         };
-        if let Err(error) = replica
-            .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
-            .await
-        {
-            drop(replica);
-            return Err(error.into());
-        }
-        // A settings file restored on its own may have lost groups the
-        // replica holds; the vault still keeps their secrets.
-        if settings.recover_groups(&vault, &domain, &replica.retained_partitions().await?)? {
-            settings.save(&path)?;
-        }
-        // Every readable member's key derives from its group secret,
-        // including a table that joined the group in a later generation.
-        let granted = settings.granted(&domain);
-        for partition in settings.partitions(&domain)? {
-            for member in &partition.members {
-                if granted.contains(&member.scope) {
-                    replica
-                        .register_partition(member.scope, member.tuple.clone())
-                        .await?;
-                }
-                // Newest first: earlier epochs then join its history.
-                if settings.reads_partition(member) {
-                    for epoch in partition.record.epochs.iter().rev() {
-                        replica
-                            .install_key_epoch(partition.key(&vault, member, *epoch)?)
-                            .await?;
-                    }
-                }
-            }
-        }
-        replica
-            .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
-                &vault.get("credential")?,
-            ))
-            .await?;
-        for (key, chain) in settings.row_authors(&vault)? {
-            replica.register_row_author(key, chain).await?;
-        }
+        attach(&replica, &mut settings, &vault, &domain, &path).await?;
         for scope in settings.granted(&domain) {
             if replica.retention_policy(scope).await?.is_none() {
                 replica
@@ -1188,7 +1425,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":4,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":5,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         for format in [0, 1, 2, 3, 5] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("rocky.sqlite");
@@ -1242,7 +1479,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_numeric_consumer_restores_pseudonym_after_reopen() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":4,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":5,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         async fn call(
             database: &Database,
             session: &Session,
@@ -1342,7 +1579,7 @@ mod tests {
         let opened = Database::create(
             Open {
                 directory: directory.path(),
-                schema: r#"{"application":"saturation","version":1,"format":4,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+                schema: r#"{"application":"saturation","version":1,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,
                 network: None,
                 commands: None,

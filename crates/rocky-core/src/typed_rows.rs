@@ -101,25 +101,16 @@ impl TypedRows {
         })
     }
     /// These tables at schema generation `generation`, where `added` names
-    /// the nullable fields transitions added to existing tables.
+    /// the fields transitions added to, or required of, existing tables.
+    /// Rows without such a field read NULL, or a required field's default.
     pub fn at_generation(
         mut self,
         generation: u32,
         added: BTreeSet<Commitment>,
     ) -> Result<Self, SchemaError> {
-        let nullable: BTreeSet<Commitment> = self
-            .schema
-            .mergeable()
-            .flat_map(|table| {
-                table
-                    .registers()
-                    .filter(|column| !column.not_null)
-                    .map(|column| self.schema.field_id(table, column))
-            })
-            .collect();
-        if generation == 0 || !added.is_subset(&nullable) {
+        if generation == 0 || !added.is_subset(&fillable(&self.schema)) {
             return Err(SchemaError::Invalid(
-                "added fields must be nullable registers of a generation".into(),
+                "added fields must be nullable registers, or required ones with a default".into(),
             ));
         }
         self.generation = generation;
@@ -201,9 +192,19 @@ impl TypedRows {
             .iter()
             .zip(&logical.columns)
             .map(|(field, column)| {
+                // A field added or required later: its default, or NULL.
+                let filled = || {
+                    if column.not_null {
+                        default_value(column).ok_or_else(|| {
+                            format!("{}.{} has no default", table.sql_name, column.sql_name)
+                        })
+                    } else {
+                        Ok(SqlValue::Null)
+                    }
+                };
                 let Some(bytes) = fields.get(field) else {
                     if self.added.contains(field) {
-                        return Ok(SqlValue::Null);
+                        return filled();
                     }
                     return Err(format!("{}.{} is missing", table.sql_name, column.sql_name));
                 };
@@ -214,6 +215,9 @@ impl TypedRows {
                     .ok_or_else(|| {
                         format!("{}.{} is not one value", table.sql_name, column.sql_name)
                     })?;
+                if value == SqlValue::Null && column.not_null && self.added.contains(field) {
+                    return filled();
+                }
                 let stored = column.affinity.store(value.clone()).ok();
                 if stored.as_ref() != Some(&value) || (column.not_null && value == SqlValue::Null) {
                     return Err(format!(
@@ -409,6 +413,41 @@ impl RowApplication for TypedRows {
     }
 }
 
+/// The mergeable fields a stored row may lack: nullable ones, and required
+/// ones with a default.
+pub fn fillable(schema: &LogicalSchema) -> BTreeSet<Commitment> {
+    schema
+        .mergeable()
+        .flat_map(|table| {
+            table
+                .registers()
+                .filter(|column| !column.not_null || default_value(column).is_some())
+                .map(|column| schema.field_id(table, column))
+        })
+        .collect()
+}
+/// The value of a column's default literal, as the definition writes it:
+/// an integer, a real or a quoted string. NULL and anything else is none.
+pub(crate) fn default_value(column: &crate::LogicalColumn) -> Option<SqlValue> {
+    let literal = column.default.as_deref()?;
+    let value = if let Some(text) = literal
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+    {
+        SqlValue::Text(text.replace("''", "'"))
+    } else if let Ok(integer) = literal.parse::<i64>() {
+        SqlValue::Integer(integer)
+    } else {
+        SqlValue::real(
+            literal
+                .parse::<f64>()
+                .ok()
+                .filter(|real| real.is_finite())?,
+        )?
+    };
+    column.affinity.store(value).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +501,39 @@ mod tests {
             views: Vec::new(),
         };
         TypedRows::new(schema, vec![DomainId([2; 16])]).unwrap()
+    }
+
+    #[test]
+    fn a_required_field_rows_lack_reads_its_default() {
+        let mut schema = rows().schema().clone();
+        let n = &mut schema.tables[0].columns[1];
+        n.default = Some("7".into());
+        let plain = TypedRows::new(schema.clone(), vec![DomainId([2; 16])]).unwrap();
+        let table = plain.tables().next().unwrap().clone();
+        let field = schema.field_id(&schema.tables[0], &schema.tables[0].columns[1]);
+        let stored = |n: Option<SqlValue>| {
+            let mut values = vec![SqlValue::Text("a".into())];
+            values.extend(n);
+            values.extend([SqlValue::Integer(4294967297), SqlValue::Integer(0)]);
+            values
+        };
+        let mut fields = plain
+            .fields(&table, &stored(Some(SqlValue::Integer(1))))
+            .unwrap();
+        fields.remove(&field);
+        assert!(plain.values(&table, &fields).is_err());
+        let defaulted = plain.at_generation(2, [field].into()).unwrap();
+        let expected = stored(Some(SqlValue::Integer(7)));
+        assert_eq!(defaulted.values(&table, &fields).unwrap(), expected);
+        fields.insert(field, {
+            let mut bytes = Vec::new();
+            SqlValue::Null.encode(&mut bytes);
+            bytes
+        });
+        assert_eq!(defaulted.values(&table, &fields).unwrap(), expected);
+        // Without a default, a required field cannot be one rows may lack.
+        let bare = TypedRows::new(rows().schema().clone(), vec![DomainId([2; 16])]).unwrap();
+        assert!(bare.at_generation(2, [field].into()).is_err());
     }
 
     #[test]

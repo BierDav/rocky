@@ -15,7 +15,7 @@ fun main(args: Array<String>) {
         }
     }
     val data = Json.parseToJsonElement(samples.definitionJson("09".repeat(32))).jsonObject
-    check(data.getValue("format").jsonPrimitive.int == 4)
+    check(data.getValue("format").jsonPrimitive.int == 5)
     check(
         runCatching {
             schema("reserved") {

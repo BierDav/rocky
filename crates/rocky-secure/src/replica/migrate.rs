@@ -134,7 +134,8 @@ impl<A: RowApplication> Inner<A> {
             .map_err(|refusal| incompatible(refusal.to_string()))?
         {
             SchemaChange::Unchanged => return Ok(()),
-            SchemaChange::Local | SchemaChange::Additive { .. } => {}
+            SchemaChange::Local | SchemaChange::Additive { .. } | SchemaChange::Breaking { .. } => {
+            }
         }
         // Local tables hold application data no stored row restores, and
         // confirmed rows change only through commands: both stay in place.
@@ -160,7 +161,9 @@ impl<A: RowApplication> Inner<A> {
                 )));
             }
         }
-        Typed::shadow(schema.clone(), domain, readers)?;
+        if !constrained(&installed, schema, domain, readers)? {
+            Typed::shadow(schema.clone(), domain, readers)?;
+        }
         self.conn
             .execute(
                 "INSERT INTO secure_projection_plan VALUES(1,?,?,?,-1,X'')",
@@ -222,6 +225,15 @@ impl<A: RowApplication> Inner<A> {
         let Some(record) = self.plan_record().await? else {
             return Ok(false);
         };
+        let installed = self
+            .installed_typed()
+            .await?
+            .ok_or_else(|| Error::Corrupt("a projection plan without typed tables".into()))?
+            .0;
+        if constrained(&installed, &record.schema, record.domain, &record.readers)? {
+            self.switch_constrained(&record, &installed).await?;
+            return Ok(false);
+        }
         let shadow = Arc::new(
             self.authorized_projection(Typed::shadow(
                 record.schema.clone(),
@@ -305,6 +317,85 @@ impl<A: RowApplication> Inner<A> {
             self.shadow = Some(shadow);
         }
         Ok(true)
+    }
+    /// Replaces tables whose visible rows depend on unique indexes or foreign
+    /// keys: every candidate decides them, so instead of filling shadows the
+    /// tables are recreated and resolved from the stored rows in one
+    /// transaction, as at installation.
+    async fn switch_constrained(
+        &mut self,
+        record: &Record,
+        installed: &LogicalSchema,
+    ) -> Result<(), Error> {
+        self.plan_fault(PlanStage::Switch)?;
+        let projected = Arc::new(
+            self.authorized_projection(Typed::new(
+                record.schema.clone(),
+                record.domain,
+                &record.readers,
+            )?)
+            .await?,
+        );
+        // Resolution reads the installed projection.
+        let previous = self.typed.replace(projected.clone());
+        let switched = transaction!(self, |inner| {
+            for table in installed.mergeable() {
+                inner.touch(&table.sql_name);
+                for name in [
+                    table.sql_name.clone(),
+                    format!("secure_candidates_{}", table.sql_name),
+                ] {
+                    inner
+                        .conn
+                        .execute(format!("DROP TABLE IF EXISTS {}", quoted(&name)), ())
+                        .await?;
+                }
+            }
+            inner.conn.execute("DELETE FROM secure_support", ()).await?;
+            inner.record_projection_access(&projected).await?;
+            for table in record.schema.tables.iter().filter(|table| {
+                table.class == TableClass::LocalOnly || projected.by_name(&table.sql_name).is_some()
+            }) {
+                inner.touch(&table.sql_name);
+                if table.class == TableClass::Mergeable {
+                    inner.conn.execute(table.create_sql.clone(), ()).await?;
+                    for index in &table.indexes {
+                        inner.conn.execute(index.create_sql.clone(), ()).await?;
+                    }
+                } else {
+                    inner.replace_indexes(installed, table).await?;
+                }
+            }
+            for sql in projected
+                .constraints
+                .iter()
+                .flat_map(super::constraints::Constraints::statements)
+            {
+                inner.conn.execute(sql.clone(), ()).await?;
+            }
+            for table in &projected.tables {
+                if !table.confirmed()
+                    && projected
+                        .constraints
+                        .as_ref()
+                        .and_then(|constraints| constraints.node(table.scope))
+                        .is_none()
+                {
+                    typed::reproject(&inner.conn, &projected, table).await?;
+                }
+            }
+            Box::pin(inner.rebuild_constraints(None, None)).await?;
+            typed::verify_constraint_indexes(&inner.conn, &projected).await?;
+            inner.finish_switch(record).await
+        });
+        if let Err(error) = switched {
+            self.typed = previous;
+            return Err(error);
+        }
+        self.start_events();
+        self.bump_authority();
+        self.publish_revision().await?;
+        Ok(())
     }
     /// Runs the pending plan to its switch.
     pub(super) async fn finish_plan(&mut self) -> Result<(), Error> {
@@ -411,38 +502,50 @@ impl<A: RowApplication> Inner<A> {
                         self.conn.execute(index.create_sql.clone(), ()).await?;
                     }
                 }
-                _ => {
-                    let before = installed.table(&table.sql_name);
-                    if before.is_none() {
-                        self.conn.execute(table.create_sql.clone(), ()).await?;
-                    }
-                    let had = |name: &str, sql: &str| {
-                        before.is_some_and(|before| {
-                            before
-                                .indexes
-                                .iter()
-                                .any(|index| index.name == name && index.create_sql == sql)
-                        })
-                    };
-                    for index in before.iter().flat_map(|before| &before.indexes) {
-                        if !table
-                            .indexes
-                            .iter()
-                            .any(|new| new.name == index.name && new.create_sql == index.create_sql)
-                        {
-                            self.conn
-                                .execute(format!("DROP INDEX {}", quoted(&index.name)), ())
-                                .await?;
-                        }
-                    }
-                    for index in &table.indexes {
-                        if !had(&index.name, &index.create_sql) {
-                            self.conn.execute(index.create_sql.clone(), ()).await?;
-                        }
-                    }
-                }
+                _ => self.replace_indexes(&installed, table).await?,
             }
         }
+        self.finish_switch(record).await
+    }
+    /// A local or command-controlled table keeps its rows; only its indexes
+    /// follow the new schema.
+    async fn replace_indexes(
+        &self,
+        installed: &LogicalSchema,
+        table: &rocky_core::LogicalTable,
+    ) -> Result<(), Error> {
+        let before = installed.table(&table.sql_name);
+        if before.is_none() {
+            self.conn.execute(table.create_sql.clone(), ()).await?;
+        }
+        let had = |name: &str, sql: &str| {
+            before.is_some_and(|before| {
+                before
+                    .indexes
+                    .iter()
+                    .any(|index| index.name == name && index.create_sql == sql)
+            })
+        };
+        for index in before.iter().flat_map(|before| &before.indexes) {
+            if !table
+                .indexes
+                .iter()
+                .any(|new| new.name == index.name && new.create_sql == index.create_sql)
+            {
+                self.conn
+                    .execute(format!("DROP INDEX {}", quoted(&index.name)), ())
+                    .await?;
+            }
+        }
+        for index in &table.indexes {
+            if !had(&index.name, &index.create_sql) {
+                self.conn.execute(index.create_sql.clone(), ()).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Records the new tables as installed and ends the plan.
+    async fn finish_switch(&self, record: &Record) -> Result<(), Error> {
         let descriptor = record
             .schema
             .canonical()
@@ -582,4 +685,20 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub(crate) async fn inject_plan_fault(&self, stage: PlanStage, after: usize) {
         self.inner.lock().await.plan_fault = Some((stage, after));
     }
+}
+
+/// Whether either schema's tables carry unique indexes or foreign keys.
+fn constrained(
+    installed: &LogicalSchema,
+    schema: &LogicalSchema,
+    domain: Scope,
+    readers: &BTreeMap<String, Commitment>,
+) -> Result<bool, Error> {
+    Ok(installed
+        .tables
+        .iter()
+        .any(|table| installed.constrained(table))
+        || Typed::new(schema.clone(), domain, readers)?
+            .constraints
+            .is_some())
 }

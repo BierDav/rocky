@@ -3,6 +3,7 @@ package org.example.examples.shopping.data
 import kotlinx.coroutines.flow.Flow
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.entity.Category
+import org.example.examples.shopping.data.db.entity.ItemCategory
 import org.example.examples.shopping.data.db.entity.ShoppingItem
 import org.example.examples.shopping.data.db.entity.ShoppingList
 import org.example.examples.shopping.data.db.list
@@ -42,18 +43,43 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
         return database.categories().add(list, name).id
     }
 
-    /** Items of the category keep their place in the list; only their category reads null. */
+    /** Items of the category keep their place in the list; only their links to it are hidden. */
     suspend fun deleteCategory(list: Long, category: Long) {
         database.categories().delete(list, category)
     }
 
+    /** Items in list order. */
     fun observe(list: Long, search: String = "", includeCompleted: Boolean = true): Flow<List<ShoppingItem>> = database.items().observeAll(list, search.lowercase(), includeCompleted).settledOnRocky()
 
-    /** Returns the id Rocky issued in [list]. */
+    /** Which items of [list] are in which categories. */
+    fun itemCategories(list: Long): Flow<List<ItemCategory>> = database.itemCategories().observe(list).settledOnRocky()
+
+    /** Adds the item at the end of [list], in [categories]; returns the id Rocky issued. */
     @OptIn(ExperimentalUuidApi::class)
-    suspend fun add(list: Long, title: String, category: Long? = null): Long {
+    suspend fun add(list: Long, title: String, categories: Set<Long> = emptySet()): Long {
         require(title.isNotBlank())
-        return database.items().add(list, Uuid.random().toString(), title, category).id
+        return database.items().add(list, Uuid.random().toString(), title, categories).id
+    }
+
+    /** Puts the item in [category], or takes it out. */
+    suspend fun categorize(list: Long, id: Long, category: Long, member: Boolean) {
+        if (member) database.itemCategories().link(list, id, category) else database.itemCategories().unlink(list, id, category)
+    }
+
+    /**
+     * Moves the item to [index] of [items], the list in its current order: one write, or, when its new neighbours
+     * share a key after concurrent places, one transaction placing every item.
+     */
+    suspend fun place(list: Long, items: List<ShoppingItem>, id: Long, index: Int) {
+        val others = items.filter { it.id != id }
+        val after = others.getOrNull(index - 1)
+        val before = others.getOrNull(index)
+        if (Positions.fits(after?.position, before?.position)) {
+            database.items().place(list, id, Positions.between(after?.position, before?.position))
+        } else {
+            val ordered = others.map { it.id }.toMutableList().apply { add(index.coerceIn(0, size), id) }
+            database.items().placeAll(list, ordered)
+        }
     }
     suspend fun rename(list: Long, id: Long, title: String) {
         require(title.isNotBlank())
@@ -62,19 +88,19 @@ class ShoppingRepository(private val database: ShoppingDatabase, private val roc
     suspend fun check(list: Long, id: Long, completed: Boolean) {
         database.items().check(list, id, completed)
     }
-    suspend fun categorize(list: Long, id: Long, category: Long?) {
-        database.items().categorize(list, id, category)
-    }
     suspend fun delete(list: Long, id: Long) {
         database.items().delete(list, id)
     }
 
     /**
-     * Moves an item to another held list in one commit, keeping its id and field stamps; its category reads null,
-     * since categories stay in their list. A device that ticked the item offline sees its tick follow it. Retrying
-     * with the same [handle] never moves twice.
+     * Moves an item to another held list in one commit, keeping its id and field stamps; it leaves its categories,
+     * which stay in their list. A device that ticked the item offline sees its tick follow it. Retrying with the same
+     * [handle] never moves twice.
      */
-    suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) = database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
+    suspend fun move(from: Long, id: Long, to: Long, handle: String = RockyDatabase.newHandle()) {
+        database.itemCategories().unlinkAll(from, id)
+        database.moveRockyRow(rocky, handle, "items", id, listOf(from), listOf(to))
+    }
 
     /**
      * Shares a held list with [recipients] by node; members choose a discovered peer. Sync carries each envelope to its device

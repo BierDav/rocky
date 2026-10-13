@@ -2,15 +2,17 @@
 //! `LogicalSchema` from data a host language can write, without Room or Rust.
 //! See `docs/runtime/schema-definitions.md`.
 use crate::{
-    Affinity, Collation, ColumnClass, ConflictPolicy, IndexColumn, LogicalColumn,
-    LogicalForeignKey, LogicalIndex, LogicalSchema, LogicalTable, SchemaError, SchemaSource,
-    TableClass, UpdatePolicy, commitment,
+    Affinity, Collation, ColumnClass, ConflictPolicy, IndexColumn, LOGICAL_SCHEMA_FORMAT,
+    LogicalColumn, LogicalForeignKey, LogicalIndex, LogicalSchema, LogicalTable, SchemaError,
+    SchemaSource, TableClass, UpdatePolicy, commitment,
 };
 use serde::{Deserialize, Serialize};
 
 /// The `SchemaSource::kind` of descriptors built from a definition.
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-pub const DEFINITION_FORMAT: u32 = 4;
+/// Format 5 adds the SDK's `granted_like` and `migrations`; descriptors
+/// keep `LOGICAL_SCHEMA_FORMAT`.
+pub const DEFINITION_FORMAT: u32 = 5;
 /// Largest definition document `SchemaDefinition::parse` accepts.
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
@@ -228,7 +230,7 @@ impl SchemaDefinition {
         let identity =
             serde_json::to_vec(self).map_err(|error| SchemaError::Invalid(error.to_string()))?;
         let schema = LogicalSchema {
-            format: self.format,
+            format: LOGICAL_SCHEMA_FORMAT,
             publisher: publisher(&self.publisher)?,
             application: self.application.clone(),
             source: SchemaSource {
@@ -428,7 +430,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":4,
+        "format":5,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -515,7 +517,8 @@ mod tests {
 
     #[test]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        for format in [0, 1, 2, 3, 5] {
+        // Definitions are format 5; the descriptors they build stay format 4.
+        for format in [0, 1, 2, 3, 4, 6] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -523,6 +526,8 @@ mod tests {
                 error,
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
+        }
+        for format in [0, 1, 2, 3, 5] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -615,7 +620,7 @@ mod constraint_tests {
     use crate::{Incompatibility, Profile};
 
     const SHOP: &str = r#"{
-        "format":4,
+        "format":5,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "shop",
         "tables": [
@@ -807,7 +812,7 @@ mod constraint_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[test]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -857,7 +862,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -929,7 +934,7 @@ mod partition_tests {
     fn existence_logs_bind_the_manifest_and_refuse_nondeterministic_support_rows() {
         let shop = |lists: &str, extra: &str| {
             format!(
-                r#"{{"format":4,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
+                r#"{{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
             )
         };
         let build = |json: String| {

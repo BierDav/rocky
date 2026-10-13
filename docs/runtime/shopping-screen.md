@@ -29,7 +29,9 @@ Trusted devices select recipients from the issuer registry; members select
 discovered peers without reading a registry. Sharing retains the existing
 whole-list reader and delegation checks.
 
-Selecting a category filters the rows and sets the category for new items.
+Selecting a category filters the rows to its items and puts new items in it.
+An item's menu toggles each category and moves it up or down the whole list,
+whatever the filters show; see [schema 7](shopping-schema-7.md).
 **All items** clears that selection. Category creation and deletion are under
 **Categories**; deleting one keeps its items, as defined by the repository.
 

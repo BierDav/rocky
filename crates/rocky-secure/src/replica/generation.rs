@@ -61,8 +61,14 @@ pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>,
     encode(&("rocky.encrypted-replica.v15", manifest, node))
 }
 /// A newer definition keeps everything replicas of the older one agree
-/// on: its tables, fields, methods, operations and domains.
-fn extends(old: &ApplicationManifest, new: &ApplicationManifest) -> Result<(), Error> {
+/// on: its tables, fields, methods, operations and domains. A breaking
+/// transition keeps fields by identity and may require them: it admits no
+/// operation of an earlier generation.
+fn extends(
+    old: &ApplicationManifest,
+    new: &ApplicationManifest,
+    transition: &rocky_core::GenerationTransition,
+) -> Result<(), Error> {
     let kept = |old: &[rocky_core::DefinitionItem], new: &[rocky_core::DefinitionItem]| {
         old.iter().all(|item| new.contains(item))
     };
@@ -75,7 +81,8 @@ fn extends(old: &ApplicationManifest, new: &ApplicationManifest) -> Result<(), E
         || old.projection != new.projection
         || old.domains != new.domains
         || old.operations != new.operations
-        || !kept(&old.fields, &new.fields)
+        || !(kept(&old.fields, &new.fields)
+            || transition.breaking() && ids(&old.fields).is_subset(&ids(&new.fields)))
         || !kept(&old.methods, &new.methods)
         || !ids(&old.entities).is_subset(&ids(&new.entities))
     {
@@ -312,7 +319,7 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Err(incompatible("the upgrade's transitions do not chain"));
             }
-            extends(&manifest, &next)?;
+            extends(&manifest, &next, &transition)?;
             horizon = transition.horizon;
             records.push((manifest, step));
         }
@@ -395,7 +402,7 @@ impl<A: RowApplication> Inner<A> {
             {
                 return Err(incompatible("the lineage's transitions do not chain"));
             }
-            extends(&manifest, &next)?;
+            extends(&manifest, &next, &transition)?;
             horizon = transition.horizon;
             self.conn
                 .execute(

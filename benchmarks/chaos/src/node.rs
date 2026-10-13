@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-pub const SCHEMA: &str = r#"{"format":4,"application":"chaos","version":1,"tables":[
+pub const SCHEMA: &str = r#"{"format":5,"application":"chaos","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"done","type":"integer","not_null":true}],

@@ -52,8 +52,9 @@ struct Offer {
     revocations: RevocationSet,
 }
 
-/// The schema generation of a lineage ending at `schema`, and the nullable
-/// fields its transitions added to collections that already existed.
+/// The schema generation of a lineage ending at `schema`, and the fields
+/// its transitions added to, or required of, collections that already
+/// existed: rows written before them may lack them.
 pub(crate) fn lineage(
     steps: &[Step],
     schema: &Schema,
@@ -68,9 +69,9 @@ pub(crate) fn lineage(
     for pair in schemas.windows(2) {
         let change =
             rocky_core::classify(&logical(pair[0], publisher)?, &logical(pair[1], publisher)?)?;
-        if let SchemaChange::Additive { fields, .. } = change {
+        if change.replicated() {
             generation += 1;
-            added.extend(fields);
+            added.extend(change.added());
         }
     }
     Ok((generation, added))
@@ -124,6 +125,21 @@ impl Settings {
         let change = rocky_core::classify(old.logical(), &logical(schema, publisher)?).map_err(
             |refusal| format!("the application schema cannot replace the installed one: {refusal}"),
         )?;
+        if let SchemaChange::Breaking { required, .. } = &change {
+            return self
+                .evolve_breaking(path, vault, schema, required, transport)
+                .await;
+        }
+        // Grants issued before would silently change meaning.
+        if let Some(table) = self.schema.tables.iter().find(|table| {
+            self.schema.granted_like.get(&table.name) != schema.granted_like.get(&table.name)
+        }) {
+            return Err(format!(
+                "the application schema cannot replace the installed one: {} changed whom it is granted like; declare that only when adding a table",
+                table.name
+            )
+            .into());
+        }
         let commands = match &schema.commands {
             Some(definitions) => definitions.build()?,
             None => Default::default(),
@@ -146,10 +162,84 @@ impl Settings {
             return Err("the domain has too many generations".into());
         }
         if self.issuer() {
-            self.sign_generation(path, vault, schema)
+            self.sign_generation(path, vault, schema, false)
         } else {
             let transport = transport.ok_or(ServiceError::NetworkRequired("upgrade"))?;
             self.fetch_generation(path, vault, schema, transport).await
+        }
+    }
+    /// Moves to a schema that requires fields rows of the installed one
+    /// lack. A member, or an issuer another issuer already moved, fetches
+    /// the generation and imports a checkpoint of it: its own pending work
+    /// of earlier generations is dropped. Otherwise this issuer cuts: it
+    /// signs the schema with those fields nullable here, and the open
+    /// migrates and calls [`Self::cut`].
+    async fn evolve_breaking(
+        &mut self,
+        path: &Path,
+        vault: &Vault,
+        schema: &Schema,
+        required: &BTreeSet<String>,
+        transport: Option<&dyn Transport>,
+    ) -> Result<(), Failure> {
+        let relaxed = relaxed(schema, required)?;
+        // Interrupted after the nullable step: the migration continues.
+        if self.issuer() && self.schema == relaxed {
+            return Ok(());
+        }
+        if self.lineage.len() + 2 > MAX_LINEAGE {
+            return Err("the domain has too many generations".into());
+        }
+        // Intent first: a device that adopts the cut must import it.
+        let intent = path.with_file_name("bootstrap.json");
+        let held = intent.exists();
+        if !held {
+            rocky_credentials::write_private(&intent, b"true")?;
+        }
+        let fetched = match transport {
+            Some(transport) => self.fetch_generation(path, vault, schema, transport).await,
+            None => Err(ServiceError::NetworkRequired("upgrade").into()),
+        };
+        if fetched.is_err() && !held {
+            std::fs::remove_file(&intent)?;
+        }
+        match fetched {
+            Ok(()) => Ok(()),
+            Err(error) if !self.issuer() => Err(error),
+            Err(_) => {
+                let publisher = *self.publisher.as_bytes();
+                match rocky_core::classify(self.domain()?.logical(), &logical(&relaxed, publisher)?)
+                {
+                    Ok(SchemaChange::Additive { .. }) => {
+                        self.sign_generation(path, vault, &relaxed, false)
+                    }
+                    // Only nullability tightens: the installed schema is the
+                    // generation the migration runs in.
+                    Ok(SchemaChange::Unchanged | SchemaChange::Local) => Ok(()),
+                    Ok(SchemaChange::Breaking { .. }) | Err(_) => {
+                        Err("the schema's required fields cannot be added in one step".into())
+                    }
+                }
+            }
+        }
+    }
+    /// After the migration: signs `schema`, which requires the fields the
+    /// installed schema holds nullable, as a cut admitting no earlier
+    /// generation.
+    pub(crate) fn cut(
+        &mut self,
+        path: &Path,
+        vault: &Vault,
+        schema: &Schema,
+    ) -> Result<(), Failure> {
+        let publisher = *self.publisher.as_bytes();
+        match rocky_core::classify(self.domain()?.logical(), &logical(schema, publisher)?)? {
+            SchemaChange::Breaking { tables, fields, .. }
+                if tables.is_empty() && fields.is_empty() =>
+            {
+                self.sign_generation(path, vault, schema, true)
+            }
+            _ => Err("a cut only requires fields the installed schema holds".into()),
         }
     }
     fn sign_generation(
@@ -157,6 +247,7 @@ impl Settings {
         path: &Path,
         vault: &Vault,
         schema: &Schema,
+        breaking: bool,
     ) -> Result<(), Failure> {
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
         let before = self.domain()?.manifest();
@@ -181,8 +272,13 @@ impl Settings {
                 schema: after.schema,
                 handler: after.handler,
             },
-            // Devices one generation behind keep syncing until they upgrade.
-            horizon: before.schema,
+            // Devices one generation behind keep syncing until they upgrade;
+            // after a cut, none do.
+            horizon: if breaking {
+                after.schema
+            } else {
+                before.schema
+            },
         };
         let signed = SignedTransition::sign(&transition, &publisher)?;
         if let Some(step) = draft.lineage.last_mut() {
@@ -292,4 +388,25 @@ impl Settings {
         }
         Ok(draft)
     }
+}
+
+/// `schema` with each `table.field` of `required` nullable: the generation
+/// a cut migrates in before it requires them.
+pub(crate) fn relaxed(schema: &Schema, required: &BTreeSet<String>) -> Result<Schema, Failure> {
+    let mut relaxed = schema.clone();
+    let mut found = 0;
+    for table in &mut relaxed.tables {
+        let name = table.logical.clone().unwrap_or_else(|| table.name.clone());
+        for column in &mut table.columns {
+            let field = column.logical.as_ref().unwrap_or(&column.name);
+            if required.contains(&format!("{name}.{field}")) {
+                column.not_null = false;
+                found += 1;
+            }
+        }
+    }
+    if found != required.len() {
+        return Err("a required field is not a column of the schema".into());
+    }
+    Ok(relaxed)
 }

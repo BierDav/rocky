@@ -4,7 +4,7 @@ use rocky_core::{
     ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
     RowApplication, Scope, TypedCommands, TypedRows,
 };
-use rocky_credentials::Resource;
+use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The reserved collection of issuer records; see
@@ -16,6 +16,7 @@ pub(crate) struct Domain {
     pub app: TypedCommands,
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
+    granted_like: BTreeMap<String, String>,
 }
 impl Domain {
     pub fn new(
@@ -126,7 +127,172 @@ impl Domain {
             )?,
             scope,
             tables,
+            granted_like: schema.granted_like.clone(),
         })
+    }
+    /// Partition grants as this generation reads them. A grant that named
+    /// every field of its table, apart from fields later generations added,
+    /// covers the whole row; and with the schema's `granted_like`, a
+    /// whole-row grant on a followed table also selects the same partitions
+    /// of the table following it, slot by slot.
+    pub fn effective_partitions(
+        &self,
+        grants: &[rocky_credentials::PartitionGrant],
+    ) -> Vec<rocky_credentials::PartitionGrant> {
+        let logical = self.logical();
+        let resources = self.resources();
+        let fields = |name: &str| -> BTreeSet<Commitment> {
+            resources
+                .iter()
+                .find(|resource| resource.name == name)
+                .map(|resource| resource.columns.values().copied().collect())
+                .unwrap_or_default()
+        };
+        let slots = |table: &rocky_core::LogicalTable| -> Vec<Commitment> {
+            table
+                .partition_by
+                .iter()
+                .filter_map(|name| table.column(name))
+                .map(|column| logical.field_id(table, column))
+                .collect()
+        };
+        let added = self.app.rows().added();
+        let table_name = |id: &Commitment| {
+            logical
+                .tables
+                .iter()
+                .find(|table| logical.table_id(table) == *id)
+                .map(|table| table.sql_name.clone())
+        };
+        let grants: Vec<_> = grants
+            .iter()
+            .cloned()
+            .map(|mut grant| {
+                if let Some(name) = table_name(&grant.table) {
+                    let all = fields(&name);
+                    if !grant.fields.is_empty()
+                        && grant.fields.is_subset(&all)
+                        && all
+                            .iter()
+                            .all(|field| grant.fields.contains(field) || added.contains(field))
+                    {
+                        grant.fields = all;
+                    }
+                }
+                grant
+            })
+            .collect();
+        let mut all = grants.clone();
+        for (name, like) in &self.granted_like {
+            let (Some(table), Some(parent)) = (logical.table(name), logical.table(like)) else {
+                continue;
+            };
+            let (id, parent_id) = (logical.table_id(table), logical.table_id(parent));
+            let (own, parents) = (slots(table), slots(parent));
+            if own.len() != parents.len() || grants.iter().any(|grant| grant.table == id) {
+                continue;
+            }
+            for grant in grants.iter().filter(|grant| {
+                grant.table == parent_id
+                    && grant.rows == rocky_core::RowSelection::All
+                    && grant.fields == fields(like)
+            }) {
+                let selector: BTreeMap<_, _> = grant
+                    .selector
+                    .0
+                    .iter()
+                    .filter_map(|(slot, selection)| {
+                        let index = parents.iter().position(|parent| parent == slot)?;
+                        Some((own[index], selection.clone()))
+                    })
+                    .collect();
+                if selector.len() != grant.selector.0.len() {
+                    continue;
+                }
+                all.push(rocky_credentials::PartitionGrant {
+                    domain: grant.domain,
+                    table: id,
+                    selector: rocky_core::PartitionSelector(selector),
+                    rows: rocky_core::RowSelection::All,
+                    rights: grant
+                        .rights
+                        .iter()
+                        .copied()
+                        .filter(|right| {
+                            !matches!(
+                                right,
+                                rocky_core::Right::Invoke | rocky_core::Right::Execute
+                            )
+                        })
+                        .collect(),
+                    fields: fields(name),
+                });
+            }
+        }
+        all
+    }
+    /// `profile` with the schema's `granted_like` applied: a table granted
+    /// like another receives the same rights wherever the profile names
+    /// that one in whole rows and is silent on it. Commands stay with
+    /// their own tables. Every interpretation of a profile goes through here.
+    pub fn effective(&self, profile: &Profile) -> Profile {
+        let follow = |scopes: &std::collections::BTreeSet<String>| {
+            let mut scopes = scopes.clone();
+            for (table, like) in &self.granted_like {
+                if scopes.contains(like) {
+                    scopes.insert(table.clone());
+                }
+            }
+            scopes
+        };
+        match profile {
+            Profile::Issuer => Profile::Issuer,
+            Profile::Custody { scopes } => Profile::Custody {
+                scopes: follow(scopes),
+            },
+            Profile::Reader { scopes } => Profile::Reader {
+                scopes: follow(scopes),
+            },
+            Profile::Writer { scopes } => Profile::Writer {
+                scopes: follow(scopes),
+            },
+            Profile::Grants { grants } => {
+                let mut all = grants.clone();
+                for (table, like) in &self.granted_like {
+                    if grants.iter().any(|grant| grant.scope == *table) {
+                        continue;
+                    }
+                    all.extend(
+                        grants
+                            .iter()
+                            .filter(|grant| {
+                                grant.scope == *like
+                                    && grant
+                                        .columns
+                                        .as_ref()
+                                        .is_none_or(|columns| columns.is_empty())
+                            })
+                            .map(|grant| Grant {
+                                scope: table.clone(),
+                                rights: grant
+                                    .rights
+                                    .iter()
+                                    .copied()
+                                    .filter(|right| {
+                                        !matches!(
+                                            right,
+                                            rocky_core::Right::Invoke | rocky_core::Right::Execute
+                                        )
+                                    })
+                                    .collect(),
+                                columns: grant.columns.clone(),
+                            })
+                            .filter(|grant| !grant.rights.is_empty()),
+                    );
+                }
+                Profile::Grants { grants: all }
+            }
+        }
     }
     /// This domain with the handlers its device executes commands with.
     pub fn hosted(mut self, host: Option<std::sync::Arc<dyn rocky_core::CommandHost>>) -> Self {
@@ -243,11 +409,12 @@ mod tests {
     use rocky_core::Affinity;
     #[test]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
-        let json = r#"{"format":4,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
+        let json = r#"{"format":5,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
         // The portable builder supplies both required columns.
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]).unwrap();
         let descriptor = definition.build().unwrap();
-        for format in [0, 1, 2, 3, 5] {
+        // Definitions are format 5; the descriptors they build stay format 4.
+        for format in [0, 1, 2, 3, 4, 6] {
             definition.format = format;
             assert!(
                 definition
@@ -256,12 +423,15 @@ mod tests {
                     .to_string()
                     .contains("unsupported schema definition format")
             );
+            let input = json.replace("\"format\":5", &format!("\"format\":{format}"));
+            let error = Schema::parse(&input).unwrap_err().to_string();
+            assert!(error.contains("unsupported schema"), "{error}");
+        }
+        assert_eq!(descriptor.format, rocky_core::LOGICAL_SCHEMA_FORMAT);
+        for format in [0, 1, 2, 3, 5] {
             let mut old = descriptor.clone();
             old.format = format;
             let error = crate::TypedApp::new(old, &[]).err().unwrap().to_string();
-            assert!(error.contains("unsupported schema"), "{error}");
-            let input = json.replace("\"format\":4", &format!("\"format\":{format}"));
-            let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
     }
@@ -269,7 +439,7 @@ mod tests {
     #[test]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":4,"application":"measurements","version":1,"tables":[{
+            r#"{"format":5,"application":"measurements","version":1,"tables":[{
             "name":"samples","class":"mergeable",
             "columns":[{"name":"sensor","type":"text","not_null":true},
                        {"name":"sequence","type":"integer","not_null":true},
@@ -303,7 +473,7 @@ mod tests {
     #[test]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":4,"application":"references","version":1,"tables":[
+            r#"{"format":5,"application":"references","version":1,"tables":[
             {"name":"parents","class":"mergeable","columns":[{"name":"next","type":"integer"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
             {"name":"children","class":"mergeable","columns":[{"name":"parent","type":"integer"}],"primary_key":["id"],
@@ -337,7 +507,7 @@ mod tests {
     #[test]
     fn references_to_an_existence_log_keep_their_reader_scopes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":4,"application":"logs","version":1,"tables":[
+            r#"{"format":5,"application":"logs","version":1,"tables":[
             {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"existence_log":true},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true}],"primary_key":["id"],
              "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]}
@@ -367,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_command_controlled_table_needs_a_command() {
-        let json = r#"{"format":4,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
+        let json = r#"{"format":5,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         let error = Schema::parse(json).unwrap_err().to_string();
         assert!(error.contains("resource of no command"), "{error}");
         let confirmed = json.replace("command_controlled", "confirmed_read_only");

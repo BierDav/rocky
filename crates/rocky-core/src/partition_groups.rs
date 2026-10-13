@@ -145,7 +145,7 @@ mod tests {
         AppId, DomainId, MeshId, Profile, SchemaChange, SchemaDefinition, Unsupported, classify,
     };
     fn definition() -> SchemaDefinition {
-        serde_json::from_value(serde_json::json!({"format":4,"publisher":"11".repeat(32),"application":"groups","tables":[
+        serde_json::from_value(serde_json::json!({"format":5,"publisher":"11".repeat(32),"application":"groups","tables":[
             {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}
         ]})).unwrap()

@@ -33,14 +33,16 @@ internal fun ItemRow(
     item: ShoppingItem,
     state: ListsState,
     onToggle: () -> Unit,
-    onCategorize: (Long?) -> Unit,
+    onCategorize: (Long, Boolean) -> Unit,
+    onShift: (Int) -> Unit,
     onMove: (Long) -> Unit,
     onRename: (String) -> Unit,
     onEditingFocus: (Boolean) -> Unit,
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
-    val category = state.categories.firstOrNull { it.id == item.category }
+    val categories = state.categoriesOf(item)
+    val index = state.items.indexOfFirst { it.id == item.id }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -52,22 +54,34 @@ internal fun ItemRow(
             Checkbox(item.completed, { onToggle() })
             Column(Modifier.weight(1f).padding(vertical = 10.dp)) {
                 ItemTitle(item, onRename, onEditingFocus)
-                category?.let { Text(it.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+                if (categories.isNotEmpty()) {
+                    Text(categories.joinToString(" · ") { it.name }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                }
             }
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Filled.MoreVert, "Actions for ${item.title}") }
                 DropdownMenu(menu, { menu = false }) {
-                    state.categories.filter { it.id != item.category }.forEach { target ->
-                        DropdownMenuItem({ Text("Category: ${target.name}") }, {
+                    if (index > 0) {
+                        DropdownMenuItem({ Text("Move up") }, {
                             menu = false
-                            onCategorize(target.id)
-                        }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.Label, null) })
+                            onShift(-1)
+                        }, leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) })
                     }
-                    if (item.category != null) {
-                        DropdownMenuItem({ Text("No category") }, {
+                    if (index in 0 until state.items.lastIndex) {
+                        DropdownMenuItem({ Text("Move down") }, {
                             menu = false
-                            onCategorize(null)
-                        }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.LabelOff, null) })
+                            onShift(1)
+                        }, leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) })
+                    }
+                    // Categories toggle: an item may be in several.
+                    state.categories.forEach { target ->
+                        val member = categories.any { it.id == target.id }
+                        DropdownMenuItem({ Text(target.name) }, {
+                            menu = false
+                            onCategorize(target.id, !member)
+                        }, leadingIcon = {
+                            Icon(if (member) Icons.AutoMirrored.Filled.LabelOff else Icons.AutoMirrored.Filled.Label, null)
+                        }, trailingIcon = { if (member) Icon(Icons.Filled.Check, "In ${target.name}") })
                     }
                     state.lists.filter { it.id != item.list }.forEach { target ->
                         DropdownMenuItem({ Text("Move to ${target.title}") }, {

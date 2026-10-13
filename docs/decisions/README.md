@@ -40,6 +40,7 @@ naturally holds.
 | [0063](0063-live-link-sessions.md) | Live link sessions and signals |
 | [0064](0064-sync-on-live-links.md) | Sync on live links |
 | [0065](0065-iroh-only-transport.md) | iroh as the only transport, with its liveness and path measurements |
+| [0066](0066-breaking-generations.md) | Breaking generations with issuer-run migrations; tables granted like another |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for

@@ -36,8 +36,9 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
                     combine(
                         repository.categories(list.id),
                         repository.observe(list.id),
-                    ) { categories, items ->
-                        ListsState(lists, list, categories, items, node.isTrusted)
+                        repository.itemCategories(list.id),
+                    ) { categories, items, links ->
+                        ListsState(lists, list, categories, items, node.isTrusted, links)
                     }
                 }
             }
@@ -84,7 +85,7 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
         editor.adding = true
         write {
             try {
-                repository.add(list, title, category)
+                repository.add(list, title, setOfNotNull(category))
                 if (editor.draft.text.toString() == draft) editor.draft.clearText()
             } finally {
                 editor.adding = false
@@ -93,7 +94,15 @@ class ListsViewModel(session: ShoppingSession) : NodeViewModel(session) {
     }
     fun toggle(item: ShoppingItem) = write { repository.check(item.list, item.id, !item.completed) }
     fun rename(item: ShoppingItem, title: String) = write { repository.rename(item.list, item.id, title) }
-    fun categorize(item: ShoppingItem, category: Long?) = write { repository.categorize(item.list, item.id, category) }
+    fun categorize(item: ShoppingItem, category: Long, member: Boolean) = write { repository.categorize(item.list, item.id, category, member) }
+
+    /** Moves the item [by] places in the whole list, whatever the filters show. */
+    fun shift(item: ShoppingItem, by: Int) {
+        val items = state.value.items
+        val index = items.indexOfFirst { it.id == item.id }.takeIf { it >= 0 } ?: return
+        val target = (index + by).coerceIn(0, items.lastIndex)
+        if (target != index) write { repository.place(item.list, items, item.id, target) }
+    }
     fun delete(item: ShoppingItem) = write { repository.delete(item.list, item.id) }
     fun move(item: ShoppingItem, to: Long) = write { repository.move(item.list, item.id, to) }
 

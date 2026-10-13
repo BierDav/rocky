@@ -152,8 +152,10 @@ directory finds no other device's node key; see
 [Phase 20 evidence](../../docs/features_07/20-shopping-without-a-roster-evidence.md).
 In **Lists → Share list**, a member chooses a discovered peer; a trusted node
 chooses from the registry, including a device it has never contacted. List title conflicts converge per list; deleting a list hides its
-children, and deleting a category clears its items' category. Moving an item
-keeps an offline tick attached to it.
+children, and deleting a category removes it from its items. An item belongs to
+any number of its list's categories; **Move up** and **Move down** reorder it
+for every device. Moving an item to another list keeps an offline tick attached
+to it and leaves its categories behind.
 
 The **Sync** tab is the searchable activity log. **All**, **Problems**,
 **Transfers**, **Connections**, **Keys**, **Access**, **Devices** and **History**
@@ -171,8 +173,11 @@ the open database's lifetime; see [SDK activity](../../docs/runtime/activity.md)
 The top badge shows **Live** only while an authenticated link is open. Raw
 inbound connection counts do not imply successful synchronization.
 
-The current Room schema is version 6. Earlier application schemas are refused;
-there is no migration or fallback. An existing household that cannot open
+The current Room schema is version 7. A version 6 household upgrades: the
+first trusted device to open it runs the schema's SQL migration, and every other
+device imports its lists, dropping version 6 edits that trusted device had not
+received; see [schema 7](../../docs/runtime/shopping-schema-7.md). Earlier
+versions are refused. An existing household that cannot open
 shows **Retry** and preserves its data. A failure in Room’s background invalidation
 tracker also closes the open node and shows **Retry**; retry opens fresh SQL
 sessions without deleting the household.
@@ -207,7 +212,7 @@ val node = ShoppingNode.create(platform)
 try {
     val list = node.repository.createList("Groceries")
     val dairy = node.repository.addCategory(list, "Dairy")
-    node.repository.add(list, "Milk", category = dairy)
+    node.repository.add(list, "Milk", categories = setOf(dairy))
     node.repository.observe(list).collect { items -> /* typed rows */ }
 } finally {
     node.close()
@@ -265,7 +270,7 @@ java -jar build/dist/shopping-desktop.jar *> shopping.log
 ```
 
 `check` compares the hand-written schema with Room's export, installs both,
-runs repository, household and approval tests and compiles desktop. Approval
+runs repository, household, approval and version 6 upgrade tests and compiles desktop. Approval
 tests use an in-process coordinator in place of the public service. Household tests
 cover automatic full-node key delivery, revocation and delivery of rotated keys, explicit partial sharing, lists two trusted devices create apart, writes by
 joined members, immediate reads after reopen, and retry after a held directory

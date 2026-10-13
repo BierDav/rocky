@@ -9,7 +9,7 @@ descriptor and both fingerprints are identical.
 
 ```json
 {
-  "format": 4,
+  "format": 5,
   "publisher": "6b6b…6b",
   "application": "notebook",
   "update_policy": "changed",
@@ -31,7 +31,7 @@ descriptor and both fingerprints are identical.
 
 | Entry | Meaning |
 | --- | --- |
-| `format` | 4, including partition groups, optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)); others are refused |
+| `format` | 5, including partition groups, optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)) and the SDK schema's `granted_like` and `migrations` ([generations](generations.md)); others are refused. The built descriptor is format 4 |
 | `publisher`, `application` | Bind table and field identities; 64 hexadecimal digits |
 | `update_policy` | `changed` (default) or `assigned`; see [SQL sessions](sql-sessions.md#what-a-commit-publishes) |
 | table `class` | `mergeable`, `local_only`, [`command_controlled`](confirmed-tables.md) or `confirmed_read_only` (trusted only) |
@@ -57,7 +57,9 @@ order; column and key order are part of the declaration. Install it with
 with `EncryptedReplica::install_tables` on the secure one. The SDK schema
 input takes the same `tables`, `update_policy` and `views`, binds the publisher
 at enrollment and builds the descriptor. Input is bounded at 1 MiB, 64 tables
-and 128 columns per table; register-style `collections` are refused.
+and 128 columns per table; register-style `collections` are refused. It also
+takes `granted_like` and `migrations`, which change no descriptor; see
+[generations](generations.md#tables-granted-like-another).
 
 ## Build in Kotlin
 
@@ -129,7 +131,7 @@ for the secure profile only.
 | Policy unique indexes, identity foreign keys, existence logs | Refused | [Resolved by hidden rows](mergeable-constraints.md) |
 | `CHECK`, plain unique constraints and auto keys in mergeable tables | Refused | Refused |
 | Declared foreign keys on non-mergeable tables | Refused | Refused |
-| Static views (format 4) | Expanded | Expanded |
+| Static views | Expanded | Expanded |
 | Engine catalog verified against the descriptor at open | Yes | No; the stored descriptor is compared |
 | Read scope | The whole domain | Whole rows of each table's reader scope |
 

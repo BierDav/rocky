@@ -76,19 +76,11 @@ impl Typed {
         shadow: bool,
     ) -> Result<Self, Error> {
         let incompatible = |reason: String| Error::Incompatible(reason);
-        // Rows written before a transition added a nullable field lack it;
-        // the application admitted them, so they project with NULL.
-        let nullable = schema
-            .mergeable()
-            .flat_map(|table| {
-                table
-                    .registers()
-                    .filter(|column| !column.not_null)
-                    .map(|column| schema.field_id(table, column))
-            })
-            .collect();
+        // Rows written before a transition added a field lack it; the
+        // application admitted them, so they project with NULL or, for a
+        // required field, its default.
         let rows = TypedRows::new(schema.clone(), vec![domain.domain])
-            .and_then(|rows| rows.at_generation(1, nullable))
+            .and_then(|rows| rows.at_generation(1, rocky_core::fillable(&schema)))
             .map_err(|error| incompatible(error.to_string()))?;
         let mut tables = Vec::new();
         // Confirmed tables are never rebuilt from stored rows, so a
@@ -173,7 +165,7 @@ impl Typed {
         self.constraints = super::constraints::Constraints::new(self.rows.schema(), &self.tables)?;
         Ok(self)
     }
-    fn statements(&self) -> Vec<String> {
+    pub(super) fn statements(&self) -> Vec<String> {
         self.rows
             .schema()
             .tables
@@ -941,7 +933,7 @@ async fn stored_winners(
 }
 
 /// Refuse a missing or changed index before using persisted projections.
-async fn verify_constraint_indexes(
+pub(super) async fn verify_constraint_indexes(
     conn: &crate::scoped_connection::ScopedConnection,
     typed: &Typed,
 ) -> Result<(), Error> {

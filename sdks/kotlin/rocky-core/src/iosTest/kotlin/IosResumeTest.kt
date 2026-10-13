@@ -33,6 +33,8 @@ class IosResumeTest {
                 val id = nextId("items")
                 execute("INSERT INTO items(id,title) VALUES(?,'after suspension')", id)
             }
+            // A background peer refuses live links; restore its listener first.
+            member.enterForeground()
             owner.enterForeground()
             assertEquals(before, owner.contact().node)
             withTimeout(1_500) {

@@ -58,11 +58,13 @@ runs:
       working-directory: source
       run: ./scripts/ci/install-system-deps
 
-    - name: Configure optimized test binaries when rebuilding
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.nextest == 'true'
+    - name: Configure the test profile and source cache key
+      if: steps.passed.outputs.cache-hit != 'true'
       shell: sh
       working-directory: source
-      run: ./scripts/ci/test-profile
+      env:
+        SOURCE_TREE: ${{ inputs.tree }}
+      run: ./scripts/ci/test-profile "$SOURCE_TREE"
 
     - uses: dtolnay/rust-toolchain@1.99.0
       if: steps.passed.outputs.cache-hit != 'true'
@@ -125,27 +127,12 @@ runs:
         cache-workspace-crates: true
         save-if: ${{ inputs.job == 'shopping' && github.ref == 'refs/heads/main' }}
 
-    - name: Restore compiled workspace crates when rebuilding
+    - name: Reuse timestamps of unchanged Cargo inputs when rebuilding
       if: >-
-        github.server_url == 'https://github.com' && steps.passed.outputs.cache-hit != 'true'
-        && inputs.job != 'shopping' && (inputs.dependencies == 'always'
+        steps.passed.outputs.cache-hit != 'true' && (inputs.dependencies == 'always'
         || (inputs.workspace-archive == 'true' && steps.workspace.outcome != 'success')
         || (inputs.sdk-archive == 'true' && steps.sdk.outcome != 'success')
         || (inputs.peer == 'true' && steps.peer.outcome != 'success'))
-      uses: actions/cache/restore@v4
-      with:
-        path: source/target
-        key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
-        restore-keys: |
-          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
-          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
-
-    - name: Restore and save the shopping job's x64 compiled crates
-      if: steps.passed.outputs.cache-hit != 'true' && inputs.job == 'shopping' && github.server_url == 'https://github.com'
-      uses: actions/cache@v4
-      with:
-        path: source/target
-        key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ inputs.tree }}
-        restore-keys: |
-          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
-          rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
+      shell: sh
+      working-directory: source
+      run: ./scripts/ci/source-times

@@ -23,7 +23,8 @@ permissions:
 # A newer push supersedes a run, but a release's call must not cancel another
 # release's checks, which share the caller's workflow name and ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Let runs from before cache seeding finish their checks.
+  group: ${{ github.workflow }}-${{ github.ref }}-source-cache-v2
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
@@ -90,6 +91,11 @@ jobs:
         working-directory: source
         run: ./scripts/lint
 
+      - name: Verify Cargo cache invalidation
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/test-source-times
+
       - name: Record the passing tree
         if: steps.passed.outputs.cache-hit != 'true'
         run: touch passed
@@ -108,7 +114,8 @@ jobs:
     # Those jobs consume architecture-specific binaries, so they all pin one
     # architecture; Gitea's `-any-arch` label mixes x64 and arm64 runners.
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
-    timeout-minutes: 60
+    # A cold four-core build can exceed an hour, including artifact/cache saves.
+    timeout-minutes: 90
     steps:
       - name: Download the exact source revision
         id: source
@@ -150,8 +157,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Cargo downloads use the dependency key; compiled workspace artifacts
-      # use a new key per tree so rebuilt crates are saved for the next run.
+      - name: Configure the test profile and source cache key
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        env:
+          SOURCE_TREE: ${{ steps.source.outputs.tree }}
+        run: ./scripts/ci/test-profile "$SOURCE_TREE"
+
       - uses: Swatinem/rust-cache@v2
         if: steps.passed.outputs.cache-hit != 'true'
         with:
@@ -160,17 +172,10 @@ jobs:
           cache-workspace-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Gitea runners fail while extracting the multi-gigabyte target overlay.
-      # Its Rust cache already restores the dependencies and compiled crates.
-      - name: Restore and save compiled workspace crates
-        if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
-        uses: actions/cache@v4
-        with:
-          path: source/target
-          key: rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-${{ steps.source.outputs.tree }}
-          restore-keys: |
-            rust-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/Cargo.toml', 'source/Cargo.lock', 'source/rust-toolchain.toml') }}-
-            rust-target-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Reuse timestamps of unchanged Cargo inputs
+        if: steps.passed.outputs.cache-hit != 'true'
+        working-directory: source
+        run: ./scripts/ci/source-times
 
       - uses: taiki-e/install-action@v2
         if: steps.passed.outputs.cache-hit != 'true' && github.server_url == 'https://github.com'
@@ -187,10 +192,9 @@ jobs:
       - name: Build and archive the tests
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
-        timeout-minutes: 300
+        timeout-minutes: 60
         run: |
           set -euo pipefail
-          ./scripts/ci/test-profile
           ./scripts/check --build "$RUNNER_TEMP/build"
 
       # One artifact per consumer so a failure to finalize the large shared
@@ -562,9 +566,11 @@ jobs:
     if: ${{ !inputs.release }}
     # Builds its own native artifacts; no dependency on the Linux build.
     runs-on: macos-latest
-    timeout-minutes: 45
+    # Includes first-time cache seeding and the complete simulator/app matrix.
+    timeout-minutes: 90
     steps:
       - name: Download the exact source revision
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
           GH_API_URL: ${{ github.api_url }}
@@ -578,6 +584,15 @@ jobs:
             "${GH_API_URL}/repos/${GH_REPOSITORY}/tarball/${GH_REVISION}"
           mkdir source
           tar -xzf "$RUNNER_TEMP/source.tar.gz" --strip-components=1 -C source
+          curl --fail --silent --show-error --location \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --output "$RUNNER_TEMP/commit.json" \
+            "${GH_API_URL}/repos/${GH_REPOSITORY}/commits/${GH_REVISION}?stat=false&files=false"
+          echo "tree=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"]["tree"]["sha"])' "$RUNNER_TEMP/commit.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Use a stable source path on the macOS Gitea runner
+        if: github.server_url != 'https://github.com'
+        run: ./source/scripts/ci/stable-ios-source
 
       - name: Install the repository toolchain and iOS targets
         working-directory: source
@@ -591,12 +606,26 @@ jobs:
 
       - uses: ./source/.github/actions/setup-java
 
+      - name: Use parallel compression for the Rust cache
+        working-directory: source
+        run: ./scripts/ci/cache-compression
+
+      - name: Configure the test profile and source cache key
+        working-directory: source
+        env:
+          SOURCE_TREE: ${{ steps.source.outputs.tree }}
+        run: ./scripts/ci/test-profile "$SOURCE_TREE"
+
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: source/sdks/native -> target
+          workspaces: ${{ env.ROCKY_CI_SOURCE || 'source' }}/sdks/native -> target
           shared-key: ios
           cache-workspace-crates: true
           cache-on-failure: true
+
+      - name: Reuse timestamps of unchanged Cargo inputs
+        working-directory: source
+        run: ./scripts/ci/source-times
 
       - name: Qualify the iOS matrix and binding
         working-directory: source

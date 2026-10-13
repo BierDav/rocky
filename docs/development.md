@@ -330,19 +330,23 @@ of the same tree, such as a redescribed or rebased commit with unchanged content
 or the release of an already-checked commit, finds the marker and skips its
 steps. Any change to a tracked file, including the workflow, runs it again.
 When `build` finds `check` already passed for the tree it builds nothing, and
-the jobs after it build what they still run themselves. The Rust action restores dependencies and a fallback `target` directory. A
-separate compiled `target` cache on GitHub then overlays it and has a separate cache key per source tree, OS, architecture and pinned
-build configuration, with a compatible prefix for restoring the previous tree.
-When manifests change, an OS/architecture fallback still restores the previous
-targets; Cargo's fingerprints rebuild incompatible crates. This saves newly rebuilt workspace crates instead of repeatedly restoring an
-immutable dependency key's original artifacts. The build job saves it; test
-consumers restore it when an artifact is missing. Shopping also saves its x64
-dependency cache on Gitea and both caches on GitHub, since the ARM baseline
-cannot warm its x64 crates. Gitea uses only the Rust action's cache: extracting
-the additional 8 GB `target` overlay has repeatedly terminated its build runners
-before compilation. Fallback test builds also avoid that overlay. Gitea's Kubernetes runners
-must share persistent cache storage so another runner or a restarted pod can
-reuse it.
+the jobs after it build what they still run themselves. One Rust cache holds
+Cargo downloads and cleaned compiled crates. A source-tree comment in the generated
+Cargo configuration refreshes its save key for every tree while retaining the
+compatible toolchain restore prefix. The build job saves it; shopping saves its
+separate x64 cache. Consumers restore it only when they need to compile.
+
+Gitea archives stamp every file with the commit time. `scripts/ci/source-times`
+records content hashes and timestamps in the Rust cache's registry directory.
+After restoring the cache it preserves a file's previous timestamp only when
+its contents match; changed or new files receive a fresh timestamp, including
+when a rebased archive is older than cached outputs. Cargo still checks its
+normal compiler, configuration and dependency fingerprints. The regression check
+`scripts/test-source-times` verifies reuse and changed-source rebuilds with Cargo.
+This avoids compiling unchanged workspace crates on every push. The additional
+raw `target` overlay was removed: its 8 GB extraction repeatedly terminated Gitea
+build runners and duplicated the Rust cache. Gitea's Kubernetes runners must
+share persistent cache storage so another runner or a restarted pod can reuse it.
 
 The `e2e` job runs `./scripts/check --e2e` on pushes to `main`; releases do not
 wait for it.
@@ -351,6 +355,15 @@ distribution downloads retry transient network failures. The artifact-only iOS
 consumer retains `DEVELOPER_DIR` when restricting its environment to non-Rust
 tools, so a runner's selected full Xcode remains available. iOS keeps compiled
 workspace crates in its Rust cache even when a later qualification fails.
+On macOS hosts without zstd, GNU tar and pigz compress that cache in parallel
+while retaining compatibility with the existing gzip cache. These hosts need
+Homebrew for the compression tools. Gitea's macOS checkout moves to a stable,
+job-owned path under `~/.cache/rocky-ci/<owner>/<repo>/ios/source`; native and Gradle build
+outputs survive replacement of the source snapshot. This avoids changing Cargo
+package identities and cache paths on every host-executor run. The source hash
+checks and tree-based cache refresh also apply to iOS. Cold Linux and iOS jobs
+have 90 minutes for initial cache seeding and artifact saves; test-tier budgets
+remain unchanged.
 Linux shopping checks publish only the common metadata, JVM and Android
 artifacts to Maven local. Disabled Kotlin/Native targets do not trigger Rust
 iOS builds while assembling that metadata. `scripts/ci/local-maven` removes

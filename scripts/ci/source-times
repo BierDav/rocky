@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Preserve Cargo input timestamps only when cached source contents match."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+EXCLUDED = {".git", ".jj", ".idea", ".gradle", ".kotlin", ".amper", "target", "build", "local", "node_modules"}
+
+
+def normalize(root, cache):
+    previous = {}
+    if cache.exists():
+        saved = json.loads(cache.read_text())
+        if saved["version"] != 1:
+            raise ValueError("unsupported CI source timestamp cache version")
+        previous = saved["files"]
+    current = {}
+    matched = 0
+    fresh = time.time_ns()
+    for directory, directories, files in os.walk(root):
+        directories[:] = [name for name in directories if name not in EXCLUDED]
+        for name in files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                continue
+            relative = path.relative_to(root).as_posix()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            old = previous.get(relative)
+            if old and old["sha256"] == digest:
+                modified = old["mtime_ns"]
+                matched += 1
+            else:
+                # A rebased archive can predate the cached compiler outputs.
+                modified = fresh
+            os.utime(path, ns=(path.stat().st_atime_ns, modified))
+            current[relative] = {"sha256": digest, "mtime_ns": modified}
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"version": 1, "files": current}))
+    temporary.replace(cache)
+    print(f"source-times: {matched} unchanged files, {len(current) - matched} fresh files")
+
+
+if __name__ == "__main__":
+    cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
+    cache = Path(sys.argv[1]) if len(sys.argv) > 1 else cargo_home / "registry/.rocky-source-times.json"
+    normalize(Path.cwd(), cache)

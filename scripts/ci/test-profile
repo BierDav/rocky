@@ -14,3 +14,7 @@ opt-level = 3
 [profile.test.package.rocky-sdk]
 opt-level = 3
 EOF
+
+# The Rust cache hashes configuration separately from its toolchain restore prefix.
+# Refresh the cleaned cache per source tree without changing compiler options.
+[ "$#" -eq 0 ] || printf '# CI source tree: %s\n' "$1" >> .cargo/config.toml

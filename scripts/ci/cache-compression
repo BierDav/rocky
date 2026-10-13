@@ -1,0 +1,11 @@
+#!/bin/sh
+# Keep gzip cache compatibility while compressing in parallel on macOS.
+set -eu
+[ "$(uname -s)" = Darwin ] || exit 0
+command -v zstd >/dev/null 2>&1 && exit 0
+
+HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install gnu-tar pigz
+tools="${RUNNER_TEMP:?RUNNER_TEMP must be set by the CI runner}/cache-compression"
+mkdir -p "$tools"
+ln -sf "$(command -v pigz)" "$tools/gzip"
+printf '%s\n' "$tools" >> "${GITHUB_PATH:?GITHUB_PATH must be set by the CI runner}"

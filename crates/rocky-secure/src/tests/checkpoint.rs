@@ -176,7 +176,9 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     assert_eq!(statement.frontier.len(), 1);
     assert_eq!(statement.frontier[0].author, node.public_key());
     assert_eq!(statement.frontier[0].sequence, 41);
-    assert_eq!((statement.operations, statement.clock), (42, 42));
+    // Stamps are hybrid time: the checkpoint's clock is its last frame's.
+    assert_eq!(statement.operations, 42);
+    assert_eq!(statement.clock, statement.frontier[0].clock);
     assert_eq!((statement.rows.count, statement.tombstones), (40, 1));
     assert_eq!(statement.creations.count, 40);
     assert_eq!(statement.handles.count, 42);

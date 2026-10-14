@@ -221,3 +221,12 @@ on receipt, projection rebuild and reopen.
 Partitioned `SetNull` indexes are refused in phase 4: nulling the entire index
 would change its partition identity. Foreign keys admit in-group identities
 and unpartitioned logged parents, natively and in the Kotlin builder and Room import.
+
+## Removed constraints
+
+A generation that removes a field also removes every index, foreign key or
+view depending on it; a removed key or partition column requires removal of
+its table. The new schema must validate on its own. Every adopting replica
+rebuilds the kept projections and their constraints from kept fields. Older
+frames verify their original grants and apply only current fields. See
+[removal](removal.md).

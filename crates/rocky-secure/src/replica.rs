@@ -25,6 +25,7 @@ mod partition;
 mod queries;
 mod reads;
 mod rebuild;
+mod removal;
 mod restore;
 pub(super) mod roles;
 mod session;
@@ -317,6 +318,8 @@ pub(super) struct Inner<A> {
     /// schema generation admitted.
     previous: Vec<generation::Previous>,
     horizon: u32,
+    /// Removed and re-added tables and fields of the recorded lineage.
+    names: generation::Names,
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
     /// Constrained rows a change may affect, until the frame or commit settles.
@@ -498,6 +501,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         migrate::SCHEMA,
         backup::SCHEMA,
         rebuild::SCHEMA,
+        removal::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
@@ -544,7 +548,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v15" {
+    if label != "rocky.encrypted-replica.v16" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -711,6 +715,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             shadow: None,
             previous: Vec::new(),
             horizon: 0,
+            names: generation::Names::default(),
             strict_projection: false,
             settling: Default::default(),
             local: Default::default(),
@@ -822,6 +827,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
         inner.load_direct().await?;
+        inner.pull_again().await?;
         inner.verify_open().await?;
         let replica = Self {
             inner: Arc::new(Mutex::new(inner)),

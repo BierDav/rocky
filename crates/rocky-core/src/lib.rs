@@ -6,7 +6,8 @@ mod definition;
 pub use definition::*;
 mod generation;
 pub use generation::{
-    Generation, GenerationTransition, SchemaChange, Unsupported, classify, classify_commands,
+    Generation, GenerationTransition, Removed, SchemaChange, Unsupported, classify,
+    classify_commands,
 };
 mod manifest;
 pub use manifest::*;

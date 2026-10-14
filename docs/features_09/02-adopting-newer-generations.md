@@ -1,8 +1,8 @@
 # 2. Adopting newer generations
 
-Status: implemented (2026-10-14) except two items deferred to
-[phase 3](03-removal.md): the Room gate's DAO on a removed column, and
-pulling again the frames stamped after a learned earlier baseline; see
+Status: implemented (2026-10-14); two items deferred to
+[phase 3](03-removal.md), the Room gate's DAO on a removed column and
+pulling again after a learned earlier baseline, landed there; see
 [evidence](#evidence).
 Owner: `rocky-secure` replica generations, admission and projection switch;
 `rocky-sdk` `generation.rs`, `database.rs` open, bootstrap and the sync

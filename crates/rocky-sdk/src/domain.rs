@@ -17,6 +17,9 @@ pub(crate) struct Domain {
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
     granted_like: BTreeMap<String, String>,
+    /// Tables and `table.field`s earlier generations removed: grants that
+    /// still name them read as if they did not.
+    removed: BTreeSet<String>,
 }
 impl Domain {
     pub fn new(
@@ -128,7 +131,21 @@ impl Domain {
             scope,
             tables,
             granted_like: schema.granted_like.clone(),
+            removed: BTreeSet::new(),
         })
+    }
+    /// This domain, whose lineage removed `removed`; a name added again
+    /// is current.
+    pub fn removing(mut self, removed: BTreeSet<String>) -> Self {
+        let logical = self.logical();
+        let current = |name: &String| match name.split_once('.') {
+            Some((table, field)) => logical
+                .table(table)
+                .is_some_and(|table| table.column(field).is_some()),
+            None => logical.table(name).is_some(),
+        };
+        self.removed = removed.into_iter().filter(|name| !current(name)).collect();
+        self
     }
     /// Partition grants as this generation reads them. A grant that named
     /// every field of its table, apart from fields later generations added,
@@ -157,6 +174,10 @@ impl Domain {
                 .collect()
         };
         let added = self.app.rows().added();
+        let current: BTreeSet<Commitment> = resources
+            .iter()
+            .flat_map(|resource| resource.columns.values().copied())
+            .collect();
         let table_name = |id: &Commitment| {
             logical
                 .tables
@@ -164,10 +185,13 @@ impl Domain {
                 .find(|table| logical.table_id(table) == *id)
                 .map(|table| table.sql_name.clone())
         };
+        // Tables and fields a later generation removed are dropped.
         let grants: Vec<_> = grants
             .iter()
+            .filter(|grant| table_name(&grant.table).is_some())
             .cloned()
             .map(|mut grant| {
+                grant.fields.retain(|field| current.contains(field));
                 if let Some(name) = table_name(&grant.table) {
                     let all = fields(&name);
                     if !grant.fields.is_empty()
@@ -231,11 +255,14 @@ impl Domain {
         }
         all
     }
-    /// `profile` with the schema's `granted_like` applied: a table granted
-    /// like another receives the same rights wherever the profile names
-    /// that one in whole rows and is silent on it. Commands stay with
-    /// their own tables. Every interpretation of a profile goes through here.
+    /// `profile` as this generation reads it: without the tables and
+    /// columns a later generation removed, and with the schema's
+    /// `granted_like` applied: a table granted like another receives the
+    /// same rights wherever the profile names that one in whole rows and is
+    /// silent on it. Commands stay with their own tables. Every
+    /// interpretation of a profile goes through here.
     pub fn effective(&self, profile: &Profile) -> Profile {
+        let profile = &self.current(profile);
         let follow = |scopes: &std::collections::BTreeSet<String>| {
             let mut scopes = scopes.clone();
             for (table, like) in &self.granted_like {
@@ -292,6 +319,44 @@ impl Domain {
                 }
                 Profile::Grants { grants: all }
             }
+        }
+    }
+    /// `profile` without the tables and columns earlier generations
+    /// removed; any other unknown name is still refused where it resolves.
+    fn current(&self, profile: &Profile) -> Profile {
+        let named = |scopes: &BTreeSet<String>| -> BTreeSet<String> {
+            scopes
+                .iter()
+                .filter(|name| !self.removed.contains(*name))
+                .cloned()
+                .collect()
+        };
+        match profile {
+            Profile::Issuer => Profile::Issuer,
+            Profile::Custody { scopes } => Profile::Custody {
+                scopes: named(scopes),
+            },
+            Profile::Reader { scopes } => Profile::Reader {
+                scopes: named(scopes),
+            },
+            Profile::Writer { scopes } => Profile::Writer {
+                scopes: named(scopes),
+            },
+            Profile::Grants { grants } => Profile::Grants {
+                grants: grants
+                    .iter()
+                    .filter(|grant| !self.removed.contains(&grant.scope))
+                    .cloned()
+                    .map(|mut grant| {
+                        if let Some(columns) = &mut grant.columns {
+                            columns.retain(|name| {
+                                !self.removed.contains(&format!("{}.{name}", grant.scope))
+                            });
+                        }
+                        grant
+                    })
+                    .collect(),
+            },
         }
     }
     /// This domain with the handlers its device executes commands with.

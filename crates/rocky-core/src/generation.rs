@@ -12,12 +12,13 @@ pub enum SchemaChange {
     /// Local tables, indexes or SQL spelling: replicas agree as before.
     /// Only the local projection is rebuilt.
     Local,
-    /// Replicated additions, which need a signed transition: new mergeable
-    /// tables, and nullable fields of existing ones.
+    /// Replicated changes that need a signed transition: new mergeable
+    /// tables, nullable fields of existing ones, and removals.
     Additive {
         tables: BTreeSet<String>,
         /// `table.field`.
         fields: BTreeSet<String>,
+        removed: Removed,
     },
     /// Additions with required fields of existing tables, new or once
     /// nullable, each with a default for rows that never held a value. Its
@@ -27,7 +28,21 @@ pub enum SchemaChange {
         fields: BTreeSet<String>,
         /// `table.field` NOT NULL fields rows of the installed schema lack.
         required: BTreeSet<String>,
+        removed: Removed,
     },
+}
+/// Mergeable tables and fields a new schema no longer has. Every device
+/// that adopts it drops them; see `docs/runtime/removal.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Removed {
+    pub tables: BTreeSet<String>,
+    /// `table.field` of tables that remain.
+    pub fields: BTreeSet<String>,
+}
+impl Removed {
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty() && self.fields.is_empty()
+    }
 }
 impl SchemaChange {
     pub fn replicated(&self) -> bool {
@@ -43,6 +58,13 @@ impl SchemaChange {
             Self::Unchanged | Self::Local => BTreeSet::new(),
         }
     }
+    /// What the new schema removed.
+    pub fn removed(&self) -> Removed {
+        match self {
+            Self::Additive { removed, .. } | Self::Breaking { removed, .. } => removed.clone(),
+            Self::Unchanged | Self::Local => Removed::default(),
+        }
+    }
 }
 
 /// A change no transition can make: replicas holding data of the installed
@@ -52,11 +74,9 @@ pub enum Unsupported {
     /// Another publisher or application name.
     Application,
     UpdatePolicy,
-    RemovedTable(String),
     /// A mergeable table became another class, or the reverse.
     TableClass(String),
     ChangedKey(String),
-    RemovedField(String),
     /// Type, nullability or collation of `table.field` changed.
     ChangedField(String),
     /// A required field of an existing table needs a default: rows written
@@ -77,10 +97,8 @@ impl std::fmt::Display for Unsupported {
         match self {
             Self::Application => f.write_str("another publisher or application"),
             Self::UpdatePolicy => f.write_str("the update policy changed"),
-            Self::RemovedTable(table) => write!(f, "table {table} was removed"),
             Self::TableClass(table) => write!(f, "table {table} changed class"),
             Self::ChangedKey(table) => write!(f, "the key of {table} changed"),
-            Self::RemovedField(field) => write!(f, "field {field} was removed"),
             Self::ChangedField(field) => write!(f, "field {field} changed type"),
             Self::RequiredField(field) => write!(
                 f,
@@ -102,8 +120,10 @@ impl std::fmt::Display for Unsupported {
 impl std::error::Error for Unsupported {}
 
 /// Classifies `new` against the installed `old`. Names are the identity of
-/// tables and fields: a rename is a removal, and a name keeps its type,
-/// collation and key role. See decision 0067.
+/// tables and fields: a rename is a removal and an addition, and a name
+/// keeps its type, collation and key role. A removed key or partition column
+/// changes its table's key; the table is removed instead. See decisions 0067
+/// and 0068.
 pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
@@ -126,6 +146,7 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     };
     let (mut tables, mut fields, mut required) =
         (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut removed = Removed::default();
     for table in new.mergeable() {
         match class(old, &table.sql_name) {
             None => {
@@ -137,13 +158,13 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     }
     for before in old.mergeable() {
         let name = &before.sql_name;
-        let after = new
-            .mergeable()
-            .find(|table| table.sql_name == *name)
-            .ok_or_else(|| match class(new, name) {
-                Some(_) => Unsupported::TableClass(name.clone()),
-                None => Unsupported::RemovedTable(name.clone()),
-            })?;
+        let Some(after) = new.mergeable().find(|table| table.sql_name == *name) else {
+            if class(new, name).is_some() {
+                return Err(Unsupported::TableClass(name.clone()));
+            }
+            removed.tables.insert(name.clone());
+            continue;
+        };
         let (old_key, new_key) = (logical::key_shape(before), logical::key_shape(after));
         if old_key != new_key
             || before.partition_by != after.partition_by
@@ -162,7 +183,9 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
         };
         for (field, shape) in &old_fields {
             match new_fields.get(field) {
-                None => return Err(Unsupported::RemovedField(format!("{name}.{field}"))),
+                None => {
+                    removed.fields.insert(format!("{name}.{field}"));
+                }
                 Some(other) if other != shape => {
                     // Only NOT NULL may tighten, and only with a default.
                     let (Some(was), Some(now)) = (column(before, field), column(after, field))
@@ -219,12 +242,17 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
         return Err(Unsupported::CommandTable(name.clone()));
     }
     if required.is_empty() {
-        return Ok(SchemaChange::Additive { tables, fields });
+        return Ok(SchemaChange::Additive {
+            tables,
+            fields,
+            removed,
+        });
     }
     Ok(SchemaChange::Breaking {
         tables,
         fields,
         required,
+        removed,
     })
 }
 
@@ -280,14 +308,15 @@ pub struct GenerationTransition {
     /// A [breaking](Self::breaking) cut: operations of every earlier
     /// schema generation are refused.
     pub cut: bool,
-    /// When it was signed, in seconds. Transitions that differ only in
-    /// this are one generation, whose baseline is the earliest.
+    /// When it was signed, in microseconds, the unit of stamp clocks.
+    /// Transitions that differ only in this are one generation, whose
+    /// baseline is the earliest.
     pub time: u64,
 }
 impl GenerationTransition {
     /// Little-endian numbers in field order.
     pub fn canonical(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.transition.v2".to_vec();
+        let mut bytes = b"rocky.transition.v3".to_vec();
         bytes.extend(self.app.0);
         bytes.extend(self.from);
         bytes.extend(self.to);
@@ -306,7 +335,7 @@ impl GenerationTransition {
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         let invalid = || crate::ProtocolError::InvalidManifest;
         let rest = bytes
-            .strip_prefix(b"rocky.transition.v2".as_slice())
+            .strip_prefix(b"rocky.transition.v3".as_slice())
             .filter(|rest| rest.len() == 16 + 32 + 32 + 4 * 4 + 1 + 8)
             .ok_or_else(invalid)?;
         let (app, rest) = rest.split_at(16);
@@ -538,6 +567,7 @@ mod tests {
             Ok(SchemaChange::Additive {
                 tables: ["tags".to_string()].into(),
                 fields: ["items.note".to_string()].into(),
+                removed: Removed::default(),
             })
         );
         for (new, refusal) in [
@@ -551,11 +581,7 @@ mod tests {
             ),
             (
                 schema(vec![items(&[("title", true)])]),
-                Unsupported::RemovedField("items.name".into()),
-            ),
-            (
-                schema(vec![table("tags", vec![column("id", true)])]),
-                Unsupported::RemovedTable("items".into()),
+                Unsupported::RequiredField("items.title".into()),
             ),
         ] {
             assert_eq!(classify(&old, &new), Err(refusal));
@@ -576,7 +602,19 @@ mod tests {
         assert_ne!(old.manifest(&[]).hash(), renamed.manifest(&[]).hash());
         assert_eq!(
             classify(&old, &renamed),
-            Err(Unsupported::RemovedField("items.name".into()))
+            Err(Unsupported::RequiredField("items.label".into()))
+        );
+        renamed.tables[0].columns[1].not_null = false;
+        assert_eq!(
+            classify(&old, &renamed),
+            Ok(SchemaChange::Additive {
+                tables: BTreeSet::new(),
+                fields: ["items.label".to_string()].into(),
+                removed: Removed {
+                    tables: BTreeSet::new(),
+                    fields: ["items.name".to_string()].into(),
+                },
+            })
         );
         // A name keeps its type, collation and key role.
         let mut retyped = old.clone();
@@ -623,6 +661,7 @@ mod tests {
                 tables: BTreeSet::new(),
                 fields: ["items.tag".to_string()].into(),
                 required: ["items.note".to_string(), "items.position".to_string()].into(),
+                removed: Removed::default(),
             })
         );
         assert_eq!(
@@ -650,6 +689,51 @@ mod tests {
         assert_eq!(
             classify(&new, &old),
             Err(Unsupported::ChangedField("items.note".into()))
+        );
+    }
+
+    #[test]
+    fn removed_tables_and_fields_are_replicated_changes() {
+        let mut shelves = table("shelves", vec![column("id", true), column("label", true)]);
+        shelves.indexes.push(LogicalIndex {
+            name: "shelves_label".into(),
+            unique: true,
+            columns: vec![crate::IndexColumn {
+                name: "label".into(),
+                descending: false,
+            }],
+            create_sql: "CREATE UNIQUE INDEX shelves_label ON shelves(label)".into(),
+            on_conflict: None,
+        });
+        let old = schema(vec![items(&[("name", true), ("note", false)]), shelves]);
+        let new = schema(vec![items(&[("name", true)])]);
+        let change = classify(&old, &new);
+        assert_eq!(
+            change,
+            Ok(SchemaChange::Additive {
+                tables: BTreeSet::new(),
+                fields: BTreeSet::new(),
+                removed: Removed {
+                    tables: ["shelves".to_string()].into(),
+                    fields: ["items.note".to_string()].into(),
+                },
+            })
+        );
+        assert!(change.is_ok_and(|change| change.replicated() && change.added().is_empty()));
+        // Re-adding a name is an ordinary addition of the same field.
+        assert_eq!(
+            classify(&new, &old).map(|change| change.removed()),
+            Ok(Removed::default())
+        );
+        // A removed key column changes the key: the table goes instead.
+        let mut keyless = schema(vec![items(&[("name", true), ("note", false)])]);
+        keyless.tables[0].primary_key = vec!["name".into()];
+        keyless.tables[0]
+            .columns
+            .retain(|column| column.sql_name != "id");
+        assert_eq!(
+            classify(&old, &keyless),
+            Err(Unsupported::ChangedKey("items".into()))
         );
     }
 
@@ -692,7 +776,7 @@ mod tests {
         );
         // One current format: another version or flag is refused.
         let mut other = cut.canonical();
-        other[b"rocky.transition.v".len()] = b'1';
+        other[b"rocky.transition.v".len()] = b'2';
         assert!(GenerationTransition::from_canonical(&other).is_err());
         let mut flag = cut.canonical();
         let at = flag.len() - 9;

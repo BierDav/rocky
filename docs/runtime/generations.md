@@ -65,6 +65,14 @@ declares: it verifies the peer's lineage, is renewed into it and switches its
 open replica before any frame of it applies. An application older than its
 database opens it unchanged. See [adopting generations](adopting-generations.md).
 
+## Removing tables and fields
+
+A signed generation can remove mergeable tables and fields, including their
+constraints. Every adopter drops them and applies older frames field by
+field under their original authority. Re-adding a name uses the earliest
+signing baseline and replays retained frames after it. See
+[removal](removal.md) for grants, checkpoint and recovery rules.
+
 ## Tables granted like another
 
 Grant profiles name tables, so a table added later is in no existing grant.
@@ -109,7 +117,7 @@ it offers no checkpoint and serves no frame of a generation behind its horizon,
 and each cut derives new pseudonym keys, so its new writes start new author
 logs. A device that has not upgraded is refused at admission.
 
-Limits: removing or renaming a field still needs a later feature. Two issuers
+Limits: two issuers
 that open the new schema while unable to reach each other each cut, and their
 households diverge. A peer behind a cut is refused at admission until its
 application declares the cut; discovery never adopts one. The migration is one transaction, so it changes at most
@@ -157,6 +165,6 @@ and queued handler work; [adopting generations](adopting-generations.md#evidence
 lists its own evidence.
 See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
 
-This does not implement removals or renames, cross-file atomic switching,
+This does not implement cross-file atomic switching,
 Room file import or cross-coordinator migration. Migrations run only on the
 cutting issuer; replicas never transform rows on their own.

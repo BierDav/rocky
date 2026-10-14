@@ -1433,6 +1433,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     ]),
                 )
                 .await?;
+            // A checkpoint sealed under an earlier generation names what
+            // this one removed: its rows and base keep only the rest.
+            inner.keep_current(id, scope, true).await?;
             for hash in reapply {
                 let frame = inner
                     .frame(hash)

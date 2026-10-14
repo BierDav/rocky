@@ -81,6 +81,13 @@ interface ShopDao {
     @Query("SELECT list, count(*) AS items, sum(completed) AS done FROM items GROUP BY list ORDER BY list")
     suspend fun summary(): List<Summary>
 
+    @Query("SELECT * FROM lists ORDER BY `key`")
+    suspend fun lists(): List<ShopList>
+
+    /** Names `price`, which a later generation of the database may have removed. */
+    @Query("SELECT price FROM items WHERE list = :list")
+    suspend fun prices(list: String): List<Double?>
+
     /** Rows whose ids the caller already holds. */
     @Transaction suspend fun addList(list: ShopList, items: List<ShopItem>) {
         insertList(list)
@@ -104,6 +111,9 @@ interface ShopDao {
     }
 
     @Transaction suspend fun createItems(items: List<ShopItem>): List<ShopItem> = items.map { it.copy(id = nextId("items")) }.also { insertItems(it) }
+
+    /** A list without items, its id reserved in the transaction that inserts it. */
+    @Transaction suspend fun createEmptyList(list: ShopList) = insertList(list.copy(id = nextListId()))
 }
 
 @Database(entities = [ShopList::class, ShopItem::class], version = 1, exportSchema = true)

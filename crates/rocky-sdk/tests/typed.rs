@@ -903,10 +903,8 @@ fn renamed_tables_and_columns_are_other_items() {
         renamed.replicated_fingerprint()
     );
     assert_eq!(
-        rocky_core::classify(&schema, &renamed),
-        Err(rocky_core::Unsupported::RemovedTable(
-            "shopping_items".into()
-        ))
+        rocky_core::classify(&schema, &renamed).map(|change| change.removed().tables),
+        Ok(["shopping_items".to_string()].into())
     );
     let mut column = schema.clone();
     column.tables[0].columns.iter_mut().for_each(|column| {

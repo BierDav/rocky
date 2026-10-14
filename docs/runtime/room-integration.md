@@ -217,3 +217,12 @@ native build steps about 2.7 ms per single-row DAO insert on the JVM, so a
 transaction near the 2,048-row bundle limit needs a longer lease than 5 s
 (`RockySQLiteDriver(database, ROOM_PROFILE, transactionTimeoutMillis)`);
 release builds are about ten times faster.
+
+## Older applications after removal
+
+Room validates the schema its application declares while Rocky opens the
+installed generation. The Kotlin qualification's `RoomGenerationsTest`
+creates version 1, opens version 2 removing `items.price`, then opens the
+version 1 Room app on that file. Its unchanged-list DAO reads and writes;
+its `prices` DAO fails with `SQLiteException` containing `no such column`.
+See [removal](removal.md) for the replicated switch.

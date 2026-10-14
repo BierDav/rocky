@@ -15,6 +15,26 @@ impl<A: RowApplication> Inner<A> {
         }
         let operation = frame.operation()?;
         let scope = operation.header.extensions.scope;
+        // Authority covers the writes as signed; the current generation
+        // applies what it still names, the same way on every device.
+        for write in writes {
+            if write.change.scope != scope
+                || !write.permitted_by(grants)
+                || write
+                    .published_fields()
+                    .iter()
+                    .any(|field| self.permission_fields.contains(field))
+            {
+                return Err(denied(
+                    "row/field transition denied; ACL changes require strong execution",
+                ));
+            }
+        }
+        let current: Vec<RowWrite> = writes
+            .iter()
+            .filter_map(|write| self.names.current(write, operation.header.timestamp))
+            .collect();
+        let writes = current.as_slice();
         let mut changed = BTreeSet::new();
         self.app
             .validate_changes(&exact(writes))
@@ -47,11 +67,6 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(|message| denied(&message))?;
             if change.scope != scope
                 || !changed.insert(self.storage_row(change)?)
-                || !write.permitted_by(grants)
-                || write
-                    .published_fields()
-                    .iter()
-                    .any(|field| self.permission_fields.contains(field))
                 || change
                     .before
                     .iter()
@@ -66,6 +81,14 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
             let current = self.row(scope, self.storage_row(change)?).await?;
+            // A re-added table's row created before its baseline is ignored,
+            // and so is every later write to it.
+            if current.is_none()
+                && change.before.is_some()
+                && self.names.tables.contains_key(&scope.table)
+            {
+                continue;
+            }
             let carried = payload.carried(&change.row);
             if let Some(carried) = carried {
                 if payload.membership().is_none() {

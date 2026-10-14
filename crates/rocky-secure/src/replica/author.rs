@@ -259,10 +259,14 @@ impl<A: RowApplication> Inner<A> {
         if previous.len() > 64 {
             return Err(denied("dependency quota"));
         }
+        // Hybrid time: past every value it saw and at least the wall clock,
+        // so stamps compare with a generation's baseline.
+        let clock = clock
+            .checked_add(1)
+            .ok_or_else(|| denied("logical clock exhausted"))?
+            .max(micros()?);
         let stamp = Stamp {
-            clock: clock
-                .checked_add(1)
-                .ok_or_else(|| denied("logical clock exhausted"))?,
+            clock,
             author: signing_key.public_key().into(),
             sequence,
         };
@@ -300,13 +304,7 @@ impl<A: RowApplication> Inner<A> {
             },
             chain,
             &key.key,
-            (
-                sequence,
-                backlink,
-                clock
-                    .checked_add(1)
-                    .ok_or_else(|| denied("logical clock exhausted"))?,
-            ),
+            (sequence, backlink, clock),
             previous.into_iter().collect(),
             &RowPayload::witness(
                 RowPayload::stamp_body(&payload(sequence)?, proofs, carried.clone())?,

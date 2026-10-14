@@ -552,6 +552,13 @@ pub struct Renewed {
 pub fn now() -> Result<u64, Failure> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
+/// Microseconds since the epoch: a transition's signing time, which stamps
+/// compare with.
+pub(crate) fn now_micros() -> Result<u64, Failure> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros(),
+    )?)
+}
 pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
@@ -808,16 +815,17 @@ impl Settings {
     }
     pub fn domain(&self) -> Result<Domain, Failure> {
         let publisher = *self.publisher.as_bytes();
-        let (generation, added) =
+        let (generation, added, removed) =
             crate::generation::lineage(&self.lineage, &self.schema, publisher)?;
-        Domain::at(
+        Ok(Domain::at(
             &self.schema,
             publisher,
             self.mesh,
             self.domain,
             generation,
             &added,
-        )
+        )?
+        .removing(removed))
     }
     pub fn manifest(&self) -> Result<SignedManifest, Failure> {
         Ok(SignedManifest::from_bytes(
@@ -1067,7 +1075,6 @@ impl Settings {
                     .iter()
                     .map(|epoch| format!("rotation.reader.{name}.{}", epoch.generation)),
             );
-            roles.push(format!("generation.reader.{name}"));
         }
         if let Ok(domain) = self.domain() {
             let cuts = self.cuts().unwrap_or_default();

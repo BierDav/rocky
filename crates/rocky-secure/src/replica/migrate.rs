@@ -121,10 +121,12 @@ impl<A: RowApplication> Inner<A> {
         else {
             return Err(incompatible("no typed tables are installed".into()));
         };
+        // A removed table leaves; every table that stays keeps its reader.
         if installed_domain != domain
-            || installed_readers
-                .iter()
-                .any(|(name, reader)| readers.get(name) != Some(reader))
+            || installed_readers.iter().any(|(name, reader)| {
+                readers.get(name).is_some_and(|new| new != reader)
+                    || (readers.get(name).is_none() && schema.table(name).is_some())
+            })
         {
             return Err(incompatible(
                 "a projection plan keeps the domain and reader scopes".into(),

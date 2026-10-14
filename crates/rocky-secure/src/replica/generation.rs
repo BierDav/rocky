@@ -81,6 +81,229 @@ impl<A> Definition<A> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
+/// What the recorded lineage removed and re-added, by table and field id.
+/// Frames, checkpoint pages and stored rows are read through it, the same
+/// way on every device. See `docs/runtime/removal.md`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Names {
+    /// Named by an earlier generation, not by the current one.
+    pub(super) retired_tables: HashSet<Commitment>,
+    pub(super) retired_fields: HashSet<Commitment>,
+    /// Removed once and named again: writes stamped before the clock of
+    /// the re-adding generation's baseline are ignored.
+    pub(super) tables: BTreeMap<Commitment, u64>,
+    pub(super) fields: BTreeMap<Commitment, u64>,
+    /// The table of each current field.
+    owners: BTreeMap<Commitment, Commitment>,
+}
+impl PartialEq for Names {
+    /// The same rules, whatever tables were added.
+    fn eq(&self, other: &Self) -> bool {
+        self.retired_tables == other.retired_tables
+            && self.retired_fields == other.retired_fields
+            && self.tables == other.tables
+            && self.fields == other.fields
+    }
+}
+impl Names {
+    /// The names of a lineage, oldest manifest first, with the signing time
+    /// of each transition out of all but the last.
+    fn of(manifests: &[ApplicationManifest], times: &[u64]) -> Self {
+        let Some((current, earlier)) = manifests.split_last() else {
+            return Self::default();
+        };
+        let ids = |items: &[rocky_core::DefinitionItem]| -> HashSet<Commitment> {
+            items.iter().map(|item| item.id).collect()
+        };
+        let tables: Vec<_> = manifests
+            .iter()
+            .map(|manifest| ids(&manifest.entities))
+            .collect();
+        let fields: Vec<_> = manifests
+            .iter()
+            .map(|manifest| ids(&manifest.fields))
+            .collect();
+        let (now_tables, now_fields) = (ids(&current.entities), ids(&current.fields));
+        let mut names = Self::default();
+        for manifest in earlier {
+            names.retired_tables.extend(
+                manifest
+                    .entities
+                    .iter()
+                    .map(|item| item.id)
+                    .filter(|id| !now_tables.contains(id)),
+            );
+            names.retired_fields.extend(
+                manifest
+                    .fields
+                    .iter()
+                    .map(|item| item.id)
+                    .filter(|id| !now_fields.contains(id)),
+            );
+        }
+        // The last generation that lacked a current name re-added it when
+        // an earlier one had it.
+        let readded = |sets: &[HashSet<Commitment>], id: &Commitment| -> Option<u64> {
+            let last = sets[..earlier.len()]
+                .iter()
+                .rposition(|set| !set.contains(id))?;
+            sets[..last]
+                .iter()
+                .any(|set| set.contains(id))
+                .then(|| times[last])
+        };
+        for id in &now_tables {
+            if let Some(clock) = readded(&tables, id) {
+                names.tables.insert(*id, clock);
+            }
+        }
+        for id in &now_fields {
+            if let Some(clock) = readded(&fields, id) {
+                names.fields.insert(*id, clock);
+            }
+        }
+        for field in &current.fields {
+            if let Some(table) = current
+                .entities
+                .iter()
+                .find(|table| field.name.starts_with(&format!("{}.", table.name)))
+            {
+                names.owners.insert(field.id, table.id);
+            }
+        }
+        // A re-added table's fields start again with it.
+        for (table, clock) in names.tables.clone() {
+            let Some(name) = current.entities.iter().find(|item| item.id == table) else {
+                continue;
+            };
+            for field in current
+                .fields
+                .iter()
+                .filter(|field| field.name.starts_with(&format!("{}.", name.name)))
+            {
+                let entry = names.fields.entry(field.id).or_insert(clock);
+                *entry = (*entry).max(clock);
+            }
+        }
+        names
+    }
+    /// Whether `table` has a re-added name, or one whose baseline moved
+    /// earlier, since `before`: writes to it ignored so far apply now.
+    pub(super) fn pulls_again(&self, before: &Self, table: Commitment) -> bool {
+        let earlier = |now: &u64, was: Option<&u64>| was.is_none_or(|was| now < was);
+        self.tables
+            .get(&table)
+            .is_some_and(|now| earlier(now, before.tables.get(&table)))
+            || self.fields.iter().any(|(field, now)| {
+                self.owners.get(field) == Some(&table) && earlier(now, before.fields.get(field))
+            })
+    }
+    /// Whether every write of a frame of `table` stamped at `clock` is
+    /// ignored: the table was added again after it.
+    pub(super) fn ignores_frame(&self, table: Commitment, clock: u64) -> bool {
+        self.retired_tables.contains(&table)
+            || self
+                .tables
+                .get(&table)
+                .is_some_and(|baseline| clock < *baseline)
+    }
+    /// `write` as the current generation applies it when stamped at
+    /// `clock`: without retired fields, nor re-added ones stamped before
+    /// their baseline. None when nothing of it applies.
+    pub(super) fn current(&self, write: &RowWrite, clock: u64) -> Option<RowWrite> {
+        let table = write.change.scope.table;
+        if self.retired_tables.contains(&table)
+            || self
+                .tables
+                .get(&table)
+                .is_some_and(|baseline| clock < *baseline)
+        {
+            return None;
+        }
+        let ignored = |field: &Commitment| {
+            self.retired_fields.contains(field)
+                || self
+                    .fields
+                    .get(field)
+                    .is_some_and(|baseline| clock < *baseline)
+        };
+        let images = [&write.change.before, &write.change.after];
+        if !write.assigned.iter().any(ignored)
+            && !images.iter().any(|image| {
+                image
+                    .as_ref()
+                    .is_some_and(|fields| fields.keys().any(ignored))
+            })
+        {
+            return Some(write.clone());
+        }
+        let strip = |image: &Option<RowFields>| {
+            image.as_ref().map(|fields| {
+                fields
+                    .iter()
+                    .filter(|(field, _)| !ignored(field))
+                    .map(|(field, value)| (*field, value.clone()))
+                    .collect::<RowFields>()
+            })
+        };
+        let stripped = RowWrite {
+            change: RowChange {
+                before: strip(&write.change.before),
+                after: strip(&write.change.after),
+                ..write.change.clone()
+            },
+            assigned: write
+                .assigned
+                .iter()
+                .copied()
+                .filter(|field| !ignored(field))
+                .collect(),
+        };
+        // An update of ignored fields alone changes nothing.
+        if stripped.change.before.is_some()
+            && stripped.change.after.is_some()
+            && stripped.published_fields().is_empty()
+        {
+            return None;
+        }
+        Some(stripped)
+    }
+    /// A stored row record as the current generation keeps it: without
+    /// retired fields, nor re-added ones stamped before their baseline.
+    /// Returns whether it changed.
+    pub(super) fn strip(&self, record: &mut Materialized) -> bool {
+        let ignored: Vec<Commitment> = record
+            .fields
+            .keys()
+            .chain(record.stamps.keys())
+            .filter(|field| {
+                self.retired_fields.contains(*field)
+                    || self.fields.get(*field).is_some_and(|baseline| {
+                        record
+                            .stamps
+                            .get(*field)
+                            .is_none_or(|stamp| stamp.clock < *baseline)
+                    })
+            })
+            .copied()
+            .collect();
+        for field in &ignored {
+            record.fields.remove(field);
+            record.stamps.remove(field);
+        }
+        !ignored.is_empty()
+    }
+    /// Whether a stored row of `table` was created before the table was
+    /// added again, so that no device keeps it.
+    pub(super) fn before_readding(&self, table: Commitment, record: &Materialized) -> bool {
+        self.tables.get(&table).is_some_and(|baseline| {
+            record
+                .created
+                .as_ref()
+                .is_none_or(|stamp| stamp.clock < *baseline)
+        })
+    }
+}
 /// An earlier generation.
 #[derive(Clone)]
 pub(crate) struct Previous {
@@ -98,22 +321,24 @@ fn incompatible(reason: impl Into<String>) -> Error {
 }
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v15", manifest, node))
+    encode(&("rocky.encrypted-replica.v16", manifest, node))
 }
-/// A newer definition keeps everything replicas of the older one agree
-/// on: its tables, fields, methods, operations and domains. A breaking
-/// transition keeps fields by identity and may require them: it admits no
-/// operation of an earlier generation.
+/// A newer definition keeps what replicas of the older one agree on: its
+/// methods, operations and domains, and every table and field it still
+/// names, unchanged. Tables and fields may be removed; every device drops
+/// them. A breaking transition keeps fields by identity and may require
+/// them: it admits no operation of an earlier generation.
 fn extends(
     old: &ApplicationManifest,
     new: &ApplicationManifest,
     transition: &rocky_core::GenerationTransition,
 ) -> Result<(), Error> {
     let kept = |old: &[rocky_core::DefinitionItem], new: &[rocky_core::DefinitionItem]| {
-        old.iter().all(|item| new.contains(item))
-    };
-    let ids = |items: &[rocky_core::DefinitionItem]| -> BTreeSet<Commitment> {
-        items.iter().map(|item| item.id).collect()
+        old.iter().all(|item| {
+            new.iter()
+                .find(|other| other.id == item.id)
+                .is_none_or(|other| other == item)
+        })
     };
     if old.publisher != new.publisher
         || old.app != new.app
@@ -121,13 +346,11 @@ fn extends(
         || old.projection != new.projection
         || old.domains != new.domains
         || old.operations != new.operations
-        || !(kept(&old.fields, &new.fields)
-            || transition.breaking() && ids(&old.fields).is_subset(&ids(&new.fields)))
-        || !kept(&old.methods, &new.methods)
-        || !ids(&old.entities).is_subset(&ids(&new.entities))
+        || !(kept(&old.fields, &new.fields) || transition.breaking())
+        || !old.methods.iter().all(|item| new.methods.contains(item))
     {
         return Err(incompatible(
-            "the new definition does not keep every table, field, method and domain of the installed one",
+            "the new definition does not keep the methods and domains, and the tables and fields it names, of the installed one",
         ));
     }
     Ok(())
@@ -307,7 +530,36 @@ impl<A: RowApplication> Inner<A> {
             _ => 0,
         };
         self.previous = previous;
+        self.names = self.lineage_names(&self.definition).await?;
         Ok(())
+    }
+    /// The names the recorded lineage, ending at `current`, removed and
+    /// re-added.
+    async fn lineage_names(&self, current: &ApplicationManifest) -> Result<Names, Error> {
+        let stored = rows(
+            &self.conn,
+            "SELECT signed,transition FROM secure_generations ORDER BY schema,handler",
+        )
+        .await?;
+        let publisher = self.config.publisher;
+        let (mut manifests, mut times) = (Vec::new(), Vec::new());
+        for row in stored {
+            let [SqlValue::Blob(signed), SqlValue::Blob(transition)] = row.as_slice() else {
+                return Err(Error::Corrupt("generation record".into()));
+            };
+            let manifest = SignedManifest::from_bytes(signed)
+                .and_then(|signed| signed.verify(publisher))
+                .map_err(credential)?;
+            let transition = SignedTransition::from_bytes(transition)
+                .and_then(|signed| signed.verify(publisher))
+                .map_err(credential)?;
+            if manifest.hash() != current.hash() {
+                manifests.push(manifest);
+                times.push(transition.time);
+            }
+        }
+        manifests.push(current.clone());
+        Ok(Names::of(&manifests, &times))
     }
     /// Activates the upgrade inside the open transaction when the file is
     /// installed with its first step's manifest. Everything is verified
@@ -337,6 +589,10 @@ impl<A: RowApplication> Inner<A> {
             return Ok(false);
         };
         let steps = &upgrade.steps[start..];
+        // What the installed generation's lineage names, before the step.
+        let before = self
+            .lineage_names(&steps[0].manifest.verify(publisher).map_err(credential)?)
+            .await?;
         if steps.len() + self.previous.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
@@ -411,6 +667,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         self.load_generations().await?;
+        self.apply_names(&before).await?;
         self.readmit().await?;
         #[cfg(test)]
         if ACTIVATION_FAULT.with(|fault| fault.replace(false)) {
@@ -623,13 +880,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     )
                     .await?;
             }
+            let before = inner.names.clone();
             inner.load_generations().await?;
+            inner.apply_names(&before).await?;
             inner.readmit().await
         });
         if let Err(error) = recorded {
             inner.load_generations().await?;
             return Err(error);
         }
+        inner.pull_again().await?;
         drop(inner);
         self.settle().await?;
         Ok(count)
@@ -650,7 +910,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(false);
         }
         let bytes = transition.to_bytes().map_err(credential)?;
-        transaction!(inner, |inner| {
+        let learned = transaction!(inner, |inner| {
             inner
                 .conn
                 .execute(
@@ -661,8 +921,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     ]),
                 )
                 .await?;
-            Ok(())
-        })?;
+            // An earlier baseline admits writes to a re-added name it ignored.
+            let before = inner.names.clone();
+            inner.names = inner.lineage_names(&inner.definition).await?;
+            inner.apply_names(&before).await
+        });
+        if let Err(error) = learned {
+            inner.load_generations().await?;
+            return Err(error);
+        }
+        inner.pull_again().await?;
         Ok(true)
     }
     /// Moves this open replica to a newer generation of its definition, as
@@ -747,6 +1015,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
         inner.load_direct().await?;
+        inner.pull_again().await?;
         inner.bump_authority();
         inner.publish_revision().await?;
         drop(inner);

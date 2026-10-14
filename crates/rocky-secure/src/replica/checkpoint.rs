@@ -697,6 +697,17 @@ fn integer(value: u64) -> SqlValue {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// The definition the credentials that sign `table`'s checkpoints name.
+    pub(super) fn signing_definition(&self, table: Commitment) -> Commitment {
+        let credentials = match self.row_authors.get(&table) {
+            Some(author) => &author.credentials,
+            None => &self.config.credentials,
+        };
+        credentials
+            .0
+            .first()
+            .map_or(self.manifest, |root| root.capability.manifest)
+    }
     pub(super) fn sign_checkpoint(
         &self,
         statement: CheckpointStatement,
@@ -1209,6 +1220,14 @@ impl<A: RowApplication> Inner<A> {
             };
             let frame = EncryptedFrame::bare(header.clone(), body.clone());
             let operation = frame.operation()?;
+            // Stamped before its table was added again: nothing applies.
+            if self
+                .names
+                .ignores_frame(scope.table, operation.header.timestamp)
+            {
+                last = Some(*position);
+                continue;
+            }
             if self.known(operation.header.extensions.manifest).is_err()
                 || !self.dependencies_ready(&frame, &BTreeSet::new()).await?
             {
@@ -1222,6 +1241,9 @@ impl<A: RowApplication> Inner<A> {
                     denied("an applied operation's key epoch is not installed; it is needed until a checkpoint covers it")
                 })?;
             for write in restore::replay_changes(&(scope, key.key), &frame)? {
+                let Some(write) = self.names.current(&write, operation.header.timestamp) else {
+                    continue;
+                };
                 if self
                     .app
                     .row_partition(&write.change)
@@ -1234,6 +1256,12 @@ impl<A: RowApplication> Inner<A> {
                 let row = self.storage_row(&write.change)?;
                 let old = self.replay_row(overlay, id, row).await?;
                 let current: Option<Materialized> = old.as_deref().map(decode).transpose()?;
+                if current.is_none()
+                    && write.change.before.is_some()
+                    && self.names.tables.contains_key(&scope.table)
+                {
+                    continue;
+                }
                 if finalized
                     && ((write.change.before.is_some() && current.is_none())
                         || (write.change.before.is_none() && current.is_some()))

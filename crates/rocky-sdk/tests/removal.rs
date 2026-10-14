@@ -1,0 +1,313 @@
+//! Removal: a generation drops tables and fields on every device that
+//! adopts it, and one that adds a name again ignores the writes stamped
+//! before its baseline. See `docs/runtime/removal.md`.
+mod common;
+use common::{Device, Failure, introduce};
+use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
+use serde_json::{Value, json};
+use std::{path::Path, sync::Arc};
+
+/// Items with a uniquely indexed `category` and a `shelf` referencing
+/// `shelves`.
+const SHELVED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true},{"name":"category","type":"text"},{"name":"shelf","type":"integer"}],"primary_key":["key"],"indexes":[{"name":"items_category","unique":true,"columns":[{"name":"category","descending":false}],"on_conflict":"latest_wins"}],"foreign_keys":[{"columns":["shelf"],"table":"shelves","on_delete":"set_null"}]},{"name":"shelves","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+/// `SHELVED` without `category`, its index, `shelf` and `shelves`.
+const UNSHELVED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+/// Items with a nullable `note`; the next version removes it and the one
+/// after adds it again.
+const NOTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text"},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+
+fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
+    Open {
+        directory,
+        schema,
+        secrets: None,
+        network,
+        commands: None,
+    }
+}
+fn version(schema: &str, version: u32) -> String {
+    schema.replace(r#""version":1"#, &format!(r#""version":{version}"#))
+}
+async fn rows(device: &Device, sql: &str) -> Value {
+    device
+        .ok(json!({"type": "read", "query": {"sql": sql, "values": [], "max_rows": 1024}}))
+        .await["rows"]
+        .clone()
+}
+fn text(value: &str) -> Value {
+    json!({"type": "text", "value": value})
+}
+async fn generation(device: &Device) -> Value {
+    device.ok(json!({"type": "generation"})).await
+}
+/// Creates a row of `collection`; returns its key.
+async fn create(device: &Device, handle: u8, collection: &str, values: Value) -> String {
+    let reply = device
+        .ok(json!({
+            "type": "mutate",
+            "handle": vec![handle; 32],
+            "payload": json!({"type": "create", "collection": collection, "values": values}).to_string().into_bytes(),
+            "entity": null,
+            "baseline": null,
+        }))
+        .await;
+    reply["id"].as_str().unwrap_or_default().to_owned()
+}
+/// Runs `sql` as one transaction: one frame.
+async fn write(device: &Device, collection: &str, handle: u8, sql: &str) {
+    let scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
+    common::identity::prepare(&scope, collection, &|request| device.call(request))
+        .await
+        .expect("prepare");
+    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
+    device.ok(json!({"type": "sql", "sql": sql})).await;
+    device
+        .ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]}))
+        .await;
+}
+/// The id of `items.<field>` in the domain at `directory`.
+fn field_id(directory: &Path, field: &str) -> Result<[u8; 32], Failure> {
+    let identity: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    let hex = identity["publisher"].as_str().ok_or("publisher")?;
+    let publisher: [u8; 32] = data_encoding::HEXLOWER
+        .decode(hex.as_bytes())?
+        .try_into()
+        .map_err(|_| "publisher length")?;
+    let app = rocky_core::ApplicationManifest::app_id(publisher, "shopping");
+    Ok(rocky_core::definition_item_id(
+        publisher,
+        app,
+        "field",
+        &format!("items.{field}"),
+    ))
+}
+/// Whether a stored or checkpoint row of the file at `directory` holds `id`.
+fn holds(directory: &Path, id: [u8; 32]) -> Result<bool, Failure> {
+    let file = rusqlite::Connection::open_with_flags(
+        directory.join("rocky.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut found = false;
+    for table in ["secure_rows", "secure_checkpoint_rows"] {
+        let mut statement = file.prepare(&format!("SELECT fields FROM {table}"))?;
+        let blobs = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        for blob in blobs {
+            found |= blob?.windows(32).any(|window| window == id);
+        }
+    }
+    Ok(found)
+}
+/// The application tables, indexes and `items` columns of the file.
+fn schema_of(directory: &Path) -> Result<(Vec<String>, Vec<String>), Failure> {
+    let file = rusqlite::Connection::open_with_flags(
+        directory.join("rocky.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = file.prepare(
+        "SELECT name FROM sqlite_schema WHERE type IN ('table','index') AND name NOT LIKE 'secure_%' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'issuer_registry%' ORDER BY name",
+    )?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    let mut statement =
+        file.prepare("SELECT name FROM pragma_table_info('items') ORDER BY name")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    Ok((names, columns))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    let b = Device::new(Database::join(
+        open(&b_dir, SHELVED, network("b")),
+        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
+            .await,
+    )?)?;
+    introduce(&a, &b).await;
+    create(&a, 1, "shelves", json!({"label": "pantry"})).await;
+    let shelf = rows(&a, "SELECT id FROM shelves").await[0][0]["value"]
+        .as_str()
+        .ok_or("shelf id")?
+        .parse::<i64>()?;
+    create(
+        &a,
+        2,
+        "items",
+        json!({"title": "apples", "completed": false, "category": "fruit", "shelf": shelf}),
+    )
+    .await;
+    create(
+        &a,
+        3,
+        "items",
+        json!({"title": "bread", "completed": false, "category": "bakery"}),
+    )
+    .await;
+    b.sync().await.expect("sync");
+    assert_eq!(b.titles().await, ["apples", "bread"]);
+    // The member, still at the first generation, writes a removed and a
+    // kept field in one frame.
+    write(
+        &b,
+        "items",
+        4,
+        "UPDATE items SET title='green apples', category='produce' WHERE title='apples'",
+    )
+    .await;
+
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, UNSHELVED, network("a")))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    assert_eq!(a.titles().await, ["apples", "bread"]);
+    // The member adopts the generation before it applies its frames; its
+    // own frame applies the kept field on both.
+    b.sync().await.expect("sync");
+    b.sync().await.expect("sync");
+    for device in [&a, &b] {
+        assert_eq!(generation(device).await["current"]["schema"], 2);
+        assert_eq!(device.titles().await, ["bread", "green apples"]);
+    }
+    // The member's application declares the removed column: its reads of
+    // it fail with an ordinary SQLite error.
+    let failed = b
+        .call(json!({"type": "read", "query": {"sql": "SELECT category FROM items", "values": [], "max_rows": 8}}))
+        .await
+        .expect_err("removed column");
+    assert!(
+        failed["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no such column")),
+        "{failed}"
+    );
+    a.close().await;
+    b.close().await;
+    // Each file holds exactly the new schema and no removed field.
+    for directory in [&a_dir, &b_dir] {
+        let (names, columns) = schema_of(directory)?;
+        assert!(
+            !names.iter().any(|name| name.contains("shelves")),
+            "{names:?}"
+        );
+        assert!(!names.contains(&"items_category".to_string()), "{names:?}");
+        assert!(names.contains(&"items".to_string()), "{names:?}");
+        assert!(
+            !columns
+                .iter()
+                .any(|name| name == "category" || name == "shelf"),
+            "{columns:?}"
+        );
+        for field in ["category", "shelf"] {
+            assert!(!holds(directory, field_id(directory, field)?)?, "{field}");
+        }
+        assert!(holds(directory, field_id(directory, "title")?)?);
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> Result<(), Failure>
+{
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let directory = |name: &str| root.path().join(name);
+    let a = Device::new(Database::create(
+        open(&directory("a"), NOTED, network("a")),
+        None,
+    )?)?;
+    let join = |name: &str, invitation: &str| -> Result<Device, Failure> {
+        Device::new(Database::join(
+            open(&directory(name), NOTED, network(name)),
+            invitation,
+        )?)
+    };
+    // c is a second issuer; d writes; e only ever meets a.
+    let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
+    let d = join("d", &a.invite().await)?;
+    let e = join("e", &a.invite().await)?;
+    for member in [&c, &d, &e] {
+        introduce(&a, member).await;
+    }
+    introduce(&c, &d).await;
+    let apples = create(
+        &a,
+        1,
+        "items",
+        json!({"title": "apples", "completed": false, "note": "old"}),
+    )
+    .await;
+    create(
+        &a,
+        2,
+        "items",
+        json!({"title": "bread", "completed": false, "note": "stale"}),
+    )
+    .await;
+    // e stays at the first generation, unsynced, until it meets a at the
+    // third.
+    c.sync().await.expect("sync");
+    d.sync().await.expect("sync");
+    // a removes the note; c adopts that generation.
+    a.close().await;
+    let a = Device::new(Database::open(open(
+        &directory("a"),
+        &version(common::SCHEMA, 2),
+        network("a"),
+    ))?)?;
+    c.sync().await.expect("sync");
+    assert_eq!(generation(&c).await["current"]["schema"], 2);
+    // Offline, a adds the note again, then stays away.
+    a.close().await;
+    Device::new(Database::open(open(
+        &directory("a"),
+        &version(NOTED, 3),
+        None,
+    ))?)?
+    .close()
+    .await;
+    // d, at the first generation, writes the note after that baseline. It
+    // meets c, adopts the second generation and hands c its frame as
+    // signed; c ignores the note.
+    d.set(3, &apples, "note", json!("late")).await;
+    let _ = d.sync().await;
+    assert_eq!(generation(&d).await["current"]["schema"], 2);
+    assert_eq!(generation(&c).await["current"]["schema"], 2);
+
+    // c meets a at the third generation and pulls the frame again.
+    let a = Device::new(Database::open(open(
+        &directory("a"),
+        &version(NOTED, 3),
+        network("a"),
+    ))?)?;
+    // Reachable again: the backoff of the failed passes ends.
+    c.ok(json!({"type": "networking_control", "enabled": true}))
+        .await;
+    c.sync().await.expect("sync");
+    assert_eq!(generation(&c).await["current"]["schema"], 3);
+    let notes = "SELECT title, note FROM items ORDER BY title";
+    let expected = json!([[text("apples"), text("late")], [text("bread"), {"type": "null"}]]);
+    assert_eq!(rows(&c, notes).await, expected);
+    // The others converge: d by the same steps, e from the first
+    // generation directly.
+    for device in [&c, &d, &e] {
+        device
+            .ok(json!({"type": "networking_control", "enabled": true}))
+            .await;
+        device.sync().await.expect("sync");
+    }
+    for device in [&a, &c, &d, &e] {
+        assert_eq!(generation(device).await["current"]["schema"], 3);
+        assert_eq!(rows(device, notes).await, expected);
+    }
+    for device in [&c, &d, &e, &a] {
+        device.close().await;
+    }
+    Ok(())
+}

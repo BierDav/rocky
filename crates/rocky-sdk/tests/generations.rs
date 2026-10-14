@@ -27,8 +27,6 @@ const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":6,"tables
 const UNIQUE_CUT: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
 /// The second schema with a nullable `rank`.
 const THIRD: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Drops a field: no transition can make that.
-const DROPPED: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
@@ -191,9 +189,9 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
 
     // A change no transition can make is refused before anything changes.
     a.close().await;
-    let refused = Database::open(open(&a_dir, DROPPED, network("a")));
+    let refused = Database::open(open(&a_dir, RETYPED, network("a")));
     let error = refused.err().expect("refused").to_string();
-    assert!(error.contains("removed"), "{error}");
+    assert!(error.contains("changed type"), "{error}");
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     a.close().await;
@@ -400,7 +398,9 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
     let a = Device::create(root.path(), None)?;
     a.add(1, "apples").await;
     a.close().await;
-    for (schema, refusal) in [(RETYPED, "changed type"), (RENAMED, "removed")] {
+    // A rename removes the old field and adds a new one, which a required
+    // field cannot be without a default.
+    for (schema, refusal) in [(RETYPED, "changed type"), (RENAMED, "needs a default")] {
         let error = Database::open(open(root.path(), schema, None))
             .err()
             .expect("refused")
@@ -754,11 +754,39 @@ async fn issuers_that_sign_one_schema_apart_end_on_one_generation() -> Result<()
     assert_eq!(left["manifest"], right["manifest"]);
     a.close().await;
     b.close().await;
+    // Both derived the first reader key of `tags` from the publisher key.
+    let tags = |directory: &Path| -> Result<Value, Failure> {
+        let identity: Value =
+            serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+        Ok(identity["keys"]["tags"].clone())
+    };
+    assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
+    assert_eq!(tags(&a_dir)?.as_array().map(Vec::len), Some(1));
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
     let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     a.add(2, "bread").await;
+    // Each issuer writes the table it added apart: both derived the same
+    // first reader key, so each reads the other's rows.
+    for (device, label) in [(&a, "fruit"), (&b, "dairy")] {
+        device
+            .ok(json!({
+                "type": "mutate",
+                "handle": vec![5; 32],
+                "payload": json!({"type": "create", "collection": "tags", "values": {"label": label}}).to_string().into_bytes(),
+                "entity": null,
+                "baseline": null,
+            }))
+            .await;
+    }
     b.sync().await.expect("sync");
     a.sync().await.expect("sync");
+    for device in [&a, &b] {
+        assert_eq!(
+            rows(device, "SELECT label FROM tags ORDER BY label").await,
+            json!([[text("dairy")], [text("fruit")]])
+        );
+    }
+    assert_eq!(tags(&a_dir)?, tags(&b_dir)?);
     let earliest = left["baseline"]
         .as_u64()
         .min(right["baseline"].as_u64())

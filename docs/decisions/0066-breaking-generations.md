@@ -38,5 +38,5 @@ format 5 and format 4 definitions are refused. The descriptor they build is
 unchanged and stays format 4, so installed databases still open. A cut drops data by design:
 the application decides when that is acceptable. Two issuers cutting without
 contact diverge; avoiding that needs coordination this record does not add.
-Removing fields remains unsupported. See
+Removal is implemented by [decision 0068](0068-adopting-newer-generations.md). See
 [generations](../runtime/generations.md#breaking-generations).

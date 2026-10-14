@@ -90,6 +90,20 @@ fn decode_bounded<T: Serialize + DeserializeOwned>(bytes: &[u8], limit: usize) -
 fn signing_bytes<T: Serialize>(label: &str, value: &T) -> Result<Vec<u8>, Error> {
     encode(&(label, value))
 }
+/// Microseconds since the epoch: the wall part of hybrid stamp clocks.
+fn micros() -> Result<u64, Error> {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|time| u64::try_from(time.as_micros()).unwrap_or(u64::MAX))
+        .map_err(|_| denied("clock before epoch"))?;
+    #[cfg(test)]
+    let time = time.saturating_add(
+        CLOCK_SKEW
+            .with(std::cell::Cell::get)
+            .saturating_mul(1_000_000),
+    );
+    Ok(time)
+}
 fn now() -> Result<u64, Error> {
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

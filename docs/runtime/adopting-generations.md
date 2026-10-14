@@ -48,7 +48,10 @@ as signed writes.
 | A newer schema, on an issuer | Signs and adopts it, as [before](generations.md#plan-backfill-and-switch) | `current` |
 | A newer schema, on a member | Fetches it from an issuer that signed it; otherwise opens at the domain's generation | `current` or `ahead` |
 
-Schema versions are local and unsigned, so they never decide this. An
+Schema versions are local and unsigned. They decide only one case: a schema
+that matches an earlier generation is behind unless it declares a later
+version than the installed one, which may add a removed name back
+([removal](removal.md)). An
 application behind or ahead of its database keeps reading and writing what
 both schemas share; its statements on what differs fail with ordinary SQLite
 errors. The [Room profile](sql-driver.md#room-284) answers `user_version` and
@@ -69,9 +72,9 @@ that time make the same generation, so issuers that sign one schema apart
 end on one manifest. Its baseline is the earliest signing time: a device
 that meets a peer at its generation once compares their lineages and keeps
 the earlier transition of each step, and `generations()` reports it.
-Nothing is filtered by the baseline yet; [removal](../features_09/03-removal.md)
-uses it for a re-added name, and with it a device that learns an earlier
-baseline pulls again the frames stamped after it.
+[Removal](removal.md) ignores writes to a re-added name stamped before it,
+and a device that learns an earlier baseline pulls again the frames stamped
+after it.
 
 ## Older generations
 
@@ -88,8 +91,8 @@ then admits the frames refused under it.
 Discovery does not adopt a [cut](generations.md#breaking-generations), which
 drops the device's unsynced work: an application that declares the cut adopts
 it at open, until [phase 6](../features_09/06-no-remnants.md) removes cuts.
-Issuers that sign one schema apart each create reader keys for the tables it
-adds. Removal is [phase 3](../features_09/03-removal.md).
+Issuers that sign one schema apart derive the same first reader key for each
+table it adds ([removal](removal.md#the-sdk)).
 
 ## Evidence
 

@@ -52,15 +52,16 @@ struct Offer {
     revocations: RevocationSet,
 }
 
-/// The schema generation of a lineage ending at `schema`, and the fields
-/// its transitions added to, or required of, collections that already
-/// existed: rows written before them may lack them.
+/// The schema generation of a lineage ending at `schema`; the fields its
+/// transitions added to, or required of, collections that already existed:
+/// rows written before them may lack them; and the tables and
+/// `table.field`s its transitions removed.
 pub(crate) fn lineage(
     steps: &[Step],
     schema: &Schema,
     publisher: [u8; 32],
-) -> Result<(u32, BTreeSet<String>), Failure> {
-    let (mut generation, mut added) = (1, BTreeSet::new());
+) -> Result<(u32, BTreeSet<String>, BTreeSet<String>), Failure> {
+    let (mut generation, mut added, mut removed) = (1, BTreeSet::new(), BTreeSet::new());
     let schemas: Vec<&Schema> = steps
         .iter()
         .map(|step| &step.schema)
@@ -72,9 +73,11 @@ pub(crate) fn lineage(
         if change.replicated() {
             generation += 1;
             added.extend(change.added());
+            let gone = change.removed();
+            removed.extend(gone.tables.into_iter().chain(gone.fields));
         }
     }
-    Ok((generation, added))
+    Ok((generation, added, removed))
 }
 
 impl Settings {
@@ -130,9 +133,17 @@ impl Settings {
                 .evolve_breaking(path, vault, schema, required, transport)
                 .await;
         }
-        // Grants issued before would silently change meaning.
+        // Grants issued before would silently change meaning. An entry goes
+        // with its table, or with the table it followed.
+        let kept = |name: &str| schema.tables.iter().any(|table| table.name == name);
         if let Some(table) = self.schema.tables.iter().find(|table| {
-            self.schema.granted_like.get(&table.name) != schema.granted_like.get(&table.name)
+            let (before, after) = (
+                self.schema.granted_like.get(&table.name),
+                schema.granted_like.get(&table.name),
+            );
+            kept(&table.name)
+                && before != after
+                && !(after.is_none() && before.is_some_and(|like| !kept(like)))
         }) {
             return Err(format!(
                 "the application schema cannot replace the installed one: {} changed whom it is granted like; declare that only when adding a table",
@@ -185,11 +196,15 @@ impl Settings {
     }
     /// How the schema an application declares stands to the installed
     /// generation: behind when it defines what a generation this domain
-    /// left defined. Versions are local and never signed, so they decide
-    /// nothing here.
+    /// left defined, unless it declares a later version than the installed
+    /// schema, which may add a removed name back. Versions are local and
+    /// unsigned, so they decide nothing else.
     pub(crate) fn application(&self, declared: &Schema) -> Result<crate::DeclaredSchema, Failure> {
         if *declared == self.schema {
             return Ok(crate::DeclaredSchema::Current);
+        }
+        if declared.version > self.schema.version {
+            return Ok(crate::DeclaredSchema::Ahead);
         }
         let publisher = *self.publisher.as_bytes();
         let declared = logical(declared, publisher)?;
@@ -322,7 +337,7 @@ impl Settings {
             },
             // Every earlier generation keeps syncing; after a cut, none do.
             cut: breaking,
-            time: crate::enrollment::now()?,
+            time: crate::enrollment::now_micros()?,
         };
         let signed = SignedTransition::sign(&transition, &publisher)?;
         if let Some(step) = draft.lineage.last_mut() {
@@ -331,10 +346,7 @@ impl Settings {
         draft.manifest = HEXLOWER.encode(&SignedManifest::sign(&after, &publisher)?.to_bytes()?);
         for (name, _) in domain.scopes() {
             if !draft.keys.contains_key(name) {
-                let key = match vault.find(&format!("generation.reader.{name}"))? {
-                    Some(key) => key,
-                    None => vault.create(&format!("generation.reader.{name}"))?,
-                };
+                let key = reader_key(&publisher, self.domain, name);
                 let epoch = rocky_core::KeyEpoch::new(1, &key);
                 let role = key_role(name, epoch);
                 if vault.find(&role)?.is_none() {
@@ -623,6 +635,16 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// The first reader key of a table a generation adds: derived from the
+/// publisher key, so issuers that sign the same schema apart hold the same
+/// key. Revocation rotates it to random later epochs as any other.
+fn reader_key(publisher: &PrivateKey, domain: rocky_core::DomainId, table: &str) -> [u8; 32] {
+    let mut input = publisher.as_bytes().to_vec();
+    input.extend(domain.0);
+    input.extend(table.as_bytes());
+    rocky_core::commitment("rocky.sdk.generation-reader.v1", &input)
 }
 
 /// Replaces each step of `lineage` whose transition `other` holds signed

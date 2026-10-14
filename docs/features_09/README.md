@@ -1,9 +1,7 @@
 # features_09: evolving schemas without limits
 
-Status: proposed roadmap (2026-10-14), not yet accepted. It does not replace
-[features_08](../features_08/README.md) as the next-work authority until that
-roadmap finishes or this one is accepted. Phase 1 is implemented and phase 2 is in
-progress; no other phase has started.
+Status: accepted roadmap (2026-10-14). Phases 1 to 3 are implemented. [features_08](../features_08/README.md) is history,
+not a competing next-work authority.
 
 ## Destination
 

@@ -2,7 +2,7 @@
 use super::*;
 use crate::replica::migrate::PlanStage;
 use crate::sql::SqlOptions;
-use crate::storage::rows;
+use crate::storage::{collect_rows, rows};
 use rocky_core::{
     Affinity, Collation, ColumnClass, DomainId, Generation, GenerationTransition, IndexColumn,
     LOGICAL_SCHEMA_FORMAT, LogicalColumn, LogicalIndex, LogicalSchema, LogicalTable,
@@ -82,7 +82,8 @@ fn text(value: &str) -> SqlValue {
 }
 
 /// Generation 1 has `items(id,title)`; 2 adds a nullable `note` and a
-/// `tags` table; 3 adds a nullable `rank`.
+/// `tags` table; 3 adds a nullable `rank`; 4 removes `note` and `tags`;
+/// 5 adds `note` again.
 struct Lineage {
     publisher: PrivateKey,
     domain: Scope,
@@ -105,14 +106,14 @@ impl Lineage {
             column("key", Affinity::Text, true),
             column("title", Affinity::Text, true),
         ];
-        if generation >= 2 {
+        if matches!(generation, 2 | 3 | 5) {
             items.push(column("note", Affinity::Text, false));
         }
         if generation >= 3 {
             items.push(column("rank", Affinity::Integer, false));
         }
         let mut tables = vec![table("items", items)];
-        if generation >= 2 {
+        if matches!(generation, 2 | 3) {
             tables.push(table(
                 "tags",
                 vec![
@@ -269,7 +270,7 @@ impl Lineage {
     fn config(&self, generation: u32, node: &PrivateKey) -> SecureConfig {
         let keys = ["items", "tags"]
             .iter()
-            .take(if generation >= 2 { 2 } else { 1 })
+            .take(if matches!(generation, 2 | 3) { 2 } else { 1 })
             .enumerate()
             .map(|(index, name)| KeyMaterial::new(self.scope(name), 1, [40 + index as u8; 32]))
             .collect();
@@ -284,15 +285,28 @@ impl Lineage {
     }
     /// The upgrade from `from` to `to`, with every intermediate step.
     fn upgrade(&self, from: u32, to: u32) -> Upgrade {
+        self.upgrade_at(from, to, 1_000)
+    }
+    /// `upgrade`, with the step into generation 5 signed at `readded`.
+    fn upgrade_at(&self, from: u32, to: u32, readded: u64) -> Upgrade {
         Upgrade {
             steps: (from..to)
                 .map(|generation| GenerationStep {
                     manifest: self.manifest(generation),
-                    transition: self.transition(generation),
+                    transition: match generation {
+                        4 => self.transition_at(4, readded),
+                        _ => self.transition(generation),
+                    },
                 })
                 .collect(),
             tables: Some((self.schema(to), self.domain, self.readers(to))),
         }
+    }
+    /// The id of `items.note`.
+    fn note(&self) -> Commitment {
+        let schema = self.schema(3);
+        let items = schema.table("items").unwrap();
+        schema.field_id(items, items.column("note").unwrap())
     }
     async fn open(
         &self,
@@ -1322,4 +1336,318 @@ async fn an_older_generation_the_replica_lacks_is_learned_before_its_frames_appl
             SqlValue::Null
         ]]
     );
+}
+
+/// Whether any stored row, or checkpoint row, holds `field`.
+async fn holds(replica: &EncryptedReplica<TypedRows>, table: &str, field: Commitment) -> bool {
+    let inner = replica.inner.lock().await;
+    rows(&inner.conn, &format!("SELECT fields FROM {table}"))
+        .await
+        .unwrap()
+        .iter()
+        .any(|row| match row.as_slice() {
+            [SqlValue::Blob(bytes)] => bytes.windows(32).any(|window| window == field),
+            _ => false,
+        })
+}
+/// Delivers every frame of `scope` from `source` at generation
+/// `generation` to `target`, applied or not.
+async fn deliver(
+    source: &EncryptedReplica<TypedRows>,
+    target: &EncryptedReplica<TypedRows>,
+    target_key: &PrivateKey,
+    lineage: &Lineage,
+    generation: u32,
+    scope: ResourceScope,
+) {
+    let credentials = lineage.credentials(generation, target_key);
+    for frame in frames_as(source, target_key.public_key(), &credentials, scope).await {
+        let _ = target.receive(frame).await;
+    }
+}
+async fn write(replica: &EncryptedReplica<TypedRows>, sql: &str) {
+    session(replica).await.run(sql, vec![]).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_generation_removes_a_field_and_a_table_on_every_replica_that_adopts_it() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice_path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(1, 3)))
+        .await
+        .unwrap();
+    let carol = lineage
+        .open(
+            &dir.path().join("carol.db"),
+            &carol_key,
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap();
+    let (items, tags, note) = (
+        lineage.scope("items"),
+        lineage.scope("tags"),
+        lineage.note(),
+    );
+    for (key, title) in [("0001", "one"), ("0002", "two")] {
+        identity_insert(
+            &session(&alice).await,
+            &format!("INSERT INTO items VALUES('{key}','{title}','noted',NULL)"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO tags VALUES('t','label')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    deliver(&alice, &carol, &carol_key, &lineage, 3, items).await;
+    // A checkpoint sealed at generation 3 holds the field.
+    alice.checkpoint(items).await.unwrap();
+    assert!(holds(&alice, "secure_checkpoint_rows", note).await);
+
+    assert!(
+        alice
+            .adopt_generation(
+                lineage.app(4),
+                lineage.config(4, &alice_key),
+                lineage.upgrade(1, 4)
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(alice.generations().await.unwrap().current.schema, 4);
+    // Exactly the new schema, every remaining row visible.
+    let reader = session(&alice).await;
+    assert!(reader.run("SELECT note FROM items", vec![]).await.is_err());
+    assert!(reader.run("SELECT * FROM tags", vec![]).await.is_err());
+    drop(reader);
+    assert_eq!(
+        select(&alice, "SELECT key,title FROM items ORDER BY key").await,
+        vec![
+            vec![text("0001"), text("one")],
+            vec![text("0002"), text("two")]
+        ]
+    );
+    // No stored row or checkpoint keeps the removed field or table.
+    assert!(!holds(&alice, "secure_rows", note).await);
+    assert!(!holds(&alice, "secure_checkpoint_rows", note).await);
+    {
+        let inner = alice.inner.lock().await;
+        let stored = |scope: ResourceScope| {
+            let conn = inner.conn.clone();
+            async move {
+                collect_rows(
+                    conn.query(
+                        "SELECT count(*) FROM secure_rows WHERE scope=?",
+                        [crate::encode(&scope).unwrap()],
+                    )
+                    .await
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(stored(tags).await, vec![vec![SqlValue::Integer(0)]]);
+        assert_eq!(stored(items).await, vec![vec![SqlValue::Integer(2)]]);
+    }
+    alice.checkpoint(items).await.unwrap();
+    assert!(!holds(&alice, "secure_checkpoint_rows", note).await);
+
+    // A device still at generation 3 writes a kept and a removed field:
+    // the kept one applies, the removed one is ignored.
+    write(
+        &carol,
+        "UPDATE items SET title='uno', note='carol' WHERE key='0001'",
+    )
+    .await;
+    write(&carol, "UPDATE tags SET label='other'").await;
+    deliver(&carol, &alice, &alice_key, &lineage, 3, items).await;
+    deliver(&carol, &alice, &alice_key, &lineage, 3, tags).await;
+    assert_eq!(
+        select(&alice, "SELECT title FROM items WHERE key='0001'").await,
+        vec![vec![text("uno")]]
+    );
+    assert!(!holds(&alice, "secure_rows", note).await);
+    alice.audit(items).await.unwrap();
+    // The frame stays as signed; reopening replays it the same way.
+    drop(alice);
+    let alice = lineage
+        .open(&alice_path, &alice_key, 4, Some(lineage.upgrade(1, 4)))
+        .await
+        .unwrap();
+    alice.audit(items).await.unwrap();
+    assert_eq!(
+        select(&alice, "SELECT key,title FROM items ORDER BY key").await,
+        vec![
+            vec![text("0001"), text("uno")],
+            vec![text("0002"), text("two")]
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let keys: Vec<_> = (0..4).map(|_| PrivateKey::new()).collect();
+    let mut replicas = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        replicas.push(
+            lineage
+                .open(
+                    &dir.path().join(format!("{index}.db")),
+                    key,
+                    3,
+                    Some(lineage.upgrade(1, 3)),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let [alice, bob, carol, dave] = &replicas[..] else {
+        unreachable!()
+    };
+    let [alice_key, bob_key, carol_key, dave_key] = &keys[..] else {
+        unreachable!()
+    };
+    let items = lineage.scope("items");
+    for (key, note) in [("0001", "old"), ("0002", "stale")] {
+        identity_insert(
+            &session(alice).await,
+            &format!("INSERT INTO items VALUES('{key}','title','{note}',NULL)"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    for (target, key) in [(bob, bob_key), (carol, carol_key), (dave, dave_key)] {
+        deliver(alice, target, key, &lineage, 3, items).await;
+    }
+    // Dave writes before the field is added again; his frame travels late.
+    write(dave, "UPDATE items SET note='early' WHERE key='0002'").await;
+    let started = crate::micros().unwrap();
+    let readded = started + 100_000_000;
+
+    // Alice goes 3 -> 4 -> 5; Bob goes 3 -> 5.
+    alice
+        .adopt_generation(
+            lineage.app(4),
+            lineage.config(4, alice_key),
+            lineage.upgrade(1, 4),
+        )
+        .await
+        .unwrap();
+    assert!(!holds(alice, "secure_rows", lineage.note()).await);
+    // Carol, still at 3, writes after the baseline.
+    crate::CLOCK_SKEW.with(|skew| skew.set(200));
+    write(carol, "UPDATE items SET note='late' WHERE key='0001'").await;
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+    // Alice, at 4, ignores the field and relays the frame as signed.
+    deliver(carol, alice, alice_key, &lineage, 3, items).await;
+    deliver(alice, bob, bob_key, &lineage, 3, items).await;
+    for (replica, key) in [(alice, alice_key), (bob, bob_key)] {
+        replica
+            .adopt_generation(
+                lineage.app(5),
+                lineage.config(5, key),
+                lineage.upgrade_at(1, 5, readded),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replica.generations().await.unwrap().baseline, Some(readded));
+    }
+    // Both read the write stamped after the baseline and none before it.
+    let notes = "SELECT key,note FROM items ORDER BY key";
+    let expected = vec![
+        vec![text("0001"), text("late")],
+        vec![text("0002"), SqlValue::Null],
+    ];
+    assert_eq!(select(alice, notes).await, expected);
+    assert_eq!(select(bob, notes).await, expected);
+    // Dave's earlier write arrives now and is ignored everywhere.
+    deliver(dave, alice, alice_key, &lineage, 3, items).await;
+    deliver(dave, bob, bob_key, &lineage, 3, items).await;
+    assert_eq!(select(alice, notes).await, expected);
+    assert_eq!(select(bob, notes).await, expected);
+
+    // An issuer signed the same step earlier: every device that learns that
+    // baseline pulls again the frames stamped after it.
+    let earlier = lineage.transition_at(4, started - 100_000_000);
+    for replica in [alice, bob] {
+        assert!(replica.learn_baseline(&earlier).await.unwrap());
+        assert_eq!(
+            replica.generations().await.unwrap().baseline,
+            Some(started - 100_000_000)
+        );
+        assert_eq!(
+            select(replica, notes).await,
+            vec![
+                vec![text("0001"), text("late")],
+                vec![text("0002"), text("early")]
+            ]
+        );
+        replica.audit(items).await.unwrap();
+    }
+
+    // Alice finalizes a horizon on her own; a replica that missed every
+    // frame imports the finalized checkpoint and agrees.
+    lineage.register_authors(alice, 5, alice_key).await.unwrap();
+    let cut = rocky_credentials::SignedHorizon::sign(
+        alice.horizon_statement(items, &[]).await.unwrap(),
+        &lineage.publisher,
+    )
+    .unwrap();
+    alice.receive_horizon(cut).await.unwrap();
+    alice.finalize_horizon(items).await.unwrap();
+    let erin_key = PrivateKey::new();
+    let erin = lineage
+        .open(
+            &dir.path().join("erin.db"),
+            &erin_key,
+            5,
+            Some(lineage.upgrade_at(1, 5, started - 100_000_000)),
+        )
+        .await
+        .unwrap();
+    let credentials = lineage.credentials(5, &erin_key);
+    let offered = alice
+        .checkpoint_offer(erin_key.public_key(), &credentials, items)
+        .await
+        .unwrap()
+        .expect("a finalized checkpoint");
+    assert!(offered.statement.finalized.is_some());
+    let checkpoint = offered.id().unwrap();
+    erin.begin_rebootstrap(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = alice
+            .checkpoint_page(
+                erin_key.public_key(),
+                &credentials,
+                items,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        erin.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    erin.finish_rebootstrap(items).await.unwrap();
+    assert_eq!(select(&erin, notes).await, select(alice, notes).await);
+    erin.audit(items).await.unwrap();
 }

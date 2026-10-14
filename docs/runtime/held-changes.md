@@ -57,7 +57,7 @@ is not stored.
 
 Range pages, pushes on sessions and live links, and transfer pages carry the
 records their frames continue after. The file identity is
-`rocky.encrypted-replica.v18` and link handshake `rocky.link.v3`, as
+`rocky.encrypted-replica.v19` and link handshake `rocky.link.v3`, as
 [coordinated writes](coordinated-writes.md) set them; other versions are
 refused.
 

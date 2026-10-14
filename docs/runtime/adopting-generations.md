@@ -99,6 +99,13 @@ the manifest in its saved lineage again.
 Issuers that sign one schema apart derive the same first reader key for each
 table it adds ([removal](removal.md#the-sdk)).
 
+Issuers that sign different schemas on the same generation split the
+lineage. A device adopts the branch it meets first and refuses the other as
+"the offered generations do not include this device's"; nothing joins the
+branches, and what a device applies of the other branch's writes is
+undefined. This is an
+[accepted limitation](../features_09/README.md#accepted-limitations).
+
 ## Evidence
 
 - `rocky-secure` `tests::generations::an_open_replica_adopts_a_newer_generation_in_place`

@@ -140,14 +140,17 @@ them. Status `migration` reports `{"state": "publishing", "bundles": n,
 arrives, a receiver reads the default in rows not reached yet; an edit a
 member makes meanwhile is stamped later and wins. A publication's frames do
 not count toward the [retained-history bound](encrypted-checkpoints.md#what-runs-on-its-own) until they
-are pruned. Rows the migrating issuer did not hold keep their default;
-nobody's work is dropped.
+are pruned. Rows the migrating issuer did not hold, and rows devices on an
+older application write later, keep their default; nobody's work is
+dropped. [Discovering such rows](../ideas/discovering_unmigrated_rows.md) is
+an idea.
 
 Issuers that open the new schema without reaching each other each migrate;
 the steps are one generation. Updates meet by latest wins, and rows an
 `insert` step adds merge when the table is keyed by name. In a table keyed
 by `id` each issuer's rows stay apart: an `insert` step's ids come from the
-issuer's own creation log ([decision 0071](../decisions/0071-staged-migration-publication.md#consequences)).
+issuer's own creation log, an
+[accepted limitation](../features_09/README.md#accepted-limitations).
 
 ## Manifests are a cache
 

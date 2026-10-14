@@ -118,7 +118,7 @@ The SDK sends entries only over open live links: a trusted node without one
 to a member of the set leaves the set at the deadline. Kotlin cannot compose
 its own `DomainLog`; it uses a coordination service's.
 
-The encrypted file identity is `rocky.encrypted-replica.v18` and the live
+The encrypted file identity is `rocky.encrypted-replica.v19` and the live
 link handshake `rocky.link.v3`; other versions are refused.
 
 ## Limits

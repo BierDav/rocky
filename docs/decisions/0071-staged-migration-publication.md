@@ -1,7 +1,8 @@
 # 0071: Staged migration publication
 
-Status: accepted; implemented except issuer-independent `insert` ids
-([phase 7](../features_09/07-migrations-at-any-size.md)).
+Status: accepted and implemented
+([phase 7](../features_09/07-migrations-at-any-size.md)), with
+[accepted limitations](../features_09/README.md#accepted-limitations).
 Date: 2026-10-14.
 
 ## Context
@@ -41,25 +42,25 @@ that evolves over decades must fill a new field of any table, however large
   retained-history bound until they are pruned; otherwise a migration larger
   than the bound would refuse the writes that deliver it, such as renewing
   members into its generation.
-- **Concurrent issuers converge without coordination.** Updates meet by
-  latest wins; rows an `insert` step adds merge when the table is keyed by
-  name, since equal keys are one row.
+- **Concurrent issuers converge without coordination,** except inserted rows
+  keyed by `id`. Updates meet by latest wins; rows an `insert` step adds
+  merge when the table is keyed by name, since equal keys are one row.
 
 ## Consequences
 
 The encrypted replica records publications and their frames, so its file
-identity moves to `rocky.encrypted-replica.v17`; v16 files are refused.
+identity moves to `rocky.encrypted-replica.v19`; v17 and v18 files are refused.
 `migration.json` holds only `from`. A migration of `n` rows retains roughly
 3 KB per row of history until it is pruned, outside the retained bound. A
 projection switch recreates partitioned tables from their stored rows, since
 a shadow fills from one scope.
 
-Not implemented: an `insert` step's ids derive from the issuer's own
+Accepted limitation: an `insert` step's ids derive from the issuer's own
 creation log. A row's id is an author number and a sequence, bound by the
 publisher's author binding and creation proof, and each author's births must
 continue its log; ids derived from the generation, step and selected key
-need a new identity class. Until then two issuers that insert into a table
-keyed by `id` add each row twice. Migration SQL cannot call
+would need a new identity class. Two issuers that insert into a table keyed
+by `id` add each row twice. Migration SQL cannot call
 `rocky_next_id`, which the SQL authorizer refuses.
 See [generations](../runtime/generations.md#migrations) and
 [secure SQL](../runtime/secure-sql.md#staged-publications).

@@ -1,7 +1,7 @@
 # 7. Migrations at any size
 
-Status: implemented (2026-10-14) except issuer-independent `insert` ids,
-which are blocked; see [evidence](#evidence).
+Status: implemented (2026-10-14), with
+[accepted limitations](README.md#accepted-limitations); see [evidence](#evidence).
 Owner: `rocky-sdk` `database.rs` migration flow and status; `rocky-secure`
 capture, outbox and bundles; `sdks/kotlin`. Depends on
 [phase 6](06-no-remnants.md). Follow the
@@ -43,16 +43,18 @@ result is published as many bundles.
 - **Receivers.** Each bundle is ordinary. Until the last arrives, rows not
   reached yet read their default; the hidden-row rules settle references and
   unique values in between. Every device ends with the same rows.
-- **Concurrent issuers converge.** Issuers that cannot reach each other may
-  each migrate. An `insert` step derives each row's id from the generation,
-  the step and the selected row's key, never from the issuer's partition, so
-  both write the same rows and they merge. Inside a migration Rocky refuses
-  every other id source, such as `next_id` and `rocky_next_id`. Differing
-  updates meet by latest wins. No coordinator is needed;
+- **Concurrent issuers converge, except inserted rows keyed by `id`.**
+  Issuers that cannot reach each other may each migrate. Differing updates
+  meet by latest wins, and rows an `insert` step adds merge when their table
+  is keyed by name. An `insert` step's ids come from the issuer's own
+  creation log, so two runs into a table keyed by `id` add each row twice;
+  this is an [accepted limitation](README.md#accepted-limitations).
+  Migration SQL cannot call `rocky_next_id`. No coordinator is needed;
   [avoiding the duplicate work](../optimizations_on_demand/coordinated-migrations.md)
   is deferred.
 - **Rows not held.** Rows the issuer did not hold when it migrated keep
-  their default. Rocky guarantees convergence, not that a migration saw
+  their default; [discovering them later](../ideas/discovering_unmigrated_rows.md)
+  is an idea. Rocky guarantees convergence, not that a migration saw
   every row.
 - **Steps unchanged.** SQL and `insert` steps keep their form and lose their
   size limit. Ordinary application transactions keep theirs.
@@ -76,7 +78,7 @@ result is published as many bundles.
 - An edit a member makes while bundles are still arriving wins on every
   device.
 - Two issuers that cannot reach each other both migrate; after they meet,
-  every device has the same rows and none twice.
+  every device has the same rows, and none twice in a table keyed by name.
 - An issuer without access to one partition cannot sign; a device whose app
   declares the new version keeps syncing on the old generation, and its
   queries on the new field fail with SQL errors.
@@ -97,7 +99,7 @@ and the guides [generations](../runtime/generations.md#migrations),
   publication and the bundle's position. The publication record commits in
   that transaction and marks the migration done; `migration.json` keeps
   only the version migrated from. The encrypted replica is
-  `rocky.encrypted-replica.v17`.
+  `rocky.encrypted-replica.v19`.
 - Slice 4. Status `migration` reports `publishing` with bundles and those a
   peer holds, or `full_access_required`.
 - A 100,000-row table gains a required field that a migration fills, and a
@@ -152,10 +154,11 @@ on a JVM/Android project (`scripts/ci/shopping-project`), whose
 `SchemaUpgradeTest` moves a version 6 household to version 7. The e2e test
 above ran alone; the e2e suite was not run.
 
-Blocked: an `insert` step's ids still come from the issuer's creation log,
-not from the generation, the step and the selected key. A row id is an
-author number and a sequence; the publisher's author binding ties the
-number to one pseudonym, the creation proof is signed by it, and each
-author's births must continue its log. Issuer-independent ids need a new
-identity class in `rocky-core` and `rocky-secure`, beyond this brief. Until
-then two issuers that insert into a table keyed by `id` add each row twice.
+Accepted instead of built: an `insert` step's ids come from the issuer's
+creation log, not from the generation, the step and the selected key. A row
+id is an author number and a sequence; the publisher's author binding ties
+the number to one pseudonym, the creation proof is signed by it, and each
+author's births must continue its log. Issuer-independent ids would need a
+new identity class in `rocky-core` and `rocky-secure`. Two issuers that
+insert into a table keyed by `id` therefore add each row twice, a
+[limitation](README.md#accepted-limitations) the roadmap accepts.

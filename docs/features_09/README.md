@@ -1,9 +1,10 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1 to 4, 6, 7, 8 and 9 are
-implemented; phases 5 and 10 are in progress. Phase 8 implementation is
-recorded in its [evidence](08-coordinated-log-evidence.md) and phase 9 in
-its [evidence](09-coordinated-writes-evidence.md). [features_08](../features_08/README.md)
+Status: accepted roadmap (2026-10-14). Phases 1, 2, 3, 4, 6, 7, 8 and 9 are
+implemented, with [accepted limitations](#accepted-limitations); phases 5 and
+10 are in progress. Phase 8 implementation is recorded in its
+[evidence](08-coordinated-log-evidence.md) and phase 9 in its
+[evidence](09-coordinated-writes-evidence.md). [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
 ## Destination
@@ -28,7 +29,8 @@ still sync:
 - **Migrations have no size limit.** They run in one local transaction on
   an issuer that can read and write every partition of the tables involved,
   and leave as many bundles as they need. They need no coordinator: issuers
-  that migrate concurrently converge on the same rows.
+  that migrate concurrently converge, apart from rows both insert into a
+  table keyed by `id`.
 - **No remnants.** Manifests are fetched when a frame needs one and dropped
   when no retained frame does. Transitions no longer carry an admission
   horizon, and the cut mechanism of
@@ -94,6 +96,24 @@ versions are tolerated belong to the application, not to Rocky.
   their database starts at the household's generation.
 - One current version per format
   ([decision 0039](../decisions/0039-single-current-formats.md)).
+
+## Accepted limitations
+
+- **A split schema is undefined.** Issuers that sign different schemas on
+  the same generation fork the lineage: each device adopts the branch it
+  meets first and refuses the other, and nothing joins the branches again.
+  What a device applies of the other branch's writes is not specified.
+  Issuers running one application release sign one generation, so a split
+  needs a bug, two releases rolled out at once or a malicious issuer.
+  [Cheap domain forks](../ideas/cheap_domain_forks.md) is an idea for making
+  a split explicit.
+- **Two migration runs may duplicate rows.** Issuers that migrate apart each
+  run the migrations. Updates meet by latest wins and rows keyed by name
+  merge, but an `insert` step into a table keyed by `id` adds each row once
+  per run. Rocky neither detects nor removes the duplicates: the application
+  must prevent them, for example by using the
+  [coordinator](../runtime/coordinated-log.md)
+  ([decision 0071](../decisions/0071-staged-migration-publication.md)).
 
 ## Phases
 

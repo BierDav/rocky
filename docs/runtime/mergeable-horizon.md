@@ -128,7 +128,7 @@ serves it to read-only participants; see
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 5, with an explicit existence-base list.
-Checkpoint 9, frame 8 and replica identity v14 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Checkpoint 9, frame 8 and replica identity v19 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
 staging are refused at admission and again at the final switch. Schema
 generations must satisfy the checkpoint's manifest/dependency bindings.

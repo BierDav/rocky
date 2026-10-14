@@ -119,7 +119,9 @@ test-tiers: failed: rocky-sdk::coordinated trusted_devices_number_concurrent_inv
 test-tiers: integration: 1028 passed, wall 185.42s, 185.42s at load x1.0, budget 300.00s
 ```
 
-The follow-up invoice investigation and fixes below address this blocker.
+The inherited invoice investigation and repairs below have not closed this gate.
+The [baseline comparison](05-invoice-baseline-evidence.md) reproduces the failure
+on unchanged Phase 9; this handoff stops at that prerequisite blocker.
 No test tier, retry count, assertion or deadline was weakened. The final Kotlin
 check after settings reuse passed (203 tasks, 5 min 13 s).
 
@@ -178,7 +180,8 @@ During development the frame-only fix exposed a planner mismatch:
 Two intermediate builds caught missing arguments while that helper was extracted:
 `error[E0425]: cannot find value id in this scope` and
 `error[E0061]: this method takes 3 arguments but 2 arguments were supplied`.
-Final verification results follow after the corrected build.
+No final full-check success is recorded. The
+[baseline comparison](05-invoice-baseline-evidence.md) records the handoff diagnosis.
 
 ## Implementation choices
 

@@ -21,6 +21,23 @@ entry at `a+1` whose hash is the record's digest, so positions are never
 reused: `c+1..=a` stay abandoned and new entries start at `a+2`. The in-sync
 set empties, so every trusted node applies the cut before it writes again.
 
+## Proposing and submitting
+
+`EncryptedReplica::cut_proposal` first collects what reachable devices hold,
+then proposes a cut of the exact head that retains this node's position. It
+refuses with `Behind` until the node holds every earlier cut and the prefix
+the last one retained, and with `Conflict` while an entry is pending. Its base
+report lists each projected scope of the domain and whether its verified
+checkpoint survives the cut; one that does not fails closed with
+`cut_base_missing` after the cut. The report covers this node's own bases;
+peer bases are classified when offered for import.
+
+`CutProposal::sign` signs with the owner's key and pairs the issuer chain.
+`submit_cut` checks the owner locally, flushes the record, then sends it.
+A lost reply keeps it, and the next resolution sends the same record again;
+a refused one is discarded unless the head's window shows it was admitted.
+The node admits and rolls back the cut once the coordinator commits it.
+
 ## Fencing
 
 Every device keeps every verified cut of a log, in order; a record whose

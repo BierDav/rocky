@@ -1,7 +1,7 @@
 # 10. Stuck recovery
 
-Status: partial; retained-bundle collection implemented. Owner-signed cuts and
-abandoned-history rollback are not implemented; see [evidence](10-stuck-recovery-evidence.md).
+Status: partial; collection and owner-signed cuts in `rocky-coordinator` and
+`rocky-secure` implemented; the SDK, API, Kotlin and guides are not. See [evidence](10-stuck-recovery-evidence.md).
 Owner: `rocky-coordinator` recovery operation; `rocky-secure` admission and
 projection; `rocky-sdk` recovery flow. Depends on
 [phase 9](09-coordinated-writes.md). Follow the

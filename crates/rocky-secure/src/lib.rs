@@ -23,14 +23,14 @@ pub use recovery::{
 mod store;
 mod wire;
 pub use replica::{
-    AuditReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus, CiphertextPage,
-    CommittedEntry, Companion, CoordinatedCommit, CoordinatedEntry, CoordinatedError,
-    CoordinatedStatus, CurrentValue, CustodySummary, CutEvidence, CutRefusal, Describe,
-    ENTRY_DEADLINE, EXISTENCE_FORMAT, EncryptedReplica, EntryPeers, EvictReport,
-    ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent, ExistencePage, ExistenceRecord,
-    FrontierLog, GenerationStatus, GenerationStep, HeldChange, HeldField, HeldKind, HeldRow,
-    Holding, HorizonPage, HorizonPending, HorizonProgress, KeyMaterial, LogPosition,
-    MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES,
+    AuditReport, BaseReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus,
+    CiphertextPage, CommittedEntry, Companion, CoordinatedCommit, CoordinatedEntry,
+    CoordinatedError, CoordinatedStatus, CurrentValue, CustodySummary, CutEvidence, CutProposal,
+    CutRefusal, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT, EncryptedReplica, EntryPeers,
+    EvictReport, ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent, ExistencePage,
+    ExistenceRecord, FrontierLog, GenerationStatus, GenerationStep, HeldChange, HeldField,
+    HeldKind, HeldRow, Holding, HorizonPage, HorizonPending, HorizonProgress, KeyMaterial,
+    LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES,
     MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE, MAX_GENERATIONS, MAX_PAGE_CUTS, MAX_SNAPSHOT_BYTES,
     MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, PLAN_ROWS, PeerFuture, PeerLag, ProjectionPlan,
     PruneBlock, PruneReport, Publication, ROWS_PER_FRAME, RangePage, RebootstrapReport,

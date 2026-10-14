@@ -9,8 +9,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub(super) mod cut;
+pub(super) mod proposal;
 mod recovery;
 pub use cut::{CutEvidence, CutRefusal, MAX_PAGE_CUTS};
+pub use proposal::{BaseReport, CutProposal};
 
 pub(super) const SCHEMA: &[&str] = &[
     // Per log: the committed position and running hash this replica holds,
@@ -887,6 +889,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<CoordinatedStatus, CoordinatedError> {
         let head = coordinator.log_head(log).await.map_err(coordination)?;
         self.inner.lock().await.learn_genesis(log, &head).await?;
+        // A submission a lost reply left undecided is sent again first.
+        self.retry_cut(log, coordinator).await?;
+        let head = coordinator.log_head(log).await.map_err(coordination)?;
         // Trusted nodes take cuts from the coordinator head only.
         if let Some(cut) = &head.cut {
             self.receive_cuts(&[CutEvidence::from_log(cut)?]).await?;

@@ -555,3 +555,198 @@ async fn a_returning_trusted_node_reverts_its_own_abandoned_entry_and_its_handle
     assert_eq!(fixture.resolve(bob).await.position, 4);
     assert_eq!(rows(&bob.1).await, expected);
 }
+
+async fn submissions(replica: &Replica) -> i64 {
+    match rocky_storage::storage::rows(
+        &replica.inner.lock().await.conn,
+        "SELECT COUNT(*) FROM secure_cut_submissions",
+    )
+    .await
+    .unwrap()[0]
+        .as_slice()
+    {
+        [SqlValue::Integer(count)] => *count,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_proposed_cut_is_signed_submitted_once_and_never_reuses_a_position() {
+    let stuck = Stuck::new().await;
+    let f = &stuck.fixture;
+    let (key, fresh) = &f.alice;
+    let (client, peers) = (f.mesh.client(key), f.mesh.peers(&f.lineage, key));
+    // Collection first: the proposal retains what dave still holds.
+    let proposal = fresh
+        .cut_proposal(f.lineage.domain, &client, &peers)
+        .await
+        .unwrap();
+    let mut expected = stuck.cut.record.statement.clone();
+    expected.issued = proposal.statement.issued;
+    assert_eq!(proposal.statement, expected);
+    let scope = f.lineage.scope("items");
+    assert!(proposal.bases.iter().any(|base| base.scope == scope));
+    assert!(proposal.bases.iter().all(|base| base.clean));
+    // A key that does not own the domain is refused before anything is
+    // flushed or sent.
+    let forged = proposal.sign(key, CredentialChain(Vec::new())).unwrap();
+    let error = fresh.submit_cut(&forged, &client).await.unwrap_err();
+    assert!(matches!(error, CoordinatedError::Storage(_)), "{error}");
+    assert_eq!(submissions(fresh).await, 0);
+    assert_eq!(domain_head(&f.mesh, &f.lineage).commit, 2);
+    // A lost coordinator keeps the flushed record; resolution sends it again.
+    let cut = proposal
+        .sign(f.lineage.publisher(), CredentialChain(Vec::new()))
+        .unwrap();
+    f.mesh.log.set_available(false);
+    assert_eq!(
+        fresh.submit_cut(&cut, &client).await,
+        Err(CoordinatedError::Unavailable)
+    );
+    assert_eq!(submissions(fresh).await, 1);
+    f.mesh.log.set_available(true);
+    assert_eq!(f.resolve(&f.alice).await.position, 3);
+    assert_eq!(
+        fresh.cuts(f.lineage.domain).await.unwrap(),
+        std::slice::from_ref(&cut)
+    );
+    assert_eq!(submissions(fresh).await, 0);
+    // The same record answers the same position; another is discarded.
+    assert_eq!(fresh.submit_cut(&cut, &client).await, Ok(3));
+    assert_eq!(
+        fresh.submit_cut(&stuck.cut, &client).await,
+        Err(CoordinatedError::Conflict)
+    );
+    assert_eq!(submissions(fresh).await, 0);
+    // The cut holds position 3; the next entry is 4.
+    f.invoice(&f.alice, "continued").await;
+    let head = domain_head(&f.mesh, &f.lineage);
+    assert_eq!(
+        (head.commit, head.hashes[2]),
+        (4, cut.record.digest().unwrap())
+    );
+    let expected = [row("0001", "kept"), row("0002", "continued")];
+    assert_eq!(rows(fresh).await, expected);
+    // Carol returns with abandoned entry 2: she reverts it, and its frames
+    // relayed back to the fresh node have no effect there.
+    let carol = &stuck.carol;
+    sync(&f.lineage, fresh, &carol.1, &carol.0).await;
+    assert_eq!(rows(&carol.1).await, expected);
+    sync(&f.lineage, &carol.1, fresh, key).await;
+    assert_eq!(rows(fresh).await, expected);
+    assert!(abandoned_frames(fresh).await > 0);
+    assert_eq!(
+        abandoned_frames(fresh).await,
+        abandoned_frames(&carol.1).await
+    );
+}
+
+#[tokio::test]
+async fn a_proposer_whose_base_holds_an_abandoned_entry_fails_closed() {
+    let stuck = Stuck::new().await;
+    let f = &stuck.fixture;
+    let carol = &stuck.carol;
+    let scope = f.lineage.scope("items");
+    // Carol's verified base covers entry 2, which no other device holds.
+    let tainted = carol.1.checkpoint(scope).await.unwrap();
+    assert_eq!(tainted.statement.coordinated.highest, 2);
+    f.mesh.add(&carol.0, &carol.1);
+    let (client, peers) = (f.mesh.client(&carol.0), f.mesh.peers(&f.lineage, &carol.0));
+    let proposal = carol
+        .1
+        .cut_proposal(f.lineage.domain, &client, &peers)
+        .await
+        .unwrap();
+    assert_eq!(proposal.statement.retained.position, 1);
+    let base = proposal
+        .bases
+        .iter()
+        .find(|base| base.scope == scope)
+        .unwrap();
+    assert!(!base.clean);
+    assert_eq!(base.binding, Some(tainted.statement.coordinated));
+    let cut = proposal
+        .sign(f.lineage.publisher(), CredentialChain(Vec::new()))
+        .unwrap();
+    assert_eq!(carol.1.submit_cut(&cut, &client).await, Ok(3));
+    // The tainted base is no replay base: the scope is guarded, its rows
+    // stay as they were, and it refuses work with `cut_base_missing`.
+    assert_eq!(carol.1.cut_guarded_scopes().await.unwrap(), [scope]);
+    assert_eq!(
+        rows(&carol.1).await,
+        [row("0001", "kept"), row("0002", "abandoned")]
+    );
+    let error = carol.1.checkpoint(scope).await.unwrap_err();
+    assert!(error.to_string().contains("cut_base_missing"), "{error}");
+    // Another holder of the cut never imports it either.
+    assert_eq!(f.resolve(&f.alice).await.position, 3);
+    assert_eq!(rows(&f.alice.1).await, [row("0001", "kept")]);
+    let error = f.alice.1.begin_rebootstrap(tainted).await.unwrap_err();
+    assert!(
+        error.to_string().contains("abandoned coordinated effects"),
+        "{error}"
+    );
+}
+
+/// A coordinator that admits a cut and then loses the reply.
+struct LostReply(Client);
+impl DomainLog for LostReply {
+    fn node(&self) -> NodeKey {
+        self.0.node()
+    }
+    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+        self.0.log_head(scope)
+    }
+    fn join(
+        &self,
+        scope: Scope,
+        position: u64,
+        running: Commitment,
+        sequence: u64,
+    ) -> CoordinationFuture<'_, u64> {
+        self.0.join(scope, position, running, sequence)
+    }
+    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
+        self.0.append(scope, append)
+    }
+    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        self.0.acknowledge(scope, pending)
+    }
+    fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+        Box::pin(async move {
+            self.0.cut(scope, cut).await?;
+            Err(CoordinationError::Unavailable)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_cut_whose_reply_is_lost_is_admitted_once_on_the_next_resolution() {
+    let stuck = Stuck::new().await;
+    let f = &stuck.fixture;
+    let (key, fresh) = &f.alice;
+    let lost = LostReply(f.mesh.client(key));
+    let proposal = fresh
+        .cut_proposal(f.lineage.domain, &lost, &f.mesh.peers(&f.lineage, key))
+        .await
+        .unwrap();
+    let cut = proposal
+        .sign(f.lineage.publisher(), CredentialChain(Vec::new()))
+        .unwrap();
+    assert_eq!(
+        fresh.submit_cut(&cut, &lost).await,
+        Err(CoordinatedError::Unavailable)
+    );
+    // Admitted at the coordinator, undecided here until it is sent again.
+    assert_eq!(domain_head(&f.mesh, &f.lineage).commit, 3);
+    assert!(fresh.cuts(f.lineage.domain).await.unwrap().is_empty());
+    assert_eq!(submissions(fresh).await, 1);
+    assert_eq!(f.resolve(&f.alice).await.position, 3);
+    assert_eq!(
+        fresh.cuts(f.lineage.domain).await.unwrap(),
+        std::slice::from_ref(&cut)
+    );
+    assert_eq!(submissions(fresh).await, 0);
+    f.invoice(&f.alice, "continued").await;
+    assert_eq!(domain_head(&f.mesh, &f.lineage).commit, 4);
+}

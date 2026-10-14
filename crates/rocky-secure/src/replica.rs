@@ -50,9 +50,9 @@ pub use checkpoint::{
     RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint, StrongSummary,
 };
 pub use coordinated::{
-    CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, CoordinatedStatus,
-    CutEvidence, CutRefusal, ENTRY_DEADLINE, EntryPeers, MAX_CATCH_UP_ENTRIES, MAX_PAGE_CUTS,
-    PeerFuture, Slot, entry_hash,
+    BaseReport, CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError,
+    CoordinatedStatus, CutEvidence, CutProposal, CutRefusal, ENTRY_DEADLINE, EntryPeers,
+    MAX_CATCH_UP_ENTRIES, MAX_PAGE_CUTS, PeerFuture, Slot, entry_hash,
 };
 pub use evict::EvictReport;
 pub use existence::{
@@ -553,6 +553,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         held::SCHEMA,
         coordinated::SCHEMA,
         coordinated::cut::SCHEMA,
+        coordinated::proposal::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,

@@ -1,7 +1,8 @@
 # Phase 10: stuck recovery evidence
 
-Status: partial. Collection implemented; owner-signed cuts and abandoned-history
-rollback remain unimplemented. This is not a passing Phase 10 completion gate.
+Status: partial. Collection, coordinator cuts, device fencing and rollback, and
+the secure-side proposal and submission are implemented; the SDK operation,
+API, Kotlin and guides are not. This is not a passing Phase 10 completion gate.
 
 ## Implemented slice
 
@@ -138,26 +139,53 @@ warning: build failed, waiting for other jobs to finish...
 
 The warning above was `warning: ignoring -C extra-filename flag due to -o flag`.
 
-## Exact remaining contract
+## Cut slices
 
-The existing `wire::Membership.entry` carries only a position. A cut that reuses
-that position cannot distinguish an abandoned frame from the new history.
-`Inner::rebuild_rows` starts from the verified checkpoint rows, then replays
-retained operations. A checkpoint may already include abandoned entries whose
-original frames have been pruned; rejecting retained suffix frames would leave
-those contributions in place. `SignedCheckpoint` has no coordinated prefix or
-history binding with which to authenticate a canonical replacement base.
+[Decision 0074](../decisions/0074-owner-signed-recovery-cuts.md) replaced the
+earlier remaining contract. Its landing steps:
 
-The remaining cut slice needs owner-signed history fencing, propagation to every
-member, a cut-bound canonical checkpoint replacement/reconciliation contract,
-and atomic rollback of projection, operation/outbox and revision state. None is
-reported as implemented. The second and third completion gates remain unmet.
+1. Coordinator admission of owner-signed cuts at `a+1` (`nvyxtvru`).
+2. Checkpoint binding, device fencing and the five-step rollback (`tzssvuyt`).
+3. `EncryptedReplica::cut_proposal`, `CutProposal::sign` and `submit_cut`
+   (`rokvryvk`); see [stuck recovery](../runtime/stuck-recovery.md#proposing-and-submitting).
+
+Step 3 adds three `rocky-secure` `tests::coordinated::cuts` scenarios:
+
+- `a_proposed_cut_is_signed_submitted_once_and_never_reuses_a_position`: the
+  proposal after collection equals the expected record; a non-owner signature
+  is refused before any flush; an unavailable coordinator keeps the flushed
+  record and resolution sends it again; a repeat answers position 3 and a
+  stale record `Conflict`; the next entry is 4. A returning member reverts
+  abandoned entry 2, and its frames relayed back have no effect.
+- `a_proposer_whose_base_holds_an_abandoned_entry_fails_closed`: the proposer's
+  base report marks its tainted checkpoint; after the cut the scope is guarded,
+  its rows unchanged, and checkpointing fails with `cut_base_missing`. Another
+  holder refuses that checkpoint as a base.
+- `a_cut_whose_reply_is_lost_is_admitted_once_on_the_next_resolution`: the
+  coordinator admits, the reply is lost, and resolution admits it locally once.
+
+Step 3 verification, 2026-10-15:
+
+- `cargo test -p rocky-secure`: exit 0; 284 passed, 11 ignored. The ten cut
+  scenarios take 1.74 s together.
+- `cargo test -p rocky-coordinator`: exit 0.
+- `cargo test -p rocky-sdk`: exit 0. No SDK source changed.
+- `./scripts/check --unit`: exit 0; 165 tests.
+- `./scripts/lint`: exit 0 after `./scripts/lint --fix` applied rustfmt.
+- `scripts/commitlint --jj @`: exit 0.
+- `./scripts/check`: exit 0; Clippy, 182 unit and 1,045 integration tests
+  (201.86 s against the 300 s budget). Log: `/tmp/rocky-p10s3-check.log`.
+
+Remaining (step 4): the SDK native operation over live-link peers, the JSON
+API, Kotlin, guides, and the Raft-store and process-kill tests 0074 lists.
+The base report covers the proposer's own bases; peer bases are classified
+only when offered for import.
 
 ## Limits
 
 The collection scenario is in-process SQLite and a memory coordinator, with
 physical deletion of the old database files. It does not qualify Raft recovery,
-real-network loss, power loss or a cut. A serving member needs a complete bundle;
+real-network loss or power loss; cuts are qualified in-process only. A serving member needs a complete bundle;
 this slice adds no collector for fragments spread across partial devices. A
 checkpoint-only copy does not reconstruct pruned entry evidence. No Kotlin,
 shopping, Phase 5, Phase 7 or Phase 11 work is included.

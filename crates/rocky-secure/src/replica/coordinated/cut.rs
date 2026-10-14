@@ -171,7 +171,10 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// The scopes of `log`'s domain this replica stores or holds a key of.
-    async fn log_scopes(&self, log: Scope) -> Result<Vec<ResourceScope>, Error> {
+    pub(in crate::replica) async fn log_scopes(
+        &self,
+        log: Scope,
+    ) -> Result<Vec<ResourceScope>, Error> {
         let mut scopes = BTreeSet::new();
         for record in rows(&self.conn, "SELECT scope FROM secure_scope_state").await? {
             let [SqlValue::Blob(bytes)] = record.as_slice() else {
@@ -190,6 +193,19 @@ impl<A: RowApplication> Inner<A> {
                 .filter(|scope| scope.domain == log),
         );
         Ok(scopes.into_iter().collect())
+    }
+    /// The id of `scope` when this replica projects its rows: it reads the
+    /// scope's key and stores it, not as keyless custody.
+    pub(in crate::replica) async fn projected(
+        &self,
+        scope: ResourceScope,
+    ) -> Result<Option<i64>, Error> {
+        let readable = self.config.keys.iter().any(|key| key.scope == scope)
+            && self.can_read_key(scope, &self.local_grants(now()?)?);
+        if !readable || self.direct.contains(&scope) {
+            return Ok(None);
+        }
+        self.find_scope_id(scope).await
     }
     /// Cut records of `log` after the first `held`, for a peer that holds
     /// that many.
@@ -370,16 +386,12 @@ impl<A: RowApplication> Inner<A> {
         let highest = self.highest_entry(id, (after, through), floor).await?;
         Ok(binding(self.held_cuts(scope.domain), highest))
     }
-    /// Verifies a record and its owner and stores it with its rollback,
-    /// inside the caller's transaction; `load_cuts` follows the commit.
-    pub(in crate::replica) async fn admit_cut(
-        &self,
-        evidence: &CutEvidence,
-    ) -> Result<Admission, Error> {
+    /// Verifies a record's signature and that its signer is the owner of
+    /// every scope of its domain this replica holds.
+    pub(in crate::replica) async fn verify_cut(&self, evidence: &CutEvidence) -> Result<(), Error> {
         let record = &evidence.record;
         record.verify().map_err(credential)?;
-        let log = record.statement.log;
-        let scopes = self.log_scopes(log).await?;
+        let scopes = self.log_scopes(record.statement.log).await?;
         if scopes.is_empty() {
             return Err(denied(
                 "the cut names a domain this replica holds nothing of",
@@ -402,7 +414,17 @@ impl<A: RowApplication> Inner<A> {
                 manifest,
                 &scopes,
             )
-            .map_err(credential)?;
+            .map_err(credential)
+    }
+    /// Verifies a record and its owner and stores it with its rollback,
+    /// inside the caller's transaction; `load_cuts` follows the commit.
+    pub(in crate::replica) async fn admit_cut(
+        &self,
+        evidence: &CutEvidence,
+    ) -> Result<Admission, Error> {
+        self.verify_cut(evidence).await?;
+        let record = &evidence.record;
+        let log = record.statement.log;
         let digest = record.digest().map_err(credential)?;
         let held = self.held_cuts(log);
         let sequence = record.statement.sequence;
@@ -595,41 +617,33 @@ impl<A: RowApplication> Inner<A> {
         let Some((scope, blob)) = next else {
             return transaction!(self, |inner| inner.advance_work(work, 4, None).await);
         };
-        let id = self.find_scope_id(scope).await?;
-        let readable = self.config.keys.iter().any(|key| key.scope == scope)
-            && self.can_read_key(scope, &self.local_grants(now()?)?);
-        if !readable || id.is_none() || self.direct.contains(&scope) {
+        let Some(id) = self.projected(scope).await? else {
             // Keyless custody projects nothing; an import replaces the rows.
             return transaction!(self, |inner| {
                 inner.advance_work(work, 3, Some(blob.clone())).await
             });
-        }
-        self.settle(scope).await?;
-        let base = match id {
-            Some(id) => self
-                .checkpoint_record(id, true)
-                .await?
-                .and_then(|record| record.signed),
-            None => None,
         };
+        self.settle(scope).await?;
+        let base = self
+            .checkpoint_record(id, true)
+            .await?
+            .and_then(|record| record.signed);
         let clean = base.is_none_or(|base| {
             classify(&base.statement.coordinated, self.held_cuts(work.log)) == Base::Clean
         });
         transaction!(self, |inner| {
             // A build begun before the cut replayed abandoned frames.
-            if let Some(id) = id {
-                inner
-                    .conn
-                    .execute(
-                        "UPDATE secure_checkpoints SET state='failed' WHERE scope=? AND state='building'",
-                        [id],
-                    )
-                    .await?;
-                inner
-                    .conn
-                    .execute("DELETE FROM secure_checkpoint_overlay WHERE scope=?", [id])
-                    .await?;
-            }
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_checkpoints SET state='failed' WHERE scope=? AND state='building'",
+                    [id],
+                )
+                .await?;
+            inner
+                .conn
+                .execute("DELETE FROM secure_checkpoint_overlay WHERE scope=?", [id])
+                .await?;
             if clean {
                 inner.rebuild_rows(scope).await?;
             } else {

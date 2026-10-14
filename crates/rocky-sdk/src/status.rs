@@ -187,6 +187,8 @@ pub struct GenerationStatus {
     pub application: DeclaredSchema,
     /// A migration this device waits for or publishes.
     pub migration: Option<MigrationStatus>,
+    /// An ahead member needs an issuer's signed generation, possibly offline.
+    pub waiting_for_issuer: bool,
 }
 /// A schema migration as this device sees it. See
 /// `docs/runtime/generations.md#migrations`.

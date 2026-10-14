@@ -25,7 +25,7 @@ import kotlin.time.Duration.Companion.seconds
 @Inject
 @ViewModelKey
 @ContributesIntoMap(AppScope::class, binding = binding<ViewModel>())
-class AppViewModel(session: ShoppingSession, deepLinks: DeepLinks, private val splash: SplashController) : ViewModel() {
+class AppViewModel(private val session: ShoppingSession, deepLinks: DeepLinks, private val splash: SplashController) : ViewModel() {
     val state: StateFlow<SessionState> = session.state
     val deepLinks: Flow<NavKey> = deepLinks.destinations
     val splashVisible: StateFlow<Boolean> = splash.visible
@@ -35,6 +35,8 @@ class AppViewModel(session: ShoppingSession, deepLinks: DeepLinks, private val s
         withTimeoutOrNull(SPLASH_LIMIT) { state.first { it != SessionState.Opening } }
         emit(true)
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun confirmRollout(digest: String) = session.confirmRollout(digest)
 
     fun hideSplash() = splash.hide()
 

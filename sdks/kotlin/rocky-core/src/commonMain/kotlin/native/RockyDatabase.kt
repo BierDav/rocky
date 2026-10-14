@@ -172,13 +172,17 @@ class RockyDatabase private constructor(
             .let { it.withAuthors(required = it.isIssuer) }
 
         /** Resumes the installation in [directory], or creates a new domain there. */
-        suspend fun openOrCreate(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase = if (exists(directory)) {
-            resume(directory, schema, transport, secrets, automaticSync, commands)
+        suspend fun openOrCreate(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = if (exists(directory)) {
+            resume(directory, schema, transport, secrets, automaticSync, commands, confirmation)
         } else {
             create(directory, schema, transport, secrets, automaticSync, commands)
         }
-        suspend fun open(directory: String, schema: Schema, transport: PeerTransport? = null, secrets: SecretStore? = null, automaticSync: Boolean = false, commands: CommandRuntime? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.open(directory, schema.json(), secretProvider(secrets), it, composeCommands(commands)) } }
-        suspend fun resume(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase = open(directory, schema, transport, secrets, automaticSync, commands)
+        suspend fun open(directory: String, schema: Schema, transport: PeerTransport? = null, secrets: SecretStore? = null, automaticSync: Boolean = false, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = make(automaticSync) {
+            withNetwork(transport) {
+                if (confirmation == null) NativeDatabase.open(directory, schema.json(), secretProvider(secrets), it, composeCommands(commands)) else NativeDatabase.openConfirmed(directory, schema.json(), confirmation, secretProvider(secrets), it, composeCommands(commands))
+            }
+        }
+        suspend fun resume(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = open(directory, schema, transport, secrets, automaticSync, commands, confirmation)
         suspend fun restore(directory: String, schema: Schema, archive: String, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, commands: CommandRuntime? = null): RockyDatabase = make(false) { withNetwork(transport) { NativeDatabase.restore(directory, schema.json(), archive, invitation, requireNotNull(it), secretProvider(secrets), composeCommands(commands)) } }
         fun newHandle(): String = newMutationHandle()
     }
@@ -280,6 +284,9 @@ private fun network(peers: PeerTransport): NativeNetwork = when (peers) {
 internal suspend fun <T> nativeCall(call: suspend () -> T): T = try {
     call()
 } catch (error: NativeException.Request) {
+    if (error.code == "confirmation_required" || error.code == "confirmation_mismatch") {
+        throw RolloutConfirmationRequired(RolloutImpact.parse(error.detail), error.code == "confirmation_mismatch")
+    }
     throw RockyException(error.code, error.retryable, error.detail)
 } catch (error: NativeException.Failure) {
     throw RockyException("storage", true, error.detail)

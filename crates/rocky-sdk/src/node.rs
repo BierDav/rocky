@@ -1724,13 +1724,11 @@ impl Node {
     /// The definition generation, the earlier ones still admitted and a
     /// table rebuild under way.
     async fn generation(&self) -> Result<Value, Failure> {
-        let (application, migration) = {
-            let settings = self.settings.lock().await;
-            (
-                self.application(&settings)?,
-                self.migration(&settings).await?,
-            )
-        };
+        let settings = self.settings.lock().await;
+        let application = self.application(&settings)?;
+        let migration = self.migration(&settings).await?;
+        let waiting_for_issuer = !settings.issuer() && application == crate::DeclaredSchema::Ahead;
+        drop(settings);
         let status = self.replica.generations().await?;
         let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema, "handler": generation.handler});
         Ok(json!({
@@ -1740,6 +1738,7 @@ impl Node {
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
             "baseline": status.baseline,
             "application": application,
+            "waiting_for_issuer": waiting_for_issuer,
             "held": self.replica.held_changes().await?.len(),
             "migration": migration,
         }))

@@ -36,6 +36,18 @@ class RoomGenerationsTest {
         },
     ).getValue("rows").jsonArray.map { it.jsonArray[0].jsonObject.getValue("value").jsonPrimitive.content }
 
+    private suspend fun confirmed(directory: File): RockyDatabase {
+        val required = assertFailsWith<RolloutConfirmationRequired> { RockyDatabase.open(directory, newer) }
+        assertEquals(listOf("items.price"), required.report.fields.map { it.name })
+        assertFalse(required.mismatch)
+        val changed = newer.copy(version = 3)
+        val stale = assertFailsWith<RolloutConfirmationRequired> {
+            RockyDatabase.open(directory, changed, confirmation = required.report.digest)
+        }
+        assertTrue(stale.mismatch)
+        return RockyDatabase.open(directory, newer, confirmation = required.report.digest)
+    }
+
     @Test fun anUnsentChangeTheNewerVersionRemovesIsHeldAndReauthored() = runBlocking {
         val directory = Files.createTempDirectory("room-held").toFile()
         try {
@@ -51,7 +63,7 @@ class RoomGenerationsTest {
             } finally {
                 created.close()
             }
-            val database = RockyDatabase.open(directory, newer)
+            val database = confirmed(directory)
             try {
                 database.installRoomAuthors()
                 // Never sent and writing the removed price: held whole, its rows rolled back.
@@ -95,7 +107,7 @@ class RoomGenerationsTest {
                 created.close()
             }
             // The application's next version removes `items.price`; this issuer signs that generation.
-            RockyDatabase.open(directory, newer).close()
+            confirmed(directory).close()
 
             // The version 1 application opens the newer database and Room validates the tables it declares.
             val database = RockyDatabase.open(directory, schema)

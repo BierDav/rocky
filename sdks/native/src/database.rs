@@ -225,6 +225,26 @@ impl NativeDatabase {
         .open()?;
         Self::wrap(rocky_sdk::Database::open(open))
     }
+    /// Opens with the digest of a removal report confirmed by the application.
+    #[uniffi::constructor]
+    pub fn open_confirmed(
+        directory: String,
+        schema: String,
+        digest: String,
+        secrets: Option<Arc<dyn NativeSecretStore>>,
+        network: Option<Arc<NativeNetwork>>,
+        commands: Option<NativeCommands>,
+    ) -> Result<Arc<Self>, NativeError> {
+        let open = Parts {
+            directory: &directory,
+            schema: &schema,
+            secrets,
+            network,
+            commands,
+        }
+        .open()?;
+        Self::wrap(rocky_sdk::Database::open_confirmed(open, &digest))
+    }
     /// Enrolls with the issuer `invitation` names, over `network`, which
     /// stays attached.
     #[uniffi::constructor]

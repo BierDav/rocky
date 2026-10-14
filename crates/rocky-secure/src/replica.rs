@@ -29,6 +29,7 @@ mod queries;
 mod reads;
 mod rebuild;
 mod removal;
+pub use removal::local_row_counts;
 mod restore;
 pub(super) mod roles;
 mod session;

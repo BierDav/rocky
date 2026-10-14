@@ -1,9 +1,9 @@
 # 0070: Confirmed rollouts and the end of cuts
 
 Status: accepted; the end of cuts implemented
-([phase 6](../features_09/06-no-remnants.md)), confirmed rollouts pending
-([phase 5](../features_09/05-confirmed-rollouts.md)). The nullable step before
-a migration is superseded by
+ ([phase 6](../features_09/06-no-remnants.md)); confirmed rollout implementation
+and verification are recorded in [phase 5](../features_09/05-confirmed-rollouts.md). The
+nullable step before a migration is superseded by
 [decision 0071](0071-staged-migration-publication.md): the issuer signs, then
 migrates.
 Date: 2026-10-14.
@@ -20,6 +20,15 @@ ever wrote, so a schema evolving for decades accumulated state
 ([features_09](../features_09/README.md)).
 
 ## Decision
+
+- **Confirmed removals.** Before an issuer's SDK open changes anything or
+  starts networking, it reports removed tables and fields with their live
+  stored local row counts. The application owns the prompt. Reopening with
+  the report's digest approves exactly its domain, installed manifest,
+  complete target schema and counts; the SDK recomputes it under the directory
+  lock and refuses mismatches. Members wait for an issuer's signed generation;
+  adoption of one already signed needs no confirmation. No protocol or
+  persisted format changes are needed for this signing gate.
 
 - **No cuts.** A required field with a default, new or once nullable, is an
   additive change. Rows that lack it, or hold NULL in it, read the default on

@@ -165,7 +165,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     b.sync().await.expect("sync");
 
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, UNSHELVED, network("a")))?)?;
+    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(a.titles().await, ["bread", "green apples"]);
     // The member adopts the generation; its frame was sent, so it is not
@@ -260,7 +260,7 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
     d.sync().await.expect("sync");
     // a removes the note; c adopts that generation.
     a.close().await;
-    let a = Device::new(Database::open(open(
+    let a = Device::new(common::confirmed(open(
         &directory("a"),
         &version(common::SCHEMA, 2),
         network("a"),
@@ -398,7 +398,7 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
     assert_eq!(b.titles().await, ["bread", "green apples"]);
 
     a.close().await;
-    let a = Device::new(Database::open(open(&a_dir, UNSHELVED, network("a")))?)?;
+    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     // Held whole: its kept edit is rolled back at once, on both.
@@ -464,5 +464,259 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
     }
     a.close().await;
     b.close().await;
+    Ok(())
+}
+
+fn confirmation(
+    result: Result<rocky_sdk::Opened, Failure>,
+) -> rocky_sdk::RolloutConfirmationRequired {
+    *result
+        .err()
+        .expect("confirmation required")
+        .downcast::<rocky_sdk::RolloutConfirmationRequired>()
+        .expect("structured report")
+}
+
+struct NeverStarts(std::sync::atomic::AtomicBool);
+impl rocky_sdk::transport::Connector for NeverStarts {
+    fn start(
+        &self,
+        _: bool,
+        _: [u8; 32],
+    ) -> rocky_sdk::transport::BoxFuture<
+        '_,
+        Result<Arc<dyn rocky_sdk::transport::Transport>, Failure>,
+    > {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err("network must not start before confirmation".into()) })
+    }
+}
+fn files(path: &Path) -> Result<Vec<(std::path::PathBuf, String)>, Failure> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            found.extend(files(&path)?);
+        } else if !path.file_name().is_some_and(|name| {
+            name == "rocky.sqlite-shm"
+                || (name == "rocky.sqlite-wal" && path.metadata().is_ok_and(|file| file.len() == 0))
+        }) {
+            found.push((
+                path.clone(),
+                data_encoding::HEXLOWER
+                    .encode(&rocky_core::commitment("test.file", &std::fs::read(path)?)),
+            ));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_open_changes_nothing_and_only_the_current_report_can_sign() -> Result<(), Failure>
+{
+    let root = common::identity::small_directory()?;
+    let directory = root.path();
+    let a = Device::new(Database::create(open(directory, SHELVED, None), None)?)?;
+    create(&a, 1, "shelves", json!({"label": "pantry"})).await;
+    create(
+        &a,
+        2,
+        "items",
+        json!({"title": "apples", "completed": false, "category": "fruit"}),
+    )
+    .await;
+    a.close().await;
+    let identity = std::fs::read(directory.join("identity.json"))?;
+    let database = std::fs::read(directory.join("rocky.sqlite"))?;
+    let before = files(directory)?;
+    let network = Arc::new(NeverStarts(std::sync::atomic::AtomicBool::new(false)));
+    let required = confirmation(Database::open(open(
+        directory,
+        UNSHELVED,
+        Some(Network::Owned(network.clone())),
+    )));
+    assert!(!network.0.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(files(directory)?, before);
+    assert!(!required.mismatch);
+    assert_eq!(
+        required.report.tables,
+        [rocky_sdk::RemovalImpact {
+            name: "shelves".into(),
+            rows: 1
+        }]
+    );
+    assert_eq!(
+        required.report.fields,
+        [
+            rocky_sdk::RemovalImpact {
+                name: "items.category".into(),
+                rows: 1
+            },
+            rocky_sdk::RemovalImpact {
+                name: "items.shelf".into(),
+                rows: 1
+            },
+        ]
+    );
+    assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
+    assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
+    assert!(!directory.join("migration.json").exists());
+    let changed = UNSHELVED.replace(r#""version":2"#, r#""version":3"#);
+    let stale = confirmation(Database::open_confirmed(
+        open(directory, &changed, None),
+        &required.report.digest,
+    ));
+    assert!(stale.mismatch);
+    assert_ne!(stale.report.digest, required.report.digest);
+    assert_eq!(std::fs::read(directory.join("identity.json"))?, identity);
+    assert_eq!(std::fs::read(directory.join("rocky.sqlite"))?, database);
+    // Opening the old schema remains possible after cancellation.
+    let a = Device::new(Database::open(open(directory, SHELVED, None))?)?;
+    create(
+        &a,
+        3,
+        "items",
+        json!({"title": "bread", "completed": false}),
+    )
+    .await;
+    a.close().await;
+    let stale = confirmation(Database::open_confirmed(
+        open(directory, UNSHELVED, None),
+        &required.report.digest,
+    ));
+    assert!(stale.mismatch);
+    assert_eq!(stale.report.fields[0].rows, 2);
+    let a = Device::new(Database::open_confirmed(
+        open(directory, UNSHELVED, None),
+        &stale.report.digest,
+    )?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    a.close().await;
+    let (_, columns) = schema_of(directory)?;
+    assert!(!columns.contains(&"category".into()));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_cannot_confirm_an_unsigned_removal_and_waits_for_an_issuer() -> Result<(), Failure>
+{
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    let b = Device::new(Database::join(
+        open(&b_dir, SHELVED, network("b")),
+        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
+            .await,
+    )?)?;
+    b.close().await;
+    let b = Device::new(Database::open_confirmed(
+        open(&b_dir, UNSHELVED, None),
+        "arbitrary",
+    )?)?;
+    let status = generation(&b).await;
+    assert_eq!(status["current"]["schema"], 1);
+    assert_eq!(status["application"], "ahead");
+    assert_eq!(status["waiting_for_issuer"], true);
+    assert!(
+        b.database
+            .session()
+            .status()
+            .await?
+            .data
+            .generation
+            .waiting_for_issuer
+    );
+    b.close().await;
+    a.close().await;
+    assert!(schema_of(&b_dir)?.1.contains(&"category".into()));
+    let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
+    let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
+    assert_eq!(generation(&b).await["current"]["schema"], 2);
+    assert_eq!(generation(&b).await["waiting_for_issuer"], false);
+    a.close().await;
+    b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partitions()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let a_dir = root.path().join("unique");
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    let peer_dir = root.path().join("peer");
+    let peer = Device::new(Database::join(
+        open(&peer_dir, SHELVED, network("peer")),
+        &a.invite_as(json!({"kind":"writer", "scopes":["items", "shelves"]}))
+            .await,
+    )?)?;
+    introduce(&a, &peer).await;
+    create(
+        &a,
+        1,
+        "items",
+        json!({"title":"apples", "completed":false, "category":"same"}),
+    )
+    .await;
+    create(
+        &peer,
+        2,
+        "items",
+        json!({"title":"bread", "completed":false, "category":"same"}),
+    )
+    .await;
+    peer.sync().await.expect("conflicting writes sync");
+    assert_eq!(a.titles().await.len(), 1);
+    peer.close().await;
+    a.close().await;
+    let report = confirmation(Database::open(open(&a_dir, UNSHELVED, None))).report;
+    assert_eq!(report.fields[0].rows, 2);
+
+    let b_dir = root.path().join("partitioned");
+    let mut schema: Value = serde_json::from_str(NOTED)?;
+    schema["tables"][0]["columns"]
+        .as_array_mut()
+        .ok_or("columns")?
+        .push(json!({"name":"list", "type":"text", "not_null":true}));
+    schema["tables"][0]["partition_by"] = json!(["list"]);
+    schema["tables"][0]["primary_key"] = json!(["list", "key"]);
+    let before = schema.to_string();
+    let b = Device::new(Database::create(open(&b_dir, &before, None), None)?)?;
+    for (handle, list) in [(1, "first"), (2, "second")] {
+        b.ok(json!({"type":"partition_create", "table":"items", "values":[text(list)]}))
+            .await;
+        let scope: Value = serde_json::from_str(&b.database.scope())?;
+        common::identity::prepare(&scope, "items", &|request| b.call(request))
+            .await
+            .map_err(|error| error.to_string())?;
+        b.ok(json!({"type":"sql", "sql":"BEGIN"})).await;
+        let id = b
+            .ok(json!({"type":"next_id", "table":"items", "partition_values":[text(list)]}))
+            .await["id"]
+            .clone();
+        b.ok(json!({"type":"sql", "sql":"INSERT INTO items(list,key,title,completed,note,id) VALUES(?,?,?,?,?,?)",
+            "values":[text(list), text("key"), text(list), {"type":"integer", "value":"0"}, text("old"), {"type":"integer", "value":id}]})).await;
+        b.ok(json!({"type":"sql", "sql":"COMMIT", "handle":vec![handle; 32]}))
+            .await;
+    }
+    b.close().await;
+    schema["version"] = json!(2);
+    schema["tables"][0]["columns"]
+        .as_array_mut()
+        .ok_or("columns")?
+        .retain(|column| column["name"] != "note");
+    let report = confirmation(Database::open(open(&b_dir, &schema.to_string(), None))).report;
+    assert_eq!(
+        report.fields,
+        [rocky_sdk::RemovalImpact {
+            name: "items.note".into(),
+            rows: 2
+        }]
+    );
     Ok(())
 }

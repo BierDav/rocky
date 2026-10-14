@@ -1,6 +1,7 @@
 # 5. Confirmed rollouts
 
-Status: proposed; not started.
+Status: implemented; rollout gates and full workspace verification passed
+after isolating the Phase 9 invoice repair. See [evidence](05-confirmed-rollouts-evidence.md).
 Owner: `rocky-sdk` `database.rs` open and generation signing, and status; `sdks/kotlin/rocky-core` `RockyDatabase`. Depends on
 [phase 3](03-removal.md). Follow the
 [execution contract](README.md#agent-execution-contract). Shares decision record 0070.

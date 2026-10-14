@@ -36,6 +36,23 @@ pub enum NativeError {
     Sql { code: i32, detail: String },
 }
 pub(crate) fn failure(error: Box<dyn std::error::Error + Send + Sync>) -> NativeError {
+    if let Some(required) = error.downcast_ref::<rocky_sdk::RolloutConfirmationRequired>() {
+        return match serde_json::to_string(&required.report) {
+            Ok(detail) => NativeError::Request {
+                code: if required.mismatch {
+                    "confirmation_mismatch"
+                } else {
+                    "confirmation_required"
+                }
+                .into(),
+                retryable: false,
+                detail,
+            },
+            Err(error) => NativeError::Failure {
+                detail: error.to_string(),
+            },
+        };
+    }
     if let Some(service) = error.downcast_ref::<rocky_sdk::ServiceError>() {
         return NativeError::Request {
             code: service.code().into(),

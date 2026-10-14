@@ -62,6 +62,7 @@ struct Setup {
     secrets: Arc<dyn SecretStore>,
     install: Install,
     commands: Option<Commands>,
+    confirmation: Option<String>,
 }
 enum Command {
     Call {
@@ -168,6 +169,10 @@ impl Database {
     pub fn open(open: Open<'_>) -> Result<Opened, Failure> {
         Self::start(open, Install::Installed)
     }
+    /// Opens after the application confirms the exact removal impact report.
+    pub fn open_confirmed(open: Open<'_>, digest: &str) -> Result<Opened, Failure> {
+        Self::start_confirmed(open, Install::Installed, Some(digest.into()))
+    }
     /// Restores a backup archive into an empty directory under a fresh
     /// signing identity, which `invitation` enrolls over `open.network`.
     /// The archive's operations, handles, tickets, results and effects keep
@@ -207,6 +212,13 @@ impl Database {
         Ok(reply["value"].to_string())
     }
     fn start(open: Open<'_>, install: Install) -> Result<Opened, Failure> {
+        Self::start_confirmed(open, install, None)
+    }
+    fn start_confirmed(
+        open: Open<'_>,
+        install: Install,
+        confirmation: Option<String>,
+    ) -> Result<Opened, Failure> {
         let directory = open.directory.to_path_buf();
         if let Install::Join { invitation } = &install {
             crate::enrollment::Invite::parse(invitation)?;
@@ -219,6 +231,7 @@ impl Database {
             directory,
             install,
             commands: open.commands,
+            confirmation,
         };
         let network = open.network;
         let (input, receiver) = mpsc::channel(32);
@@ -668,10 +681,11 @@ async fn identity(
         }
         Install::Installed => {
             let mut settings = Settings::load(path)?;
-            let vault = settings.vault(secrets);
             if settings.logged_out {
                 return Err("this device logged out; join the domain again".into());
             }
+            crate::rollout::confirm(&settings, path, schema, setup.confirmation.as_deref()).await?;
+            let vault = settings.vault(secrets);
             let link = match network {
                 Some(network) => {
                     let key = Settings::transport_key(&vault)?;

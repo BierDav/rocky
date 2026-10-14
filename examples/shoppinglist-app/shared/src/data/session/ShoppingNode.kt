@@ -108,8 +108,8 @@ class ShoppingNode private constructor(
             if (isTrusted) household.record(self, code.name, NodeKind.Trusted)
         }
 
-        suspend fun resume(platform: ShoppingPlatform): ShoppingNode = open(platform) { commands ->
-            RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), commands = commands)
+        suspend fun resume(platform: ShoppingPlatform, confirmation: String? = null): ShoppingNode = open(platform) { commands ->
+            RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), commands = commands, confirmation = confirmation)
         }.configure {
             if (isTrusted && rocky.observeStatus().first().authority.verifiedRevocation == null && household.devices().first().none { it.node == self }) {
                 household.record(self, platform.deviceName, NodeKind.Trusted)

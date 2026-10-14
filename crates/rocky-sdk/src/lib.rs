@@ -15,6 +15,7 @@ mod mesh;
 mod node;
 mod owner;
 mod registry;
+mod rollout;
 mod scheduling;
 mod schema;
 mod secrets;
@@ -46,6 +47,7 @@ pub use rocky_core::{
 };
 /// Signed credentials, grant profiles and the key provider contract.
 pub use rocky_credentials as credentials;
+pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use status::*;

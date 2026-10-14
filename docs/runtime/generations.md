@@ -20,8 +20,9 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   versions within the support horizon keep their descriptors. Adding a version
   requires a new handler generation. Removing/redefining one is refused.
 - Key rotation/revocation uses the existing explicit credential policy mechanism.
-  Generation plans refuse reader-scope remapping. Key/type changes, removals
-  and renames, which remove the old name, are unsupported.
+  Generation plans refuse reader-scope remapping and key/type changes.
+  Removing mergeable tables or fields needs [application confirmation](#confirmed-removals);
+  renaming is removal and addition.
 
 Partition group membership and names are immutable for existing tables, as are
 partition columns. A new mergeable table may join an existing group with matching
@@ -60,6 +61,32 @@ reports its application ahead. Issuer state is saved before replica activation,
 so reopening with the same schema continues after interruption. New collections
 do not silently expand member grants. SDK lineage is capped at 32 steps; secure
 runtime lineage at 64.
+
+## Confirmed removals
+
+An issuer opening a schema that removes tables or fields receives
+`RolloutConfirmationRequired` before settings, secrets or the replica change,
+and before its network starts. Its `report` lists removed tables and
+`table.field` names with the live stored row count of each table on this copy,
+including rows suppressed by constraints and every held partition. A removed
+field counts every live row of its table, including NULL or missing values.
+Counts are neither a device inventory nor a domain-wide estimate.
+
+The application shows the report with its own wording and asks for confirmation.
+Only after confirmation does it call `Database::open_confirmed(open, digest)`;
+Kotlin calls `RockyDatabase.open(..., confirmation = report.digest)` or `resume`.
+The digest binds the domain, installed manifest, complete target SDK schema
+(including migrations) and counts. Open recomputes it under the directory lock.
+A mismatch returns the current report with `mismatch = true` and changes nothing;
+the application must show that report again. Counts changing invalidates approval;
+a value change that leaves counts unchanged does not change this impact report.
+Cancelling leaves the old schema usable. Pure additions need no confirmation.
+
+Members never sign or authorize removal. Until an issuer supplies a signed
+new generation, they open the installed one with `application = ahead` and
+`waiting_for_issuer = true`. Adopting a generation already signed by an issuer
+needs no further local confirmation. Confirmation governs SDK signing, not
+verification of publisher signatures from peers.
 
 ## Adopting newer generations
 

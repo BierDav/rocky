@@ -136,6 +136,15 @@ impl TableEvents {
             registry: Mutex::default(),
         })
     }
+    /// The events of the same domain with another set of tables, such as
+    /// after a schema switch: every observer moves over and stays open.
+    pub fn follow(&self, tables: impl IntoIterator<Item = String>) -> Arc<Self> {
+        let next = Self::new(self.scope, tables);
+        if let (Ok(mut from), Ok(mut to)) = (self.registry.lock(), next.registry.lock()) {
+            *to = std::mem::take(&mut *from);
+        }
+        next
+    }
     pub fn scope(&self) -> Scope {
         self.scope
     }

@@ -105,7 +105,7 @@ impl Node {
         chain
             .verify_selectors(
                 settings.publisher,
-                self.domain.manifest().hash(),
+                self.domain().manifest().hash(),
                 node,
                 &settings.revocations,
                 time,
@@ -276,7 +276,7 @@ impl Node {
             .map(|value| value.value())
             .collect::<Result<Vec<_>, _>>()?;
         let partition =
-            GroupPartition::resolve(&self.domain, Some(&contents.group), None, values.clone())?;
+            GroupPartition::resolve(&self.domain(), Some(&contents.group), None, values.clone())?;
         let envelope = GroupSecretEnvelope::from_bytes(&contents.envelope)?;
         if envelope.group() != partition.record.address {
             return Err("the delivery names another partition than its envelope".into());

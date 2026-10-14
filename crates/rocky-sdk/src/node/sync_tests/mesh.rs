@@ -431,7 +431,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         let reached = b.reached()?;
         assert!(reached.get(&c_key).is_some_and(|last| !last.refused.is_empty() || last.error.is_some()));
         let held = &reached.get(&d_key).ok_or("custody was not reached")?.held;
-        assert!(b.scopes().iter().filter(|scope| !b.domain.partitioned_table(scope)).all(|scope| held.contains(scope)));
+        assert!(b.scopes().iter().filter(|scope| !b.domain().partitioned_table(scope)).all(|scope| held.contains(scope)));
         assert!(hub.dials_to("d") > 0);
         }
         let page = command(&b, json!({"type":"read","query":{"sql":"SELECT title FROM items WHERE row_kind=0","max_rows":8}})).await?;

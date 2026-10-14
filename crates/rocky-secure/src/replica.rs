@@ -592,6 +592,57 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Checks a configuration against its verified manifest: the revocations,
+/// this node's credentials for that manifest, and keys it may read whole.
+pub(super) fn check_config(
+    config: &SecureConfig,
+    manifest: &rocky_core::ApplicationManifest,
+) -> Result<(), Error> {
+    config
+        .revocations
+        .verify(config.publisher, manifest.app)
+        .map_err(credential)?;
+    let (grants, selectors) = config
+        .credentials
+        .verify_selectors(
+            config.publisher,
+            manifest.hash(),
+            config.node.public_key(),
+            &config.revocations,
+            now()?,
+        )
+        .map_err(credential)?;
+    let mut seen_scopes = BTreeSet::new();
+    let mut seen_keys = BTreeSet::new();
+    let mut counts = BTreeMap::<ResourceScope, usize>::new();
+    for key in &config.keys {
+        let count = counts.entry(key.scope).or_default();
+        *count += 1;
+        if *count > 256 {
+            return Err(denied("key epoch capacity reached"));
+        }
+        if !key.generation.valid()
+            || !seen_scopes.insert((key.scope, key.generation))
+            || !seen_keys.insert(key.key)
+            || (!grants.iter().any(|grant| {
+                grant.scope == key.scope
+                    && grant.rows == RowSelection::All
+                    && grant.rights.contains(&Right::Read)
+            }) && !selectors.iter().any(|grant| {
+                grant.domain == key.scope.domain
+                    && grant.table == key.scope.table
+                    && grant.rows == RowSelection::All
+                    && grant.rights.contains(&Right::Read)
+            }))
+        {
+            return Err(denied(
+                "encryption key does not have whole-scope read authority",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn open(path: impl AsRef<Path>, app: A, config: SecureConfig) -> Result<Self, Error> {
         Self::open_upgrading(path, app, config, None).await
@@ -613,48 +664,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if app.manifest().hash() != manifest.hash() {
             return Err(denied("compiled application differs from signed manifest"));
         }
-        config
-            .revocations
-            .verify(config.publisher, manifest.app)
-            .map_err(credential)?;
-        let (grants, selectors) = config
-            .credentials
-            .verify_selectors(
-                config.publisher,
-                manifest.hash(),
-                config.node.public_key(),
-                &config.revocations,
-                now()?,
-            )
-            .map_err(credential)?;
-        let mut seen_scopes = BTreeSet::new();
-        let mut seen_keys = BTreeSet::new();
-        let mut counts = BTreeMap::<ResourceScope, usize>::new();
-        for key in &config.keys {
-            let count = counts.entry(key.scope).or_default();
-            *count += 1;
-            if *count > 256 {
-                return Err(denied("key epoch capacity reached"));
-            }
-            if !key.generation.valid()
-                || !seen_scopes.insert((key.scope, key.generation))
-                || !seen_keys.insert(key.key)
-                || (!grants.iter().any(|grant| {
-                    grant.scope == key.scope
-                        && grant.rows == RowSelection::All
-                        && grant.rights.contains(&Right::Read)
-                }) && !selectors.iter().any(|grant| {
-                    grant.domain == key.scope.domain
-                        && grant.table == key.scope.table
-                        && grant.rows == RowSelection::All
-                        && grant.rights.contains(&Right::Read)
-                }))
-            {
-                return Err(denied(
-                    "encryption key does not have whole-scope read authority",
-                ));
-            }
-        }
+        check_config(&config, &manifest)?;
         let (current, history) = keys::split(std::mem::take(&mut config.keys));
         config.keys = current;
         check_replica_format(path.as_ref()).await?;

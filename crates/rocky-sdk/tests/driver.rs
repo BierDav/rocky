@@ -830,7 +830,7 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
     )
     .map_err(|_| "code")?;
     assert!(
-        moved.message.contains("installed schema's version 3"),
+        moved.message.contains("application's schema version 3"),
         "{moved}"
     );
 
@@ -1209,5 +1209,77 @@ async fn local_write_latency() -> Result<(), Failure> {
             at(100)
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_older_room_application_validates_the_schema_it_declares() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    create(open(root.path(), None), None)
+        .await?
+        .database
+        .close()
+        .await?;
+    // The issuer's next application version adds a nullable rank.
+    let newer = SHOPPING
+        .replace(r#""version":3"#, r#""version":4"#)
+        .replace(
+            r#"{"name":"note","type":"blob"}"#,
+            r#"{"name":"note","type":"blob"},{"name":"rank","type":"integer"}"#,
+        );
+    let database = Database::open(Open {
+        schema: &newer,
+        ..open(root.path(), None)
+    })?
+    .database;
+    let room = ConnectionOptions {
+        profile: Some("room-2.8.4".parse()?),
+        ..WRITER
+    };
+    let columns = |rows: Vec<Vec<SqlValue>>| -> Vec<String> {
+        rows.into_iter()
+            .filter_map(|row| match row.get(1) {
+                Some(SqlValue::Text(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let writer = database.connect(room).await?;
+    let current = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
+    assert!(current.contains(&"rank".to_string()), "{current:?}");
+    let indexes = all(&writer, "PRAGMA index_list(items)", vec![]).await?;
+    writer.close().await;
+    database.close().await?;
+
+    // The version 3 application opens the version 4 database: Room sees
+    // its own version and tables as it declares them.
+    let database = Database::open(open(root.path(), None))?.database;
+    assert_eq!(
+        call(&database, json!({"type": "generation"})).await?["application"],
+        "behind"
+    );
+    let writer = database.connect(room).await?;
+    assert_eq!(
+        all(&writer, "PRAGMA user_version", vec![]).await?,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+    let declared = columns(all(&writer, "PRAGMA table_info(items)", vec![]).await?);
+    assert_eq!(
+        declared,
+        current
+            .iter()
+            .filter(|name| *name != "rank")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        all(&writer, "PRAGMA index_list(items)", vec![]).await?,
+        indexes
+    );
+    // An unchanged table is the installed one.
+    assert!(!columns(all(&writer, "PRAGMA table_info(lists)", vec![]).await?).is_empty());
+    assert_eq!(count(&writer, "items").await?, 0);
+    writer.close().await;
+    database.close().await?;
     Ok(())
 }

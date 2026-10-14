@@ -28,8 +28,8 @@ slots. See [partition groups](partitioned-scopes.md#partition-groups).
 
 `rocky_core::classify` and `classify_commands` reject unsupported changes before
 activation. A signed transition binds application, old/new manifest, schema/handler
-pairs and oldest admissible schema generation. A generation-number edit alone
-cannot open a different definition.
+pairs, whether it is a [cut](#breaking-generations) and when it was signed. A
+generation-number edit alone cannot open a different definition.
 
 ## Plan, backfill and switch
 
@@ -47,14 +47,23 @@ Reopen resumes the recorded plan. An incompatible pending plan is refused.
 `open_upgrading` verifies the signed lineage before changing the installed manifest;
 projection switch and generation activation retain a recoverable durable boundary.
 Network/coordinator calls never occur inside these storage transactions.
-`generations()` reports current/previous generations, horizon and bounded progress.
+`generations()` reports current/previous generations, the cut horizon, the
+baseline and bounded progress.
 
 The SDK issuer signs an additive upgrade when `Database::open` receives the new
-schema. A member fetches that exact schema/lineage over its attached enrollment
-transport; an offline member needing it fails without changing its old installation.
-Issuer state is saved before replica activation, so reopening with the same schema
-continues after interruption. New collections do not silently expand member grants.
-SDK lineage is capped at 32 steps; secure runtime lineage at 64.
+schema. A member fetches that exact schema/lineage from an issuer over its
+attached transport; while it reaches none, it opens at its generation and
+reports its application ahead. Issuer state is saved before replica activation,
+so reopening with the same schema continues after interruption. New collections
+do not silently expand member grants. SDK lineage is capped at 32 steps; secure
+runtime lineage at 64.
+
+## Adopting newer generations
+
+A device that meets a newer generation adopts it whatever its application
+declares: it verifies the peer's lineage, is renewed into it and switches its
+open replica before any frame of it applies. An application older than its
+database opens it unchanged. See [adopting generations](adopting-generations.md).
 
 ## Tables granted like another
 
@@ -74,10 +83,10 @@ it would change what earlier grants mean.
 
 ## Breaking generations
 
-A field rows of the installed schema lack becomes required in a *cut*, signed
-with `horizon` equal to its new schema generation: no earlier generation is
-admitted. Every required field declares a default, which rows the cut never
-reached read, such as hidden unique losers or children of a deleted parent.
+A field rows of the installed schema lack becomes required in a *cut*, a
+transition signed with `cut` set: no earlier generation is admitted. Every
+required field declares a default, which rows the cut never reached read,
+such as hidden unique losers or children of a deleted parent.
 
 The first issuer to open the new schema cuts, after asking its known issuers
 for the generation (a cut one already signed is adopted like a member's):
@@ -102,16 +111,16 @@ logs. A device that has not upgraded is refused at admission.
 
 Limits: removing or renaming a field still needs a later feature. Two issuers
 that open the new schema while unable to reach each other each cut, and their
-households diverge. A peer behind a cut sees failed admissions rather than an
-`upgrade_required` report. The migration is one transaction, so it changes at most
+households diverge. A peer behind a cut is refused at admission until its
+application declares the cut; discovery never adopts one. The migration is one transaction, so it changes at most
 [2,048 rows](sql-driver.md); see [decision 0066](../decisions/0066-breaking-generations.md).
 
 ## Old devices and pending work
 
-SDK upgrades keep the immediately preceding schema generation admissible. Older
-peers receive explicit upgrade/rebootstrap refusal after the horizon advances.
-Retained history behind the horizon remains verifiable locally; the admission
-horizon is not permission to delete recovery evidence. New admission verifies the
+Every generation of the lineage stays admissible, except behind a cut, whose
+older peers are refused until their application declares it. Retained history behind a cut
+remains verifiable locally; the cut is not permission to delete recovery
+evidence. New admission verifies the
 original generation's signed credentials plus current revocations, never invented
 current authority. Current execution authorization remains required for commands.
 
@@ -143,7 +152,9 @@ and definition activation; verifies atomic visibility, stale sessions, pending
 work, old peers/horizon and typed checkpoint recovery. Core/credentials tests
 verify transition encoding, classification and signing; coordinator tests verify
 authorized exact-head activation. SDK `tests/generations.rs` exercises issuer/member
-upgrade, an offline refusal, nullable fields, scope denial and queued handler work.
+upgrade, an offline member opening at its generation, nullable fields, scope denial
+and queued handler work; [adopting generations](adopting-generations.md#evidence)
+lists its own evidence.
 See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
 
 This does not implement removals or renames, cross-file atomic switching,

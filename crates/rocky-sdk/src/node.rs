@@ -1,6 +1,7 @@
 //! One open secure database: its replica, identity, sessions and optional
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
+mod adoption;
 mod command_mesh;
 mod delivery;
 mod discovery;
@@ -247,7 +248,9 @@ async fn settle() {
 pub(crate) struct Node {
     owner: std::sync::OnceLock<std::sync::Weak<Node>>,
     pub replica: EncryptedReplica<TypedCommands>,
-    pub domain: Domain,
+    /// The installed generation's domain; replaced when the database adopts
+    /// a newer generation.
+    domain: std::sync::RwLock<Arc<Domain>>,
     /// The scopes this device's credentials name. A renewal keeps them.
     granted: std::sync::Mutex<Vec<ResourceScope>>,
     pub vault: Vault,
@@ -316,6 +319,11 @@ pub(crate) struct Node {
     service: Option<crate::owner::Service>,
     /// Deposits held as a mailbox, loaded at first use.
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
+    /// The schema the application declares, which may be older or newer
+    /// than the installed generation's.
+    declared: crate::schema::Schema,
+    /// Peers whose baselines this process compared, by generation.
+    compared: std::sync::Mutex<std::collections::BTreeSet<(PublicKey, String)>>,
 }
 /// Acquires `scope` at fencing `epoch` with this device's node key.
 pub(crate) type Acquire = Arc<
@@ -323,6 +331,13 @@ pub(crate) type Acquire = Arc<
 >;
 
 impl Node {
+    /// The domain of the installed generation.
+    pub fn domain(&self) -> Arc<Domain> {
+        self.domain
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
     pub fn new(
         replica: EncryptedReplica<TypedCommands>,
         domain: Domain,
@@ -332,6 +347,7 @@ impl Node {
         coordinator: Option<Arc<dyn Coordinator>>,
         acquire: Option<Acquire>,
     ) -> Self {
+        let settings_schema = settings.schema.clone();
         let observations = crate::status::Observations::default();
         let coordinator = coordinator.map(|inner| {
             Arc::new(crate::status::ObservedCoordinator {
@@ -372,7 +388,7 @@ impl Node {
             owner: Default::default(),
             replica,
             granted: std::sync::Mutex::new(settings.granted(&domain)),
-            domain,
+            domain: std::sync::RwLock::new(Arc::new(domain)),
             vault,
             settings: Mutex::new(Shared::new(settings)),
             path,
@@ -413,12 +429,39 @@ impl Node {
             acquire,
             service: None,
             mailbox: Mutex::new(None),
+            declared: settings_schema,
+            compared: Default::default(),
         }
     }
     /// Lets the owner control its domain on this coordination service.
     pub fn with_service(mut self, service: Option<crate::owner::Service>) -> Self {
         self.service = service;
         self
+    }
+    /// The schema the application declared at open.
+    pub fn with_declared(mut self, schema: crate::schema::Schema) -> Self {
+        self.declared = schema;
+        self
+    }
+    /// The version the application declares: Room's database version.
+    pub fn declared_version(&self) -> u32 {
+        self.declared.version
+    }
+    /// The tables the application declares differently from the installed
+    /// generation, as it declares them; none while they are the same.
+    pub fn declared_differences(&self) -> Result<Vec<rocky_core::LogicalTable>, Failure> {
+        let domain = self.domain();
+        let installed = domain.logical();
+        let declared = crate::domain::logical(&self.declared, installed.publisher)?;
+        Ok(declared
+            .tables
+            .into_iter()
+            .filter(|table| installed.table(&table.sql_name) != Some(table))
+            .collect())
+    }
+    /// How the application's schema stands to the installed generation's.
+    pub fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
+        settings.application(&self.declared)
     }
     /// Every granted scope, the registry's included: what sync covers.
     fn scopes(&self) -> Vec<ResourceScope> {
@@ -430,7 +473,7 @@ impl Node {
     /// The granted scopes the application's sessions open: the registry is
     /// the SDK's own.
     fn app_scopes(&self) -> Vec<ResourceScope> {
-        let registry = self.domain.registry();
+        let registry = self.domain().registry();
         self.scopes()
             .into_iter()
             .filter(|scope| *scope != registry)
@@ -786,7 +829,7 @@ impl Node {
             "domain" => {
                 let settings = self.settings.lock().await;
                 Ok(json!({
-                    "scope": self.domain.scope,
+                    "scope": self.domain().scope,
                     "issuer": settings.issuer(),
                     "profile": settings.profile,
                     "collections": settings.schema.names(),
@@ -1128,7 +1171,7 @@ impl Node {
         if !draft.persisted_eq(&settings) {
             draft.save(&self.path)?;
         }
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain());
         *settings = draft;
         self.observations.touch();
         Ok(result)
@@ -1258,11 +1301,11 @@ impl Node {
             }),
         );
         // New grants may make more members of a held group readable.
-        for partition in settings.partitions(&self.domain)? {
+        for partition in settings.partitions(&self.domain())? {
             self.hold_keys(&settings, &partition).await?;
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
-            settings.granted(&self.domain);
+            settings.granted(&self.domain());
         drop(settings);
         self.forget_readers().await;
         self.status(client).await
@@ -1333,7 +1376,7 @@ impl Node {
             address["table"] = collection.into();
             self.partition_address(&address)?.0
         } else {
-            self.domain
+            self.domain()
                 .scopes()
                 .find(|(name, _)| *name == collection)
                 .map(|(_, scope)| scope)
@@ -1450,7 +1493,7 @@ impl Node {
             .as_str()
             .ok_or("collection must be a table name")?;
         let scope = self
-            .domain
+            .domain()
             .scopes()
             .find(|(name, _)| *name == collection)
             .map(|(_, scope)| scope)
@@ -1632,7 +1675,7 @@ impl Node {
                 staged.push(("coordinator.evidence", copy));
             }
             let node = PrivateKey::from_bytes(&self.vault.get("node")?);
-            let scope = serde_json::to_value(self.domain.scope)?;
+            let scope = serde_json::to_value(self.domain().scope)?;
             let target = target.to_path_buf();
             let inventory = tokio::task::spawn_blocking(move || {
                 crate::backup::write(&target, &staged, &settings, scope, revision, &node, now()?)
@@ -1647,6 +1690,7 @@ impl Node {
     /// The definition generation, the earlier ones still admitted and a
     /// table rebuild under way.
     async fn generation(&self) -> Result<Value, Failure> {
+        let application = self.application(&*self.settings.lock().await)?;
         let status = self.replica.generations().await?;
         let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema, "handler": generation.handler});
         Ok(json!({
@@ -1655,6 +1699,8 @@ impl Node {
             "horizon": status.horizon,
             "previous": status.previous.iter().map(|(previous, _)| generation(*previous)).collect::<Vec<_>>(),
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
+            "baseline": status.baseline,
+            "application": application,
         }))
     }
     /// Revokes a device and rotates the keys it could read. The intent,
@@ -1689,7 +1735,7 @@ impl Node {
         for (key, credentials) in settings.row_authors(&self.vault)? {
             self.replica.register_row_author(key, credentials).await?;
         }
-        for partition in settings.partitions(&self.domain)? {
+        for partition in settings.partitions(&self.domain())? {
             let address = crate::groups::record_key(&partition.record.address);
             if rotation.groups.contains_key(&address) {
                 self.hold_keys(&settings, &partition).await?;
@@ -1719,7 +1765,7 @@ impl Node {
         keys.sort_by_key(|(_, epoch, _)| *epoch);
         for (name, generation, key) in keys {
             let scope = self
-                .domain
+                .domain()
                 .scopes()
                 .find(|(collection, _)| *collection == name)
                 .map(|(_, scope)| scope)
@@ -1797,7 +1843,7 @@ impl Node {
         if changed {
             self.apply(&settings.revocations, &settings.credentials, keys)
                 .await?;
-            for partition in settings.partitions(&self.domain)? {
+            for partition in settings.partitions(&self.domain())? {
                 self.hold_keys(&settings, &partition).await?;
             }
         }
@@ -1814,7 +1860,7 @@ impl Node {
                 settings.save(&self.path)?;
                 self.apply(&settings.revocations, &settings.credentials, keys)
                     .await?;
-                for partition in settings.partitions(&self.domain)? {
+                for partition in settings.partitions(&self.domain())? {
                     self.hold_keys(&settings, &partition).await?;
                 }
             }
@@ -1823,7 +1869,7 @@ impl Node {
             return Ok(false);
         }
         *self.granted.lock().map_err(|_| "scope catalog poisoned")? =
-            settings.granted(&self.domain);
+            settings.granted(&self.domain());
         drop(settings);
         self.refresh_importing().await?;
         self.forget_readers().await;
@@ -1877,7 +1923,7 @@ impl Node {
     /// Installs a pseudonym for every collection this device writes and has
     /// none for: an issuer assigns its own, a member asks its issuers.
     async fn authors(&self, transport: Option<&dyn Transport>) -> Result<Value, Failure> {
-        let missing = self.settings.lock().await.missing_authors(&self.domain)?;
+        let missing = self.settings.lock().await.missing_authors(&self.domain())?;
         let mut installed = Vec::new();
         for collection in missing {
             let settings = self.settings.lock().await.clone();
@@ -2009,10 +2055,8 @@ impl Node {
     /// A scope as events name it: its table, and for a partition its
     /// encryption commitment, which `partition_address` also reports.
     fn scope_label(&self, scope: &ResourceScope) -> Value {
-        let own = self
-            .domain
-            .scopes()
-            .find(|(_, own)| own.table == scope.table);
+        let domain = self.domain();
+        let own = domain.scopes().find(|(_, own)| own.table == scope.table);
         json!({
             "table": own.map(|(name, _)| name),
             "partition": own.is_some_and(|(_, own)| own != *scope).then(|| HEXLOWER.encode(&scope.encryption)),
@@ -2304,7 +2348,7 @@ impl Node {
                 .settings
                 .lock()
                 .await
-                .missing_authors(&self.domain)?
+                .missing_authors(&self.domain())?
                 .is_empty()
         {
             let _ = self.authors(Some(transport)).await;
@@ -2383,7 +2427,7 @@ impl Node {
         let needed: Vec<_> = self
             .scopes()
             .into_iter()
-            .filter(|scope| !self.domain.partitioned_table(scope))
+            .filter(|scope| !self.domain().partitioned_table(scope))
             .collect();
         // A pass that failed after importing checkpoint pages goes on soon.
         let imports = self.replica.observe_imports().await;
@@ -2603,7 +2647,7 @@ impl Node {
         let needed: Vec<_> = self
             .scopes()
             .into_iter()
-            .filter(|scope| !self.domain.partitioned_table(scope))
+            .filter(|scope| !self.domain().partitioned_table(scope))
             .collect();
         let mut targets = settings.targets();
         targets.sort_by_key(|(node, _)| {
@@ -2700,7 +2744,8 @@ impl Node {
         Ok(pending
             .into_iter()
             .filter(|scope| {
-                settings.reads_whole(&self.domain, scope) && !self.domain.partitioned_table(scope)
+                settings.reads_whole(&self.domain(), scope)
+                    && !self.domain().partitioned_table(scope)
             })
             .collect())
     }
@@ -2983,7 +3028,7 @@ impl Node {
         let coordinator = self
             .coordinator
             .as_deref()
-            .filter(|_| !self.domain.app.commands().is_empty());
+            .filter(|_| !self.domain().app.commands().is_empty());
         // Envelopes first, on the exchange's first session: a list a
         // delivery opens syncs in this exchange. A stalled dial must not
         // hold the shared checkpoint import slot.
@@ -3046,9 +3091,9 @@ impl Node {
         let scopes: Vec<_> = self
             .scopes()
             .into_iter()
-            .filter(|scope| !self.domain.partitioned_table(scope))
+            .filter(|scope| !self.domain().partitioned_table(scope))
             .collect();
-        let (newer, retry, transfer) = sync::reconcile(
+        let reconciled = sync::reconcile(
             &self.replica,
             &upstream,
             &scopes,
@@ -3062,12 +3107,57 @@ impl Node {
             },
             first,
         )
-        .await?;
+        .await;
+        // Something of a newer generation, such as its horizon statement,
+        // ends the exchange: this device adopts the generation first.
+        let (newer, retry, transfer) = match reconciled {
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(rocky_secure::Error::Incompatible(_))
+                ) =>
+            {
+                let _ = reconcile.close().await;
+                let _ = upstream.link.drain().await;
+                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
+                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
+                {
+                    return Ok((false, true, sync::Transfer::default()));
+                }
+                return Err(error);
+            }
+            other => other?,
+        };
         bootstrapped.extend(transfer);
         self.observations
             .record_partial(peer.to_hex(), bootstrapped);
         reconcile.close().await?;
         upstream.link.drain().await?;
+        // A peer on a newer generation: this database moves to it, and the
+        // next pass syncs at it.
+        if newer {
+            match self.adopt_newer(transport, peer, contact).await {
+                Ok(true) => return Ok((false, true, sync::Transfer::default())),
+                // A peer under an older generation this replica lacks.
+                Ok(false) | Err(_)
+                    if matches!(self.learn_older(transport, peer, contact).await, Ok(true)) =>
+                {
+                    return Ok((false, true, sync::Transfer::default()));
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.activity.record(
+                        "generation_pending",
+                        json!({"peer": peer.to_hex(), "error": error.to_string()}),
+                    );
+                }
+            }
+        } else if let Err(error) = self.compare_baselines(transport, peer, contact).await {
+            self.activity.record(
+                "baseline_unknown",
+                json!({"peer": peer.to_hex(), "error": error.to_string()}),
+            );
+        }
         Ok((newer, retry, sync::Transfer::default()))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
@@ -3108,6 +3198,10 @@ impl Node {
                         return Ok(reply);
                     }
                     let settings = self.settings.lock().await.clone();
+                    // Every device serves its generations: all of it is public.
+                    if request == crate::generation::OFFER {
+                        return settings.offer();
+                    }
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
                     }
@@ -3118,7 +3212,7 @@ impl Node {
                         signed.verify(
                             PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
                             settings.publisher,
-                            self.domain.manifest().hash(),
+                            self.domain().manifest().hash(),
                             (now()?, 300),
                         )?;
                         let registry = self.registry().await?;
@@ -3130,7 +3224,7 @@ impl Node {
                             *current = draft;
                             self.apply(&current.revocations, &current.credentials, Vec::new())
                                 .await?;
-                            for partition in current.partitions(&self.domain)? {
+                            for partition in current.partitions(&self.domain())? {
                                 self.hold_keys(&current, &partition).await?;
                             }
                         }
@@ -3141,9 +3235,6 @@ impl Node {
                     }
                     if request == crate::enrollment::POLICY {
                         return Ok(serde_json::to_vec(&settings.revocations)?);
-                    }
-                    if request == crate::generation::OFFER {
-                        return settings.offer();
                     }
                     if let Some(asked) = request.strip_prefix(crate::enrollment::AUTHOR) {
                         let asked = rocky_credentials::PseudonymRequest::from_bytes(asked)?;
@@ -3249,13 +3340,13 @@ impl Node {
             .await
             .as_ref()
             .map(|link| link.transport.clone());
-        let manifest = self.domain.manifest();
+        let manifest = self.domain().manifest();
         let domain = crate::owner::Domain {
-            scope: self.domain.scope,
+            scope: self.domain().scope,
             application: manifest.name.clone(),
             owner: secure_principal_id(user),
             schema: manifest.schema,
-            handler: self.domain.app.commands().handler(),
+            handler: self.domain().app.commands().handler(),
             anchor: self.settings.lock().await.publisher,
             publisher,
             transport,
@@ -3308,7 +3399,7 @@ impl Node {
     /// The calls of typed strong commands. Submission, lookup and
     /// cancellation are local; `command_run` is what executes or delivers.
     async fn command(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
-        let app = &self.domain.app;
+        let app = &self.domain().app;
         let handle = || -> Result<[u8; 32], Failure> {
             let bytes: Vec<u8> = serde_json::from_value(request["handle"].clone())
                 .map_err(|_| refused("handle must be 32 bytes"))?;
@@ -3335,14 +3426,14 @@ impl Node {
                     .capability
                     .subject;
                 Ok(json!({
-                    "scope": self.domain.scope,
+                    "scope": self.domain().scope,
                     "node": HEXLOWER.encode(&secure_node_id(node).0),
                     "key": HEXLOWER.encode(node.as_bytes()),
-                    "application": self.domain.manifest().name,
+                    "application": self.domain().manifest().name,
                     "principal": HEXLOWER.encode(&secure_principal_id(user).0),
                     "handler": app.hosts(),
                     "coordinator": self.coordinator.is_some(),
-                    "schema_generation": self.domain.manifest().schema,
+                    "schema_generation": self.domain().manifest().schema,
                     "handler_generation": app.commands().handler(),
                 }))
             }
@@ -3351,9 +3442,9 @@ impl Node {
             // confirmed results must have reached, and the transition.
             "command_activation" => {
                 let coordinator = self.coordinator()?;
-                let scope = self.domain.scope;
+                let scope = self.domain().scope;
                 let head = coordinator.head(scope).await?;
-                let manifest = self.domain.manifest();
+                let manifest = self.domain().manifest();
                 if (head.schema, head.handler) == (manifest.schema, manifest.handler) {
                     return Ok(json!({"active": true, "activation": null}));
                 }
@@ -3436,7 +3527,7 @@ impl Node {
                         .credentials
                         .verify(
                             settings.publisher,
-                            self.domain.manifest().hash(),
+                            self.domain().manifest().hash(),
                             node,
                             &settings.revocations,
                             now()?,
@@ -3500,7 +3591,7 @@ impl Node {
                 let grant = rocky_credentials::SignedCoordinationGrant::sign(
                     rocky_credentials::CoordinationGrant {
                         publisher: rocky_credentials::Publisher(publisher.public_key()),
-                        application: self.domain.manifest().name,
+                        application: self.domain().manifest().name,
                         tenant: rocky_credentials::CoordinatorControl(
                             PublicKey::from_bytes(&tenant)
                                 .map_err(|_| refused("tenant is not a valid key"))?,
@@ -3528,7 +3619,7 @@ impl Node {
                     .map_err(refused)?;
                 let ticket = self
                     .replica
-                    .submit_command(handle()?, self.domain.scope, method, version, &arguments)
+                    .submit_command(handle()?, self.domain().scope, method, version, &arguments)
                     .await?;
                 report(ticket)
             }
@@ -3603,8 +3694,8 @@ impl Node {
                     .into_iter()
                     .map(crate::commands::cells)
                     .collect();
-                let columns: Vec<&str> = self
-                    .domain
+                let domain = self.domain();
+                let columns: Vec<&str> = domain
                     .logical()
                     .table(table)
                     .ok_or_else(|| refused("unknown table"))?
@@ -3647,12 +3738,12 @@ impl Node {
             _ => {}
         }
         let coordinator = self.coordinator()?;
-        let mut head = coordinator.head(self.domain.scope).await?;
+        let mut head = coordinator.head(self.domain().scope).await?;
         if head.executor == rocky_core::NodeId([0; 16])
-            && self.domain.app.hosts()
+            && self.domain().app.hosts()
             && let Some(acquire) = &self.acquire
         {
-            match acquire(self.domain.scope, head.epoch).await {
+            match acquire(self.domain().scope, head.epoch).await {
                 Ok(()) => {}
                 // Not eligible here: another executor acquires it on its next run.
                 Err(rocky_core::CoordinationError::Denied) => {
@@ -3662,7 +3753,7 @@ impl Node {
                 }
                 Err(error) => return Err(error.into()),
             }
-            head = coordinator.head(self.domain.scope).await?;
+            head = coordinator.head(self.domain().scope).await?;
         }
         if head.executor == rocky_core::NodeId([0; 16]) {
             return Err(Box::new(Deferred(
@@ -3837,7 +3928,7 @@ impl Node {
         let token = |offset: usize| -> Result<String, Failure> {
             let bytes = serde_json::to_vec(&(
                 client.cursor_key,
-                self.domain.manifest().hash(),
+                self.domain().manifest().hash(),
                 authority,
                 &descriptor,
                 offset,
@@ -3881,7 +3972,7 @@ impl Node {
         result.rows.truncate(query.max_rows);
         let mut rows = Vec::new();
         let mut used = serde_json::to_vec(&json!({
-            "scope": self.domain.scope,
+            "scope": self.domain().scope,
             "revision": revision.to_string(),
             "columns": result.columns,
             "rows": [],
@@ -3914,7 +4005,7 @@ impl Node {
             None
         };
         Ok(json!({
-            "scope": self.domain.scope,
+            "scope": self.domain().scope,
             "revision": revision.to_string(),
             "columns": result.columns,
             "rows": rows,

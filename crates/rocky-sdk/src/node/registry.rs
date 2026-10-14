@@ -14,7 +14,7 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Ok(Registry::default());
         }
-        Box::pin(registry::read(&self.replica, self.domain.registry())).await
+        Box::pin(registry::read(&self.replica, self.domain().registry())).await
     }
     /// Installs this issuer's registry pseudonym, from its own author
     /// range, unless it holds a current one.
@@ -23,7 +23,7 @@ impl Node {
         if !settings.issuer() {
             return Err(refused("only an issuer writes the registry"));
         }
-        if settings.holds_author(&self.domain, REGISTRY)? {
+        if settings.holds_author(&self.domain(), REGISTRY)? {
             return Ok(());
         }
         let request = settings.pseudonym_request(&self.vault, REGISTRY)?;
@@ -49,7 +49,7 @@ impl Node {
         changes.extend(own);
         Box::pin(registry::write(
             &self.replica,
-            self.domain.registry(),
+            self.domain().registry(),
             &changes,
         ))
         .await
@@ -221,7 +221,7 @@ impl Node {
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;
         let registry = self.registry().await?;
         self.configure(|settings| {
-            settings.complete_revocation(&self.vault, &self.domain, &registry)
+            settings.complete_revocation(&self.vault, &self.domain(), &registry)
         })
         .await
     }

@@ -62,6 +62,12 @@ signing waits for [confirmation](05-confirmed-rollouts.md).
   contains a removed field id. Relayed frames stay as signed.
 - A frame an unmigrated device sent with a removed and a kept field applies
   the kept field on every device.
+- An old Room app opens a database whose generation removed a column it
+  declares; a DAO on an unchanged table works and one on the removed column
+  fails with a SQLite error (carried from [phase 2](02-adopting-newer-generations.md)).
+- A device that learns an earlier baseline of a re-adding generation pulls
+  again the frames of the field's tables stamped after it (carried from
+  phase 2).
 - A device that went v7 → v8 → v9 and one that went v7 → v9, with a v7
   device's write to the re-added field relayed between them, end with the
   same value; a device that misses the horizon deadline imports the

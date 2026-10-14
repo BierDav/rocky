@@ -151,9 +151,9 @@ writes them; another version needs a new profile and fixture.
 | --- | --- |
 | `PRAGMA journal_mode = …`, `synchronous = NORMAL\|FULL`, `temp_store = MEMORY`, `recursive_triggers = 1`, `foreign_keys = ON` | Accepted: the file is always in WAL mode and Rocky decides when it flushes ([durability](#durability)) |
 | `PRAGMA busy_timeout [= n]` | The transaction timeout in milliseconds; setting it changes nothing |
-| `PRAGMA user_version` | The installed schema's version, which Room's import makes Room's database version |
+| `PRAGMA user_version` | The version of the schema the application declares, which Room's import makes Room's database version |
 | `PRAGMA user_version = n` | Accepted when it is that version; otherwise an error naming both |
-| `PRAGMA table_info`, `index_list`, `index_info`, `index_xinfo`, `foreign_key_list` | Read from the file for a table or index of the session's catalog, so Room validates the real keys and indexes |
+| `PRAGMA table_info`, `index_list`, `index_info`, `index_xinfo`, `foreign_key_list` | Read from the file for a table or index of the session's catalog, so Room validates the real keys and indexes. A table the application declares otherwise than the installed [generation](adopting-generations.md#applications-behind-and-ahead) is described as declared; statements on what differs then fail as SQLite fails them |
 | `CREATE TABLE IF NOT EXISTS`, `CREATE [UNIQUE] INDEX IF NOT EXISTS` | Nothing, for an installed table or index, as SQLite leaves an existing one; otherwise an error. An entity declaring `AUTOINCREMENT` (`autoGenerate = true`) or lacking the `id` or `row_kind` field fails with code 1 |
 | `room_master_table` statements | The identity hash Room writes, kept by the connection; Room validates the schema once per process |
 | `sqlite_master` counts and lists | From the catalog; no ORM trigger or view is listed |

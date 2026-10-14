@@ -244,6 +244,13 @@ impl<A: RowApplication> Inner<A> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
         if statement.manifest != self.manifest {
+            // A newer generation's statement waits until this replica
+            // adopts that generation.
+            if self.known(statement.manifest).is_err() {
+                return Err(Error::Incompatible(
+                    "the horizon names a newer or unknown generation".into(),
+                ));
+            }
             return Err(denied("horizon manifest is not current"));
         }
         if statement

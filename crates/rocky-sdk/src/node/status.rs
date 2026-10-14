@@ -14,10 +14,8 @@ impl Node {
         now()
     }
     pub(super) fn observed_scope(&self, scope: ResourceScope) -> crate::ScopeStatus {
-        let root = self
-            .domain
-            .scopes()
-            .find(|(_, root)| root.table == scope.table);
+        let domain = self.domain();
+        let root = domain.scopes().find(|(_, root)| root.table == scope.table);
         crate::ScopeStatus {
             table: root.map(|(name, _)| name.to_owned()),
             table_id: HEXLOWER.encode(&scope.table),
@@ -221,7 +219,7 @@ impl Node {
                 .any(|scope| scope.horizon_rebootstrap_required || scope.checkpoint.is_some());
         let mut tickets = BTreeMap::<String, u64>::new();
         for ticket in self.replica.open_tickets(usize::MAX).await? {
-            let state = crate::commands::ticket_json(&self.domain.app, &ticket)?["state"]
+            let state = crate::commands::ticket_json(&self.domain().app, &ticket)?["state"]
                 .as_str()
                 .ok_or("missing ticket state")?
                 .to_owned();
@@ -297,6 +295,8 @@ impl Node {
                             manifest: HEXLOWER.encode(&manifest),
                         })
                         .collect(),
+                    baseline: generation.baseline,
+                    application: self.application(&settings)?,
                     rebuilding: generation.plan.map(|plan| RebuildProgress {
                         schema: HEXLOWER.encode(&plan.schema),
                         filled: plan.filled as u64,

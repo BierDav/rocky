@@ -44,7 +44,9 @@ the history its checkpoint replaces.
 
 ## Join
 
-Enrollment persists checkpoint-first intent before installing an identity. Join
+Enrollment installs the domain's current schema, whatever version of the
+application the device runs ([adopting generations](adopting-generations.md#joining)),
+and persists checkpoint-first intent before installing an identity. Join
 starts a sync in the background; applications may also call `sync`. It first
 asks its peer which checkpoint it offers for every granted collection, then
 imports populated scopes smallest first, followed by empty scopes, and pulls each

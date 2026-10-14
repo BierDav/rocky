@@ -1,6 +1,7 @@
 use super::*;
 use rocky_credentials::PartitionGrant;
 use rocky_credentials::device_chain;
+use serde_json::{Value, json};
 
 const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
@@ -786,5 +787,117 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
         assert!(payload.groups.is_empty());
     }
     assert_eq!(issuer.groups.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_forged_generation_offer_is_refused_before_anything_changes() -> Result<(), Failure> {
+    const SECOND: &str = r#"{"format":6,"application":"holders","version":2,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true},{"name":"note","type":"text","not_null":false}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = installed.vault(&store);
+    let mut newer = installed.clone();
+    newer
+        .evolve(
+            &directory.path().join("identity.json"),
+            &vault,
+            &Schema::parse(SECOND)?,
+            None,
+        )
+        .await?;
+    let offer: Value = serde_json::from_slice(&newer.offer()?)?;
+    let adopted = installed.verify_offer(&serde_json::to_vec(&offer)?)?;
+    assert_eq!(adopted.schema, newer.schema);
+    assert_eq!(adopted.lineage.len(), 1);
+
+    let other = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut moved = other.clone();
+    moved
+        .evolve(
+            &directory.path().join("other.json"),
+            &other.vault(&store),
+            &Schema::parse(SECOND)?,
+            None,
+        )
+        .await?;
+    let foreign = moved.lineage[0].transition.clone();
+    let forge = |change: &dyn Fn(&mut Value)| -> Result<Vec<u8>, Failure> {
+        let mut forged = offer.clone();
+        change(&mut forged);
+        Ok(serde_json::to_vec(&forged)?)
+    };
+    let forgeries = [
+        // A schema other than the one the manifest was signed for.
+        forge(&|offer| offer["schema"]["tables"][0]["columns"][1]["name"] = json!("label"))?,
+        // The installed manifest offered as the newer one.
+        forge(&|offer| offer["manifest"] = offer["lineage"][0]["manifest"].clone())?,
+        // A lineage step whose schema is not its manifest's.
+        forge(&|offer| {
+            offer["lineage"][0]["schema"]["tables"][0]["columns"][0]["name"] = json!("title")
+        })?,
+        // A lineage that does not pass through this device's generation.
+        forge(&|offer| offer["lineage"] = json!([]))?,
+        // A transition another publisher signed.
+        forge(&|offer| offer["lineage"][0]["transition"] = json!(foreign.clone()))?,
+    ];
+    for (index, forged) in forgeries.iter().enumerate() {
+        assert!(installed.verify_offer(forged).is_err(), "forgery {index}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_earlier_signed_step_moves_the_baseline() -> Result<(), Failure> {
+    const SECOND: &str = r#"{"format":6,"application":"holders","version":2,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true},{"name":"note","type":"text","not_null":false}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+    let directory = tempfile::tempdir()?;
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
+        crate::FileSecretStore::new(directory.path().join("secrets")),
+    );
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let vault = issuer.vault(&store);
+    issuer
+        .evolve(
+            &directory.path().join("identity.json"),
+            &vault,
+            &Schema::parse(SECOND)?,
+            None,
+        )
+        .await?;
+    let decode = |hex: &str| -> Result<rocky_core::GenerationTransition, Failure> {
+        Ok(
+            rocky_credentials::SignedTransition::from_bytes(&HEXLOWER.decode(hex.as_bytes())?)?
+                .verify(issuer.publisher)?,
+        )
+    };
+    let signed = decode(&issuer.lineage[0].transition)?;
+    let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+    let at = |time: u64| -> Result<Vec<u8>, Failure> {
+        let transition = rocky_core::GenerationTransition {
+            time,
+            ..signed.clone()
+        };
+        let mut offer: Value = serde_json::from_slice(&issuer.offer()?)?;
+        offer["lineage"][0]["transition"] = json!(HEXLOWER.encode(
+            &rocky_credentials::SignedTransition::sign(&transition, &publisher)?.to_bytes()?
+        ));
+        Ok(serde_json::to_vec(&offer)?)
+    };
+    // Signed later, or the same: nothing changes.
+    assert!(issuer.earlier_baselines(&at(signed.time + 60)?)?.is_none());
+    assert!(issuer.earlier_baselines(&issuer.offer()?)?.is_none());
+    let (merged, transitions) = issuer
+        .earlier_baselines(&at(signed.time - 60)?)?
+        .ok_or("an earlier baseline")?;
+    assert_eq!(transitions.len(), 1);
+    assert_eq!(merged.manifest, issuer.manifest);
+    assert_eq!(
+        decode(&merged.lineage[0].transition)?.time,
+        signed.time - 60
+    );
+    // A step signed later than the one now held changes nothing.
+    assert!(merged.earlier_baselines(&at(signed.time - 30)?)?.is_none());
     Ok(())
 }

@@ -17,8 +17,13 @@ const TRIGGER: &str = "room_table_modification_trigger_";
 /// What an answer may consult.
 pub(super) struct Context<'a> {
     pub sql: &'a SecureSql<TypedCommands>,
-    /// The installed schema's version, which is Room's database version.
+    /// The version the application declares, which is Room's database
+    /// version whatever generation the database is at.
     pub version: u32,
+    /// Tables the application declares otherwise than the installed
+    /// generation: Room validates them as declared, and statements on what
+    /// differs fail as SQLite fails them.
+    pub declared: &'a [rocky_core::LogicalTable],
     pub read_only: bool,
     /// What `busy_timeout` reports: the writer's transaction timeout.
     pub busy_timeout: i64,
@@ -111,7 +116,7 @@ impl Housekeeping {
                     return Err(failure(
                         code::ERROR,
                         format!(
-                            "Room's database version {value} differs from the installed schema's version {}; change the schema through Rocky",
+                            "Room's database version {value} differs from the application's schema version {}; change the schema through Rocky",
                             context.version
                         ),
                     )
@@ -131,7 +136,27 @@ impl Housekeeping {
                     "foreign_key_list" => Describe::ForeignKeyList,
                     _ => return Ok(None),
                 };
-                let rows = context.sql.describe(pragma, &unquote(target)).await?;
+                let target = unquote(target);
+                let index = matches!(pragma, Describe::IndexInfo | Describe::IndexXinfo);
+                let declared = context.declared.iter().find(|table| {
+                    if index {
+                        table
+                            .indexes
+                            .iter()
+                            .any(|index| index.name.eq_ignore_ascii_case(&target))
+                    } else {
+                        table.sql_name.eq_ignore_ascii_case(&target)
+                    }
+                });
+                let rows = match declared {
+                    Some(table) => {
+                        context
+                            .sql
+                            .describe_declared(pragma, &target, table)
+                            .await?
+                    }
+                    None => context.sql.describe(pragma, &target).await?,
+                };
                 let columns = rows.columns.into_iter().map(|column| column.name).collect();
                 Some(Pending::rows(columns, rows.rows))
             }

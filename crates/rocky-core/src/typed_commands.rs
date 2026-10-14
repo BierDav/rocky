@@ -61,6 +61,10 @@ impl TypedCommands {
         self.host = host;
         self
     }
+    /// Where handlers run, if anywhere.
+    pub fn host(&self) -> Option<Arc<dyn CommandHost>> {
+        self.host.clone()
+    }
     pub fn rows(&self) -> &TypedRows {
         &self.rows
     }

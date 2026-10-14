@@ -2,8 +2,8 @@
 
 Status: proposed roadmap (2026-10-14), not yet accepted. It does not replace
 [features_08](../features_08/README.md) as the next-work authority until that
-roadmap finishes or this one is accepted. Phase 1 is implemented; no other
-phase has started.
+roadmap finishes or this one is accepted. Phase 1 is implemented and phase 2 is in
+progress; no other phase has started.
 
 ## Destination
 

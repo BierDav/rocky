@@ -1155,7 +1155,7 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
     let publisher = PrivateKey::from_bytes(&node.vault.get("publisher")?);
     let statement = rocky_credentials::SignedRevocation::sign(
         rocky_credentials::Revocation {
-            app: node.domain.manifest().app,
+            app: node.domain().manifest().app,
             issuer: issuer.public_key(),
             time: now()?,
             nodes: [rocky_credentials::PeerId::of(peer)].into(),

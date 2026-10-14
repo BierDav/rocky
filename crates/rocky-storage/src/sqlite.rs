@@ -267,7 +267,7 @@ impl Connection {
         connection.rows("SELECT name FROM sqlite_schema LIMIT 0", ())?;
         Ok(connection)
     }
-    #[cfg(any(test, feature = "test-support"))]
+    /// A private database that lives as long as the connection.
     pub fn open_in_memory() -> Result<Self> {
         Self::configure(rusqlite::Connection::open_in_memory()?)
     }

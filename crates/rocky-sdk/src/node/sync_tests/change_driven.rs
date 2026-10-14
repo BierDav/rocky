@@ -100,8 +100,8 @@ async fn enrollment_reaches_the_caller_before_its_return_route_wakes_sync() -> R
                 PrivateKey::new().public_key(),
                 PrivateKey::new().public_key(),
                 commitment(
-                    "rocky.sdk.schema.v1",
-                    &serde_json::to_vec(&Schema::parse(SCHEMA)?)?,
+                    "rocky.sdk.application.v1",
+                    Schema::parse(SCHEMA)?.application.as_bytes(),
                 ),
             )
             .with_routes(&token, vec![("memory".into(), "member".into())])

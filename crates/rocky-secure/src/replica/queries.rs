@@ -49,7 +49,11 @@ impl<A: RowApplication> Inner<A> {
                 .tables
                 .iter()
                 .map(|table| table.sql_name.clone());
-            self.queries.events = Some(TableEvents::new(typed.domain, tables));
+            // Observers of the same domain stay registered across a switch.
+            self.queries.events = Some(match &self.queries.events {
+                Some(events) if events.scope() == typed.domain => events.follow(tables),
+                _ => TableEvents::new(typed.domain, tables),
+            });
         }
     }
     /// Policy, credentials or keys changed: earlier sessions and cursors are
@@ -421,47 +425,129 @@ impl<A: RowApplication> SecureSql<A> {
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // Each foreign key spans the rows sharing its id: (id, seq, table, from, ...).
-        let mut keys: BTreeMap<i64, (String, Vec<String>)> = BTreeMap::new();
-        if pragma == Describe::ForeignKeyList {
-            for row in &rows {
-                if let (
-                    Some(SqlValue::Integer(id)),
-                    Some(SqlValue::Text(table)),
-                    Some(SqlValue::Text(column)),
-                ) = (row.first(), row.get(2), row.get(3))
-                {
-                    let key = keys
-                        .entry(*id)
-                        .or_insert_with(|| (table.clone(), Vec::new()));
-                    key.1.push(column.clone());
-                }
-            }
-        }
-        let mut result = Vec::with_capacity(rows.len());
-        for row in rows {
-            // A created index the catalog does not list is Rocky's own.
-            if pragma == Describe::IndexList
-                && matches!((&row[1], &row[3]), (SqlValue::Text(index), SqlValue::Text(origin))
-                    if origin == "c" && !listed.contains(&index.to_ascii_lowercase()))
-            {
-                continue;
-            }
-            let mut row = row;
-            if pragma == Describe::ForeignKeyList
-                && let Some(SqlValue::Integer(id)) = row.first()
-                && let Some((table, columns)) = keys.get(id)
-                && let Some(action) = actions.get(&foreign_key_name(table, columns))
-            {
-                row[6] = SqlValue::Text(action.clone());
-            }
-            result.push(row);
-        }
         Ok(SnapshotRows {
             columns,
-            rows: result,
+            rows: shaped(pragma, rows, &actions, &listed),
         })
     }
+    /// Answers `pragma` about `table`, or one of its indexes, as a file
+    /// installed with that definition would: what an application declaring
+    /// another generation's schema validates. See
+    /// `docs/runtime/sql-driver.md#room-284`.
+    pub async fn describe_declared(
+        &self,
+        pragma: Describe,
+        name: &str,
+        table: &rocky_core::LogicalTable,
+    ) -> Result<SnapshotRows, Error> {
+        let (verb, columns) = pragma.shape();
+        let columns = columns
+            .iter()
+            .map(|column| crate::cursor::ResultColumn {
+                name: (*column).into(),
+                declared: None,
+            })
+            .collect();
+        let found = if pragma.of_index() {
+            table
+                .indexes
+                .iter()
+                .find(|index| index.name.eq_ignore_ascii_case(name))
+                .map(|index| index.name.clone())
+        } else {
+            table
+                .sql_name
+                .eq_ignore_ascii_case(name)
+                .then(|| table.sql_name.clone())
+        };
+        let Some(found) = found else {
+            return Ok(SnapshotRows {
+                columns,
+                rows: Vec::new(),
+            });
+        };
+        let connection = crate::sqlite::Connection::open_in_memory()?;
+        for sql in std::iter::once(&table.create_sql)
+            .chain(table.indexes.iter().map(|index| &index.create_sql))
+        {
+            connection.execute(sql, ()).await?;
+        }
+        let quoted = format!("\"{}\"", found.replace('"', "\"\""));
+        let rows = connection
+            .rows(&format!("PRAGMA {verb}({quoted})"), ())?
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(crate::storage::sql_value)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let actions = table
+            .foreign_keys
+            .iter()
+            .map(|key| {
+                (
+                    foreign_key_name(&key.table, &key.columns),
+                    key.on_delete.clone(),
+                )
+            })
+            .collect();
+        let listed = table
+            .indexes
+            .iter()
+            .map(|index| index.name.to_ascii_lowercase())
+            .collect();
+        Ok(SnapshotRows {
+            columns,
+            rows: shaped(pragma, rows, &actions, &listed),
+        })
+    }
+}
+/// Pragma rows as an ORM should see them: indexes outside `listed` are
+/// Rocky's own and left out, and foreign keys report their declared action.
+fn shaped(
+    pragma: Describe,
+    rows: Vec<Vec<SqlValue>>,
+    actions: &BTreeMap<(String, BTreeSet<String>), String>,
+    listed: &BTreeSet<String>,
+) -> Vec<Vec<SqlValue>> {
+    // Each foreign key spans the rows sharing its id: (id, seq, table, from, ...).
+    let mut keys: BTreeMap<i64, (String, Vec<String>)> = BTreeMap::new();
+    if pragma == Describe::ForeignKeyList {
+        for row in &rows {
+            if let (
+                Some(SqlValue::Integer(id)),
+                Some(SqlValue::Text(table)),
+                Some(SqlValue::Text(column)),
+            ) = (row.first(), row.get(2), row.get(3))
+            {
+                let key = keys
+                    .entry(*id)
+                    .or_insert_with(|| (table.clone(), Vec::new()));
+                key.1.push(column.clone());
+            }
+        }
+    }
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        // A created index the catalog does not list is Rocky's own.
+        if pragma == Describe::IndexList
+            && matches!((&row[1], &row[3]), (SqlValue::Text(index), SqlValue::Text(origin))
+                if origin == "c" && !listed.contains(&index.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        let mut row = row;
+        if pragma == Describe::ForeignKeyList
+            && let Some(SqlValue::Integer(id)) = row.first()
+            && let Some((table, columns)) = keys.get(id)
+            && let Some(action) = actions.get(&foreign_key_name(table, columns))
+        {
+            row[6] = SqlValue::Text(action.clone());
+        }
+        result.push(row);
+    }
+    result
 }
 /// A foreign key of one table, case-insensitively by parent and column set.
 fn foreign_key_name(table: &str, columns: &[String]) -> (String, BTreeSet<String>) {

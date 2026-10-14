@@ -9,7 +9,7 @@ impl Node {
     fn group_partition(&self, request: &Value) -> Result<GroupPartition, Failure> {
         let values: Vec<Cell> = serde_json::from_value(request["values"].clone())?;
         GroupPartition::resolve(
-            &self.domain,
+            &self.domain(),
             request["group"].as_str(),
             request["table"].as_str(),
             values
@@ -25,7 +25,7 @@ impl Node {
         let name = request["table"]
             .as_str()
             .ok_or("partition table must be a string")?;
-        self.domain
+        self.domain()
             .logical()
             .table(name)
             .filter(|table| table.class == TableClass::Mergeable && !table.partition_by.is_empty())
@@ -45,7 +45,7 @@ impl Node {
                 .credentials
                 .verify_partition(
                     settings.publisher,
-                    self.domain.manifest().hash(),
+                    self.domain().manifest().hash(),
                     node,
                     member.scope,
                     &member.tuple,
@@ -130,7 +130,7 @@ impl Node {
             CredentialChain(vec![
                 Authority {
                     publisher: &issuer,
-                    manifest: self.domain.manifest().hash(),
+                    manifest: self.domain().manifest().hash(),
                 }
                 .issue_partition_terms(
                     device.user,
@@ -204,9 +204,9 @@ impl Node {
             .entry(secret_role(&record.address, epoch))
             .or_insert(ids);
         draft.save(&self.path)?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain());
         *settings = draft;
-        let partition = GroupPartition::of(&self.domain, &record)?;
+        let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, &partition).await?;
         Ok(json!({"address": record_key(&record.address), "epoch": epoch}))
     }
@@ -229,7 +229,7 @@ impl Node {
                 for member in &partition.members {
                     let grants = chain.verify_partition(
                         settings.publisher,
-                        self.domain.manifest().hash(),
+                        self.domain().manifest().hash(),
                         signer,
                         member.scope,
                         &member.tuple,
@@ -249,7 +249,7 @@ impl Node {
         let secret = envelope.open(
             &PrivateKey::from_bytes(&self.vault.get("node")?),
             signer,
-            self.domain.manifest().hash(),
+            self.domain().manifest().hash(),
             partition.record.address,
             epoch,
         )?;
@@ -305,9 +305,9 @@ impl Node {
             .epoch_statements
             .insert(role, envelope.statements().to_vec());
         draft.save(&self.path)?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain);
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain());
         *settings = draft;
-        let partition = GroupPartition::of(&self.domain, &record)?;
+        let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, &partition).await?;
         Ok(true)
     }
@@ -377,7 +377,7 @@ impl Node {
         for recipient in &recipients {
             let envelope = GroupSecretEnvelope::seal_recorded(
                 &signer,
-                self.domain.manifest().hash(),
+                self.domain().manifest().hash(),
                 record.address,
                 epoch.generation,
                 secret,
@@ -476,9 +476,9 @@ impl Node {
                 // Partial concerns partitions: every whole unpartitioned table read here stays held.
                 if partial {
                     let settings = self.settings.lock().await.clone();
-                    for (_, scope) in self.domain.scopes() {
-                        if !self.domain.partitioned_table(&scope)
-                            && settings.reads_whole(&self.domain, &scope)
+                    for (_, scope) in self.domain().scopes() {
+                        if !self.domain().partitioned_table(&scope)
+                            && settings.reads_whole(&self.domain(), &scope)
                         {
                             self.replica.subscribe(scope).await?;
                         }

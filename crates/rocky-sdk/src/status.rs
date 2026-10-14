@@ -183,6 +183,23 @@ pub struct GenerationStatus {
     pub horizon: u32,
     pub previous: Vec<GenerationRecord>,
     pub rebuilding: Option<RebuildProgress>,
+    /// When the earliest transition into the current generation was signed.
+    pub baseline: Option<u64>,
+    pub application: DeclaredSchema,
+}
+/// How the schema the application declares stands to the installed
+/// generation's. An application behind or ahead of its database still
+/// opens it; its statements on what differs fail. See
+/// `docs/runtime/generations.md#adopting-newer-generations`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclaredSchema {
+    Current,
+    /// Older than the database, which adopted a newer generation.
+    Behind,
+    /// Newer than the database: no issuer has signed it, or this device
+    /// could not reach one yet.
+    Ahead,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapProgress {

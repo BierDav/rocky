@@ -479,10 +479,15 @@ async fn rows(
             }
             for scope in scopes {
                 // A refused scope is not exchanged with this peer at all.
+                // A statement of a newer generation is acknowledged after
+                // this device adopts it.
                 if !exchange.refused.contains(scope) {
-                    session
-                        .acknowledge_mergeable_horizon(replica, *scope)
-                        .await?;
+                    match session.acknowledge_mergeable_horizon(replica, *scope).await {
+                        Err(rocky_secure::Error::Incompatible(_)) => newer = true,
+                        other => {
+                            other?;
+                        }
+                    }
                 }
                 if replica.can_finalize_horizon(*scope).await?
                     && let Some(signed) = replica.admitted_horizon(*scope).await?

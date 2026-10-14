@@ -24,10 +24,10 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             .await?;
             // 64 devices of the domain, none of them a contact of A.
             let publisher = PrivateKey::from_bytes(&a.vault.get("publisher")?);
-            let grants = crate::enrollment::grants_of(&writer, &a.domain)?;
+            let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
             let authority = Authority {
                 publisher: &publisher,
-                manifest: a.domain.manifest().hash(),
+                manifest: a.domain().manifest().hash(),
             };
             let strangers = (0..64)
                 .map(|_| {
@@ -46,10 +46,10 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;
             // The strangers share one replica: it only checks A's chain.
-            let config = a.settings.lock().await.config(&a.vault, &a.domain)?;
+            let config = a.settings.lock().await.config(&a.vault, &a.domain())?;
             let replica = EncryptedReplica::open(
                 root.path().join("strangers.sqlite"),
-                a.domain.app.clone(),
+                a.domain().app.clone(),
                 config,
             )
             .await?;

@@ -369,6 +369,9 @@ pub(crate) struct Invite {
 struct Enrollment {
     mesh: MeshId,
     domain: DomainId,
+    /// The domain's current schema, which the device installs whatever
+    /// schema its application declares.
+    schema: Schema,
     manifest: String,
     revocations: RevocationSet,
     capability: SignedCapability,
@@ -579,11 +582,10 @@ fn pseudonym_role(collection: &str, cut: u32) -> String {
     }
 }
 /// What a joining device expects to join.
-fn context(schema: &Schema) -> Result<Commitment, Failure> {
-    Ok(commitment(
-        "rocky.sdk.schema.v1",
-        &serde_json::to_vec(schema)?,
-    ))
+/// What a joining device's application is: its name, whatever version of
+/// the schema it declares.
+fn context(schema: &Schema) -> Commitment {
+    commitment("rocky.sdk.application.v1", schema.application.as_bytes())
 }
 fn reads(grants: &[ResourceGrant], scope: rocky_core::ResourceScope) -> bool {
     grants.iter().any(|grant| {
@@ -1609,7 +1611,7 @@ impl Settings {
         let token = vault.get("invitation")?;
         let issuer = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-        let expected = context(&self.schema)?;
+        let expected = context(&self.schema);
         let time = now()?;
         let authority = self.issuing("enrolls devices")?;
         let active = authority
@@ -1617,9 +1619,10 @@ impl Settings {
             .as_mut()
             .ok_or("no active invitation")?;
         let admission = active.admit(&token, &request, time)?;
-        // A mismatch does not consume the invitation.
+        // Another application does not consume the invitation. Any version
+        // of this one joins: the device installs the domain's schema.
         if request.context != expected {
-            return Err("application schema mismatch".into());
+            return Err("application mismatch".into());
         }
         let claimed = authority
             .claimed
@@ -1681,6 +1684,7 @@ impl Settings {
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &grants)?),
             mesh: self.mesh,
             domain: self.domain,
+            schema: self.schema.clone(),
             manifest: self.manifest.clone(),
             revocations: self.revocations.clone(),
             capability: issued,
@@ -2802,7 +2806,7 @@ impl Joining {
             intent.nonce.clone(),
             node.public_key(),
             user.public_key(),
-            context(schema)?,
+            context(schema),
         );
         // Every joining device supplies a return route for later commits.
         if let Ok(address) = transport.address().await
@@ -2816,7 +2820,7 @@ impl Joining {
         let mut settings = Settings {
             version: VERSION,
             installation: intent.installation.clone(),
-            schema: schema.clone(),
+            schema: enrollment.schema.clone(),
             mesh: enrollment.mesh,
             domain: enrollment.domain,
             publisher: invite.publisher,
@@ -2856,10 +2860,9 @@ impl Joining {
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
+        // The schema and lineage are the publisher's.
+        settings.verify_lineage()?;
         let domain = settings.domain()?;
-        if settings.manifest()?.verify(settings.publisher)?.hash() != domain.manifest().hash() {
-            return Err("the domain's manifest differs from this application schema".into());
-        }
         settings.epoch_statements = enrollment.epoch_statements.clone();
         settings.learn_revocations(&enrollment.revocations)?;
         // The device receives what the invitation said, no more and no less.

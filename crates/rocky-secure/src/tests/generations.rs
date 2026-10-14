@@ -170,7 +170,11 @@ impl Lineage {
     fn manifest(&self, generation: u32) -> SignedManifest {
         SignedManifest::sign(&self.definition(generation), &self.publisher).unwrap()
     }
-    fn transition(&self, from: u32, horizon: u32) -> SignedTransition {
+    fn transition(&self, from: u32) -> SignedTransition {
+        self.transition_at(from, 1_000)
+    }
+    /// The transition out of `from`, signed at `time`.
+    fn transition_at(&self, from: u32, time: u64) -> SignedTransition {
         let at = |generation| Generation {
             schema: generation,
             handler: 1,
@@ -182,7 +186,8 @@ impl Lineage {
                 to: self.definition(from + 1).hash(),
                 before: at(from),
                 after: at(from + 1),
-                horizon,
+                cut: false,
+                time,
             },
             &self.publisher,
         )
@@ -278,12 +283,12 @@ impl Lineage {
         }
     }
     /// The upgrade from `from` to `to`, with every intermediate step.
-    fn upgrade(&self, from: u32, to: u32, horizon: u32) -> Upgrade {
+    fn upgrade(&self, from: u32, to: u32) -> Upgrade {
         Upgrade {
             steps: (from..to)
                 .map(|generation| GenerationStep {
                     manifest: self.manifest(generation),
-                    transition: self.transition(generation, horizon.min(generation)),
+                    transition: self.transition(generation),
                 })
                 .collect(),
             tables: Some((self.schema(to), self.domain, self.readers(to))),
@@ -623,7 +628,7 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
 }
 
 #[tokio::test]
-async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the_horizon() {
+async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
@@ -648,7 +653,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     drop(alice);
 
     // An unsupported change activates nothing.
-    let mut required = lineage.upgrade(1, 2, 1);
+    let mut required = lineage.upgrade(1, 2);
     if let Some((schema, _, _)) = &mut required.tables {
         schema.tables[0].columns[2].not_null = true;
     }
@@ -666,7 +671,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     EncryptedReplica::<TypedRows>::fail_next_activation();
     assert!(matches!(
         lineage
-            .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+            .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2)))
             .await,
         Err(Error::InjectedFailure)
     ));
@@ -678,7 +683,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     drop(alice);
 
     let alice = lineage
-        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2)))
         .await
         .unwrap();
     let status = alice.generations().await.unwrap();
@@ -689,7 +694,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
             handler: 1
         }
     );
-    assert_eq!(status.horizon, 1);
+    assert_eq!(status.horizon, 0);
     assert_eq!(status.previous.len(), 1);
     // Existing rows gained the new column, empty; the new table exists.
     assert_eq!(
@@ -775,7 +780,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     let bob_path = dir.path().join("bob.db");
     drop(bob);
     let bob = lineage
-        .open(&bob_path, &bob_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .open(&bob_path, &bob_key, 2, Some(lineage.upgrade(1, 2)))
         .await
         .unwrap();
     bob.audit(items).await.unwrap();
@@ -793,8 +798,8 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     let bob = lineage.open(&bob_path, &bob_key, 2, None).await.unwrap();
     bob.audit(items).await.unwrap();
 
-    // Generation 3 moves the horizon to 2: a generation 1 device is refused
-    // explicitly, generation 2 devices are not.
+    // Generation 3 has no admission horizon: a device two generations
+    // behind keeps syncing with its generation 1 credentials.
     let carol_key = PrivateKey::new();
     let carol = lineage
         .open(&dir.path().join("carol.db"), &carol_key, 1, None)
@@ -802,24 +807,22 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
         .unwrap();
     identity_insert(
         &session(&carol).await,
-        "INSERT INTO items VALUES('0300','stale')",
+        "INSERT INTO items VALUES('0300','older')",
         vec![],
     )
     .await
     .unwrap();
     drop(alice);
     let alice = lineage
-        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(2, 3, 2)))
+        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(2, 3)))
         .await
         .unwrap();
-    assert_eq!(alice.generations().await.unwrap().horizon, 2);
-    let stale = frames_as(&carol, alice_key.public_key(), &earlier, items).await;
-    assert_eq!(stale.len(), 1);
-    for frame in stale {
-        assert!(matches!(
-            alice.receive(frame).await,
-            Err(Error::Incompatible(_))
-        ));
+    assert_eq!(alice.generations().await.unwrap().horizon, 0);
+    assert_eq!(alice.generations().await.unwrap().previous.len(), 2);
+    let older = frames_as(&carol, alice_key.public_key(), &earlier, items).await;
+    assert_eq!(older.len(), 1);
+    for frame in older {
+        assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
     }
     let (node, credentials) = {
         let inner = carol.inner.lock().await;
@@ -828,12 +831,10 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
             inner.config.credentials.clone(),
         )
     };
-    assert!(matches!(
-        alice
-            .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
-            .await,
-        Err(Error::Incompatible(_))
-    ));
+    alice
+        .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
+        .await
+        .unwrap();
     let second = lineage.credentials(2, &alice_key);
     for frame in frames_as(&bob, alice_key.public_key(), &second, items).await {
         alice.receive(frame).await.unwrap();
@@ -841,7 +842,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_old_peers_inside_the
     alice.audit(items).await.unwrap();
     assert_eq!(
         select(&alice, "SELECT count(*), max(rank) FROM items").await,
-        vec![vec![SqlValue::Integer(5), SqlValue::Null]]
+        vec![vec![SqlValue::Integer(6), SqlValue::Null]]
     );
 }
 
@@ -901,7 +902,7 @@ async fn a_checkpoint_of_the_previous_generation_rebootstraps_typed_rows_and_tom
 
     // Alice moves to generation 2; her checkpoint is of generation 1.
     let alice = lineage
-        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2, 1)))
+        .open(&alice_path, &alice_key, 2, Some(lineage.upgrade(1, 2)))
         .await
         .unwrap();
     identity_insert(
@@ -918,7 +919,7 @@ async fn a_checkpoint_of_the_previous_generation_rebootstraps_typed_rows_and_tom
         dir.path().join("carol.db"),
         lineage.app(2),
         lineage.config(2, &carol_key),
-        Some(lineage.upgrade(1, 2, 1)),
+        Some(lineage.upgrade(1, 2)),
     )
     .await
     .unwrap();
@@ -1065,5 +1066,260 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
     assert_eq!(
         reopened.predecessors().await.unwrap(),
         [old_key.public_key()]
+    );
+}
+
+#[tokio::test]
+async fn an_open_replica_adopts_a_newer_generation_in_place() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
+    let alice_path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&alice_path, &alice_key, 1, None)
+        .await
+        .unwrap();
+    insert(&alice, 0..3).await;
+    let bob = lineage
+        .open(
+            &dir.path().join("bob.db"),
+            &bob_key,
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap();
+    let items = lineage.scope("items");
+    identity_insert(
+        &session(&bob).await,
+        "INSERT INTO items VALUES('0100','ranked',NULL,7)",
+        vec![],
+    )
+    .await
+    .unwrap();
+    // Generation 3 frames forced on Alice are refused before the switch.
+    let third = lineage.credentials(3, &alice_key);
+    let newer = frames_as(&bob, alice_key.public_key(), &third, items).await;
+    assert!(!newer.is_empty());
+    for frame in newer {
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Incompatible(_))
+        ));
+    }
+    let mut observer = alice.observe_tables(None).await.unwrap();
+    let before = session(&alice).await;
+
+    // A transition another key signed changes nothing.
+    let mut forged = lineage.upgrade(1, 3);
+    forged.steps[1].transition = Lineage::new().transition(2);
+    assert!(
+        alice
+            .adopt_generation(lineage.app(3), lineage.config(3, &alice_key), forged)
+            .await
+            .is_err()
+    );
+    assert_eq!(alice.generations().await.unwrap().current.schema, 1);
+    assert_eq!(
+        before
+            .run("SELECT count(*) FROM items", vec![])
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+
+    assert!(
+        alice
+            .adopt_generation(
+                lineage.app(3),
+                lineage.config(3, &alice_key),
+                lineage.upgrade(1, 3)
+            )
+            .await
+            .unwrap()
+    );
+    let status = alice.generations().await.unwrap();
+    assert_eq!(status.current.schema, 3);
+    assert_eq!(status.previous.len(), 2);
+    assert_eq!(status.plan, None);
+    // Sessions planned against the old tables end; observers stay.
+    assert!(before.run("SELECT 1", vec![]).await.is_err());
+    assert!(observer.try_next().unwrap().is_some());
+    assert_eq!(
+        select(&alice, "SELECT key,note,rank FROM items ORDER BY key").await,
+        (0..3)
+            .map(|id| vec![text(&format!("{id:04}")), SqlValue::Null, SqlValue::Null])
+            .collect::<Vec<_>>()
+    );
+    for frame in frames(&bob, &alice, items).await {
+        alice.receive(frame).await.unwrap();
+    }
+    assert_eq!(
+        select(&alice, "SELECT title,rank FROM items WHERE key='0100'").await,
+        vec![vec![text("ranked"), SqlValue::Integer(7)]]
+    );
+    // Adopting the current generation again changes nothing.
+    assert!(
+        !alice
+            .adopt_generation(
+                lineage.app(3),
+                lineage.config(3, &alice_key),
+                lineage.upgrade(1, 3)
+            )
+            .await
+            .unwrap()
+    );
+    // Its writes reach the generation 3 peer, and the file reopens at 3.
+    lineage
+        .register_authors(&alice, 3, &alice_key)
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&alice).await,
+        "INSERT INTO tags VALUES('t','label')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    for frame in frames(&alice, &bob, lineage.scope("tags")).await {
+        bob.receive(frame).await.unwrap();
+    }
+    assert_eq!(
+        select(&bob, "SELECT label FROM tags").await,
+        vec![vec![text("label")]]
+    );
+    drop(before);
+    drop(observer);
+    drop(alice);
+    let alice = lineage
+        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(1, 3)))
+        .await
+        .unwrap();
+    alice.audit(items).await.unwrap();
+    assert_eq!(
+        select(&alice, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(4)]]
+    );
+}
+
+#[tokio::test]
+async fn one_schema_signed_apart_is_one_generation_with_the_earliest_baseline() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&path, &key, 2, Some(lineage.upgrade(1, 2)))
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().baseline, Some(1_000));
+    // Another issuer signed the same step later, then one earlier.
+    assert!(
+        !alice
+            .learn_baseline(&lineage.transition_at(1, 1_500))
+            .await
+            .unwrap()
+    );
+    assert!(
+        alice
+            .learn_baseline(&lineage.transition_at(1, 400))
+            .await
+            .unwrap()
+    );
+    let status = alice.generations().await.unwrap();
+    assert_eq!(status.baseline, Some(400));
+    assert_eq!(status.previous.len(), 1);
+    // Another step or another publisher's transition is refused.
+    assert!(
+        !alice
+            .learn_baseline(&lineage.transition_at(2, 100))
+            .await
+            .unwrap()
+    );
+    assert!(
+        alice
+            .learn_baseline(&Lineage::new().transition_at(1, 100))
+            .await
+            .is_err()
+    );
+    drop(alice);
+    let alice = lineage
+        .open(&path, &key, 2, Some(lineage.upgrade(1, 2)))
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().baseline, Some(400));
+}
+
+#[tokio::test]
+async fn an_older_generation_the_replica_lacks_is_learned_before_its_frames_apply() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
+    // Alice knows generations 2 and 3 only, as a device that dropped 1.
+    let alice = lineage
+        .open(
+            &dir.path().join("alice.db"),
+            &alice_key,
+            3,
+            Some(lineage.upgrade(2, 3)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().previous.len(), 1);
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &carol_key, 1, None)
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&carol).await,
+        "INSERT INTO items VALUES('0001','from generation 1')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let items = lineage.scope("items");
+    let earlier = lineage.credentials(1, &alice_key);
+    for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Incompatible(_))
+        ));
+    }
+    // Another publisher's steps, or none that lead to a known generation,
+    // record nothing.
+    assert!(
+        alice
+            .learn_generations(&Lineage::new().upgrade(1, 3).steps)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        alice
+            .learn_generations(&lineage.upgrade(1, 2).steps[..0])
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        alice
+            .learn_generations(&lineage.upgrade(1, 3).steps)
+            .await
+            .unwrap(),
+        1
+    );
+    let status = alice.generations().await.unwrap();
+    assert_eq!(status.current.schema, 3);
+    assert_eq!(status.previous.len(), 2);
+    for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
+        alice.receive(frame).await.unwrap();
+    }
+    assert_eq!(
+        select(&alice, "SELECT title, note, rank FROM items").await,
+        vec![vec![
+            text("from generation 1"),
+            SqlValue::Null,
+            SqlValue::Null
+        ]]
     );
 }

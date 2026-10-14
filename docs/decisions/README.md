@@ -42,6 +42,7 @@ naturally holds.
 | [0065](0065-iroh-only-transport.md) | iroh as the only transport, with its liveness and path measurements |
 | [0066](0066-breaking-generations.md) | Breaking generations with issuer-run migrations; tables granted like another |
 | [0067](0067-names-are-identities.md) | Names are table and field identities, kept forever |
+| [0068](0068-adopting-newer-generations.md) | Devices adopt any newer generation they meet; no admission horizon |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for

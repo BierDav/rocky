@@ -12,17 +12,15 @@ impl Node {
     ) -> Result<Vec<HorizonPeer>, Failure> {
         let registry = self.registry().await?;
         let settings = self.settings.lock().await;
+        let domain = self.domain();
         let holds = |record: &Record, scope: ResourceScope| -> Result<bool, Failure> {
-            let Some((name, base)) = self
-                .domain
-                .scopes()
-                .find(|(_, base)| base.table == scope.table)
+            let Some((name, base)) = domain.scopes().find(|(_, base)| base.table == scope.table)
             else {
                 return Ok(false);
             };
             let grants = record
                 .profile()
-                .map(|profile| self.domain.effective(profile).raw(&self.domain.resources()))
+                .map(|profile| domain.effective(profile).raw(&domain.resources()))
                 .transpose()?
                 .unwrap_or_default();
             let whole = grants.iter().any(|grant| {

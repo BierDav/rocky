@@ -39,7 +39,47 @@ pub struct GenerationStatus {
     pub horizon: u32,
     /// Earlier generations, oldest first, with their manifests.
     pub previous: Vec<(Generation, Commitment)>,
+    /// When the earliest signed transition into the current generation was
+    /// signed; none for a first generation.
+    pub baseline: Option<u64>,
     pub plan: Option<super::migrate::ProjectionPlan>,
+}
+/// What an open replica holds of its definition, swapped whole when it
+/// adopts a generation.
+struct Definition<A> {
+    app: Arc<A>,
+    permission_fields: HashSet<Commitment>,
+    config: SecureConfig,
+    chain: Chain,
+    history: Vec<KeyMaterial>,
+    manifest: Commitment,
+    definition: ApplicationManifest,
+    tables: HashSet<Commitment>,
+    fields: HashSet<Commitment>,
+    domains: HashSet<rocky_core::DomainId>,
+}
+impl<A> Definition<A> {
+    fn swap(&mut self, inner: &mut Inner<A>) {
+        std::mem::swap(&mut self.app, &mut inner.app);
+        std::mem::swap(&mut self.permission_fields, &mut inner.permission_fields);
+        std::mem::swap(&mut self.config, &mut inner.config);
+        std::mem::swap(&mut self.chain, &mut inner.chain);
+        std::mem::swap(&mut self.history, &mut inner.history);
+        std::mem::swap(&mut self.manifest, &mut inner.manifest);
+        std::mem::swap(&mut self.definition, &mut inner.definition);
+        std::mem::swap(&mut self.tables, &mut inner.tables);
+        std::mem::swap(&mut self.fields, &mut inner.fields);
+        std::mem::swap(&mut self.domains, &mut inner.domains);
+        // Grants resolved under the other definition are stale.
+        *inner
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *inner
+            .local_selectors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }
 /// An earlier generation.
 #[derive(Clone)]
@@ -264,7 +304,7 @@ impl<A: RowApplication> Inner<A> {
             Some([SqlValue::Integer(horizon)]) => {
                 u32::try_from(*horizon).map_err(|_| Error::Corrupt("horizon".into()))?
             }
-            _ => self.definition.schema,
+            _ => 0,
         };
         self.previous = previous;
         Ok(())
@@ -303,7 +343,8 @@ impl<A: RowApplication> Inner<A> {
         // The chain: each step's manifest, its transition to the next, and
         // the configured manifest at the end.
         let mut records = Vec::new();
-        let mut horizon = 0;
+        // Every generation stays admitted, except behind a cut.
+        let mut horizon = self.horizon;
         for (index, step) in steps.iter().enumerate() {
             let manifest = step.manifest.verify(publisher).map_err(credential)?;
             let next = match steps.get(index + 1) {
@@ -320,7 +361,9 @@ impl<A: RowApplication> Inner<A> {
                 return Err(incompatible("the upgrade's transitions do not chain"));
             }
             extends(&manifest, &next, &transition)?;
-            horizon = transition.horizon;
+            if transition.breaking() {
+                horizon = transition.after.schema;
+            }
             records.push((manifest, step));
         }
         // Typed tables move to the new schema through a projection plan;
@@ -386,7 +429,7 @@ impl<A: RowApplication> Inner<A> {
         if upgrade.steps.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
-        let mut horizon = self.definition.schema;
+        let mut horizon = 0;
         for (index, step) in upgrade.steps.iter().enumerate() {
             let manifest = step.manifest.verify(publisher).map_err(credential)?;
             let next = match upgrade.steps.get(index + 1) {
@@ -403,7 +446,9 @@ impl<A: RowApplication> Inner<A> {
                 return Err(incompatible("the lineage's transitions do not chain"));
             }
             extends(&manifest, &next, &transition)?;
-            horizon = transition.horizon;
+            if transition.breaking() {
+                horizon = transition.after.schema;
+            }
             self.conn
                 .execute(
                     "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?)",
@@ -425,8 +470,41 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    /// The stored transition out of `manifest`, verified.
+    async fn stored_transition(
+        &self,
+        manifest: Commitment,
+    ) -> Result<Option<rocky_core::GenerationTransition>, Error> {
+        let stored = collect_rows(
+            self.conn
+                .query(
+                    "SELECT transition FROM secure_generations WHERE manifest=?",
+                    [manifest.to_vec()],
+                )
+                .await?,
+        )
+        .await?;
+        let Some([SqlValue::Blob(bytes)]) = stored.first().map(Vec::as_slice) else {
+            return Ok(None);
+        };
+        let signed = SignedTransition::from_bytes(bytes).map_err(credential)?;
+        Ok(Some(
+            signed.verify(self.config.publisher).map_err(credential)?,
+        ))
+    }
+    /// The signing time of the transition into the current generation.
+    async fn baseline(&self) -> Result<Option<u64>, Error> {
+        let Some(previous) = self.previous.last() else {
+            return Ok(None);
+        };
+        Ok(self
+            .stored_transition(previous.manifest)
+            .await?
+            .filter(|transition| transition.to == self.manifest)
+            .map(|transition| transition.time))
+    }
     /// Frames this replica refused as signed under an unknown generation
-    /// are pending again once that generation is the current one.
+    /// are pending again once that generation is admitted.
     async fn readmit(&self) -> Result<(), Error> {
         let mut after = Vec::new();
         loop {
@@ -445,7 +523,7 @@ impl<A: RowApplication> Inner<A> {
                 };
                 after = hash.clone();
                 let header: p2panda_core::Header<Extensions> = decode(header)?;
-                if header.extensions.manifest == self.manifest {
+                if self.admits(header.extensions.manifest).is_ok() {
                     self.conn
                         .execute(
                             "UPDATE secure_operations SET status='pending' WHERE hash=?",
@@ -475,8 +553,205 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .iter()
                 .map(|previous| (previous.generation, previous.manifest))
                 .collect(),
+            baseline: inner.baseline().await?,
             plan: inner.plan_status().await?,
         })
+    }
+    /// Records the earlier generations among `steps` this replica lacks,
+    /// such as one a peer that has not migrated still writes under: each
+    /// step's manifest is the publisher's, and its transition leads to a
+    /// generation the replica knows or to another such step. Frames refused
+    /// under them are admitted again. Returns how many it recorded.
+    pub async fn learn_generations(&self, steps: &[GenerationStep]) -> Result<usize, Error> {
+        let mut inner = self.inner.lock().await;
+        let publisher = inner.config.publisher;
+        let mut verified = Vec::new();
+        for step in steps {
+            let manifest = step.manifest.verify(publisher).map_err(credential)?;
+            let transition = step.transition.verify(publisher).map_err(credential)?;
+            if transition.app != manifest.app
+                || transition.from != manifest.hash()
+                || transition.before != generation(&manifest)
+            {
+                return Err(incompatible(
+                    "a step's transition does not leave its manifest",
+                ));
+            }
+            verified.push((manifest, transition, step));
+        }
+        // Each newly known generation links the ones before it.
+        let mut known: BTreeSet<Commitment> = inner
+            .previous
+            .iter()
+            .map(|previous| previous.manifest)
+            .chain([inner.manifest])
+            .collect();
+        let mut learned = Vec::new();
+        loop {
+            let found = verified.iter().position(|(manifest, transition, _)| {
+                !known.contains(&manifest.hash()) && known.contains(&transition.to)
+            });
+            let Some(index) = found else { break };
+            let (manifest, transition, step) = verified.swap_remove(index);
+            if transition.breaking() {
+                // Behind a cut nothing is admitted; such a step is not learned.
+                continue;
+            }
+            known.insert(manifest.hash());
+            learned.push((manifest, step));
+        }
+        if learned.is_empty() {
+            return Ok(0);
+        }
+        if learned.len() + inner.previous.len() > MAX_GENERATIONS {
+            return Err(incompatible("too many definition generations"));
+        }
+        let count = learned.len();
+        let recorded = transaction!(inner, |inner| {
+            for (manifest, step) in &learned {
+                inner
+                    .conn
+                    .execute(
+                        "INSERT INTO secure_generations VALUES(?,?,?,?,?)",
+                        bindings(vec![
+                            SqlValue::Blob(manifest.hash().to_vec()),
+                            SqlValue::Integer(i64::from(manifest.schema)),
+                            SqlValue::Integer(i64::from(manifest.handler)),
+                            SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
+                            SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
+                        ]),
+                    )
+                    .await?;
+            }
+            inner.load_generations().await?;
+            inner.readmit().await
+        });
+        if let Err(error) = recorded {
+            inner.load_generations().await?;
+            return Err(error);
+        }
+        drop(inner);
+        self.settle().await?;
+        Ok(count)
+    }
+    /// Keeps `transition` out of an earlier generation when it makes the
+    /// recorded step and was signed earlier: issuers that signed the same
+    /// schema apart made one generation, whose baseline is the earliest.
+    /// Returns whether the recorded transition changed.
+    pub async fn learn_baseline(&self, transition: &SignedTransition) -> Result<bool, Error> {
+        let mut inner = self.inner.lock().await;
+        let verified = transition
+            .verify(inner.config.publisher)
+            .map_err(credential)?;
+        let Some(recorded) = inner.stored_transition(verified.from).await? else {
+            return Ok(false);
+        };
+        if !recorded.same_step(&verified) || verified.time >= recorded.time {
+            return Ok(false);
+        }
+        let bytes = transition.to_bytes().map_err(credential)?;
+        transaction!(inner, |inner| {
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_generations SET transition=? WHERE manifest=?",
+                    bindings(vec![
+                        SqlValue::Blob(bytes.clone()),
+                        SqlValue::Blob(verified.from.to_vec()),
+                    ]),
+                )
+                .await?;
+            Ok(())
+        })?;
+        Ok(true)
+    }
+    /// Moves this open replica to a newer generation of its definition, as
+    /// opening with `upgrade` would: the lineage is verified before anything
+    /// changes, the generation activates in one transaction and the typed
+    /// tables switch through the projection plan before this returns.
+    /// Frames of the generation refused before are admitted afterwards.
+    /// Sessions end; table observers stay registered. A crash after the
+    /// activation resumes the plan when the file is opened at the new
+    /// generation. Returns whether the generation changed.
+    pub async fn adopt_generation(
+        &self,
+        app: A,
+        mut config: SecureConfig,
+        upgrade: Upgrade,
+    ) -> Result<bool, Error> {
+        let manifest = config
+            .manifest
+            .verify(config.publisher)
+            .map_err(credential)?;
+        if app.manifest().hash() != manifest.hash() {
+            return Err(denied("compiled application differs from signed manifest"));
+        }
+        super::check_config(&config, &manifest)?;
+        let (current, history) = super::keys::split(std::mem::take(&mut config.keys));
+        config.keys = current;
+        let mut inner = self.inner.lock().await;
+        if inner.manifest == manifest.hash() {
+            return Ok(false);
+        }
+        if inner.config.publisher != config.publisher
+            || inner.config.node.public_key() != config.node.public_key()
+        {
+            return Err(denied("a generation keeps the publisher and the node"));
+        }
+        let identity = identity(manifest.hash(), config.node.public_key())?;
+        let mut definition = Definition {
+            permission_fields: app.permission_fields().into_iter().collect(),
+            app: Arc::new(app),
+            chain: Chain::new(config.credentials.clone())?,
+            config,
+            history,
+            manifest: manifest.hash(),
+            tables: manifest.entities.iter().map(|item| item.id).collect(),
+            fields: manifest.fields.iter().map(|item| item.id).collect(),
+            domains: manifest.domains.iter().map(|item| item.domain).collect(),
+            definition: manifest,
+        };
+        definition.swap(&mut inner);
+        let activated = transaction!(inner, |inner| {
+            let stored = inner.stored_identity().await?;
+            if !inner.activate(&stored, Some(&upgrade)).await? {
+                return Err(incompatible(
+                    "the lineage does not start at the installed generation",
+                ));
+            }
+            inner.load_revocations(None).await?;
+            inner
+                .conn
+                .execute(
+                    "UPDATE secure_metadata SET identity=? WHERE id=1",
+                    [identity.clone()],
+                )
+                .await?;
+            Ok(())
+        });
+        if let Err(error) = activated {
+            // Nothing was written: the installed generation stays.
+            definition.swap(&mut inner);
+            inner.load_generations().await?;
+            return Err(error);
+        }
+        inner
+            .chains
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        inner.load_generations().await?;
+        inner.finish_plan().await?;
+        inner.load_partitions().await?;
+        inner.local_grants(now()?)?;
+        inner.validate_keys(now()?)?;
+        inner.adopt_keys().await?;
+        inner.load_direct().await?;
+        inner.bump_authority();
+        inner.publish_revision().await?;
+        drop(inner);
+        self.settle().await?;
+        Ok(true)
     }
     /// The sequence and head of the newest confirmed result this replica
     /// holds for `domain`; `None` before the first. An activation is

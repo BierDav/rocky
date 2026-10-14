@@ -266,8 +266,8 @@ pub struct Generation {
 }
 
 /// What a publisher signs to activate a replicated or handler change: the
-/// installed definition, the next one, and the oldest schema generation
-/// whose operations replicas still admit. Operations keep their original
+/// installed definition and the next one. Every generation of a lineage
+/// stays admitted, except behind a cut. Operations keep their original
 /// signed bytes; nothing is re-signed or translated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationTransition {
@@ -277,15 +277,17 @@ pub struct GenerationTransition {
     pub to: Commitment,
     pub before: Generation,
     pub after: Generation,
-    /// Operations of schema generations below this are refused; their
-    /// authors rebootstrap after upgrading. At most `before.schema`, or
-    /// `after.schema` for a [breaking](Self::breaking) cut.
-    pub horizon: u32,
+    /// A [breaking](Self::breaking) cut: operations of every earlier
+    /// schema generation are refused.
+    pub cut: bool,
+    /// When it was signed, in seconds. Transitions that differ only in
+    /// this are one generation, whose baseline is the earliest.
+    pub time: u64,
 }
 impl GenerationTransition {
     /// Little-endian numbers in field order.
     pub fn canonical(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.transition.v1".to_vec();
+        let mut bytes = b"rocky.transition.v2".to_vec();
         bytes.extend(self.app.0);
         bytes.extend(self.from);
         bytes.extend(self.to);
@@ -294,35 +296,37 @@ impl GenerationTransition {
             self.before.handler,
             self.after.schema,
             self.after.handler,
-            self.horizon,
         ] {
             bytes.extend(number.to_le_bytes());
         }
+        bytes.push(u8::from(self.cut));
+        bytes.extend(self.time.to_le_bytes());
         bytes
     }
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         let invalid = || crate::ProtocolError::InvalidManifest;
         let rest = bytes
-            .strip_prefix(b"rocky.transition.v1".as_slice())
-            .filter(|rest| rest.len() == 16 + 32 + 32 + 5 * 4)
+            .strip_prefix(b"rocky.transition.v2".as_slice())
+            .filter(|rest| rest.len() == 16 + 32 + 32 + 4 * 4 + 1 + 8)
             .ok_or_else(invalid)?;
         let (app, rest) = rest.split_at(16);
         let (from, rest) = rest.split_at(32);
         let (to, rest) = rest.split_at(32);
+        let (rest, cut) = rest.split_at(4 * 4);
+        let (cut, time) = cut.split_at(1);
+        let time = u64::from_le_bytes(time.try_into().map_err(|_| invalid())?);
+        let cut = match cut {
+            [0] => false,
+            [1] => true,
+            _ => return Err(invalid()),
+        };
         let numbers: Vec<u32> = rest
             .as_chunks::<4>()
             .0
             .iter()
             .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
-        let [
-            before_schema,
-            before_handler,
-            after_schema,
-            after_handler,
-            horizon,
-        ] = numbers[..]
-        else {
+        let [before_schema, before_handler, after_schema, after_handler] = numbers[..] else {
             return Err(invalid());
         };
         let transition = Self {
@@ -337,7 +341,8 @@ impl GenerationTransition {
                 schema: after_schema,
                 handler: after_handler,
             },
-            horizon,
+            cut,
+            time,
         };
         transition.validate()?;
         Ok(transition)
@@ -347,10 +352,17 @@ impl GenerationTransition {
     }
     /// A cut: operations of every earlier schema generation are refused.
     pub fn breaking(&self) -> bool {
-        self.horizon == self.after.schema && self.after.schema > self.before.schema
+        self.cut
+    }
+    /// Whether `other` makes the same step, signed at another time.
+    pub fn same_step(&self, other: &Self) -> bool {
+        Self {
+            time: other.time,
+            ..self.clone()
+        } == *other
     }
     /// A step forward: a new manifest, generations that do not go back and
-    /// one of them up, and a horizon inside the generations it spans.
+    /// one of them up; a cut moves the schema generation up.
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
         let (before, after) = (self.before, self.after);
         let forward = after.schema >= before.schema
@@ -361,8 +373,7 @@ impl GenerationTransition {
             || !forward
             || before.schema == 0
             || before.handler == 0
-            || self.horizon == 0
-            || (self.horizon > before.schema && !self.breaking())
+            || (self.cut && after.schema == before.schema)
         {
             return Err(crate::ProtocolError::InvalidManifest);
         }
@@ -656,26 +667,40 @@ mod tests {
                 schema: 2,
                 handler: 1,
             },
-            horizon: 1,
+            cut: false,
+            time: 1_000,
         };
         assert!(transition.validate().is_ok());
+        let later = GenerationTransition {
+            time: 2_000,
+            ..transition.clone()
+        };
+        assert!(later.same_step(&transition) && later.id() != transition.id());
         assert_eq!(
             GenerationTransition::from_canonical(&transition.canonical()),
             Ok(transition.clone())
         );
         // A cut admits only the new generation.
         let cut = GenerationTransition {
-            horizon: 2,
+            cut: true,
             ..transition.clone()
         };
         assert!(cut.validate().is_ok() && cut.breaking() && !transition.breaking());
+        assert_eq!(
+            GenerationTransition::from_canonical(&cut.canonical()),
+            Ok(cut.clone())
+        );
+        // One current format: another version or flag is refused.
+        let mut other = cut.canonical();
+        other[b"rocky.transition.v".len()] = b'1';
+        assert!(GenerationTransition::from_canonical(&other).is_err());
+        let mut flag = cut.canonical();
+        let at = flag.len() - 9;
+        flag[at] = 2;
+        assert!(GenerationTransition::from_canonical(&flag).is_err());
         for invalid in [
             GenerationTransition {
-                horizon: 3,
-                ..transition.clone()
-            },
-            GenerationTransition {
-                horizon: 2,
+                cut: true,
                 after: Generation {
                     schema: 1,
                     handler: 2,

@@ -1,6 +1,9 @@
 # 2. Adopting newer generations
 
-Status: proposed; not started.
+Status: implemented (2026-10-14) except two items deferred to
+[phase 3](03-removal.md): the Room gate's DAO on a removed column, and
+pulling again the frames stamped after a learned earlier baseline; see
+[evidence](#evidence).
 Owner: `rocky-secure` replica generations, admission and projection switch;
 `rocky-sdk` `generation.rs`, `database.rs` open, bootstrap and the sync
 worker; the driver's Room profile. Depends on
@@ -77,8 +80,57 @@ whatever schema its app declares, and keeps syncing.
 - A crash during that migration resumes on reopen and ends at v9.
 - An old Room app opens the migrated database; a DAO on an unchanged table
   works and one on a removed column fails with a SQLite error.
+  *Deferred to [phase 3](03-removal.md):* no generation can remove a column
+  before removal exists; the rest of this item is met.
 - A forged schema or manifest is refused before anything changes.
 - Two issuers that sign the same schema apart end on one generation with the
   earlier baseline on every device.
 - A device on v8 that receives a v9 horizon statement migrates to v9 before
   acknowledging it.
+
+## Evidence
+
+Decision record [0068](../decisions/0068-adopting-newer-generations.md) and
+the guide [adopting generations](../runtime/adopting-generations.md), which
+lists the tests. Against the completion gate:
+
+- v1 application meets a v3 issuer, switches once, syncs both ways and
+  reopens with the v1 application: `rocky-sdk` `tests/generations.rs`
+  `an_older_application_adopts_the_newer_generation_it_meets`.
+- A crash after the settings were saved, before the switch, reopens at the
+  newer generation: `a_crash_before_the_switch_resumes_at_the_newer_generation`;
+  interruptions of the plan itself: `rocky-secure` `tests::generations`.
+- Room: `tests/driver.rs` `an_older_room_application_validates_the_schema_it_declares`
+  opens a v4 database with the v3 schema through the `room-2.8.4` profile:
+  `user_version` is 3, `table_info(items)` lists the v3 columns, the index
+  list is unchanged, an unchanged table is read from the file and a read of
+  `items` works. A DAO on a removed column is deferred to
+  [phase 3](03-removal.md), whose gate now carries it; no Kotlin Room
+  application older than its database has been run.
+- Forged schema, manifest, lineage or transition: `enrollment::tests::a_forged_generation_offer_is_refused_before_anything_changes`
+  and `rocky-secure` `an_open_replica_adopts_a_newer_generation_in_place`.
+- Two issuers signing apart: `issuers_that_sign_one_schema_apart_end_on_one_generation`,
+  `an_earlier_signed_step_moves_the_baseline` and `rocky-secure`
+  `one_schema_signed_apart_is_one_generation_with_the_earliest_baseline`.
+- A newer horizon statement: `a_newer_horizon_is_acknowledged_after_adopting_its_generation`.
+- Slice 4, an older manifest a device lacks: `rocky-sdk` `tests/generations.rs`
+  `an_older_generation_the_database_lacks_is_fetched_before_its_frames_apply`
+  (a generation 1 frame relayed by the issuer; the member fetches and
+  verifies generation 1 from it first) and `rocky-secure`
+  `an_older_generation_the_replica_lacks_is_learned_before_its_frames_apply`.
+- Slice 4, joining: `an_older_application_joins_at_the_households_generation`.
+
+Deferred: the settled point "a device that learns an earlier one pulls again
+the frames stamped after it, as [removal](03-removal.md#settled) does for a
+re-added field". Pulling again recovers writes a device ignored, and only
+removal makes any ignored: its brief says "Every device ignores writes to
+the field stamped before it" and "A device adopting the generation pulls
+again the frames of the field's tables stamped after the baseline". Until
+then every frame stamped after a baseline is already stored, so phase 2
+records and merges the earliest baseline (evidence above) and the pull
+again lands with phase 3. Neither this brief nor decision 0068 said so
+before this note. Discovery does not adopt cuts.
+
+On 2026-10-14 `./scripts/lint`, `./scripts/check` (173 unit, 990
+integration tests), `sdks/kotlin/gradlew -p sdks/kotlin check` and
+`./examples/shoppinglist-app/check` passed.

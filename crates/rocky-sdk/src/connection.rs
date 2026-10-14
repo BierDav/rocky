@@ -319,10 +319,12 @@ pub(crate) struct State {
     reading: Option<Reading>,
     results: BTreeMap<u64, Pending>,
     room: room::Housekeeping,
-    /// The installed schema's version, read between transactions: a
-    /// statement must not wait for the settings while its transaction holds
-    /// the replica, since a renewal holds them while it waits for the replica.
+    /// The version the application declares, which Room checks whatever
+    /// generation the database is at.
     version: u32,
+    /// The tables the application declares otherwise than the installed
+    /// generation, as Room validates them; read between transactions.
+    declared: Vec<rocky_core::LogicalTable>,
 }
 impl State {
     async fn new(node: Arc<Node>, options: ConnectionOptions) -> Result<Self, Failure> {
@@ -332,7 +334,8 @@ impl State {
             }
             None => room::Housekeeping::new(None),
         };
-        let version = node.settings.lock().await.schema.version;
+        let version = node.declared_version();
+        let declared = node.declared_differences()?;
         let mut state = Self {
             read_only: options.read_only,
             options,
@@ -344,6 +347,7 @@ impl State {
             results: BTreeMap::new(),
             room,
             version,
+            declared,
         };
         state.sql().await?;
         Ok(state)
@@ -470,13 +474,15 @@ impl State {
         let timeout = self.options.sql().transaction_timeout.as_millis();
         // The session of an idle connection may have lost its authority.
         if !self.authority_pinned() {
-            self.version = self.node.settings.lock().await.schema.version;
+            // The installed generation may have changed with the authority.
+            self.declared = self.node.declared_differences()?;
             self.sql().await?;
         }
         let Self {
             opened,
             room,
             version,
+            declared,
             ..
         } = self;
         let version = *version;
@@ -487,6 +493,7 @@ impl State {
             room::Context {
                 sql: sql_session,
                 version,
+                declared,
                 read_only,
                 busy_timeout: i64::try_from(timeout).unwrap_or(i64::MAX),
             },

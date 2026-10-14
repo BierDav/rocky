@@ -162,8 +162,11 @@ uses this retry for its observations.
 
 Rocky creates the tables when the database is created or joined, with real
 primary keys and indexes; ordinary SQLite tools see them in the file. Room
-finds the version it expects in `PRAGMA user_version`, which is the
-replicated schema's version, and never runs `onCreate`. A Room migration or
+finds the version it expects in `PRAGMA user_version`, which is the version
+its application declares, and never runs `onCreate`. A database may be at a
+newer or older [generation](adopting-generations.md) than the application:
+Room validates the tables as the application declares them, DAOs on what
+both share work, and DAOs on what differs fail with SQLite errors. A Room migration or
 destructive fallback fails at its first schema change: the replicated schema
 changes through Rocky's [generations](generations.md), never through Room.
 Table and column names are their identities: renaming an entity's table or

@@ -666,8 +666,9 @@ async fn identity(
                 None => None,
             };
             // Another application schema: a local rebuild or the domain's
-            // next generation, saved before the replica opens.
-            if settings.schema != *schema {
+            // next generation, saved before the replica opens. An older one
+            // opens the installed database unchanged.
+            if settings.application(schema)? == crate::DeclaredSchema::Ahead {
                 let transport = link.as_ref().map(|(transport, _)| &**transport);
                 if let Err(error) = settings.evolve(path, &vault, schema, transport).await {
                     if let Some((transport, true)) = &link {
@@ -683,7 +684,7 @@ async fn identity(
 
 /// Readies an opened replica for this identity: its readable tables,
 /// group keys, credential signer and row authors.
-async fn attach(
+pub(crate) async fn attach(
     replica: &EncryptedReplica<rocky_core::TypedCommands>,
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
@@ -743,6 +744,29 @@ async fn attach(
         .await?;
     for (key, chain) in settings.row_authors(vault)? {
         replica.register_row_author(key, chain).await?;
+    }
+    Ok(())
+}
+
+/// Gives every granted scope without one the default retention policy.
+pub(crate) async fn retain(
+    replica: &EncryptedReplica<rocky_core::TypedCommands>,
+    settings: &Settings,
+    domain: &crate::domain::Domain,
+) -> Result<(), Failure> {
+    for scope in settings.granted(domain) {
+        if replica.retention_policy(scope).await?.is_none() {
+            replica
+                .set_retention_policy(
+                    scope,
+                    rocky_secure::RetentionPolicy {
+                        copies: 1,
+                        window: 256,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+        }
     }
     Ok(())
 }
@@ -1111,7 +1135,7 @@ async fn run(
             None => None,
         };
         // A cut this issuer started: migrate, then require the fields.
-        if settings.schema != setup.schema {
+        if settings.schema != setup.schema && settings.started_cut(&setup.schema)? {
             cut(&directory, &mut settings, &vault, &path, &setup.schema).await?;
         }
         let domain = settings.domain()?.hosted(host);
@@ -1139,20 +1163,7 @@ async fn run(
             .await?
         };
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
-        for scope in settings.granted(&domain) {
-            if replica.retention_policy(scope).await?.is_none() {
-                replica
-                    .set_retention_policy(
-                        scope,
-                        rocky_secure::RetentionPolicy {
-                            copies: 1,
-                            window: 256,
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            }
-        }
+        retain(&replica, &settings, &domain).await?;
         #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
         let mut acquire: Option<crate::node::Acquire> = None;
         #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
@@ -1218,7 +1229,8 @@ async fn run(
             coordinator,
             acquire,
         )
-        .with_service(service),
+        .with_service(service)
+        .with_declared(setup.schema.clone()),
     );
     if let Err(error) = async {
         node.complete_revocation().await?;
@@ -1406,7 +1418,7 @@ fn purge_directory(directory: &Path) -> Result<(), Failure> {
 async fn dispatch(bytes: &[u8], client: Result<Arc<Client>, Failure>, node: &Node) -> Vec<u8> {
     let result: Result<Value, Failure> = async {
         let call: Value = serde_json::from_slice(bytes)?;
-        if call["version"] != 1 || call["scope"] != serde_json::to_value(node.domain.scope)? {
+        if call["version"] != 1 || call["scope"] != serde_json::to_value(node.domain().scope)? {
             return Err("foreign scope or SDK version".into());
         }
         Box::pin(node.dispatch(&*client?, &call["request"])).await

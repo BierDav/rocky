@@ -137,23 +137,22 @@ impl Names {
     fn of(steps: &[rocky_core::GenerationTransition], current: &ApplicationManifest) -> Self {
         // An id is retired from its removal until a later step names it
         // again, which re-adds it at that step's signing time.
-        let follow = |changes: &dyn Fn(
-            &rocky_core::GenerationTransition,
-        ) -> &rocky_core::ItemChanges| {
-            let (mut retired, mut readded) = (HashSet::new(), BTreeMap::new());
-            for step in steps {
-                for id in &changes(step).removed {
-                    retired.insert(*id);
-                    readded.remove(id);
-                }
-                for id in &changes(step).named {
-                    if retired.remove(id) {
-                        readded.insert(*id, step.time);
+        let follow =
+            |changes: &dyn Fn(&rocky_core::GenerationTransition) -> &rocky_core::ItemChanges| {
+                let (mut retired, mut readded) = (HashSet::new(), BTreeMap::new());
+                for step in steps {
+                    for id in &changes(step).removed {
+                        retired.insert(*id);
+                        readded.remove(id);
+                    }
+                    for id in &changes(step).named {
+                        if retired.remove(id) {
+                            readded.insert(*id, step.time);
+                        }
                     }
                 }
-            }
-            (retired, readded)
-        };
+                (retired, readded)
+            };
         let (retired_tables, tables) = follow(&|step| &step.tables);
         let (retired_fields, fields) = follow(&|step| &step.fields);
         let mut names = Self {
@@ -350,7 +349,9 @@ fn extends(
         ..field.clone()
     };
     let fields_kept = old.fields.iter().all(|field| {
-        removed.contains(&field.id) || new.fields.contains(field) || new.fields.contains(&required(field))
+        removed.contains(&field.id)
+            || new.fields.contains(field)
+            || new.fields.contains(&required(field))
     });
     let tables_kept = old.entities.iter().all(|table| {
         removed.contains(&table.id) || new.entities.iter().any(|other| other.id == table.id)
@@ -699,7 +700,11 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         if let Some(earlier) = &earlier {
-            extends(earlier, &self.definition, &between.iter().collect::<Vec<_>>())?;
+            extends(
+                earlier,
+                &self.definition,
+                &between.iter().collect::<Vec<_>>(),
+            )?;
         }
         Ok(verified)
     }

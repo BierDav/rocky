@@ -204,10 +204,12 @@ impl Node {
             .entry(secret_role(&record.address, epoch))
             .or_insert(ids);
         draft.save(&self.path)?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain());
+        let granted = draft.granted(&self.domain());
         *settings = draft;
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, &partition).await?;
+        // Sessions name the partition only once the replica grants it.
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(json!({"address": record_key(&record.address), "epoch": epoch}))
     }
     /// Accepts one group envelope after it opens and the device reads every
@@ -305,10 +307,12 @@ impl Node {
             .epoch_statements
             .insert(role, envelope.statements().to_vec());
         draft.save(&self.path)?;
-        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = draft.granted(&self.domain());
+        let granted = draft.granted(&self.domain());
         *settings = draft;
         let partition = GroupPartition::of(&self.domain(), &record)?;
         self.hold_keys(&settings, &partition).await?;
+        // Sessions name the partition only once the replica grants it.
+        *self.granted.lock().map_err(|_| "scope catalog poisoned")? = granted;
         Ok(true)
     }
     /// Seals the current epoch's group secret to each recipient and saves

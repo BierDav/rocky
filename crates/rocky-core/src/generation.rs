@@ -378,9 +378,7 @@ impl GenerationTransition {
             if total > MAX_TRANSITION_IDS {
                 return Err(invalid());
             }
-            let (ids, after) = after
-                .split_at_checked(count * 32)
-                .ok_or_else(invalid)?;
+            let (ids, after) = after.split_at_checked(count * 32).ok_or_else(invalid)?;
             let (ids, []) = ids.as_chunks::<32>() else {
                 return Err(invalid());
             };
@@ -403,7 +401,13 @@ impl GenerationTransition {
         let [before_schema, before_handler, after_schema, after_handler] = numbers[..] else {
             return Err(invalid());
         };
-        let [added, named_tables, removed_tables, named_fields, removed_fields] = sets;
+        let [
+            added,
+            named_tables,
+            removed_tables,
+            named_fields,
+            removed_fields,
+        ] = sets;
         let transition = Self {
             app: AppId(app.try_into().map_err(|_| invalid())?),
             from: from.try_into().map_err(|_| invalid())?,

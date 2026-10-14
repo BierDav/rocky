@@ -1,7 +1,6 @@
 # 6. No remnants
 
-Status: implemented (2026-10-14) except end-to-end proof that a frame of a
-dropped generation applies after the fetch; see [evidence](#evidence).
+Status: implemented (2026-10-14); see [evidence](#evidence).
 Owner: `rocky-core` generations; `rocky-secure` horizon, retention and
 pruning; `rocky-sdk` `generation.rs` and `database.rs`; the shopping example.
 Depends on [phase 2](02-adopting-newer-generations.md). Follow the
@@ -55,10 +54,6 @@ every version that ever wrote. After this phase neither remains.
   default on every v7 device.
 - Once its last frame is finalized, a version's manifest is gone from every
   device; a frame of that version arriving later fetches it again and applies.
-  *Partly verified:* the drop on every device and the fetch are shown end to
-  end; that the fetched frame applies is shown only in `rocky-secure`. In the
-  SDK test the frame stays hidden after the fetch because its writer missed a
-  finalized horizon, with dropping disabled as well; see [evidence](#evidence).
 
 ## Evidence
 
@@ -88,34 +83,45 @@ and the guides [generations](../runtime/generations.md#required-fields)
   switch rewrites stored NULLs:
   `a_null_an_older_generation_writes_to_a_required_field_reads_its_default`
   and `rocky-core` `a_required_field_rows_lack_reads_its_default`.
-- Slice 2. Transitions (`rocky.transition.v3`) carry the field ids they add;
-  the SDK lineage keeps every transition and a manifest only while the
-  replica holds it. After a horizon finalizes, both devices of
+- Slice 2. Transitions (`rocky.transition.v4`) carry the field ids rows of
+  the earlier generation may lack and the table and field ids the step named
+  and removed, so [phase 3](03-removal.md)'s removal is read from them
+  alone: `Names`, the SDK lineage and `Domain::removing` take no earlier
+  schema or manifest, and `extends` checks a step against its manifests where
+  both are held. The SDK lineage keeps every transition and a manifest only
+  while the replica holds it. After a horizon finalizes, both devices of
   `a_manifest_nothing_retained_names_is_dropped_and_fetched_again` drop the
   generation 1 manifest from replica and saved lineage; when a device that
-  stayed away returns with a generation 1 frame, the receiving device fetches
-  the manifest again (`generation_learned`) and holds it in its lineage.
+  stayed away returns with a generation 1 edit of a row that survived the
+  horizon, the receiving device fetches the manifest again
+  (`generation_learned`), holds it in its lineage and applies the edit.
+  (An insert from that device stays dropped, by the horizon's rule for births
+  authored against an older cut.)
   `rocky-secure` `an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame`
   drops two manifests, keeps the baseline, refuses a frame of the dropped
   generation and a forged manifest, learns the writer's manifest through the
   kept transitions and applies the frame, after which the manifest stays.
+  `a_generation_removes_a_field_and_a_table_on_every_replica_that_adopts_it`
+  drops the earlier manifests and still ignores the removed field after a
+  reopen; `a_transition_that_hides_a_removal_is_refused` refuses a step whose
+  transition omits a removal its manifests show.
 
-Not shown end to end: the returning frame in the SDK test stays hidden after
-the fetch. The same happens with dropping disabled: the device missed a
-finalized horizon, whose existing rules hide its write. A device that
-acknowledged the horizon at generation 1 cannot be used instead, since a peer
-upgraded after a finalized horizon refuses that horizon's statement as "not
-current" and closes the link, a limit of [phase 2](02-adopting-newer-generations.md)'s
-horizon handling. Chains peers last authenticated with do not keep a manifest
-(decision 0070); otherwise any device that was ever away would pin its
-generation's manifest everywhere.
+Chains peers last authenticated with do not keep a manifest (decision 0070);
+otherwise any device that was ever away would pin its generation's manifest
+everywhere. A peer upgraded after a finalized horizon still refuses that
+horizon's statement under an earlier generation as "not current", a limit of
+[phase 2](02-adopting-newer-generations.md)'s horizon handling that the gate
+does not need.
 
-Checks on 2026-10-14: `./scripts/lint` and `sdks/kotlin/gradlew -p sdks/kotlin check`
-passed. `./scripts/check` ran every test green (173 unit, 995 integration) but
-failed its timing budgets under heavy machine load; the tests over budget take
-about 1 s alone. `./examples/shoppinglist-app/check`, run on a JVM/Android
-project (`scripts/ci/shopping-project`) against this change's SDK, passed
-`SchemaUpgradeTest` but failed intermittently in `HouseholdTest`: a household
-reset and a Room background failure close the node while `createList` runs.
-The Phase 2 SDK passed the reset test 6 times of 6, this change 3 of 4. That
-looks like a regression and has not been explained.
+Checks on 2026-10-14, after combining with [phase 3](03-removal.md):
+`./scripts/lint`, `./scripts/check` (1,010 integration tests within their
+budgets), `sdks/kotlin/gradlew -p sdks/kotlin check` and, against this
+change's SDK published to a private Maven repository,
+`./examples/shoppinglist-app/check` on a JVM/Android project
+(`scripts/ci/shopping-project`) passed twice, and its shared JVM tests six
+times of six. Their earlier intermittent `HouseholdTest` failures predate this
+phase: the phase 2 SDK failed three runs of six the same way. A partition
+`createList` prepared reached the SDK's session scope catalog before the
+replica granted it, so a Room connection opened in between failed with
+"session scope is not granted" and the app closed the node. The catalog now
+follows the replica.

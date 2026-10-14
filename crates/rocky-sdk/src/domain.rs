@@ -147,7 +147,11 @@ impl Domain {
     /// Whether a generation removed the table or `table.field` `name`.
     fn removed(&self, name: &str) -> bool {
         let logical = self.logical();
-        let kind = if name.contains('.') { "field" } else { "entity" };
+        let kind = if name.contains('.') {
+            "field"
+        } else {
+            "entity"
+        };
         self.removed.contains(&rocky_core::definition_item_id(
             logical.publisher,
             logical.app_id(),
@@ -357,9 +361,8 @@ impl Domain {
                     .cloned()
                     .map(|mut grant| {
                         if let Some(columns) = &mut grant.columns {
-                            columns.retain(|name| {
-                                !self.removed(&format!("{}.{name}", grant.scope))
-                            });
+                            columns
+                                .retain(|name| !self.removed(&format!("{}.{name}", grant.scope)));
                         }
                         grant
                     })

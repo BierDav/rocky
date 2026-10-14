@@ -1513,6 +1513,25 @@ async fn a_generation_removes_a_field_and_a_table_on_every_replica_that_adopts_i
             vec![text("0002"), text("two")]
         ]
     );
+    // The removal is read from the transitions: dropping the earlier
+    // manifests nothing names keeps it.
+    assert!(
+        !alice
+            .drop_unreferenced_generations()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(alice);
+    let alice = lineage
+        .open(&alice_path, &alice_key, 4, Some(lineage.upgrade(1, 4)))
+        .await
+        .unwrap();
+    alice.audit(items).await.unwrap();
+    assert!(!holds(&alice, "secure_rows", note).await);
+    write(&carol, "UPDATE items SET note='again' WHERE key='0002'").await;
+    deliver(&carol, &alice, &alice_key, &lineage, 3, items).await;
+    assert!(!holds(&alice, "secure_rows", note).await);
 }
 
 #[tokio::test]
@@ -1760,4 +1779,32 @@ async fn an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame() {
             .is_empty()
     );
     assert_eq!(alice.generations().await.unwrap().previous.len(), 1);
+}
+
+#[tokio::test]
+async fn a_transition_that_hides_a_removal_is_refused() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let key = PrivateKey::new();
+    let mut upgrade = lineage.upgrade(1, 4);
+    let honest = upgrade.steps[2]
+        .transition
+        .verify(lineage.publisher.public_key())
+        .unwrap();
+    assert!(honest.fields.removed.contains(&lineage.note()));
+    let hidden = rocky_core::GenerationTransition {
+        fields: rocky_core::ItemChanges {
+            removed: BTreeSet::new(),
+            ..honest.fields.clone()
+        },
+        tables: rocky_core::ItemChanges::default(),
+        ..honest
+    };
+    upgrade.steps[2].transition = SignedTransition::sign(&hidden, &lineage.publisher).unwrap();
+    assert!(matches!(
+        lineage
+            .open(&dir.path().join("a.db"), &key, 4, Some(upgrade))
+            .await,
+        Err(Error::Incompatible(_))
+    ));
 }

@@ -969,7 +969,7 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
         Network::Owned(hub.connector("c")),
     )?;
     introduce(&a, &c).await;
-    a.add(1, "apples").await;
+    let apples = a.add(1, "apples").await;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
     // A device that then stays away at generation 1.
@@ -1016,12 +1016,11 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     }
     a.close().await;
 
-    // `c` writes under generation 1 while still away, then returns and
-    // reaches `b`: its frame makes `b` fetch the manifest again. The row
-    // itself stays hidden, as for any device that missed a finalized
-    // horizon; the replica's own tests apply such a frame.
+    // `c` edits a surviving row under generation 1 while still away, then
+    // returns and reaches `b`: its frame makes `b` fetch the manifest again,
+    // and the edit applies.
     let c = Device::new(Database::open(open(&dirs("c"), SCHEMA, None))?)?;
-    c.add(2, "late").await;
+    c.set(2, &apples, "title", json!("late apples")).await;
     c.close().await;
     let c = Device::new(Database::open(open(&dirs("c"), SCHEMA, network("c")))?)?;
     introduce(&b, &c).await;
@@ -1047,6 +1046,7 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     );
     let identity: Value = serde_json::from_slice(&std::fs::read(dirs("b").join("identity.json"))?)?;
     assert!(identity["lineage"][0]["manifest"].is_string(), "{identity}");
+    assert_eq!(b.titles().await, vec!["late apples".to_string()]);
     c.close().await;
     b.close().await;
     Ok(())

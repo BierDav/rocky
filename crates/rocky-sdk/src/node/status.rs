@@ -283,7 +283,6 @@ impl Node {
                         schema: generation.current.schema,
                         handler: generation.current.handler,
                     },
-                    horizon: generation.horizon,
                     previous: generation
                         .previous
                         .into_iter()

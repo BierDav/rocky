@@ -771,27 +771,20 @@ pub(crate) async fn retain(
     Ok(())
 }
 
-/// Completes a cut this issuer started: at the generation that holds the
-/// required fields nullable, runs the schema's migrations once in one
-/// transaction, checks that no live row lacks a required field, then signs
-/// `schema` as the cut. Nothing leaves this device in between: the network
-/// starts after the open. See `docs/runtime/generations.md#breaking-generations`.
-async fn cut(
+/// Completes requiring fields this issuer started: at the generation that
+/// holds them nullable, runs the schema's migrations once in one
+/// transaction, then signs `schema`. Rows the migrations leave NULL read the
+/// default, like rows of older writers. Nothing leaves this device in
+/// between: the network starts after the open. See
+/// `docs/runtime/generations.md#required-fields`.
+async fn migrate(
     directory: &Path,
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
     path: &Path,
     schema: &Schema,
 ) -> Result<(), Failure> {
-    let publisher = *settings.publisher.as_bytes();
     let domain = settings.domain()?;
-    let required = match rocky_core::classify(
-        domain.logical(),
-        &crate::domain::logical(schema, publisher)?,
-    )? {
-        rocky_core::SchemaChange::Breaking { required, .. } => required,
-        _ => return Err("the installed schema is no step of a cut to this one".into()),
-    };
     // Every partition the domain knows is migrated here, or none is.
     for partition in settings.partitions(&domain)? {
         if !partition
@@ -800,7 +793,7 @@ async fn cut(
             .all(|member| settings.reads_partition(member))
         {
             return Err(format!(
-                "a cut needs every partition of group {}; this issuer cannot read one",
+                "a migration needs every partition of group {}; this issuer cannot read one",
                 partition.record.group
             )
             .into());
@@ -814,25 +807,25 @@ async fn cut(
     )
     .await?;
     attach(&replica, settings, vault, &domain, path).await?;
-    // Pseudonyms name a generation: this issuer assigns its own anew.
+    // Pseudonym chains name a generation: this issuer renews its own.
     let registry = crate::registry::read(&replica, domain.registry()).await?;
     for collection in settings.missing_authors(&domain)? {
         let request = settings.pseudonym_request(vault, &collection)?;
         let (chain, _) = settings.assign_pseudonym(vault, &request, Some(&registry))?;
         let (collection, _) = settings.hold_pseudonym(vault, chain.clone())?;
         settings.save(path)?;
-        let key = PrivateKey::from_bytes(&vault.get(&settings.pseudonym_role(&collection)?)?);
+        let key = PrivateKey::from_bytes(&vault.get(&settings.pseudonym_role(&collection))?);
         replica.register_row_author(key, chain).await?;
     }
-    let marker = path.with_file_name("migration.json");
-    let done = std::fs::read(&marker).ok() == Some(schema.version.to_string().into_bytes());
-    if !done {
-        // The installed application version: the last step's, when the
-        // nullable fields were added as a step of their own.
-        let from = match settings.lineage.last() {
-            Some(step) if settings.schema.version == schema.version => step.schema.version,
-            _ => settings.schema.version,
-        };
+    // The installed application version, recorded when the nullable
+    // fields were signed as a step of their own.
+    let marker =
+        crate::generation::Migration::read(path)?.unwrap_or(crate::generation::Migration {
+            from: settings.schema.version,
+            done: false,
+        });
+    let from = marker.from;
+    if !marker.done {
         let session = replica
             .session(
                 settings
@@ -874,25 +867,6 @@ async fn cut(
                 }
             }
         }
-        for field in &required {
-            let (table, column) = field.split_once('.').ok_or("required field")?;
-            let (table, column) = sql_names(domain.logical(), table, column)?;
-            let rows = sql
-                .run(
-                    &format!("SELECT count(*) FROM \"{table}\" WHERE \"{column}\" IS NULL"),
-                    Vec::new(),
-                )
-                .await?;
-            if rows.rows.first().and_then(|row| row.first())
-                != Some(&rocky_core::SqlValue::Integer(0))
-            {
-                sql.cancel().await;
-                return Err(format!(
-                    "after the migrations {table}.{column} is still NULL in some rows; assign every row a value"
-                )
-                .into());
-            }
-        }
         let handle = rocky_core::commitment(
             "rocky.sdk.migration.v1",
             &[settings.manifest.as_bytes(), &schema.version.to_le_bytes()].concat(),
@@ -900,11 +874,14 @@ async fn cut(
         sql.commit(handle).await?;
         drop((sql, session));
         replica.flush().await?;
-        rocky_credentials::write_private(&marker, schema.version.to_string().as_bytes())?;
+        crate::generation::Migration { from, done: true }.write(path)?;
     }
     drop(replica);
-    settings.cut(path, vault, schema)?;
-    std::fs::remove_file(&marker)?;
+    settings.require(path, vault, schema)?;
+    match std::fs::remove_file(crate::generation::Migration::path(path)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
     Ok(())
 }
 /// Inserts a row of `table` for each row of `select`, with the next id of
@@ -958,25 +935,6 @@ async fn insert_rows(
     }
     Ok(())
 }
-/// The declared `table.column`, which must exist.
-fn sql_names(
-    schema: &rocky_core::LogicalSchema,
-    table: &str,
-    column: &str,
-) -> Result<(String, String), Failure> {
-    let table = schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.sql_name == table)
-        .ok_or("required field of no table")?;
-    let column = table
-        .columns
-        .iter()
-        .find(|candidate| candidate.sql_name == column)
-        .ok_or("required field of no column")?;
-    Ok((table.sql_name.clone(), column.sql_name.clone()))
-}
-
 /// Verifies the archive, enrolls a fresh identity with the invitation's
 /// issuer and puts the archive's files in place. The marker, written
 /// before enrolling, names the predecessor whose file is rebound at open.
@@ -1134,9 +1092,9 @@ async fn run(
             }
             None => None,
         };
-        // A cut this issuer started: migrate, then require the fields.
-        if settings.schema != setup.schema && settings.started_cut(&setup.schema)? {
-            cut(&directory, &mut settings, &vault, &path, &setup.schema).await?;
+        // Fields this issuer started requiring: migrate, then require them.
+        if settings.schema != setup.schema && settings.started_requiring(&setup.schema)? {
+            migrate(&directory, &mut settings, &vault, &path, &setup.schema).await?;
         }
         let domain = settings.domain()?.hosted(host);
         // A restored file is rebound to this device's identity first.

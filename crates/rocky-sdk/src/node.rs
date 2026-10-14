@@ -1239,7 +1239,7 @@ impl Node {
                 let (collection, author) = self
                     .configure(|settings| settings.hold_pseudonym(&self.vault, pseudonym.clone()))
                     .await?;
-                let role = self.settings.lock().await.pseudonym_role(&collection)?;
+                let role = self.settings.lock().await.pseudonym_role(&collection);
                 let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
                 self.replica.register_row_author(key, pseudonym).await?;
                 Ok(json!({"collection": collection, "author": author}))
@@ -1404,6 +1404,7 @@ impl Node {
                 {
                     self.replica.finalize_horizon(scope).await?;
                     self.replica.prune(scope).await?;
+                    self.forget_generations().await?;
                 }
             } else {
                 declare = self
@@ -1456,6 +1457,7 @@ impl Node {
             "finalize" => {
                 self.replica.finalize_horizon(scope).await?;
                 self.replica.prune(scope).await?;
+                self.forget_generations().await?;
                 self.wake_sync();
             }
             "status" | "maintain" => {}
@@ -1696,7 +1698,6 @@ impl Node {
         Ok(json!({
             "manifest": HEXLOWER.encode(&status.manifest),
             "current": generation(status.current),
-            "horizon": status.horizon,
             "previous": status.previous.iter().map(|(previous, _)| generation(*previous)).collect::<Vec<_>>(),
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
             "baseline": status.baseline,
@@ -1937,7 +1938,7 @@ impl Node {
             let (collection, author) = self
                 .configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
                 .await?;
-            let role = self.settings.lock().await.pseudonym_role(&collection)?;
+            let role = self.settings.lock().await.pseudonym_role(&collection);
             let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
             self.replica.register_row_author(key, chain).await?;
             self.activity.record(
@@ -2081,7 +2082,7 @@ impl Node {
             .send_modify(|event| *event = event.wrapping_add(1));
         self.wake_sync();
     }
-    fn reset_retry(&self, peer: Option<PublicKey>) {
+    pub(super) fn reset_retry(&self, peer: Option<PublicKey>) {
         let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
         for (node, state) in retries.iter_mut() {
             if peer.is_none_or(|peer| peer == *node) {
@@ -2519,6 +2520,12 @@ impl Node {
                         covered.extend(transfer.held.iter().copied());
                     }
                     self.record_reach(peer, before, &result);
+                    // A finalized horizon may leave an earlier manifest unnamed.
+                    if result.as_ref().is_ok_and(|(_, _, transfer)| {
+                        transfer.scopes.iter().any(|(_, moved)| moved.finalized)
+                    }) {
+                        self.forget_generations().await?;
+                    }
                     results.push((peer, contact, generation, result));
                 }
             }
@@ -3005,7 +3012,25 @@ impl Node {
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
-        let link = self.request_link(transport, peer, contact).await?;
+        let link = match self.request_link(transport, peer, contact).await {
+            Ok(link) => link,
+            // The peer's credentials name a generation this replica lacks:
+            // adopt or learn it first, then sync again.
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(rocky_secure::Error::Incompatible(_))
+                ) =>
+            {
+                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
+                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
+                {
+                    return Ok((false, true, sync::Transfer::default()));
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         attempt.stage(crate::AttemptStage::Reconciliation);
         let _short = service.live.short(peer);
         let renewable = {

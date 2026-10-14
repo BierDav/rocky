@@ -180,7 +180,6 @@ pub struct GenerationRecord {
 pub struct GenerationStatus {
     pub manifest: String,
     pub current: Generation,
-    pub horizon: u32,
     pub previous: Vec<GenerationRecord>,
     pub rebuilding: Option<RebuildProgress>,
     /// When the earliest transition into the current generation was signed.

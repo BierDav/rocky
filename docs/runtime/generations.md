@@ -12,24 +12,27 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   `GenerationTransition`. Rows from an older definition supply null for newly
   added nullable fields. Names are the identities of tables and fields
   ([decision 0067](../decisions/0067-names-are-identities.md)).
-- Requiring a field of an existing table, newly added or once nullable, is a
-  [breaking generation](#breaking-generations): the field needs a default,
-  and the schema's migrations compute its values once.
+- Requiring a field of an existing table, newly added or once nullable, is
+  additive too: the field needs a default, rows that lack it or hold NULL
+  read the default, and the schema's migrations compute its values once
+  ([required fields](#required-fields)).
 - Handler semantics require a higher handler generation; declared command
   versions within the support horizon keep their descriptors. Adding a version
   requires a new handler generation. Removing/redefining one is refused.
 - Key rotation/revocation uses the existing explicit credential policy mechanism.
   Generation plans refuse reader-scope remapping. Key/type changes, removals
-  and renames, which remove the old name, are unsupported, cuts included.
+  and renames, which remove the old name, are unsupported.
 
 Partition group membership and names are immutable for existing tables, as are
 partition columns. A new mergeable table may join an existing group with matching
 slots. See [partition groups](partitioned-scopes.md#partition-groups).
 
 `rocky_core::classify` and `classify_commands` reject unsupported changes before
-activation. A signed transition binds application, old/new manifest, schema/handler
-pairs, whether it is a [cut](#breaking-generations) and when it was signed. A
-generation-number edit alone cannot open a different definition.
+activation. A signed transition (`rocky.transition.v4`) binds application,
+old/new manifest, schema/handler pairs, the field ids rows of the old
+generation may lack, the table and field ids the step named and removed, and
+when it was signed, in microseconds. A generation-number edit alone
+cannot open a different definition.
 
 ## Plan, backfill and switch
 
@@ -47,8 +50,8 @@ Reopen resumes the recorded plan. An incompatible pending plan is refused.
 `open_upgrading` verifies the signed lineage before changing the installed manifest;
 projection switch and generation activation retain a recoverable durable boundary.
 Network/coordinator calls never occur inside these storage transactions.
-`generations()` reports current/previous generations, the cut horizon, the
-baseline and bounded progress.
+`generations()` reports the current generation, the earlier ones whose
+manifests the replica holds, the baseline and bounded progress.
 
 The SDK issuer signs an additive upgrade when `Database::open` receives the new
 schema. A member fetches that exact schema/lineage from an issuer over its
@@ -89,46 +92,59 @@ generation receives them. The followed table must follow none, and the entry
 is declared with the table: changing it for an existing table is refused, since
 it would change what earlier grants mean.
 
-## Breaking generations
+## Required fields
 
-A field rows of the installed schema lack becomes required in a *cut*, a
-transition signed with `cut` set: no earlier generation is admitted. Every
-required field declares a default, which rows the cut never reached read,
-such as hidden unique losers or children of a deleted parent.
+A field rows of the installed schema lack, or hold NULL in, may become
+required in an ordinary additive transition; it declares a default. Every
+device reads the default wherever a row lacks the field or holds NULL in
+it, including rows a device of an older generation writes later, and the
+projection switch rewrites stored NULLs the same way. A device whose
+application predates the field keeps syncing; its new rows read the
+default.
 
-The first issuer to open the new schema cuts, after asking its known issuers
-for the generation (a cut one already signed is adopted like a member's):
+The first issuer to open the new schema migrates, after asking its known
+issuers for the generation (one already signed is adopted like a member's):
 
 1. It signs a step holding the required fields nullable, unless they already are.
-2. At open, before the network starts, it assigns its own pseudonyms for that
-   generation and runs `migrations` with versions above the installed one in one
-   SQL transaction, then refuses the cut while a live row still holds NULL. A
-   step is SQL, or `{"insert": table, "select": sql}`, which inserts a row per
-   selected row with an `id` Rocky issues in its partition. It
-   needs every partition the domain knows. `migration.json` records completion
-   until the cut is signed, so a retry does not run statements twice.
-3. It signs the schema as the cut and opens at it.
+2. At open, before the network starts, it renews its pseudonyms for that
+   generation and runs `migrations` with versions above the installed one in
+   one SQL transaction. A step is SQL, or `{"insert": table, "select": sql}`,
+   which inserts a row per selected row with an `id` Rocky issues in its
+   partition. It needs every partition the domain knows. `migration.json`
+   records the version it migrates from and completion until the generation
+   is signed, so a retry does not run statements twice.
+3. It signs the schema and opens at it.
 
-A member, or an issuer that finds the cut signed, fetches the lineage, saves
-checkpoint-first [bootstrap intent](sdk-bootstrapping.md#join) before adopting
-it and imports a checkpoint of the cut. Rows the cutting issuer never received
-are gone, and the device's own unsynced work of earlier generations is dropped:
-it offers no checkpoint and serves no frame of a generation behind its horizon,
-and each cut derives new pseudonym keys, so its new writes start new author
-logs. A device that has not upgraded is refused at admission.
+The migration's results are ordinary signed writes; nobody's work is
+dropped. A member fetches the generation from an issuer that signed it.
+Rows the migrating issuer did not hold keep their default. The migration is
+one transaction, so it changes at most [2,048 rows](sql-driver.md) until
+[phase 7](../features_09/07-migrations-at-any-size.md). Two issuers that open
+the new schema without reaching each other each migrate; the steps are one
+generation, and their writes merge.
 
-Limits: two issuers
-that open the new schema while unable to reach each other each cut, and their
-households diverge. A peer behind a cut is refused at admission until its
-application declares the cut; discovery never adopts one. The migration is one transaction, so it changes at most
-[2,048 rows](sql-driver.md); see [decision 0066](../decisions/0066-breaking-generations.md).
+## Manifests are a cache
+
+Every device keeps the signed transitions of its lineage; they prove which
+manifests belong to it and carry, for each step, the field ids rows of the
+earlier generation may lack and the table and field ids it named and removed.
+Removal and re-adding are read from them alone ([removal](removal.md)), and a
+device checks a step against its manifests where it holds both. A manifest of an
+earlier generation is kept only while a retained frame, a checkpoint, a
+horizon statement, an existence base, a command or the credential chain of a
+retained frame or registered author names it. After a horizon finalizes,
+`EncryptedReplica::drop_unreferenced_generations` drops the others, and the
+SDK removes them from the saved lineage. Retained history stays verifiable
+by its transitions. A peer that still writes under a dropped generation
+presents a chain the replica places by its transition; its first frame is
+refused as unknown, and the device fetches the manifest from that peer
+again before the frame applies, as for any
+[older generation](adopting-generations.md#older-generations).
 
 ## Old devices and pending work
 
-Every generation of the lineage stays admissible, except behind a cut, whose
-older peers are refused until their application declares it. Retained history behind a cut
-remains verifiable locally; the cut is not permission to delete recovery
-evidence. New admission verifies the
+Every generation of the lineage stays admissible; a dropped manifest is
+fetched again when a frame needs it. New admission verifies the
 original generation's signed credentials plus current revocations, never invented
 current authority. Current execution authorization remains required for commands.
 
@@ -151,13 +167,20 @@ Schema distribution and payload verification stay on application nodes.
 
 ## Evidence
 
-SDK `tests/generations.rs` also cuts with a migration, refuses a migration
-that leaves NULL, drops a member's unsynced work and refuses a device left at
-the old generation, and grants a new table like an existing one. The shopping
-example's `SchemaUpgradeTest` moves a version 6 household to version 7.
+SDK `tests/generations.rs` also requires a field with a migration while an
+older member keeps its unsynced work and a device whose application stays at
+version 1 keeps syncing (`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),
+reads the default for a NULL an older generation writes
+(`a_null_an_older_generation_writes_to_a_required_field_reads_its_default`),
+drops a manifest nothing retained names and fetches it again
+(`a_manifest_nothing_retained_names_is_dropped_and_fetched_again`), and grants
+a new table like an existing one. The shopping example's `SchemaUpgradeTest`
+moves a version 6 household to version 7 while a version 6 member keeps syncing.
 `rocky-secure`'s `tests::generations` interrupts shadow creation, backfill, switch
 and definition activation; verifies atomic visibility, stale sessions, pending
-work, old peers/horizon and typed checkpoint recovery. Core/credentials tests
+work, old peers and typed checkpoint recovery, and drops and learns again an
+unreferenced manifest (`an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame`).
+Core/credentials tests
 verify transition encoding, classification and signing; coordinator tests verify
 authorized exact-head activation. SDK `tests/generations.rs` exercises issuer/member
 upgrade, an offline member opening at its generation, nullable fields, scope denial
@@ -167,4 +190,4 @@ See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for executi
 
 This does not implement cross-file atomic switching,
 Room file import or cross-coordinator migration. Migrations run only on the
-cutting issuer; replicas never transform rows on their own.
+migrating issuer; replicas never transform rows on their own.

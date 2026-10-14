@@ -74,7 +74,7 @@ impl SignedTransition {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, 1024)
+        decode_bounded(bytes, rocky_core::MAX_TRANSITION_IDS * 34 + 1024)
     }
 }
 

@@ -314,10 +314,8 @@ pub(super) struct Inner<A> {
     /// The shadow tables of a pending projection plan, which rows also
     /// project into.
     shadow: Option<Arc<typed::Typed>>,
-    /// Earlier definition generations still admitted, and the oldest
-    /// schema generation admitted.
+    /// Earlier definition generations, all admitted.
     previous: Vec<generation::Previous>,
-    horizon: u32,
     /// Removed and re-added tables and fields of the recorded lineage.
     names: generation::Names,
     /// Set while a SQL session commits: a projection must find its rows.
@@ -714,7 +712,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             typed: None,
             shadow: None,
             previous: Vec::new(),
-            horizon: 0,
             names: generation::Names::default(),
             strict_projection: false,
             settling: Default::default(),

@@ -175,9 +175,9 @@ inbound connection counts do not imply successful synchronization.
 
 The current Room schema is version 7. A version 6 household upgrades: the
 first trusted device to open it runs the schema's SQL migration, and every other
-device imports its lists, dropping version 6 edits that trusted device had not
-received; see [schema 7](../../docs/runtime/shopping-schema-7.md). Earlier
-versions are refused. An existing household that cannot open
+device moves its database to version 7 when it meets it, keeping its version 6
+edits; a version 6 app keeps syncing. See
+[schema 7](../../docs/runtime/shopping-schema-7.md). An existing household that cannot open
 shows **Retry** and preserves its data. A failure in Room’s background invalidation
 tracker also closes the open node and shows **Retry**; retry opens fresh SQL
 sessions without deleting the household.

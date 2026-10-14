@@ -3,7 +3,7 @@
 Implemented. Version 7 of the [shopping example](../../examples/shoppinglist-app/README.md)
 orders a list's items and lets an item belong to any number of its list's
 categories. It is the example's first upgrade of an existing household and uses
-both [breaking generations](generations.md#breaking-generations) and
+both [required fields](generations.md#required-fields) and
 [tables granted like another](generations.md#tables-granted-like-another).
 
 ## What changed
@@ -43,18 +43,19 @@ migration(7) {
 `insert` adds a row for each selected row with an `id` Rocky issues in its
 partition; plain SQL cannot issue ids. Existing items keep their order of
 creation. The writes are ordinary signed writes of the trusted device, which
-every other device receives in its checkpoint of the cut.
+every other device receives like any other.
 
 ## What a household sees
 
-1. The first trusted device to open version 7 migrates and cuts. It needs every
-   list; a trusted device holds all of them.
-2. Each other device that opens version 7 fetches the generation from a trusted
-   device; it needs the network for that, and keeps opening version 6 offline.
-   It then imports the trusted device's lists. Edits it made under version 6
-   that the trusted device had not received are gone.
-3. A device still running version 6 is refused by every upgraded device until
-   its app is updated.
+1. The first trusted device to open version 7 migrates and signs it. It needs
+   every list; a trusted device holds all of them.
+2. Every other device moves its database to version 7 when it meets a device
+   that runs it, whatever app version it runs; one that opens version 7
+   offline opens at version 6 until then. Edits it made under version 6 are
+   kept and sent.
+3. A device still running the version 6 app keeps syncing on its version 7
+   database. Items it adds, or edits it made before the trusted device
+   migrated, read the default position `''` and sort first.
 
 Full and partial members keep their enrollment: renewal into version 7 grants
 them `item_categories` because it follows `items`. Partial members still hold
@@ -63,10 +64,12 @@ only the lists shared with them.
 ## Evidence and limits
 
 `SchemaUpgradeTest` creates a version 6 household with a trusted device and a full
-member, upgrades both and checks the order, the links, the member's dropped
-offline item, and that the member links, reorders and adds items. The example's
-`check` compares the hand-written schema with Room's version 7 export.
+member and upgrades the trusted device. The member, still running the version 6
+app, syncs: its database moves to version 7, its offline item arrives, and an
+item it adds reads the default position. Updated, it links, reorders and adds
+items. The example's `check` compares the hand-written schema with Room's
+version 7 export.
 
-Two trusted devices opening version 7 without reaching each other would each
-cut; upgrade one trusted device first. A device behind the cut sees failed
-connections, not an upgrade prompt.
+Two trusted devices opening version 7 without reaching each other each
+migrate; their writes merge, the later order winning. Upgrade one trusted
+device first.

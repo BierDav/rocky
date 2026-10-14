@@ -1,24 +1,50 @@
 //! Definition generations of a secure replica: a publisher-signed lineage
 //! from the installed manifest to a newer one, activated atomically at
 //! open. Operations, credentials and checkpoints of earlier generations
-//! inside the horizon stay admissible under their original signed bytes.
+//! stay admissible under their original signed bytes. The transitions are
+//! kept; an earlier generation's manifest is a cache, dropped once nothing
+//! retained names it and learned again from a peer that still writes it.
 //! See `docs/runtime/generations.md`.
 use super::*;
 use rocky_core::{ApplicationManifest, Generation, LogicalSchema, Scope};
 use rocky_credentials::SignedTransition;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,handler INTEGER NOT NULL,signed BLOB NOT NULL,transition BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_horizon(id INTEGER PRIMARY KEY CHECK(id=1),horizon INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,handler INTEGER NOT NULL,signed BLOB,transition BLOB NOT NULL)",
 ];
 /// Earlier generations a replica keeps admitting.
 pub const MAX_GENERATIONS: usize = 64;
+/// Stored artifacts that may name a manifest: frames, checkpoints, horizon
+/// statements and acknowledgments, existence bases and commands. A
+/// generation's manifest is kept while any of them, or a credential chain
+/// of a retained frame or registered author, names it. The chains peers
+/// last authenticated with do not keep it: a peer presents its chain again
+/// and the sync fetches the manifest.
+const REFERENCES: &[(&str, &str)] = &[
+    ("secure_operations", "header"),
+    ("secure_roles", "config"),
+    ("secure_checkpoints", "signed"),
+    ("secure_checkpoint_archive", "signed"),
+    ("secure_rebootstrap", "signed"),
+    ("secure_horizon_relay_finalized", "checkpoint"),
+    ("secure_mergeable_horizon", "statement"),
+    ("secure_horizon_bootstrap", "statement"),
+    ("secure_horizon_ack", "ack"),
+    ("secure_existence_base", "attachment"),
+    ("secure_existence_archive", "attachment"),
+    ("secure_existence_stage", "attachment"),
+    ("secure_tickets", "request"),
+    ("secure_commands", "command"),
+    ("secure_recovered_commands", "command"),
+    ("secure_pruned_commands", "input"),
+    ("secure_preparation_requests", "request"),
+];
 
-/// One generation a transition leaves: its signed manifest and the
-/// transition to the next.
+/// One generation a transition leaves: the transition to the next and,
+/// where held, the generation's signed manifest.
 #[derive(Clone, Debug)]
 pub struct GenerationStep {
-    pub manifest: SignedManifest,
+    pub manifest: Option<SignedManifest>,
     pub transition: SignedTransition,
 }
 /// What activates `SecureConfig::manifest` on a file installed with an
@@ -35,9 +61,8 @@ pub struct Upgrade {
 pub struct GenerationStatus {
     pub manifest: Commitment,
     pub current: Generation,
-    /// Operations of schema generations below this are refused.
-    pub horizon: u32,
-    /// Earlier generations, oldest first, with their manifests.
+    /// Earlier generations whose manifests this replica holds, oldest
+    /// first.
     pub previous: Vec<(Generation, Commitment)>,
     /// When the earliest signed transition into the current generation was
     /// signed; none for a first generation.
@@ -83,10 +108,11 @@ impl<A> Definition<A> {
 }
 /// What the recorded lineage removed and re-added, by table and field id.
 /// Frames, checkpoint pages and stored rows are read through it, the same
-/// way on every device. See `docs/runtime/removal.md`.
+/// way on every device. It comes from the signed transitions alone, so it
+/// holds whatever manifests were dropped. See `docs/runtime/removal.md`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Names {
-    /// Named by an earlier generation, not by the current one.
+    /// Removed by a transition and not named again since.
     pub(super) retired_tables: HashSet<Commitment>,
     pub(super) retired_fields: HashSet<Commitment>,
     /// Removed once and named again: writes stamped before the clock of
@@ -106,62 +132,37 @@ impl PartialEq for Names {
     }
 }
 impl Names {
-    /// The names of a lineage, oldest manifest first, with the signing time
-    /// of each transition out of all but the last.
-    fn of(manifests: &[ApplicationManifest], times: &[u64]) -> Self {
-        let Some((current, earlier)) = manifests.split_last() else {
-            return Self::default();
-        };
-        let ids = |items: &[rocky_core::DefinitionItem]| -> HashSet<Commitment> {
-            items.iter().map(|item| item.id).collect()
-        };
-        let tables: Vec<_> = manifests
-            .iter()
-            .map(|manifest| ids(&manifest.entities))
-            .collect();
-        let fields: Vec<_> = manifests
-            .iter()
-            .map(|manifest| ids(&manifest.fields))
-            .collect();
-        let (now_tables, now_fields) = (ids(&current.entities), ids(&current.fields));
-        let mut names = Self::default();
-        for manifest in earlier {
-            names.retired_tables.extend(
-                manifest
-                    .entities
-                    .iter()
-                    .map(|item| item.id)
-                    .filter(|id| !now_tables.contains(id)),
-            );
-            names.retired_fields.extend(
-                manifest
-                    .fields
-                    .iter()
-                    .map(|item| item.id)
-                    .filter(|id| !now_fields.contains(id)),
-            );
-        }
-        // The last generation that lacked a current name re-added it when
-        // an earlier one had it.
-        let readded = |sets: &[HashSet<Commitment>], id: &Commitment| -> Option<u64> {
-            let last = sets[..earlier.len()]
-                .iter()
-                .rposition(|set| !set.contains(id))?;
-            sets[..last]
-                .iter()
-                .any(|set| set.contains(id))
-                .then(|| times[last])
-        };
-        for id in &now_tables {
-            if let Some(clock) = readded(&tables, id) {
-                names.tables.insert(*id, clock);
+    /// The names of a lineage's transitions, oldest first, read with the
+    /// fields and tables of the `current` manifest.
+    fn of(steps: &[rocky_core::GenerationTransition], current: &ApplicationManifest) -> Self {
+        // An id is retired from its removal until a later step names it
+        // again, which re-adds it at that step's signing time.
+        let follow = |changes: &dyn Fn(
+            &rocky_core::GenerationTransition,
+        ) -> &rocky_core::ItemChanges| {
+            let (mut retired, mut readded) = (HashSet::new(), BTreeMap::new());
+            for step in steps {
+                for id in &changes(step).removed {
+                    retired.insert(*id);
+                    readded.remove(id);
+                }
+                for id in &changes(step).named {
+                    if retired.remove(id) {
+                        readded.insert(*id, step.time);
+                    }
+                }
             }
-        }
-        for id in &now_fields {
-            if let Some(clock) = readded(&fields, id) {
-                names.fields.insert(*id, clock);
-            }
-        }
+            (retired, readded)
+        };
+        let (retired_tables, tables) = follow(&|step| &step.tables);
+        let (retired_fields, fields) = follow(&|step| &step.fields);
+        let mut names = Self {
+            retired_tables,
+            retired_fields,
+            tables,
+            fields,
+            owners: BTreeMap::new(),
+        };
         for field in &current.fields {
             if let Some(table) = current
                 .entities
@@ -304,11 +305,13 @@ impl Names {
         })
     }
 }
-/// An earlier generation.
+/// An earlier generation, recorded by its transition.
 #[derive(Clone)]
 pub(crate) struct Previous {
     pub(super) manifest: Commitment,
     pub(super) generation: Generation,
+    /// Whether this replica holds its signed manifest.
+    pub(super) held: bool,
 }
 fn generation(manifest: &ApplicationManifest) -> Generation {
     Generation {
@@ -325,28 +328,53 @@ pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>,
 }
 /// A newer definition keeps what replicas of the older one agree on: its
 /// methods, operations and domains, and every table and field it still
-/// names, unchanged. Tables and fields may be removed; every device drops
-/// them. A breaking transition keeps fields by identity and may require
-/// them: it admits no operation of an earlier generation.
+/// names. A field may become required; rows that lack it or hold NULL read
+/// its default. Tables and fields may be removed; every device drops them.
+/// `steps`, the transitions from `old` to `new`, account for each removal,
+/// and a name removed in between may come back changed. One step names and
+/// removes exactly what the two manifests differ in.
 fn extends(
     old: &ApplicationManifest,
     new: &ApplicationManifest,
-    transition: &rocky_core::GenerationTransition,
+    steps: &[&rocky_core::GenerationTransition],
 ) -> Result<(), Error> {
-    let kept = |old: &[rocky_core::DefinitionItem], new: &[rocky_core::DefinitionItem]| {
-        old.iter().all(|item| {
-            new.iter()
-                .find(|other| other.id == item.id)
-                .is_none_or(|other| other == item)
-        })
+    let removed: HashSet<Commitment> = steps
+        .iter()
+        .flat_map(|step| step.tables.removed.iter().chain(&step.fields.removed))
+        .copied()
+        .collect();
+    let required = |field: &rocky_core::DefinitionItem| rocky_core::DefinitionItem {
+        shape: field
+            .shape
+            .replace("\"not_null\":false", "\"not_null\":true"),
+        ..field.clone()
     };
+    let fields_kept = old.fields.iter().all(|field| {
+        removed.contains(&field.id) || new.fields.contains(field) || new.fields.contains(&required(field))
+    });
+    let tables_kept = old.entities.iter().all(|table| {
+        removed.contains(&table.id) || new.entities.iter().any(|other| other.id == table.id)
+    });
+    let exact = match steps {
+        [step] => {
+            step.tables == rocky_core::ItemChanges::between(&old.entities, &new.entities)
+                && step.fields == rocky_core::ItemChanges::between(&old.fields, &new.fields)
+        }
+        _ => true,
+    };
+    if !exact {
+        return Err(incompatible(
+            "a transition does not name and remove what its manifests differ in",
+        ));
+    }
     if old.publisher != new.publisher
         || old.app != new.app
         || old.name != new.name
         || old.projection != new.projection
         || old.domains != new.domains
         || old.operations != new.operations
-        || !(kept(&old.fields, &new.fields) || transition.breaking())
+        || !fields_kept
+        || !tables_kept
         || !old.methods.iter().all(|item| new.methods.contains(item))
     {
         return Err(incompatible(
@@ -361,13 +389,13 @@ impl<A: RowApplication> Inner<A> {
         generation(&self.definition)
     }
     /// Whether a new signed artifact of `manifest` is admitted, and under
-    /// which earlier generation. Generations behind the horizon are refused
-    /// explicitly; their authors upgrade and rebootstrap.
+    /// which earlier generation: one whose manifest this replica holds. A
+    /// dropped one is learned again from the peer that sent the artifact.
     pub(crate) fn admits(&self, manifest: Commitment) -> Result<Option<&Previous>, Error> {
         self.lookup(manifest, true)
     }
-    /// The recorded generation of retained history, whatever the horizon:
-    /// what was admitted once stays verifiable.
+    /// The recorded generation of retained history, held or dropped: what
+    /// was admitted once stays verifiable by its signed transition.
     pub(crate) fn known(&self, manifest: Commitment) -> Result<Option<&Previous>, Error> {
         self.lookup(manifest, false)
     }
@@ -380,13 +408,10 @@ impl<A: RowApplication> Inner<A> {
             .iter()
             .find(|previous| previous.manifest == manifest)
         {
-            Some(previous) if !admitting || previous.generation.schema >= self.horizon => {
-                Ok(Some(previous))
-            }
-            Some(previous) => Err(incompatible(format!(
-                "schema generation {} is behind the horizon {}; its author must upgrade and rebootstrap",
-                previous.generation.schema, self.horizon
-            ))),
+            Some(previous) if !admitting || previous.held => Ok(Some(previous)),
+            Some(_) => Err(incompatible(
+                "signed under a generation whose manifest this replica dropped; fetch it from the peer",
+            )),
             None => Err(incompatible(
                 "signed under a newer or unknown definition generation; upgrade the application",
             )),
@@ -480,24 +505,22 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         self.verify_reference_chain_with(chain, node, &self.config.revocations, time)
     }
-    /// `revocations` once `manifest` names an admitted generation, or with
-    /// a set other than the held one, any recorded generation.
+    /// `revocations` once `manifest` names a recorded generation. A chain
+    /// needs only its generation's signed transition; frames under a
+    /// dropped generation fetch its manifest as they arrive.
     pub(super) fn revocations_for<'a>(
         &self,
         manifest: Commitment,
         revocations: &'a RevocationSet,
     ) -> Result<&'a RevocationSet, Error> {
-        self.lookup(
-            manifest,
-            std::ptr::eq(revocations, &self.config.revocations),
-        )?;
+        self.known(manifest)?;
         Ok(revocations)
     }
-    /// Loads the earlier generations and the horizon at open.
+    /// Loads the earlier generations at open.
     pub(super) async fn load_generations(&mut self) -> Result<(), Error> {
         let stored = rows(
             &self.conn,
-            "SELECT manifest,schema,handler FROM secure_generations ORDER BY schema,handler",
+            "SELECT manifest,schema,handler,signed IS NOT NULL FROM secure_generations ORDER BY schema,handler",
         )
         .await?;
         let mut previous = Vec::new();
@@ -506,6 +529,7 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(manifest),
                 SqlValue::Integer(schema),
                 SqlValue::Integer(handler),
+                SqlValue::Integer(held),
             ] = row.as_slice()
             else {
                 return Err(Error::Corrupt("generation record".into()));
@@ -517,49 +541,33 @@ impl<A: RowApplication> Inner<A> {
                     schema: u32::try_from(*schema).map_err(|_| corrupt())?,
                     handler: u32::try_from(*handler).map_err(|_| corrupt())?,
                 },
+                held: *held != 0,
             });
         }
-        self.horizon = match rows(&self.conn, "SELECT horizon FROM secure_horizon WHERE id=1")
-            .await?
-            .first()
-            .map(Vec::as_slice)
-        {
-            Some([SqlValue::Integer(horizon)]) => {
-                u32::try_from(*horizon).map_err(|_| Error::Corrupt("horizon".into()))?
-            }
-            _ => 0,
-        };
         self.previous = previous;
-        self.names = self.lineage_names(&self.definition).await?;
+        self.names = self.lineage_names().await?;
         Ok(())
     }
-    /// The names the recorded lineage, ending at `current`, removed and
-    /// re-added.
-    async fn lineage_names(&self, current: &ApplicationManifest) -> Result<Names, Error> {
+    /// The names the recorded transitions removed and re-added.
+    async fn lineage_names(&self) -> Result<Names, Error> {
         let stored = rows(
             &self.conn,
-            "SELECT signed,transition FROM secure_generations ORDER BY schema,handler",
+            "SELECT transition FROM secure_generations ORDER BY schema,handler",
         )
         .await?;
         let publisher = self.config.publisher;
-        let (mut manifests, mut times) = (Vec::new(), Vec::new());
+        let mut steps = Vec::with_capacity(stored.len());
         for row in stored {
-            let [SqlValue::Blob(signed), SqlValue::Blob(transition)] = row.as_slice() else {
+            let [SqlValue::Blob(transition)] = row.as_slice() else {
                 return Err(Error::Corrupt("generation record".into()));
             };
-            let manifest = SignedManifest::from_bytes(signed)
-                .and_then(|signed| signed.verify(publisher))
-                .map_err(credential)?;
-            let transition = SignedTransition::from_bytes(transition)
-                .and_then(|signed| signed.verify(publisher))
-                .map_err(credential)?;
-            if manifest.hash() != current.hash() {
-                manifests.push(manifest);
-                times.push(transition.time);
-            }
+            steps.push(
+                SignedTransition::from_bytes(transition)
+                    .and_then(|signed| signed.verify(publisher))
+                    .map_err(credential)?,
+            );
         }
-        manifests.push(current.clone());
-        Ok(Names::of(&manifests, &times))
+        Ok(Names::of(&steps, &self.definition))
     }
     /// Activates the upgrade inside the open transaction when the file is
     /// installed with its first step's manifest. Everything is verified
@@ -579,8 +587,8 @@ impl<A: RowApplication> Inner<A> {
         // upgrade starts at the step the file is installed with.
         let mut start = None;
         for (index, step) in upgrade.steps.iter().enumerate() {
-            let manifest = step.manifest.verify(publisher).map_err(credential)?;
-            if identity(manifest.hash(), node)? == stored {
+            let transition = step.transition.verify(publisher).map_err(credential)?;
+            if identity(transition.from, node)? == stored {
                 start = Some(index);
                 break;
             }
@@ -590,38 +598,11 @@ impl<A: RowApplication> Inner<A> {
         };
         let steps = &upgrade.steps[start..];
         // What the installed generation's lineage names, before the step.
-        let before = self
-            .lineage_names(&steps[0].manifest.verify(publisher).map_err(credential)?)
-            .await?;
+        let before = self.lineage_names().await?;
         if steps.len() + self.previous.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
-        // The chain: each step's manifest, its transition to the next, and
-        // the configured manifest at the end.
-        let mut records = Vec::new();
-        // Every generation stays admitted, except behind a cut.
-        let mut horizon = self.horizon;
-        for (index, step) in steps.iter().enumerate() {
-            let manifest = step.manifest.verify(publisher).map_err(credential)?;
-            let next = match steps.get(index + 1) {
-                Some(next) => next.manifest.verify(publisher).map_err(credential)?,
-                None => self.definition.clone(),
-            };
-            let transition = step.transition.verify(publisher).map_err(credential)?;
-            if transition.app != manifest.app
-                || transition.from != manifest.hash()
-                || transition.to != next.hash()
-                || transition.before != generation(&manifest)
-                || transition.after != generation(&next)
-            {
-                return Err(incompatible("the upgrade's transitions do not chain"));
-            }
-            extends(&manifest, &next, &transition)?;
-            if transition.breaking() {
-                horizon = transition.after.schema;
-            }
-            records.push((manifest, step));
-        }
+        let records = self.chain_steps(steps)?;
         // Typed tables move to the new schema through a projection plan;
         // the plan classifies the change before anything is written.
         if self.installed_typed().await?.is_some() {
@@ -645,27 +626,9 @@ impl<A: RowApplication> Inner<A> {
             }
             self.record_plan(schema, *domain, readers).await?;
         }
-        for (manifest, step) in &records {
-            let generation = generation(manifest);
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?)",
-                    bindings(vec![
-                        SqlValue::Blob(manifest.hash().to_vec()),
-                        SqlValue::Integer(i64::from(generation.schema)),
-                        SqlValue::Integer(i64::from(generation.handler)),
-                        SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
-                        SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
-                    ]),
-                )
-                .await?;
+        for (transition, step) in &records {
+            self.record_step(transition, step).await?;
         }
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO secure_horizon VALUES(1,?)",
-                [i64::from(horizon)],
-            )
-            .await?;
         self.load_generations().await?;
         self.apply_names(&before).await?;
         self.readmit().await?;
@@ -682,50 +645,164 @@ impl<A: RowApplication> Inner<A> {
         let Some(upgrade) = upgrade else {
             return Ok(());
         };
-        let publisher = self.config.publisher;
         if upgrade.steps.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
-        let mut horizon = 0;
-        for (index, step) in upgrade.steps.iter().enumerate() {
-            let manifest = step.manifest.verify(publisher).map_err(credential)?;
-            let next = match upgrade.steps.get(index + 1) {
-                Some(next) => next.manifest.verify(publisher).map_err(credential)?,
-                None => self.definition.clone(),
-            };
+        for (transition, step) in &self.chain_steps(&upgrade.steps)? {
+            self.record_step(transition, step).await?;
+        }
+        Ok(())
+    }
+    /// Verifies that `steps` chain into the configured definition: each
+    /// transition is the publisher's and leads to the next step's, the last
+    /// to the configured manifest; a held manifest is the one its
+    /// transition leaves, and each held manifest, and the configured one,
+    /// extends the held one before it. Returns the verified transitions.
+    fn chain_steps<'a>(
+        &self,
+        steps: &'a [GenerationStep],
+    ) -> Result<Vec<(rocky_core::GenerationTransition, &'a GenerationStep)>, Error> {
+        let publisher = self.config.publisher;
+        let mut verified = Vec::with_capacity(steps.len());
+        let mut earlier: Option<ApplicationManifest> = None;
+        // The transitions since the last held manifest.
+        let mut between = Vec::new();
+        for step in steps {
             let transition = step.transition.verify(publisher).map_err(credential)?;
-            if transition.app != manifest.app
-                || transition.from != manifest.hash()
-                || transition.to != next.hash()
-                || transition.before != generation(&manifest)
-                || transition.after != generation(&next)
-            {
+            if transition.app != self.definition.app {
                 return Err(incompatible("the lineage's transitions do not chain"));
             }
-            extends(&manifest, &next, &transition)?;
-            if transition.breaking() {
-                horizon = transition.after.schema;
+            if let Some(signed) = &step.manifest {
+                let manifest = signed.verify(publisher).map_err(credential)?;
+                if transition.from != manifest.hash() || transition.before != generation(&manifest)
+                {
+                    return Err(incompatible(
+                        "a step's transition does not leave its manifest",
+                    ));
+                }
+                if let Some(earlier) = &earlier {
+                    extends(earlier, &manifest, &between.iter().collect::<Vec<_>>())?;
+                }
+                earlier = Some(manifest);
+                between.clear();
             }
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO secure_generations VALUES(?,?,?,?,?)",
-                    bindings(vec![
-                        SqlValue::Blob(manifest.hash().to_vec()),
-                        SqlValue::Integer(i64::from(manifest.schema)),
-                        SqlValue::Integer(i64::from(manifest.handler)),
-                        SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
-                        SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
-                    ]),
-                )
-                .await?;
+            between.push(transition.clone());
+            verified.push((transition, step));
         }
+        for (index, (transition, _)) in verified.iter().enumerate() {
+            let (to, after) = match verified.get(index + 1) {
+                Some((next, _)) => (next.from, next.before),
+                None => (self.manifest, generation(&self.definition)),
+            };
+            if transition.to != to || transition.after != after {
+                return Err(incompatible("the lineage's transitions do not chain"));
+            }
+        }
+        if let Some(earlier) = &earlier {
+            extends(earlier, &self.definition, &between.iter().collect::<Vec<_>>())?;
+        }
+        Ok(verified)
+    }
+    /// Records a verified step: its transition, and its manifest when the
+    /// step holds one; a manifest already held stays.
+    async fn record_step(
+        &self,
+        transition: &rocky_core::GenerationTransition,
+        step: &GenerationStep,
+    ) -> Result<(), Error> {
+        let signed = match &step.manifest {
+            Some(manifest) => SqlValue::Blob(manifest.to_bytes().map_err(credential)?),
+            None => SqlValue::Null,
+        };
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO secure_horizon VALUES(1,?)",
-                [i64::from(horizon)],
+                "INSERT INTO secure_generations VALUES(?,?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed),transition=excluded.transition",
+                bindings(vec![
+                    SqlValue::Blob(transition.from.to_vec()),
+                    SqlValue::Integer(i64::from(transition.before.schema)),
+                    SqlValue::Integer(i64::from(transition.before.handler)),
+                    signed,
+                    SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
+                ]),
             )
             .await?;
         Ok(())
+    }
+    /// Records a learned step as [`Self::record_step`] does, but keeps a
+    /// transition already recorded: it may carry an earlier baseline.
+    async fn record_known(
+        &self,
+        transition: &rocky_core::GenerationTransition,
+        step: &GenerationStep,
+    ) -> Result<(), Error> {
+        let signed = match &step.manifest {
+            Some(manifest) => SqlValue::Blob(manifest.to_bytes().map_err(credential)?),
+            None => SqlValue::Null,
+        };
+        self.conn
+            .execute(
+                "INSERT INTO secure_generations VALUES(?,?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed)",
+                bindings(vec![
+                    SqlValue::Blob(transition.from.to_vec()),
+                    SqlValue::Integer(i64::from(transition.before.schema)),
+                    SqlValue::Integer(i64::from(transition.before.handler)),
+                    signed,
+                    SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
+                ]),
+            )
+            .await?;
+        Ok(())
+    }
+    /// Whether anything this replica retains names `manifest`: its own
+    /// credentials and registered authors' chains, a chain of a retained
+    /// frame, or a stored artifact holding the manifest's hash in canonical
+    /// or raw form. A stored row that merely contains those bytes keeps the
+    /// manifest too, which errs on keeping it.
+    async fn names_manifest(&self, manifest: Commitment) -> Result<bool, Error> {
+        let names = |chain: &CredentialChain| {
+            chain
+                .0
+                .iter()
+                .any(|link| link.capability.manifest == manifest)
+        };
+        if names(&self.config.credentials)
+            || self
+                .row_authors
+                .values()
+                .any(|author| names(author.chain.credentials()))
+        {
+            return Ok(true);
+        }
+        let (canonical, raw) = (encode(&manifest)?, manifest.to_vec());
+        let framed = collect_rows(
+            self.conn
+                .query(
+                    "SELECT 1 FROM secure_chains c WHERE (instr(c.chain,?1)>0 OR instr(c.chain,?2)>0) AND EXISTS(SELECT 1 FROM secure_operations o WHERE o.chain=c.digest) LIMIT 1",
+                    [canonical.clone(), raw.clone()],
+                )
+                .await?,
+        )
+        .await?;
+        if !framed.is_empty() {
+            return Ok(true);
+        }
+        for (table, column) in REFERENCES {
+            let found = collect_rows(
+                self.conn
+                    .query(
+                        &format!(
+                            "SELECT 1 FROM {table} WHERE instr({column},?1)>0 OR instr({column},?2)>0 LIMIT 1"
+                        ),
+                        [canonical.clone(), raw.clone()],
+                    )
+                    .await?,
+            )
+            .await?;
+            if !found.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     /// The stored transition out of `manifest`, verified.
     async fn stored_transition(
@@ -804,81 +881,114 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(GenerationStatus {
             manifest: inner.manifest,
             current: inner.generation(),
-            horizon: inner.horizon,
             previous: inner
                 .previous
                 .iter()
+                .filter(|previous| previous.held)
                 .map(|previous| (previous.generation, previous.manifest))
                 .collect(),
             baseline: inner.baseline().await?,
             plan: inner.plan_status().await?,
         })
     }
-    /// Records the earlier generations among `steps` this replica lacks,
-    /// such as one a peer that has not migrated still writes under: each
-    /// step's manifest is the publisher's, and its transition leads to a
-    /// generation the replica knows or to another such step. Frames refused
-    /// under them are admitted again. Returns how many it recorded.
+    /// Records the manifests among `steps` of earlier generations this
+    /// replica lacks or dropped, such as one a peer that has not migrated
+    /// still writes under: each manifest is the publisher's, and the
+    /// transitions of `steps` and those recorded lead from it to a
+    /// generation the replica knows. Frames refused under them are
+    /// admitted again. Returns how many it recorded.
     pub async fn learn_generations(&self, steps: &[GenerationStep]) -> Result<usize, Error> {
         let mut inner = self.inner.lock().await;
         let publisher = inner.config.publisher;
         let mut verified = Vec::new();
         for step in steps {
-            let manifest = step.manifest.verify(publisher).map_err(credential)?;
             let transition = step.transition.verify(publisher).map_err(credential)?;
-            if transition.app != manifest.app
-                || transition.from != manifest.hash()
-                || transition.before != generation(&manifest)
-            {
-                return Err(incompatible(
-                    "a step's transition does not leave its manifest",
-                ));
+            let manifest = match &step.manifest {
+                Some(signed) => {
+                    let manifest = signed.verify(publisher).map_err(credential)?;
+                    if transition.app != manifest.app
+                        || transition.from != manifest.hash()
+                        || transition.before != generation(&manifest)
+                    {
+                        return Err(incompatible(
+                            "a step's transition does not leave its manifest",
+                        ));
+                    }
+                    Some(manifest)
+                }
+                None => None,
+            };
+            if transition.app != inner.definition.app {
+                return Err(incompatible("a step's transition is another application's"));
             }
-            verified.push((manifest, transition, step));
+            verified.push((manifest.is_some(), transition, step));
         }
-        // Each newly known generation links the ones before it.
-        let mut known: BTreeSet<Commitment> = inner
+        // Known generations, and those a transition leads from to one.
+        let mut linked: BTreeSet<Commitment> = inner
             .previous
             .iter()
             .map(|previous| previous.manifest)
             .chain([inner.manifest])
             .collect();
-        let mut learned = Vec::new();
         loop {
-            let found = verified.iter().position(|(manifest, transition, _)| {
-                !known.contains(&manifest.hash()) && known.contains(&transition.to)
-            });
-            let Some(index) = found else { break };
-            let (manifest, transition, step) = verified.swap_remove(index);
-            if transition.breaking() {
-                // Behind a cut nothing is admitted; such a step is not learned.
-                continue;
+            let before = linked.len();
+            for (_, transition, _) in &verified {
+                if linked.contains(&transition.to) {
+                    linked.insert(transition.from);
+                }
             }
-            known.insert(manifest.hash());
-            learned.push((manifest, step));
+            if linked.len() == before {
+                break;
+            }
         }
-        if learned.is_empty() {
+        let held: BTreeSet<Commitment> = inner
+            .previous
+            .iter()
+            .filter(|previous| previous.held)
+            .map(|previous| previous.manifest)
+            .chain([inner.manifest])
+            .collect();
+        let mut learned: Vec<(rocky_core::GenerationTransition, &GenerationStep)> = Vec::new();
+        for (with_manifest, transition, step) in verified {
+            let wanted = with_manifest
+                && !held.contains(&transition.from)
+                && linked.contains(&transition.to)
+                && !learned
+                    .iter()
+                    .any(|(known, _)| known.from == transition.from);
+            // A transition this replica lacks links a step it learns.
+            let link = !inner
+                .previous
+                .iter()
+                .any(|previous| previous.manifest == transition.from)
+                && transition.from != inner.manifest
+                && linked.contains(&transition.from);
+            if wanted || link {
+                learned.push((transition, step));
+            }
+        }
+        let count = learned
+            .iter()
+            .filter(|(_, step)| step.manifest.is_some())
+            .count();
+        if count == 0 {
             return Ok(0);
         }
-        if learned.len() + inner.previous.len() > MAX_GENERATIONS {
+        let added = learned
+            .iter()
+            .filter(|(transition, _)| {
+                !inner
+                    .previous
+                    .iter()
+                    .any(|previous| previous.manifest == transition.from)
+            })
+            .count();
+        if added + inner.previous.len() > MAX_GENERATIONS {
             return Err(incompatible("too many definition generations"));
         }
-        let count = learned.len();
         let recorded = transaction!(inner, |inner| {
-            for (manifest, step) in &learned {
-                inner
-                    .conn
-                    .execute(
-                        "INSERT INTO secure_generations VALUES(?,?,?,?,?)",
-                        bindings(vec![
-                            SqlValue::Blob(manifest.hash().to_vec()),
-                            SqlValue::Integer(i64::from(manifest.schema)),
-                            SqlValue::Integer(i64::from(manifest.handler)),
-                            SqlValue::Blob(step.manifest.to_bytes().map_err(credential)?),
-                            SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
-                        ]),
-                    )
-                    .await?;
+            for (transition, step) in &learned {
+                inner.record_known(transition, step).await?;
             }
             let before = inner.names.clone();
             inner.load_generations().await?;
@@ -893,6 +1003,49 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(inner);
         self.settle().await?;
         Ok(count)
+    }
+    /// Forgets the manifest of each earlier generation that no retained
+    /// frame, credential, checkpoint, horizon statement, existence base or
+    /// command names; its transition stays, so retained history remains
+    /// verifiable and a peer that still writes it is asked for it again.
+    /// Returns the manifests dropped.
+    pub async fn drop_unreferenced_generations(&self) -> Result<Vec<Commitment>, Error> {
+        let mut inner = self.inner.lock().await;
+        let candidates: Vec<Commitment> = inner
+            .previous
+            .iter()
+            .filter(|previous| previous.held)
+            .map(|previous| previous.manifest)
+            .collect();
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut dropped = Vec::new();
+        for manifest in candidates {
+            if !inner.names_manifest(manifest).await? {
+                dropped.push(manifest);
+            }
+        }
+        if dropped.is_empty() {
+            return Ok(dropped);
+        }
+        let result = transaction!(inner, |inner| {
+            for manifest in &dropped {
+                inner
+                    .conn
+                    .execute(
+                        "UPDATE secure_generations SET signed=NULL WHERE manifest=?",
+                        [manifest.to_vec()],
+                    )
+                    .await?;
+            }
+            inner.load_generations().await
+        });
+        if let Err(error) = result {
+            inner.load_generations().await?;
+            return Err(error);
+        }
+        Ok(dropped)
     }
     /// Keeps `transition` out of an earlier generation when it makes the
     /// recorded step and was signed earlier: issuers that signed the same
@@ -923,7 +1076,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .await?;
             // An earlier baseline admits writes to a re-added name it ignored.
             let before = inner.names.clone();
-            inner.names = inner.lineage_names(&inner.definition).await?;
+            inner.names = inner.lineage_names().await?;
             inner.apply_names(&before).await
         });
         if let Err(error) = learned {

@@ -657,12 +657,10 @@ impl<A: RowApplication> Inner<A> {
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let manifest = frame.operation()?.header.extensions.manifest;
                 // Every frame of a revoked author is refused, so none is
-                // sent; nor is one behind this replica's horizon, which no
-                // replica past the cut admits: a cut dropped it.
+                // sent.
                 if self
                     .generation_of(manifest, false)
                     .is_ok_and(|made| made > reach)
-                    || self.admits(manifest).is_err()
                     || self
                         .config
                         .revocations

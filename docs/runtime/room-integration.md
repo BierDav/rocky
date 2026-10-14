@@ -173,7 +173,7 @@ Table and column names are their identities: renaming an entity's table or
 `@ColumnInfo` name makes another table or field
 ([decision 0067](../decisions/0067-names-are-identities.md)).
 Values for a field an upgrade requires come from the schema's SQL
-[migrations](generations.md#breaking-generations), declared with
+[migrations](generations.md#required-fields), declared with
 `migration(version, …)` in the Kotlin schema or its Room overlay.
 Imported tables exclude Room, Rocky and SQLite bookkeeping tables.
 

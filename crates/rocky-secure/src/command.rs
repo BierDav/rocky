@@ -92,9 +92,9 @@ impl EncryptedCommand {
         {
             return Err(denied("invalid encrypted command identity/generation"));
         }
-        // A command submitted under an earlier generation inside the
-        // horizon keeps its signed identity and runs under this one.
-        // Admitting under the held set, not verifying history.
+        // A command submitted under an earlier generation keeps its signed
+        // identity and runs under this one. Admitting under the held set,
+        // not verifying history.
         let live = std::ptr::eq(revocations, &inner.config.revocations);
         let submitted = inner.generation_of(request.policy, live)?;
         if request.schema != submitted.schema

@@ -476,8 +476,9 @@ impl<A: RowApplication> Inner<A> {
         let operation = frame.operation()?;
         let mut store = TransactionStore(self.conn.clone());
         let held = store.has_operation(operation.hash).await?;
-        // A held frame of a generation now behind the horizon was verified
-        // as it arrived; any other is verified again.
+        // A held frame of a generation this replica does not admit, such as
+        // one refused as unknown, was verified as it arrived; any other is
+        // verified again.
         if held && self.admits(operation.header.extensions.manifest).is_err() {
             return Ok(Staged::Duplicate);
         }

@@ -2,6 +2,7 @@ package org.example.examples.shopping
 
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonPrimitive
 import org.example.examples.shopping.data.ShoppingRepository
 import org.example.examples.shopping.data.coordination.ApprovalCommands
 import org.example.examples.shopping.data.db.ShoppingSchema
@@ -60,16 +61,17 @@ private val ShoppingSchemaV6 = schema("shopping", version = 6) {
 }
 
 /**
- * A household of version 6 moves to version 7: the trusted device that opens it first runs the migration, and a
- * full member enrolled under version 6 then adopts the cut, edits links it was never granted by name, and loses the
- * item it had not synced. See `docs/runtime/shopping-schema-7.md`.
+ * A household of version 6 moves to version 7: the trusted device that opens it first runs the migration. A full
+ * member enrolled under version 6 keeps syncing while its app stays at version 6: its database moves to version 7,
+ * the item it had not synced arrives, and its new items read the default position. Updated, it edits links it was
+ * never granted by name. See `docs/runtime/shopping-schema-7.md`.
  */
 class SchemaUpgradeTest {
     private fun RockyDatabase.reconciled(): Boolean = runBlocking {
         syncOnce().peers.any { peer -> peer.attempts.any { it.operation == AttemptOperation.Reconcile && it.outcome == AttemptOutcome.Completed } }
     }
 
-    @Test fun `a trusted device migrates version 6 and a member adopts the cut`() = runBlocking {
+    @Test fun `a trusted device migrates version 6 and a version 6 member keeps syncing`() = runBlocking {
         val root = Files.createTempDirectory("rocky-shopping-upgrade").toFile()
         val (trusted, member) = File(root, "trusted") to File(root, "member")
         // The trusted device keeps its address across reopening, as on a network; the member reaches it to upgrade.
@@ -110,12 +112,25 @@ class SchemaUpgradeTest {
                 val links = roomA.itemCategories().observe(list).first().map { link -> items.single { it.id == link.item }.title to link.category }
                 assertEquals(setOf("Milk" to dairy, "Bread" to bakery), links.toSet())
 
+                // The member's app stays at version 6: its database adopts version 7 and keeps syncing.
+                b = RockyDatabase.resume(member, ShoppingSchemaV6, PeerTransport.Iroh.isolated(), automaticSync = false)
+                b.addPeer(a.contact().uri)
+                // The first sync meets version 7 and adopts it; the next reconciles.
+                b.syncOnce()
+                assertTrue(b.reconciled())
+                assertEquals("behind", b.generation().getValue("application").jsonPrimitive.content)
+                b.write { execute("INSERT INTO items(list, key, title, completed, id) VALUES(?, ?, ?, ?, ?)", list, "jam", "Jam", false, nextId("items", list)) }
+                assertTrue(b.reconciled())
+                val received = roomA.items().all(list)
+                assertEquals(listOf("Late", "Jam", "Milk", "Bread", "Eggs"), received.map { it.title })
+                assertEquals(listOf("", ""), received.take(2).map { it.position })
+                b.close()
+
                 b = RockyDatabase.resume(member, ShoppingSchema, PeerTransport.Iroh.isolated(), automaticSync = false)
                 val roomB = openShoppingDatabase(member, b)
                 try {
-                    b.addPeer(a.contact().uri)
                     assertTrue(b.reconciled())
-                    assertEquals(listOf("Milk", "Bread", "Eggs"), roomB.items().all(list).map { it.title })
+                    assertEquals(listOf("Late", "Jam", "Milk", "Bread", "Eggs"), roomB.items().all(list).map { it.title })
                     // The member's grants named `items`; `item_categories` follows them.
                     val repository = ShoppingRepository(roomB, b)
                     val eggs = roomB.items().all(list).single { it.title == "Eggs" }
@@ -126,7 +141,7 @@ class SchemaUpgradeTest {
                 } finally {
                     roomB.close()
                 }
-                assertEquals(listOf("Eggs", "Milk", "Bread", "Butter"), roomA.items().all(list).map { it.title })
+                assertEquals(listOf("Eggs", "Late", "Jam", "Milk", "Bread", "Butter"), roomA.items().all(list).map { it.title })
                 val dairyItems = roomA.itemCategories().observe(list).first().filter { it.category == dairy }.map { link -> roomA.items().all(list).single { it.id == link.item }.title }
                 assertEquals(setOf("Milk", "Eggs", "Butter"), dairyItems.toSet())
             } finally {

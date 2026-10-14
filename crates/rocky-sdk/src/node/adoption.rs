@@ -48,6 +48,8 @@ impl Node {
             json!({"peer": peer.to_hex(), "schema": generation.schema, "handler": generation.handler}),
         );
         self.observations.touch();
+        // Failures the unknown generation caused no longer hold this peer back.
+        self.reset_retry(Some(peer));
         Ok(true)
     }
     /// Once per peer and generation: keeps the earlier transitions a peer
@@ -106,11 +108,69 @@ impl Node {
         let steps = self.settings.lock().await.older_steps(&reply)?;
         let learned = self.replica.learn_generations(&steps).await?;
         if learned > 0 {
+            self.hold_manifests(&steps).await?;
+            self.reset_retry(Some(peer));
             self.activity.record(
                 "generation_learned",
                 json!({"peer": peer.to_hex(), "generations": learned}),
             );
         }
         Ok(learned > 0)
+    }
+    /// Keeps in the saved lineage the manifests among `steps` the replica
+    /// now holds, so this device serves them as well.
+    async fn hold_manifests(&self, steps: &[rocky_secure::GenerationStep]) -> Result<(), Failure> {
+        let held = self
+            .replica
+            .generations()
+            .await?
+            .previous
+            .into_iter()
+            .map(|(_, manifest)| manifest)
+            .collect();
+        let mut settings = self.settings.lock().await;
+        let mut draft = (**settings).clone();
+        if draft.hold_manifests(steps, &held)? {
+            draft.save(&self.path)?;
+            *settings = Shared::new(draft);
+        }
+        Ok(())
+    }
+    /// Drops the manifests of earlier generations nothing this replica
+    /// retains names any longer, in the replica and then in the saved
+    /// lineage; their transitions stay. Runs after a horizon finalized,
+    /// when retained frames go.
+    pub(super) async fn forget_generations(&self) -> Result<(), Failure> {
+        let dropped = self.replica.drop_unreferenced_generations().await?;
+        let mut settings = self.settings.lock().await;
+        let mut draft = (**settings).clone();
+        // Also catches up on a drop whose save a crash interrupted.
+        let held: std::collections::BTreeSet<_> = self
+            .replica
+            .generations()
+            .await?
+            .previous
+            .into_iter()
+            .map(|(_, manifest)| manifest)
+            .collect();
+        let unheld: Vec<_> = draft
+            .lineage
+            .iter()
+            .filter(|step| step.manifest.is_some())
+            .map(|step| step.verified(draft.publisher).map(|step| step.from))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|from| !held.contains(from))
+            .collect();
+        if draft.forget_manifests(&unheld)? {
+            draft.save(&self.path)?;
+            *settings = Shared::new(draft);
+        }
+        drop(settings);
+        if !dropped.is_empty() {
+            self.activity
+                .record("generation_dropped", json!({"generations": dropped.len()}));
+        }
+        Ok(())
     }
 }

@@ -60,7 +60,10 @@ evolves for decades cannot depend on every device updating its application
 
 ## Consequences
 
-Transitions move to `rocky.transition.v3`, signed at a time in microseconds, the unit stamps compare with; others are refused. Enrollments
+Transitions moved to `rocky.transition.v3`, signed at a time in microseconds,
+the unit stamps compare with, and with the end of cuts to `rocky.transition.v4`
+([decision 0070](0070-confirmed-rollouts-and-the-end-of-cuts.md)); others are
+refused. Enrollments
 carry the domain's schema, and pairing compares the application's name, not
 its schema. Sessions end when a database switches; table observers stay.
 Removal makes stamps hybrid time, so they compare with a baseline; the

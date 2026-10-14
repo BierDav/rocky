@@ -31,11 +31,9 @@ impl<A: RowApplication> Inner<A> {
             .0
             .first()
             .map_or(self.manifest, |root| root.capability.manifest);
-        let newer = match self.admits(manifest) {
-            Ok(_) => false,
-            Err(error) if self.known(manifest).is_ok() => return Err(error),
-            Err(_) => true,
-        };
+        // A generation whose manifest this replica lacks, newer or dropped:
+        // the session proceeds and the sync fetches it.
+        let newer = self.admits(manifest).is_err();
         let (grants, selectors) = chain
             .verify_selectors(
                 self.config.publisher,

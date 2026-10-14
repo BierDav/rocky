@@ -9,7 +9,9 @@ records why.
 
 A sync finds a peer on a newer generation when the peer's credentials, a
 frame or a [horizon statement](mergeable-horizon.md) name a manifest this
-device does not know. The device then asks that peer for its generations on
+device does not know, including when opening the link to the peer fails on
+its credentials; after adopting, earlier failures no longer back that peer
+off. The device then asks that peer for its generations on
 the renewal protocol (`rocky.sdk.generations.v1`); every device answers, since
 all of it is public. Before anything is saved it verifies the reply:
 
@@ -80,17 +82,16 @@ after it.
 
 Frames of devices that have not migrated are admitted under their own
 manifest. A replica that lacks the manifest of a generation a peer still writes
-under, such as one it dropped, learns it on demand: when a sync meets a
-frame or credentials it cannot place and the peer is not newer, the device
-asks that peer for its generations, and `EncryptedReplica::learn_generations`
-records each verified step whose transition leads to a generation it knows,
-then admits the frames refused under it.
+under, such as one it [dropped](generations.md#manifests-are-a-cache), learns
+it on demand: when a sync, or a live link the peer opened, meets a frame or
+credentials it cannot place and the peer is not newer, the device asks that
+peer for its generations. `EncryptedReplica::learn_generations` records each
+publisher-signed manifest whose transitions, the peer's or its own, lead to a
+generation it knows, then admits the frames refused under it; the SDK keeps
+the manifest in its saved lineage again.
 
 ## Limits
 
-Discovery does not adopt a [cut](generations.md#breaking-generations), which
-drops the device's unsynced work: an application that declares the cut adopts
-it at open, until [phase 6](../features_09/06-no-remnants.md) removes cuts.
 Issuers that sign one schema apart derive the same first reader key for each
 table it adds ([removal](removal.md#the-sdk)).
 
@@ -108,3 +109,6 @@ table it adds ([removal](removal.md#the-sdk)).
 - `rocky-sdk` `tests/driver.rs` `an_older_room_application_validates_the_schema_it_declares`.
 - `rocky-sdk` `an_older_generation_the_database_lacks_is_fetched_before_its_frames_apply`
   and `rocky-secure` `an_older_generation_the_replica_lacks_is_learned_before_its_frames_apply`.
+- A dropped manifest learned again: `rocky-secure`
+  `an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame` and
+  `rocky-sdk` `a_manifest_nothing_retained_names_is_dropped_and_fetched_again`.

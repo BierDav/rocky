@@ -1,6 +1,8 @@
 # 0066: Breaking generations and tables granted like another
 
-Status: accepted and implemented in the SDK.
+Status: accepted; cuts superseded by
+[decision 0070](0070-confirmed-rollouts-and-the-end-of-cuts.md), which keeps
+issuer-run migrations and `granted_like`.
 Date: 2026-10-13.
 
 ## Context
@@ -39,4 +41,4 @@ unchanged and stays format 4, so installed databases still open. A cut drops dat
 the application decides when that is acceptable. Two issuers cutting without
 contact diverge; avoiding that needs coordination this record does not add.
 Removal is implemented by [decision 0068](0068-adopting-newer-generations.md). See
-[generations](../runtime/generations.md#breaking-generations).
+[generations](../runtime/generations.md#required-fields).

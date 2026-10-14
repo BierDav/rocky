@@ -17,14 +17,15 @@ use std::{path::Path, sync::Arc};
 const SECOND: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 /// The second schema, with `tags` granted like `items`.
 const GRANTED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}],"granted_like":{"tags":"items"}}"#;
-/// Requires `position`, which a migration computes from the titles, and
-/// cuts off generation 1. `BARE` requires it without a migration.
-const CUT: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
+/// Requires `position`, which a migration computes from the titles.
+const REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = printf('%04d', (SELECT count(*) FROM items AS earlier WHERE earlier.title < items.title))"]}]}"#;
+/// `position` nullable, and `BARE` requiring it without a migration.
+const NULLABLE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 const BARE: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
-/// Titles are unique, the later write winning: the cut rebuilds a
-/// constrained projection.
+/// Titles are unique, the later write winning: requiring a field rebuilds
+/// a constrained projection.
 const UNIQUE: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}]}"#;
-const UNIQUE_CUT: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
+const UNIQUE_REQUIRED: &str = r#"{"application":"shopping","version":2,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"position","type":"text","not_null":true,"default":""},{"name":"title","type":"text","not_null":true}],"primary_key":["key"],"indexes":[{"name":"items_title","unique":true,"columns":[{"name":"title","descending":false}],"on_conflict":"latest_wins"}]}],"migrations":[{"version":2,"statements":["UPDATE items SET position = upper(title)"]}]}"#;
 /// The second schema with a nullable `rank`.
 const THIRD: &str = r#"{"application":"shopping","version":3,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"note","type":"text","not_null":false},{"name":"rank","type":"integer","not_null":false},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},{"name":"tags","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"label","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
@@ -103,7 +104,6 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
     let status = generation(&a).await;
     assert_eq!(status["current"], json!({"schema": 2, "handler": 1}));
-    assert_eq!(status["horizon"], 0);
     assert_eq!(status["application"], "current");
     assert_eq!(status["previous"], json!([{"schema": 1, "handler": 1}]));
     assert_eq!(status["rebuilding"], Value::Null);
@@ -246,7 +246,8 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cut_migrates_on_the_issuer_and_drops_unsynced_earlier_work() -> Result<(), Failure> {
+async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing()
+-> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -269,22 +270,15 @@ async fn a_cut_migrates_on_the_issuer_and_drops_unsynced_earlier_work() -> Resul
     b.add(3, "bread").await;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
-    // Never reaches the issuer before the cut.
+    // Never reaches the issuer before it migrates.
     b.add(4, "late").await;
     b.close().await;
     a.close().await;
 
-    // Every row needs a value: without a migration the cut is refused,
-    // and nothing beyond the nullable step happened.
-    let error = Database::open(open(&dirs("a"), BARE, network("a")))
-        .err()
-        .expect("refused")
-        .to_string();
-    assert!(error.contains("still NULL"), "{error}");
-    let a = Device::new(Database::open(open(&dirs("a"), CUT, network("a")))?)?;
+    let a = Device::new(Database::open(open(&dirs("a"), REQUIRED, network("a")))?)?;
     let status = generation(&a).await;
-    assert_eq!(status["current"]["schema"], 3);
-    assert_eq!(status["horizon"], 3, "{status}");
+    assert_eq!(status["current"]["schema"], 3, "{status}");
+    assert_eq!(status["application"], "current");
     let positions = json!([
         [text("apples"), text("0000")],
         [text("bread"), text("0001")],
@@ -295,19 +289,36 @@ async fn a_cut_migrates_on_the_issuer_and_drops_unsynced_earlier_work() -> Resul
         positions
     );
 
-    // A device still at generation 1 is refused, not merged.
+    // A device whose application stays at version 1 keeps syncing: it
+    // adopts the generation, and its new item reads the default position.
     c.add(6, "stale").await;
-    let _ = c.sync().await;
-    assert_eq!(a.titles().await, ["apples", "bread", "cherries"]);
+    c.sync().await.expect("sync");
+    c.sync().await.expect("sync");
+    assert_eq!(generation(&c).await["application"], "behind");
+    assert_eq!(a.titles().await, ["apples", "bread", "cherries", "stale"]);
+    assert_eq!(
+        rows(&a, "SELECT position FROM items WHERE title='stale'").await,
+        json!([[text("")]])
+    );
     c.close().await;
 
-    // The member adopts the cut and imports the issuer's rows: its
-    // unsynced item of generation 1 is gone everywhere.
-    let b = Device::new(Database::open(open(&dirs("b"), CUT, network("b")))?)?;
+    // The member's unsynced work of generation 1 is not dropped.
+    let b = Device::new(Database::open(open(&dirs("b"), REQUIRED, network("b")))?)?;
+    b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     assert_eq!(
-        rows(&b, "SELECT title, position FROM items ORDER BY position").await,
-        positions
+        rows(
+            &b,
+            "SELECT title, position FROM items ORDER BY position, title"
+        )
+        .await,
+        json!([
+            [text("late"), text("")],
+            [text("stale"), text("")],
+            [text("apples"), text("0000")],
+            [text("bread"), text("0001")],
+            [text("cherries"), text("0002")]
+        ])
     );
     b.ok(json!({
         "type": "mutate",
@@ -318,21 +329,82 @@ async fn a_cut_migrates_on_the_issuer_and_drops_unsynced_earlier_work() -> Resul
     }))
     .await;
     b.sync().await.expect("sync");
-    assert_eq!(a.titles().await, ["apples", "bread", "cherries", "dates"]);
+    assert_eq!(
+        a.titles().await,
+        ["apples", "bread", "cherries", "dates", "late", "stale"]
+    );
     b.close().await;
     a.close().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cut_rebuilds_tables_with_unique_indexes() -> Result<(), Failure> {
+async fn a_null_an_older_generation_writes_to_a_required_field_reads_its_default()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let a = Device::new(Database::create(
+        open(&dirs("a"), NULLABLE, network("a")),
+        None,
+    )?)?;
+    let b = Device::new(Database::join(
+        open(&dirs("b"), NULLABLE, network("b")),
+        &a.invite().await,
+    )?)?;
+    let c = Device::new(Database::join(
+        open(&dirs("c"), NULLABLE, network("c")),
+        &a.invite().await,
+    )?)?;
+    introduce(&a, &b).await;
+    introduce(&a, &c).await;
+    a.add(1, "apples").await;
+    b.sync().await.expect("sync");
+    c.sync().await.expect("sync");
+    a.close().await;
+
+    // Requiring a field that was nullable rewrites its stored NULLs as the
+    // default in the switch, without a migration.
+    let a = Device::new(Database::open(open(&dirs("a"), BARE, network("a")))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    assert_eq!(
+        rows(&a, "SELECT title, position FROM items").await,
+        json!([[text("apples"), text("")]])
+    );
+
+    // A device of generation 1 writes NULL to it before it meets the
+    // issuer; every device of generation 2 reads the default.
+    b.add(2, "bread").await;
+    assert_eq!(
+        rows(&b, "SELECT position FROM items WHERE title='bread'").await,
+        json!([[{"type": "null"}]])
+    );
+    b.sync().await.expect("sync");
+    b.sync().await.expect("sync");
+    c.sync().await.expect("sync");
+    for device in [&a, &b, &c] {
+        assert_eq!(generation(device).await["current"]["schema"], 2);
+        assert_eq!(
+            rows(device, "SELECT title, position FROM items ORDER BY title").await,
+            json!([[text("apples"), text("")], [text("bread"), text("")]])
+        );
+    }
+    c.close().await;
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let a = Device::new(Database::create(open(root.path(), UNIQUE, None), None)?)?;
     a.add(1, "apples").await;
     a.add(2, "bread").await;
     a.close().await;
-    let a = Device::new(Database::open(open(root.path(), UNIQUE_CUT, None))?)?;
-    assert_eq!(generation(&a).await["horizon"], 3);
+    let a = Device::new(Database::open(open(root.path(), UNIQUE_REQUIRED, None))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 3);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
         json!([
@@ -873,5 +945,109 @@ async fn an_older_generation_the_database_lacks_is_fetched_before_its_frames_app
     c.close().await;
     b.close().await;
     a.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let dirs = |name: &str| root.path().join(name);
+    let a = Device::create(&dirs("a"), network("a"))?;
+    // A second issuer holds a copy of every frame and acknowledges the
+    // horizons, so both prune.
+    let b = Device::join(
+        &dirs("b"),
+        &a.invite_as(json!({"kind": "issuer"})).await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    let c = Device::join(
+        &dirs("c"),
+        &a.invite().await,
+        Network::Owned(hub.connector("c")),
+    )?;
+    introduce(&a, &c).await;
+    a.add(1, "apples").await;
+    b.sync().await.expect("sync");
+    c.sync().await.expect("sync");
+    // A device that then stays away at generation 1.
+    c.close().await;
+    a.close().await;
+
+    let a = Device::new(Database::open(open(&dirs("a"), SECOND, network("a")))?)?;
+    b.sync().await.expect("sync");
+    for device in [&a, &b] {
+        assert_eq!(
+            generation(device).await["previous"],
+            json!([{"schema": 1, "handler": 1}])
+        );
+    }
+    // Every retained frame of generation 1 is finalized and pruned.
+    let participant = b.node().await;
+    for collection in ["items", "issuer_registry"] {
+        let retention = json!({"type": "retention", "collection": collection,
+            "policy": {"required": [], "behind": [], "copies": 1, "window": 0}});
+        a.ok(retention.clone()).await;
+        b.ok(retention).await;
+        // The registry's horizon names no participant: `b` follows it.
+        let participants = if collection == "items" {
+            vec![participant.clone()]
+        } else {
+            Vec::new()
+        };
+        let horizon = |action: &str| json!({"type": "horizon", "collection": collection, "action": action, "participants": participants});
+        a.ok(horizon("declare")).await;
+        b.sync().await.expect("sync");
+        b.sync().await.expect("sync");
+        let finalized = a.ok(horizon("finalize")).await;
+        assert_eq!(finalized["finalized"], true, "{collection}: {finalized}");
+        b.sync().await.expect("sync");
+    }
+    // Nothing retained names generation 1: its manifest is gone from both
+    // devices, replica and saved lineage, and the transition stays.
+    for (device, name) in [(&a, "a"), (&b, "b")] {
+        assert_eq!(generation(device).await["previous"], json!([]), "{name}");
+        let identity: Value =
+            serde_json::from_slice(&std::fs::read(dirs(name).join("identity.json"))?)?;
+        assert_eq!(identity["lineage"][0].get("manifest"), None, "{identity}");
+        assert!(identity["lineage"][0]["transition"].is_string());
+    }
+    a.close().await;
+
+    // `c` writes under generation 1 while still away, then returns and
+    // reaches `b`: its frame makes `b` fetch the manifest again. The row
+    // itself stays hidden, as for any device that missed a finalized
+    // horizon; the replica's own tests apply such a frame.
+    let c = Device::new(Database::open(open(&dirs("c"), SCHEMA, None))?)?;
+    c.add(2, "late").await;
+    c.close().await;
+    let c = Device::new(Database::open(open(&dirs("c"), SCHEMA, network("c")))?)?;
+    introduce(&b, &c).await;
+    for _ in 0..3 {
+        let _ = c.sync().await;
+        let _ = b.sync().await;
+    }
+    assert_eq!(
+        generation(&b).await["previous"],
+        json!([{"schema": 1, "handler": 1}])
+    );
+    let activity = b.ok(json!({"type": "activity"})).await;
+    let events = activity["events"].as_array().ok_or("events")?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"] == "generation_dropped")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"] == "generation_learned")
+    );
+    let identity: Value = serde_json::from_slice(&std::fs::read(dirs("b").join("identity.json"))?)?;
+    assert!(identity["lineage"][0]["manifest"].is_string(), "{identity}");
+    c.close().await;
+    b.close().await;
     Ok(())
 }

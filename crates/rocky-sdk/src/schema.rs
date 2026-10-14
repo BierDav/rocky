@@ -22,8 +22,8 @@ pub struct Schema {
     /// `docs/runtime/generations.md#tables-granted-like-another`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub granted_like: BTreeMap<String, String>,
-    /// SQL the issuer that cuts a breaking generation runs once, before it
-    /// requires the new fields; see `docs/runtime/generations.md#breaking-generations`.
+    /// SQL the first issuer to require new fields runs once, before it
+    /// requires them; see `docs/runtime/generations.md#required-fields`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<Migration>,
 }

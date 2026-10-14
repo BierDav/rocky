@@ -12,19 +12,14 @@ pub enum SchemaChange {
     /// Local tables, indexes or SQL spelling: replicas agree as before.
     /// Only the local projection is rebuilt.
     Local,
-    /// Replicated changes that need a signed transition: new mergeable
-    /// tables, nullable fields of existing ones, and removals.
+    /// Replicated changes, which need a signed transition: new mergeable
+    /// tables, nullable fields of existing ones, required fields of
+    /// existing ones, new or once nullable, each with a default, and
+    /// removals. Rows of older writers that lack a required field, or hold
+    /// NULL in it, read its default.
     Additive {
         tables: BTreeSet<String>,
         /// `table.field`.
-        fields: BTreeSet<String>,
-        removed: Removed,
-    },
-    /// Additions with required fields of existing tables, new or once
-    /// nullable, each with a default for rows that never held a value. Its
-    /// transition is a cut: earlier generations are no longer admitted.
-    Breaking {
-        tables: BTreeSet<String>,
         fields: BTreeSet<String>,
         /// `table.field` NOT NULL fields rows of the installed schema lack.
         required: BTreeSet<String>,
@@ -46,13 +41,12 @@ impl Removed {
 }
 impl SchemaChange {
     pub fn replicated(&self) -> bool {
-        matches!(self, Self::Additive { .. } | Self::Breaking { .. })
+        matches!(self, Self::Additive { .. })
     }
     /// Fields rows of the installed schema may lack: `table.field`.
     pub fn added(&self) -> BTreeSet<String> {
         match self {
-            Self::Additive { fields, .. } => fields.clone(),
-            Self::Breaking {
+            Self::Additive {
                 fields, required, ..
             } => fields.union(required).cloned().collect(),
             Self::Unchanged | Self::Local => BTreeSet::new(),
@@ -61,7 +55,7 @@ impl SchemaChange {
     /// What the new schema removed.
     pub fn removed(&self) -> Removed {
         match self {
-            Self::Additive { removed, .. } | Self::Breaking { removed, .. } => removed.clone(),
+            Self::Additive { removed, .. } => removed.clone(),
             Self::Unchanged | Self::Local => Removed::default(),
         }
     }
@@ -241,14 +235,7 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     {
         return Err(Unsupported::CommandTable(name.clone()));
     }
-    if required.is_empty() {
-        return Ok(SchemaChange::Additive {
-            tables,
-            fields,
-            removed,
-        });
-    }
-    Ok(SchemaChange::Breaking {
+    Ok(SchemaChange::Additive {
         tables,
         fields,
         required,
@@ -286,6 +273,9 @@ pub fn classify_commands(old: &CommandSet, new: &CommandSet) -> Result<bool, Uns
     }
 }
 
+/// Most ids one transition lists, over all its sets.
+pub const MAX_TRANSITION_IDS: usize = 8192;
+
 /// The schema and handler generations of a definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Generation {
@@ -293,10 +283,33 @@ pub struct Generation {
     pub handler: u32,
 }
 
+/// Item ids a transition's new manifest names and its old one does not,
+/// and the reverse.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemChanges {
+    pub named: BTreeSet<Commitment>,
+    pub removed: BTreeSet<Commitment>,
+}
+impl ItemChanges {
+    /// The ids `new` names apart from `old`, and the reverse.
+    pub fn between(old: &[crate::DefinitionItem], new: &[crate::DefinitionItem]) -> Self {
+        let ids = |items: &[crate::DefinitionItem]| -> BTreeSet<Commitment> {
+            items.iter().map(|item| item.id).collect()
+        };
+        let (old, new) = (ids(old), ids(new));
+        Self {
+            named: new.difference(&old).copied().collect(),
+            removed: old.difference(&new).copied().collect(),
+        }
+    }
+}
+
 /// What a publisher signs to activate a replicated or handler change: the
 /// installed definition and the next one. Every generation of a lineage
-/// stays admitted, except behind a cut. Operations keep their original
-/// signed bytes; nothing is re-signed or translated.
+/// stays admitted. Operations keep their original signed bytes; nothing is
+/// re-signed or translated. Transitions are the lineage every device keeps,
+/// and the only record of what each step named and removed; the manifests
+/// they name are fetched when needed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationTransition {
     pub app: AppId,
@@ -305,18 +318,25 @@ pub struct GenerationTransition {
     pub to: Commitment,
     pub before: Generation,
     pub after: Generation,
-    /// A [breaking](Self::breaking) cut: operations of every earlier
-    /// schema generation are refused.
-    pub cut: bool,
+    /// The field ids rows of `before` may lack: fields added to, or newly
+    /// required of, its tables.
+    pub added: BTreeSet<Commitment>,
+    /// Table ids the step named and removed.
+    pub tables: ItemChanges,
+    /// Field ids the step named and removed, those of named and removed
+    /// tables included.
+    pub fields: ItemChanges,
     /// When it was signed, in microseconds, the unit of stamp clocks.
     /// Transitions that differ only in this are one generation, whose
     /// baseline is the earliest.
     pub time: u64,
 }
 impl GenerationTransition {
-    /// Little-endian numbers in field order.
+    /// Little-endian numbers in field order; then `added`, the named and
+    /// removed tables and the named and removed fields, each as a count and
+    /// its ids in ascending order.
     pub fn canonical(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.transition.v3".to_vec();
+        let mut bytes = b"rocky.transition.v4".to_vec();
         bytes.extend(self.app.0);
         bytes.extend(self.from);
         bytes.extend(self.to);
@@ -328,28 +348,53 @@ impl GenerationTransition {
         ] {
             bytes.extend(number.to_le_bytes());
         }
-        bytes.push(u8::from(self.cut));
         bytes.extend(self.time.to_le_bytes());
+        for set in self.sets() {
+            bytes.extend(u32::try_from(set.len()).unwrap_or(u32::MAX).to_le_bytes());
+            for id in set {
+                bytes.extend(id);
+            }
+        }
         bytes
     }
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         let invalid = || crate::ProtocolError::InvalidManifest;
         let rest = bytes
-            .strip_prefix(b"rocky.transition.v3".as_slice())
-            .filter(|rest| rest.len() == 16 + 32 + 32 + 4 * 4 + 1 + 8)
+            .strip_prefix(b"rocky.transition.v4".as_slice())
+            .filter(|rest| rest.len() >= 16 + 32 + 32 + 4 * 4 + 8)
             .ok_or_else(invalid)?;
         let (app, rest) = rest.split_at(16);
         let (from, rest) = rest.split_at(32);
         let (to, rest) = rest.split_at(32);
-        let (rest, cut) = rest.split_at(4 * 4);
-        let (cut, time) = cut.split_at(1);
+        let (numbers, rest) = rest.split_at(4 * 4);
+        let (time, mut rest) = rest.split_at(8);
         let time = u64::from_le_bytes(time.try_into().map_err(|_| invalid())?);
-        let cut = match cut {
-            [0] => false,
-            [1] => true,
-            _ => return Err(invalid()),
-        };
-        let numbers: Vec<u32> = rest
+        let mut sets: [BTreeSet<Commitment>; 5] = Default::default();
+        let mut total = 0usize;
+        for set in &mut sets {
+            let (count, after) = rest.split_at_checked(4).ok_or_else(invalid)?;
+            let count = u32::from_le_bytes(count.try_into().map_err(|_| invalid())?) as usize;
+            total = total.saturating_add(count);
+            if total > MAX_TRANSITION_IDS {
+                return Err(invalid());
+            }
+            let (ids, after) = after
+                .split_at_checked(count * 32)
+                .ok_or_else(invalid)?;
+            let (ids, []) = ids.as_chunks::<32>() else {
+                return Err(invalid());
+            };
+            // Strictly ascending: one encoding per set.
+            if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(invalid());
+            }
+            *set = ids.iter().copied().collect();
+            rest = after;
+        }
+        if !rest.is_empty() {
+            return Err(invalid());
+        }
+        let numbers: Vec<u32> = numbers
             .as_chunks::<4>()
             .0
             .iter()
@@ -358,6 +403,7 @@ impl GenerationTransition {
         let [before_schema, before_handler, after_schema, after_handler] = numbers[..] else {
             return Err(invalid());
         };
+        let [added, named_tables, removed_tables, named_fields, removed_fields] = sets;
         let transition = Self {
             app: AppId(app.try_into().map_err(|_| invalid())?),
             from: from.try_into().map_err(|_| invalid())?,
@@ -370,18 +416,31 @@ impl GenerationTransition {
                 schema: after_schema,
                 handler: after_handler,
             },
-            cut,
+            added,
+            tables: ItemChanges {
+                named: named_tables,
+                removed: removed_tables,
+            },
+            fields: ItemChanges {
+                named: named_fields,
+                removed: removed_fields,
+            },
             time,
         };
         transition.validate()?;
         Ok(transition)
     }
+    fn sets(&self) -> [&BTreeSet<Commitment>; 5] {
+        [
+            &self.added,
+            &self.tables.named,
+            &self.tables.removed,
+            &self.fields.named,
+            &self.fields.removed,
+        ]
+    }
     pub fn id(&self) -> Commitment {
         commitment("rocky.transition.id.v1", &self.canonical())
-    }
-    /// A cut: operations of every earlier schema generation are refused.
-    pub fn breaking(&self) -> bool {
-        self.cut
     }
     /// Whether `other` makes the same step, signed at another time.
     pub fn same_step(&self, other: &Self) -> bool {
@@ -391,18 +450,24 @@ impl GenerationTransition {
         } == *other
     }
     /// A step forward: a new manifest, generations that do not go back and
-    /// one of them up; a cut moves the schema generation up.
+    /// one of them up. Only a schema step names or removes; nothing is both
+    /// named and removed, and a removed field is not one rows may lack.
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
         let (before, after) = (self.before, self.after);
         let forward = after.schema >= before.schema
             && after.handler >= before.handler
             && after != before
             && after.schema <= before.schema.saturating_add(1);
+        let changes = self.sets().iter().any(|set| !set.is_empty());
         if self.from == self.to
             || !forward
             || before.schema == 0
             || before.handler == 0
-            || (self.cut && after.schema == before.schema)
+            || (changes && after.schema == before.schema)
+            || self.sets().iter().map(|set| set.len()).sum::<usize>() > MAX_TRANSITION_IDS
+            || !self.tables.named.is_disjoint(&self.tables.removed)
+            || !self.fields.named.is_disjoint(&self.fields.removed)
+            || !self.added.is_disjoint(&self.fields.removed)
         {
             return Err(crate::ProtocolError::InvalidManifest);
         }
@@ -567,6 +632,7 @@ mod tests {
             Ok(SchemaChange::Additive {
                 tables: ["tags".to_string()].into(),
                 fields: ["items.note".to_string()].into(),
+                required: BTreeSet::new(),
                 removed: Removed::default(),
             })
         );
@@ -610,6 +676,7 @@ mod tests {
             Ok(SchemaChange::Additive {
                 tables: BTreeSet::new(),
                 fields: ["items.label".to_string()].into(),
+                required: BTreeSet::new(),
                 removed: Removed {
                     tables: BTreeSet::new(),
                     fields: ["items.name".to_string()].into(),
@@ -635,7 +702,7 @@ mod tests {
         );
     }
     #[test]
-    fn required_fields_with_defaults_are_breaking() {
+    fn required_fields_with_defaults_are_additive() {
         let defaulted = |table: &mut LogicalTable, name: &str| {
             for column in table
                 .columns
@@ -657,7 +724,7 @@ mod tests {
         let change = classify(&old, &new);
         assert_eq!(
             change,
-            Ok(SchemaChange::Breaking {
+            Ok(SchemaChange::Additive {
                 tables: BTreeSet::new(),
                 fields: ["items.tag".to_string()].into(),
                 required: ["items.note".to_string(), "items.position".to_string()].into(),
@@ -713,6 +780,7 @@ mod tests {
             Ok(SchemaChange::Additive {
                 tables: BTreeSet::new(),
                 fields: BTreeSet::new(),
+                required: BTreeSet::new(),
                 removed: Removed {
                     tables: ["shelves".to_string()].into(),
                     fields: ["items.note".to_string()].into(),
@@ -751,7 +819,15 @@ mod tests {
                 schema: 2,
                 handler: 1,
             },
-            cut: false,
+            added: [[7; 32], [6; 32]].into(),
+            tables: ItemChanges {
+                named: [[10; 32]].into(),
+                removed: BTreeSet::new(),
+            },
+            fields: ItemChanges {
+                named: [[7; 32], [11; 32]].into(),
+                removed: [[9; 32], [8; 32]].into(),
+            },
             time: 1_000,
         };
         assert!(transition.validate().is_ok());
@@ -764,33 +840,19 @@ mod tests {
             GenerationTransition::from_canonical(&transition.canonical()),
             Ok(transition.clone())
         );
-        // A cut admits only the new generation.
-        let cut = GenerationTransition {
-            cut: true,
-            ..transition.clone()
-        };
-        assert!(cut.validate().is_ok() && cut.breaking() && !transition.breaking());
-        assert_eq!(
-            GenerationTransition::from_canonical(&cut.canonical()),
-            Ok(cut.clone())
-        );
-        // One current format: another version or flag is refused.
-        let mut other = cut.canonical();
-        other[b"rocky.transition.v".len()] = b'2';
+        // One current format: another version or length is refused.
+        let mut other = transition.canonical();
+        other[b"rocky.transition.v".len()] = b'3';
         assert!(GenerationTransition::from_canonical(&other).is_err());
-        let mut flag = cut.canonical();
-        let at = flag.len() - 9;
-        flag[at] = 2;
-        assert!(GenerationTransition::from_canonical(&flag).is_err());
+        let mut longer = transition.canonical();
+        longer.push(0);
+        assert!(GenerationTransition::from_canonical(&longer).is_err());
+        // Ids are listed once, in ascending order.
+        let mut unordered = transition.canonical();
+        let at = unordered.len() - 64;
+        unordered[at..].rotate_left(32);
+        assert!(GenerationTransition::from_canonical(&unordered).is_err());
         for invalid in [
-            GenerationTransition {
-                cut: true,
-                after: Generation {
-                    schema: 1,
-                    handler: 2,
-                },
-                ..transition.clone()
-            },
             GenerationTransition {
                 to: [4; 32],
                 ..transition.clone()
@@ -803,6 +865,22 @@ mod tests {
                 after: Generation {
                     schema: 3,
                     handler: 1,
+                },
+                ..transition.clone()
+            },
+            // Only a schema step names or removes.
+            GenerationTransition {
+                after: Generation {
+                    schema: 1,
+                    handler: 2,
+                },
+                ..transition.clone()
+            },
+            // A field is named or removed, not both.
+            GenerationTransition {
+                fields: ItemChanges {
+                    named: [[8; 32]].into(),
+                    removed: [[8; 32]].into(),
                 },
                 ..transition.clone()
             },

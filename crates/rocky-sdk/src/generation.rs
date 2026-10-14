@@ -1,7 +1,9 @@
 //! Schema and handler generations of an SDK domain. A changed application
 //! schema either rebuilds local tables, or moves the domain to the next
 //! signed generation: an issuer signs it, a member fetches it from an
-//! issuer with credentials for it. See `docs/runtime/generations.md`.
+//! issuer with credentials for it. The lineage keeps every signed
+//! transition; an earlier generation's manifest only while the replica
+//! holds it. See `docs/runtime/generations.md`.
 use crate::{
     Failure,
     domain::{Domain, logical},
@@ -12,7 +14,7 @@ use crate::{
     transport::{Protocol, Transport},
 };
 use data_encoding::HEXLOWER;
-use rocky_core::{Generation, GenerationTransition, SchemaChange};
+use rocky_core::{Commitment, Generation, GenerationTransition, ItemChanges, SchemaChange};
 use rocky_credentials::{Profile, SignedTransition};
 use rocky_secure::{GenerationStep, PrivateKey, RevocationSet, SignedManifest, Upgrade};
 use serde::{Deserialize, Serialize};
@@ -23,23 +25,67 @@ pub(crate) const OFFER: &[u8] = b"rocky.sdk.generations.v1\n";
 /// Earlier generations a domain keeps.
 const MAX_LINEAGE: usize = 32;
 
-/// A generation a domain left: its schema, signed manifest and the signed
-/// transition to the next. All of it is public.
+/// A generation a domain left: the signed transition to the next and,
+/// while the replica holds it, the generation's signed manifest. All of it
+/// is public.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
-    pub schema: Schema,
-    pub manifest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<String>,
     pub transition: String,
 }
 impl Step {
     fn signed(&self) -> Result<GenerationStep, Failure> {
         Ok(GenerationStep {
-            manifest: SignedManifest::from_bytes(&HEXLOWER.decode(self.manifest.as_bytes())?)?,
-            transition: SignedTransition::from_bytes(
-                &HEXLOWER.decode(self.transition.as_bytes())?,
-            )?,
+            manifest: self.signed_manifest()?,
+            transition: self.signed_transition()?,
         })
+    }
+    fn signed_manifest(&self) -> Result<Option<SignedManifest>, Failure> {
+        Ok(match &self.manifest {
+            Some(manifest) => Some(SignedManifest::from_bytes(
+                &HEXLOWER.decode(manifest.as_bytes())?,
+            )?),
+            None => None,
+        })
+    }
+    fn signed_transition(&self) -> Result<SignedTransition, Failure> {
+        Ok(SignedTransition::from_bytes(
+            &HEXLOWER.decode(self.transition.as_bytes())?,
+        )?)
+    }
+    /// The transition out of this generation, the publisher's.
+    pub(crate) fn verified(
+        &self,
+        publisher: rocky_credentials::PublicKey,
+    ) -> Result<GenerationTransition, Failure> {
+        Ok(self.signed_transition()?.verify(publisher)?)
+    }
+}
+/// `migration.json` beside the identity while an issuer requires fields:
+/// the application version it migrates from, and whether the migrations
+/// committed.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Migration {
+    pub from: u32,
+    pub done: bool,
+}
+impl Migration {
+    pub(crate) fn path(identity: &Path) -> std::path::PathBuf {
+        identity.with_file_name("migration.json")
+    }
+    pub(crate) fn read(identity: &Path) -> Result<Option<Self>, Failure> {
+        match std::fs::read(Self::path(identity)) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    pub(crate) fn write(&self, identity: &Path) -> Result<(), Failure> {
+        rocky_credentials::write_private(&Self::path(identity), &serde_json::to_vec(self)?)?;
+        Ok(())
     }
 }
 /// An issuer's current definition and how it got there.
@@ -52,30 +98,21 @@ struct Offer {
     revocations: RevocationSet,
 }
 
-/// The schema generation of a lineage ending at `schema`; the fields its
-/// transitions added to, or required of, collections that already existed:
-/// rows written before them may lack them; and the tables and
-/// `table.field`s its transitions removed.
+/// The schema generation a lineage leads to; the field ids its transitions
+/// added to, or required of, tables that already existed: rows written
+/// before them may lack them; and the table and field ids its transitions
+/// removed.
 pub(crate) fn lineage(
     steps: &[Step],
-    schema: &Schema,
-    publisher: [u8; 32],
-) -> Result<(u32, BTreeSet<String>, BTreeSet<String>), Failure> {
+    publisher: rocky_credentials::PublicKey,
+) -> Result<(u32, BTreeSet<Commitment>, BTreeSet<Commitment>), Failure> {
     let (mut generation, mut added, mut removed) = (1, BTreeSet::new(), BTreeSet::new());
-    let schemas: Vec<&Schema> = steps
-        .iter()
-        .map(|step| &step.schema)
-        .chain([schema])
-        .collect();
-    for pair in schemas.windows(2) {
-        let change =
-            rocky_core::classify(&logical(pair[0], publisher)?, &logical(pair[1], publisher)?)?;
-        if change.replicated() {
-            generation += 1;
-            added.extend(change.added());
-            let gone = change.removed();
-            removed.extend(gone.tables.into_iter().chain(gone.fields));
-        }
+    for step in steps {
+        let transition = step.verified(publisher)?;
+        generation = transition.after.schema;
+        added.extend(transition.added);
+        removed.extend(transition.tables.removed);
+        removed.extend(transition.fields.removed);
     }
     Ok((generation, added, removed))
 }
@@ -97,10 +134,10 @@ impl Settings {
     }
     /// The id of the transition into the current generation.
     pub(crate) fn transition(&self) -> Result<Option<GenerationTransition>, Failure> {
-        let Some(step) = self.lineage.last() else {
-            return Ok(None);
-        };
-        Ok(Some(step.signed()?.transition.verify(self.publisher)?))
+        self.lineage
+            .last()
+            .map(|step| step.verified(self.publisher))
+            .transpose()
     }
     /// This issuer's answer to a member asking for the domain's generations.
     pub(crate) fn offer(&self) -> Result<Vec<u8>, Failure> {
@@ -128,11 +165,6 @@ impl Settings {
         let change = rocky_core::classify(old.logical(), &logical(schema, publisher)?).map_err(
             |refusal| format!("the application schema cannot replace the installed one: {refusal}"),
         )?;
-        if let SchemaChange::Breaking { required, .. } = &change {
-            return self
-                .evolve_breaking(path, vault, schema, required, transport)
-                .await;
-        }
         // Grants issued before would silently change meaning. An entry goes
         // with its table, or with the table it followed.
         let kept = |name: &str| schema.tables.iter().any(|table| table.name == name);
@@ -159,6 +191,13 @@ impl Settings {
             rocky_core::classify_commands(old.app.commands(), &commands).map_err(|refusal| {
                 format!("the application's commands cannot replace the installed ones: {refusal}")
             })?;
+        if let SchemaChange::Additive { required, .. } = &change
+            && !required.is_empty()
+        {
+            return self
+                .evolve_required(path, vault, schema, required, transport)
+                .await;
+        }
         if !change.replicated() && !handled {
             let mut draft = self.clone();
             draft.schema = schema.clone();
@@ -173,7 +212,7 @@ impl Settings {
             return Err("the domain has too many generations".into());
         }
         if self.issuer() {
-            self.sign_generation(path, vault, schema, false)
+            self.sign_generation(path, vault, schema)
         } else {
             self.fetch_or_wait(path, vault, schema, transport).await
         }
@@ -206,37 +245,32 @@ impl Settings {
         if declared.version > self.schema.version {
             return Ok(crate::DeclaredSchema::Ahead);
         }
-        let publisher = *self.publisher.as_bytes();
-        let declared = logical(declared, publisher)?;
         for step in &self.lineage {
-            if matches!(
-                rocky_core::classify(&logical(&step.schema, publisher)?, &declared),
-                Ok(SchemaChange::Unchanged | SchemaChange::Local)
-            ) {
+            let transition = step.verified(self.publisher)?;
+            if self.manifest_at(declared, transition.before.schema)? == transition.from {
                 return Ok(crate::DeclaredSchema::Behind);
             }
         }
         Ok(crate::DeclaredSchema::Ahead)
     }
-    /// Whether this issuer started a cut to `schema`: the installed schema
-    /// holds nullable the fields `schema` requires.
-    pub(crate) fn started_cut(&self, schema: &Schema) -> Result<bool, Failure> {
+    /// Whether this issuer started requiring fields of `schema`: the
+    /// installed schema holds them nullable, and the open migrates.
+    pub(crate) fn started_requiring(&self, schema: &Schema) -> Result<bool, Failure> {
         if !self.issuer() {
             return Ok(false);
         }
         let publisher = *self.publisher.as_bytes();
         Ok(matches!(
             rocky_core::classify(self.domain()?.logical(), &logical(schema, publisher)?),
-            Ok(SchemaChange::Breaking { tables, fields, .. }) if tables.is_empty() && fields.is_empty()
+            Ok(SchemaChange::Additive { tables, fields, required, removed })
+                if tables.is_empty() && fields.is_empty() && removed.is_empty() && !required.is_empty()
         ))
     }
     /// Moves to a schema that requires fields rows of the installed one
     /// lack. A member, or an issuer another issuer already moved, fetches
-    /// the generation and imports a checkpoint of it: its own pending work
-    /// of earlier generations is dropped. Otherwise this issuer cuts: it
-    /// signs the schema with those fields nullable here, and the open
-    /// migrates and calls [`Self::cut`].
-    async fn evolve_breaking(
+    /// the generation. Otherwise this issuer signs the schema with those
+    /// fields nullable here; the open migrates and calls [`Self::require`].
+    async fn evolve_required(
         &mut self,
         path: &Path,
         vault: &Vault,
@@ -252,34 +286,30 @@ impl Settings {
         if self.lineage.len() + 2 > MAX_LINEAGE {
             return Err("the domain has too many generations".into());
         }
-        // Intent first: a device that adopts the cut must import it.
-        let intent = path.with_file_name("bootstrap.json");
-        let held = intent.exists();
-        if !held {
-            rocky_credentials::write_private(&intent, b"true")?;
-        }
         let fetched = match transport {
             Some(transport) => self.fetch_generation(path, vault, schema, transport).await,
             None => Err(ServiceError::NetworkRequired("upgrade").into()),
         };
-        if fetched.is_err() && !held {
-            std::fs::remove_file(&intent)?;
-        }
         match fetched {
             Ok(()) => Ok(()),
-            // A member waits for an issuer to cut; the application is ahead.
+            // A member waits for an issuer to migrate; the application is ahead.
             Err(_) if !self.issuer() => Ok(()),
             Err(_) => {
                 let publisher = *self.publisher.as_bytes();
                 match rocky_core::classify(self.domain()?.logical(), &logical(&relaxed, publisher)?)
                 {
-                    Ok(SchemaChange::Additive { .. }) => {
-                        self.sign_generation(path, vault, &relaxed, false)
+                    Ok(SchemaChange::Additive { required, .. }) if required.is_empty() => {
+                        Migration {
+                            from: self.schema.version,
+                            done: false,
+                        }
+                        .write(path)?;
+                        self.sign_generation(path, vault, &relaxed)
                     }
                     // Only nullability tightens: the installed schema is the
                     // generation the migration runs in.
                     Ok(SchemaChange::Unchanged | SchemaChange::Local) => Ok(()),
-                    Ok(SchemaChange::Breaking { .. }) | Err(_) => {
+                    Ok(SchemaChange::Additive { .. }) | Err(_) => {
                         Err("the schema's required fields cannot be added in one step".into())
                     }
                 }
@@ -287,41 +317,56 @@ impl Settings {
         }
     }
     /// After the migration: signs `schema`, which requires the fields the
-    /// installed schema holds nullable, as a cut admitting no earlier
-    /// generation.
-    pub(crate) fn cut(
+    /// installed schema holds nullable.
+    pub(crate) fn require(
         &mut self,
         path: &Path,
         vault: &Vault,
         schema: &Schema,
     ) -> Result<(), Failure> {
-        let publisher = *self.publisher.as_bytes();
-        match rocky_core::classify(self.domain()?.logical(), &logical(schema, publisher)?)? {
-            SchemaChange::Breaking { tables, fields, .. }
-                if tables.is_empty() && fields.is_empty() =>
-            {
-                self.sign_generation(path, vault, schema, true)
-            }
-            _ => Err("a cut only requires fields the installed schema holds".into()),
+        if !self.started_requiring(schema)? {
+            return Err("only fields the installed schema holds can become required".into());
         }
+        self.sign_generation(path, vault, schema)
+    }
+    /// The hash of the manifest `schema` defines at schema generation
+    /// `generation`.
+    fn manifest_at(&self, schema: &Schema, generation: u32) -> Result<Commitment, Failure> {
+        let publisher = *self.publisher.as_bytes();
+        Ok(Domain::at(
+            schema,
+            publisher,
+            self.mesh,
+            self.domain,
+            generation,
+            &BTreeSet::new(),
+        )?
+        .manifest()
+        .hash())
     }
     fn sign_generation(
         &mut self,
         path: &Path,
         vault: &Vault,
         schema: &Schema,
-        breaking: bool,
     ) -> Result<(), Failure> {
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-        let before = self.domain()?.manifest();
-        let mut draft = self.clone();
-        draft.lineage.push(Step {
-            schema: self.schema.clone(),
-            manifest: self.manifest.clone(),
-            transition: String::new(),
-        });
-        draft.schema = schema.clone();
-        let domain = draft.domain()?;
+        let old = self.domain()?;
+        let before = old.manifest();
+        let new = logical(schema, *self.publisher.as_bytes())?;
+        let change = rocky_core::classify(old.logical(), &new)?;
+        let added = field_ids(&new, &change.added())?;
+        let (_, mut all, _) = lineage(&self.lineage, self.publisher)?;
+        all.extend(added.iter().copied());
+        let generation = before.schema + u32::from(change.replicated());
+        let domain = Domain::at(
+            schema,
+            *self.publisher.as_bytes(),
+            self.mesh,
+            self.domain,
+            generation,
+            &all,
+        )?;
         let after = domain.manifest();
         let transition = GenerationTransition {
             app: after.app,
@@ -335,14 +380,18 @@ impl Settings {
                 schema: after.schema,
                 handler: after.handler,
             },
-            // Every earlier generation keeps syncing; after a cut, none do.
-            cut: breaking,
+            added,
+            tables: ItemChanges::between(&before.entities, &after.entities),
+            fields: ItemChanges::between(&before.fields, &after.fields),
             time: crate::enrollment::now_micros()?,
         };
         let signed = SignedTransition::sign(&transition, &publisher)?;
-        if let Some(step) = draft.lineage.last_mut() {
-            step.transition = HEXLOWER.encode(&signed.to_bytes()?);
-        }
+        let mut draft = self.clone();
+        draft.lineage.push(Step {
+            manifest: Some(self.manifest.clone()),
+            transition: HEXLOWER.encode(&signed.to_bytes()?),
+        });
+        draft.schema = schema.clone();
         draft.manifest = HEXLOWER.encode(&SignedManifest::sign(&after, &publisher)?.to_bytes()?);
         for (name, _) in domain.scopes() {
             if !draft.keys.contains_key(name) {
@@ -428,13 +477,6 @@ impl Settings {
             }
             .into());
         }
-        // A cut drops this device's unsynced work: only an application
-        // that declares it adopts it, at open.
-        if draft.cuts_after(&self.manifest)? {
-            return Err(
-                "the newer generation is a cut; open the application that declares it".into(),
-            );
-        }
         let mut failure = None;
         for route in &routes {
             match draft
@@ -505,22 +547,6 @@ impl Settings {
         }
         Err(failure)
     }
-    /// Whether a transition after `manifest` in this lineage is a cut.
-    fn cuts_after(&self, manifest: &str) -> Result<bool, Failure> {
-        let mut after = false;
-        for step in &self.lineage {
-            if after && step.signed()?.transition.verify(self.publisher)?.breaking() {
-                return Ok(true);
-            }
-            if step.manifest == manifest {
-                after = true;
-                if step.signed()?.transition.verify(self.publisher)?.breaking() {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
-    }
     /// The signed steps a device's `reply` to [`OFFER`] and this identity
     /// hold: what a replica that lacks an older generation learns it from.
     /// The replica verifies each and keeps those that lead to a generation
@@ -530,11 +556,30 @@ impl Settings {
         if offer.lineage.len() > MAX_LINEAGE {
             return Err("the offered lineage is too long".into());
         }
+        // The peer's own manifest and those either side holds, by hash.
+        let mut manifests = std::collections::BTreeMap::new();
+        for manifest in [&offer.manifest].into_iter().chain(
+            offer
+                .lineage
+                .iter()
+                .chain(&self.lineage)
+                .filter_map(|step| step.manifest.as_ref()),
+        ) {
+            let signed = SignedManifest::from_bytes(&HEXLOWER.decode(manifest.as_bytes())?)?;
+            manifests.insert(signed.verify(self.publisher)?.hash(), signed);
+        }
         offer
             .lineage
             .iter()
             .chain(&self.lineage)
-            .map(Step::signed)
+            .map(|step| {
+                let transition = step.signed_transition()?;
+                let from = transition.verify(self.publisher)?.from;
+                Ok(GenerationStep {
+                    manifest: manifests.get(&from).cloned(),
+                    transition,
+                })
+            })
             .collect()
     }
     /// The identity at the generation a device's `reply` to [`OFFER`]
@@ -554,11 +599,12 @@ impl Settings {
                     .into(),
             );
         }
+        let own = self.domain()?.manifest().hash();
         if offer.lineage.len() > MAX_LINEAGE
-            || !offer
-                .lineage
-                .iter()
-                .any(|step| step.manifest == self.manifest)
+            || !offer.lineage.iter().any(|step| {
+                step.verified(self.publisher)
+                    .is_ok_and(|step| step.from == own)
+            })
         {
             return Err("the offered generations do not include this device's".into());
         }
@@ -566,6 +612,24 @@ impl Settings {
         draft.lineage = offer.lineage;
         draft.schema = offer.schema;
         draft.manifest = offer.manifest;
+        // The manifests this device holds stay held, its own among them.
+        let mut held = self.lineage.clone();
+        held.push(Step {
+            manifest: Some(self.manifest.clone()),
+            transition: String::new(),
+        });
+        for step in &mut draft.lineage {
+            if step.manifest.is_none() {
+                let from = step.verified(self.publisher)?.from;
+                step.manifest = held
+                    .iter()
+                    .filter_map(|held| held.manifest.as_ref())
+                    .find(|manifest| {
+                        manifest_hash(manifest, self.publisher).is_ok_and(|hash| hash == from)
+                    })
+                    .cloned();
+            }
+        }
         draft.verify_lineage()?;
         // A step this device holds signed earlier keeps its baseline.
         keep_earlier(&mut draft.lineage, &self.lineage, self.publisher)?;
@@ -587,7 +651,10 @@ impl Settings {
                 .lineage
                 .iter()
                 .zip(&self.lineage)
-                .any(|(theirs, ours)| theirs.manifest != ours.manifest)
+                .any(|(theirs, ours)| {
+                    theirs.verified(self.publisher).ok().map(|step| step.from)
+                        != ours.verified(self.publisher).ok().map(|step| step.from)
+                })
         {
             return Ok(None);
         }
@@ -599,42 +666,125 @@ impl Settings {
         draft.verify_lineage()?;
         let transitions = changed
             .into_iter()
-            .map(|index| Ok(draft.lineage[index].signed()?.transition))
+            .map(|index| draft.lineage[index].signed_transition())
             .collect::<Result<_, Failure>>()?;
         Ok(Some((draft, transitions)))
     }
     /// Checks the lineage and current generation as [`Self::adopt_offer`]
-    /// describes.
+    /// describes: the transitions chain, each held manifest is the one its
+    /// transition leaves, and the current schema derives the current
+    /// manifest.
     pub(crate) fn verify_lineage(&self) -> Result<(), Failure> {
         let forged = || -> Failure { "the offered generation is not the publisher's".into() };
+        let mut transitions = Vec::with_capacity(self.lineage.len());
         let mut manifests = Vec::with_capacity(self.lineage.len() + 1);
-        for (index, step) in self.lineage.iter().enumerate() {
-            let signed = step.signed()?;
-            let manifest = signed.manifest.verify(self.publisher)?;
-            let mut earlier = self.clone();
-            earlier.lineage.truncate(index);
-            earlier.schema = step.schema.clone();
-            if earlier.domain()?.manifest().hash() != manifest.hash() {
+        for step in &self.lineage {
+            let transition = step.verified(self.publisher)?;
+            let held = match step.signed_manifest()? {
+                Some(signed) => Some(signed.verify(self.publisher)?),
+                None => None,
+            };
+            if held.as_ref().is_some_and(|manifest| {
+                manifest.hash() != transition.from
+                    || manifest.schema != transition.before.schema
+                    || manifest.handler != transition.before.handler
+            }) {
                 return Err(forged());
             }
-            manifests.push((manifest.hash(), Some(signed.transition)));
+            transitions.push(transition);
+            manifests.push(held);
         }
         let manifest = self.manifest()?.verify(self.publisher)?;
+        manifests.push(Some(manifest.clone()));
+        // Where both manifests of a step are held, it names and removes
+        // what they differ in.
+        for (index, transition) in transitions.iter().enumerate() {
+            if let (Some(old), Some(new)) = (&manifests[index], &manifests[index + 1])
+                && (transition.tables != ItemChanges::between(&old.entities, &new.entities)
+                    || transition.fields != ItemChanges::between(&old.fields, &new.fields))
+            {
+                return Err(forged());
+            }
+        }
         if manifest.hash() != self.domain()?.manifest().hash() {
             return Err(forged());
         }
-        manifests.push((manifest.hash(), None));
-        for pair in manifests.windows(2) {
-            let (from, Some(transition)) = &pair[0] else {
-                return Err(forged());
-            };
-            let transition = transition.verify(self.publisher)?;
-            if transition.from != *from || transition.to != pair[1].0 {
-                return Err(forged());
-            }
+        let ends = transitions.last().is_none_or(|last| {
+            last.to == manifest.hash()
+                && last.after.schema == manifest.schema
+                && last.after.handler == manifest.handler
+        });
+        if !ends
+            || transitions
+                .windows(2)
+                .any(|pair| pair[0].to != pair[1].from || pair[0].after != pair[1].before)
+        {
+            return Err(forged());
         }
         Ok(())
     }
+    /// Holds the manifests among `steps` of the generations `held` names,
+    /// which the replica now holds. Returns whether any changed.
+    pub(crate) fn hold_manifests(
+        &mut self,
+        steps: &[GenerationStep],
+        held: &BTreeSet<Commitment>,
+    ) -> Result<bool, Failure> {
+        let mut changed = false;
+        for step in &mut self.lineage {
+            let from = step.verified(self.publisher)?.from;
+            if step.manifest.is_some() || !held.contains(&from) {
+                continue;
+            }
+            for candidate in steps.iter().filter_map(|step| step.manifest.as_ref()) {
+                if candidate.verify(self.publisher)?.hash() == from {
+                    step.manifest = Some(HEXLOWER.encode(&candidate.to_bytes()?));
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        Ok(changed)
+    }
+    /// Forgets the manifests of the generations `dropped` names, which the
+    /// replica dropped; their transitions stay. Returns whether any changed.
+    pub(crate) fn forget_manifests(&mut self, dropped: &[Commitment]) -> Result<bool, Failure> {
+        let mut changed = false;
+        for step in &mut self.lineage {
+            if step.manifest.is_some() && dropped.contains(&step.verified(self.publisher)?.from) {
+                step.manifest = None;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+}
+
+/// The hash of a hex signed manifest, the publisher's.
+fn manifest_hash(
+    manifest: &str,
+    publisher: rocky_credentials::PublicKey,
+) -> Result<Commitment, Failure> {
+    Ok(
+        SignedManifest::from_bytes(&HEXLOWER.decode(manifest.as_bytes())?)?
+            .verify(publisher)?
+            .hash(),
+    )
+}
+/// The ids of `table.field` names of `schema`.
+fn field_ids(
+    schema: &rocky_core::LogicalSchema,
+    fields: &BTreeSet<String>,
+) -> Result<BTreeSet<Commitment>, Failure> {
+    fields
+        .iter()
+        .map(|field| {
+            let (table, column) = field.split_once('.').ok_or("a field names its table")?;
+            let table = schema.table(table).ok_or("an added field's table")?;
+            let column = table.column(column).ok_or("an added field's column")?;
+            Ok(schema.field_id(table, column))
+        })
+        .collect()
 }
 
 /// The first reader key of a table a generation adds: derived from the
@@ -656,17 +806,17 @@ fn keep_earlier(
 ) -> Result<Vec<usize>, Failure> {
     let mut changed = Vec::new();
     for (index, step) in lineage.iter_mut().enumerate() {
-        let Some(earlier) = other
+        let current = step.verified(publisher)?;
+        for earlier in other
             .iter()
-            .find(|other| other.manifest == step.manifest && other.transition != step.transition)
-        else {
-            continue;
-        };
-        let current = step.signed()?.transition.verify(publisher)?;
-        let candidate = earlier.signed()?.transition.verify(publisher)?;
-        if candidate.same_step(&current) && candidate.time < current.time {
-            step.transition = earlier.transition.clone();
-            changed.push(index);
+            .filter(|other| other.transition != step.transition)
+        {
+            let candidate = earlier.verified(publisher)?;
+            if candidate.same_step(&current) && candidate.time < current.time {
+                step.transition = earlier.transition.clone();
+                changed.push(index);
+                break;
+            }
         }
     }
     Ok(changed)
@@ -687,7 +837,7 @@ pub(crate) async fn ask_bytes(
 }
 
 /// `schema` with each `table.field` of `required` nullable: the generation
-/// a cut migrates in before it requires them.
+/// the migration runs in before they become required.
 pub(crate) fn relaxed(schema: &Schema, required: &BTreeSet<String>) -> Result<Schema, Failure> {
     let mut relaxed = schema.clone();
     let mut found = 0;

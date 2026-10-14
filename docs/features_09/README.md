@@ -1,7 +1,8 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1 to 3 are implemented. [features_08](../features_08/README.md) is history,
-not a competing next-work authority.
+Status: accepted roadmap (2026-10-14). Phases 1 to 3 are implemented; phase 6
+is in progress. [features_08](../features_08/README.md) is history, not a
+competing next-work authority.
 
 ## Destination
 
@@ -135,7 +136,7 @@ flowchart LR
 | 0067 | 1 | [Names are table and field identities](../decisions/0067-names-are-identities.md) |
 | 0068 | 2, 3 | Adopting newer generations and removal |
 | 0069 | 4 | Held changes, void records and re-authoring |
-| 0070 | 5, 6 | Confirmed rollouts and the end of cuts |
+| 0070 | 5, 6 | [Confirmed rollouts and the end of cuts](../decisions/0070-confirmed-rollouts-and-the-end-of-cuts.md) |
 | 0071 | 7 | Staged migration publication |
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | Stuck recovery and the end of strong commands |

@@ -136,8 +136,7 @@ impl<A: RowApplication> Inner<A> {
             .map_err(|refusal| incompatible(refusal.to_string()))?
         {
             SchemaChange::Unchanged => return Ok(()),
-            SchemaChange::Local | SchemaChange::Additive { .. } | SchemaChange::Breaking { .. } => {
-            }
+            SchemaChange::Local | SchemaChange::Additive { .. } => {}
         }
         // Local tables hold application data no stored row restores, and
         // confirmed rows change only through commands: both stay in place.

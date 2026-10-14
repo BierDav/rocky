@@ -15,17 +15,21 @@ and is refused: remove the table instead. Indexes, foreign keys, views,
 partition groups and `granted_like` entries naming a removed item go with it,
 since the new schema must validate on its own. Command-controlled tables stay
 unchangeable. The replica's `extends` keeps every method, operation and
-domain, and every table and field the new manifest still names, unchanged.
+domain, and every table and field the new manifest still names, unchanged;
+the transitions between two held manifests must remove whatever the newer one
+lacks, and one step must name and remove exactly what they differ in.
 
 ## Names of a lineage
 
-The replica derives from its recorded lineage:
+The replica derives from the signed transitions of its recorded lineage,
+which list the table and field ids each step named and removed; it needs no
+earlier manifest, since those are a [cache](generations.md#manifests-are-a-cache):
 
-- **retired** tables and fields, named by an earlier generation and not by
-  the current one;
-- **re-added** ones, with the baseline of the generation that added them
-  back: the signing time of its transition in microseconds, the earliest
-  one learned.
+- **retired** tables and fields, removed by a transition and not named
+  again since;
+- **re-added** ones, with the baseline of the generation that named them
+  again: the signing time of its transition in microseconds, the earliest
+  one learned. A re-added table's fields share its baseline.
 
 Every write is read through them: a retired field or table is ignored, and a
 re-added one is ignored when stamped before its baseline. A re-added table's

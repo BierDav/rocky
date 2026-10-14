@@ -683,8 +683,8 @@ impl<A: RowApplication> Inner<A> {
         {
             return Ok(None);
         }
-        // A checkpoint of a generation behind the horizon is offered again
-        // once maintenance seals one of the current generation.
+        // A checkpoint of a generation this replica does not admit is
+        // offered again once maintenance seals one of the current generation.
         if self.admits(signed.statement.definition).is_err() {
             return Ok(None);
         }

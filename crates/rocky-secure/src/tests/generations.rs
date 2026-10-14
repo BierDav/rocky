@@ -187,12 +187,34 @@ impl Lineage {
                 to: self.definition(from + 1).hash(),
                 before: at(from),
                 after: at(from + 1),
-                cut: false,
+                added: self.added(from),
+                tables: rocky_core::ItemChanges::between(
+                    &self.definition(from).entities,
+                    &self.definition(from + 1).entities,
+                ),
+                fields: rocky_core::ItemChanges::between(
+                    &self.definition(from).fields,
+                    &self.definition(from + 1).fields,
+                ),
                 time,
             },
             &self.publisher,
         )
         .unwrap()
+    }
+    /// The field ids rows of generation `from` lack in the next.
+    fn added(&self, from: u32) -> BTreeSet<Commitment> {
+        let (old, new) = (self.schema(from), self.schema(from + 1));
+        rocky_core::classify(&old, &new)
+            .unwrap()
+            .added()
+            .iter()
+            .map(|field| {
+                let (table, column) = field.split_once('.').unwrap();
+                let table = new.table(table).unwrap();
+                new.field_id(table, table.column(column).unwrap())
+            })
+            .collect()
     }
     fn scope(&self, name: &str) -> ResourceScope {
         let schema = self.schema(3);
@@ -292,7 +314,7 @@ impl Lineage {
         Upgrade {
             steps: (from..to)
                 .map(|generation| GenerationStep {
-                    manifest: self.manifest(generation),
+                    manifest: Some(self.manifest(generation)),
                     transition: match generation {
                         4 => self.transition_at(4, readded),
                         _ => self.transition(generation),
@@ -708,7 +730,6 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
             handler: 1
         }
     );
-    assert_eq!(status.horizon, 0);
     assert_eq!(status.previous.len(), 1);
     // Existing rows gained the new column, empty; the new table exists.
     assert_eq!(
@@ -831,7 +852,6 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
         .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(2, 3)))
         .await
         .unwrap();
-    assert_eq!(alice.generations().await.unwrap().horizon, 0);
     assert_eq!(alice.generations().await.unwrap().previous.len(), 2);
     let older = frames_as(&carol, alice_key.public_key(), &earlier, items).await;
     assert_eq!(older.len(), 1);
@@ -1650,4 +1670,94 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
     erin.finish_rebootstrap(items).await.unwrap();
     assert_eq!(select(&erin, notes).await, select(alice, notes).await);
     erin.audit(items).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame() {
+    let lineage = Lineage::new();
+    let dir = TempDir::new().unwrap();
+    let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
+    // Alice starts at generation 3 with the lineage: nothing she holds
+    // names generations 1 and 2.
+    let alice = lineage
+        .open(
+            &dir.path().join("alice.db"),
+            &alice_key,
+            3,
+            Some(lineage.upgrade(1, 3)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(alice.generations().await.unwrap().previous.len(), 2);
+    let dropped = alice.drop_unreferenced_generations().await.unwrap();
+    assert_eq!(
+        dropped,
+        vec![lineage.definition(1).hash(), lineage.definition(2).hash()]
+    );
+    let status = alice.generations().await.unwrap();
+    assert!(status.previous.is_empty());
+    // The transition into generation 3 stays, and with it the baseline.
+    assert_eq!(status.baseline, Some(1_000));
+    assert!(
+        alice
+            .drop_unreferenced_generations()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // A frame of generation 1 is refused until its manifest is learned
+    // again: the writer's manifest, with the transitions Alice kept.
+    let carol = lineage
+        .open(&dir.path().join("carol.db"), &carol_key, 1, None)
+        .await
+        .unwrap();
+    identity_insert(
+        &session(&carol).await,
+        "INSERT INTO items VALUES('0001','from generation 1')",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let items = lineage.scope("items");
+    let earlier = lineage.credentials(1, &alice_key);
+    for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Incompatible(_))
+        ));
+    }
+    let carols = GenerationStep {
+        manifest: Some(lineage.manifest(1)),
+        transition: lineage.transition(1),
+    };
+    // A forged manifest is refused before anything is recorded.
+    let forged = GenerationStep {
+        manifest: Some(Lineage::new().manifest(1)),
+        transition: lineage.transition(1),
+    };
+    assert!(alice.learn_generations(&[forged]).await.is_err());
+    assert_eq!(alice.learn_generations(&[carols]).await.unwrap(), 1);
+    let status = alice.generations().await.unwrap();
+    assert_eq!(status.previous.len(), 1);
+    for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
+        alice.receive(frame).await.unwrap();
+    }
+    assert_eq!(
+        select(&alice, "SELECT title, note, rank FROM items").await,
+        vec![vec![
+            text("from generation 1"),
+            SqlValue::Null,
+            SqlValue::Null
+        ]]
+    );
+    // A retained frame names generation 1 now: its manifest stays.
+    assert!(
+        alice
+            .drop_unreferenced_generations()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(alice.generations().await.unwrap().previous.len(), 1);
 }

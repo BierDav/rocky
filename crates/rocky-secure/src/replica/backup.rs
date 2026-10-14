@@ -56,7 +56,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .hash(),
         ];
         for step in upgrade.iter().flat_map(|upgrade| &upgrade.steps) {
-            manifests.push(step.manifest.verify(publisher).map_err(credential)?.hash());
+            manifests.push(step.transition.verify(publisher).map_err(credential)?.from);
         }
         rebind(path.as_ref(), &manifests, predecessor, node).await?;
         Self::open_upgrading(path, app, config, upgrade).await

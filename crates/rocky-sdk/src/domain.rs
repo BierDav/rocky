@@ -17,9 +17,9 @@ pub(crate) struct Domain {
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
     granted_like: BTreeMap<String, String>,
-    /// Tables and `table.field`s earlier generations removed: grants that
+    /// Ids of tables and fields earlier generations removed: grants that
     /// still name them read as if they did not.
-    removed: BTreeSet<String>,
+    removed: BTreeSet<Commitment>,
 }
 impl Domain {
     pub fn new(
@@ -30,30 +30,22 @@ impl Domain {
     ) -> Result<Self, Failure> {
         Self::at(schema, publisher, mesh, domain, 1, &BTreeSet::new())
     }
-    /// The domain at schema generation `generation`, where `added` names
-    /// the nullable `collection.field`s transitions added to collections
-    /// that existed before them. See `docs/runtime/generations.md`.
+    /// The domain at schema generation `generation`, where `added` holds
+    /// the field ids transitions added to, or required of, tables that
+    /// existed before them; ids this schema no longer holds are ignored.
+    /// See `docs/runtime/generations.md`.
     pub fn at(
         schema: &Schema,
         publisher: [u8; 32],
         mesh: MeshId,
         domain: DomainId,
         generation: u32,
-        added: &BTreeSet<String>,
+        added: &BTreeSet<Commitment>,
     ) -> Result<Self, Failure> {
         let logical = logical(schema, publisher)?;
-        let added = logical
-            .tables
-            .iter()
-            .flat_map(|table| {
-                table
-                    .columns
-                    .iter()
-                    .filter(|column| {
-                        added.contains(&format!("{}.{}", table.sql_name, column.sql_name))
-                    })
-                    .map(|column| logical.field_id(table, column))
-            })
+        let added = rocky_core::fillable(&logical)
+            .intersection(added)
+            .copied()
             .collect();
         let scope = Scope {
             mesh,
@@ -134,18 +126,34 @@ impl Domain {
             removed: BTreeSet::new(),
         })
     }
-    /// This domain, whose lineage removed `removed`; a name added again
-    /// is current.
-    pub fn removing(mut self, removed: BTreeSet<String>) -> Self {
+    /// This domain, whose lineage removed the table and field ids
+    /// `removed`; a name added again is current.
+    pub fn removing(mut self, removed: BTreeSet<Commitment>) -> Self {
         let logical = self.logical();
-        let current = |name: &String| match name.split_once('.') {
-            Some((table, field)) => logical
-                .table(table)
-                .is_some_and(|table| table.column(field).is_some()),
-            None => logical.table(name).is_some(),
-        };
-        self.removed = removed.into_iter().filter(|name| !current(name)).collect();
+        let current: BTreeSet<Commitment> = logical
+            .tables
+            .iter()
+            .flat_map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .map(|column| logical.field_id(table, column))
+                    .chain([logical.table_id(table)])
+            })
+            .collect();
+        self.removed = removed.difference(&current).copied().collect();
         self
+    }
+    /// Whether a generation removed the table or `table.field` `name`.
+    fn removed(&self, name: &str) -> bool {
+        let logical = self.logical();
+        let kind = if name.contains('.') { "field" } else { "entity" };
+        self.removed.contains(&rocky_core::definition_item_id(
+            logical.publisher,
+            logical.app_id(),
+            kind,
+            name,
+        ))
     }
     /// Partition grants as this generation reads them. A grant that named
     /// every field of its table, apart from fields later generations added,
@@ -327,7 +335,7 @@ impl Domain {
         let named = |scopes: &BTreeSet<String>| -> BTreeSet<String> {
             scopes
                 .iter()
-                .filter(|name| !self.removed.contains(*name))
+                .filter(|name| !self.removed(name))
                 .cloned()
                 .collect()
         };
@@ -345,12 +353,12 @@ impl Domain {
             Profile::Grants { grants } => Profile::Grants {
                 grants: grants
                     .iter()
-                    .filter(|grant| !self.removed.contains(&grant.scope))
+                    .filter(|grant| !self.removed(&grant.scope))
                     .cloned()
                     .map(|mut grant| {
                         if let Some(columns) = &mut grant.columns {
                             columns.retain(|name| {
-                                !self.removed.contains(&format!("{}.{name}", grant.scope))
+                                !self.removed(&format!("{}.{name}", grant.scope))
                             });
                         }
                         grant

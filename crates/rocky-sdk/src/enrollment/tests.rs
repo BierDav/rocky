@@ -824,6 +824,7 @@ async fn a_forged_generation_offer_is_refused_before_anything_changes() -> Resul
         )
         .await?;
     let foreign = moved.lineage[0].transition.clone();
+    let foreign_manifest = moved.lineage[0].manifest.clone();
     let forge = |change: &dyn Fn(&mut Value)| -> Result<Vec<u8>, Failure> {
         let mut forged = offer.clone();
         change(&mut forged);
@@ -834,10 +835,10 @@ async fn a_forged_generation_offer_is_refused_before_anything_changes() -> Resul
         forge(&|offer| offer["schema"]["tables"][0]["columns"][1]["name"] = json!("label"))?,
         // The installed manifest offered as the newer one.
         forge(&|offer| offer["manifest"] = offer["lineage"][0]["manifest"].clone())?,
-        // A lineage step whose schema is not its manifest's.
-        forge(&|offer| {
-            offer["lineage"][0]["schema"]["tables"][0]["columns"][0]["name"] = json!("title")
-        })?,
+        // A lineage step holding a manifest its transition does not leave.
+        forge(&|offer| offer["lineage"][0]["manifest"] = offer["manifest"].clone())?,
+        // A lineage step holding a manifest another publisher signed.
+        forge(&|offer| offer["lineage"][0]["manifest"] = json!(foreign_manifest.clone()))?,
         // A lineage that does not pass through this device's generation.
         forge(&|offer| offer["lineage"] = json!([]))?,
         // A transition another publisher signed.

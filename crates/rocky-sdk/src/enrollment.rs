@@ -579,14 +579,9 @@ pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String 
         HEXLOWER.encode(&epoch.secret_hash)
     )
 }
-/// The key provider role of this device's pseudonym key in `collection`
-/// after the cut into schema generation `cut`, or 0 before any: each cut
-/// starts new author logs, since work behind it was dropped.
-fn pseudonym_role(collection: &str, cut: u32) -> String {
-    match cut {
-        0 => format!("pseudonym.{collection}"),
-        cut => format!("pseudonym.{collection}.{cut}"),
-    }
+/// The key provider role of this device's pseudonym key in `collection`.
+fn pseudonym_role(collection: &str) -> String {
+    format!("pseudonym.{collection}")
 }
 /// What a joining device expects to join.
 /// What a joining device's application is: its name, whatever version of
@@ -816,7 +811,7 @@ impl Settings {
     pub fn domain(&self) -> Result<Domain, Failure> {
         let publisher = *self.publisher.as_bytes();
         let (generation, added, removed) =
-            crate::generation::lineage(&self.lineage, &self.schema, publisher)?;
+            crate::generation::lineage(&self.lineage, self.publisher)?;
         Ok(Domain::at(
             &self.schema,
             publisher,
@@ -1077,14 +1072,7 @@ impl Settings {
             );
         }
         if let Ok(domain) = self.domain() {
-            let cuts = self.cuts().unwrap_or_default();
-            for (name, _) in domain.scopes() {
-                roles.extend(
-                    std::iter::once(0)
-                        .chain(cuts.iter().copied())
-                        .map(|cut| pseudonym_role(name, cut)),
-                );
-            }
+            roles.extend(domain.scopes().map(|(name, _)| pseudonym_role(name)));
         }
         for record in self.groups.values() {
             roles.push(format!(
@@ -2038,7 +2026,7 @@ impl Settings {
             .scopes()
             .find(|(name, _)| *name == collection)
             .ok_or("unknown collection")?;
-        let role = self.pseudonym_role(collection)?;
+        let role = self.pseudonym_role(collection);
         let key = match vault.find(&role)? {
             Some(key) => key,
             None => vault.create(&role)?,
@@ -2364,7 +2352,7 @@ impl Settings {
             .ok_or("empty pseudonym")?;
         let collection = self.collection_of(table)?;
         let key = vault
-            .find(&self.pseudonym_role(&collection)?)?
+            .find(&self.pseudonym_role(&collection))?
             .map(|key| PrivateKey::from_bytes(&key).public_key())
             .ok_or("this device asked for no pseudonym in that collection")?;
         let (pseudonym, _) = chain.verify_pseudonym_selectors(
@@ -2379,24 +2367,8 @@ impl Settings {
     }
     /// The key provider role of this device's current pseudonym key in
     /// `collection`.
-    pub(crate) fn pseudonym_role(&self, collection: &str) -> Result<String, Failure> {
-        Ok(pseudonym_role(
-            collection,
-            self.cuts()?.last().copied().unwrap_or(0),
-        ))
-    }
-    /// The schema generations the domain's cuts moved to, oldest first.
-    pub(crate) fn cuts(&self) -> Result<Vec<u32>, Failure> {
-        let mut cuts = Vec::new();
-        for step in &self.lineage {
-            let bytes = HEXLOWER.decode(step.transition.as_bytes())?;
-            let transition =
-                rocky_credentials::SignedTransition::from_bytes(&bytes)?.verify(self.publisher)?;
-            if transition.breaking() {
-                cuts.push(transition.after.schema);
-            }
-        }
-        Ok(cuts)
+    pub(crate) fn pseudonym_role(&self, collection: &str) -> String {
+        pseudonym_role(collection)
     }
     pub(crate) fn row_authors(
         &self,
@@ -2410,7 +2382,7 @@ impl Settings {
             .filter(|(_, chain)| self.current_pseudonym(chain, manifest, time))
             .map(|(collection, chain)| {
                 Ok((
-                    PrivateKey::from_bytes(&vault.get(&self.pseudonym_role(collection)?)?),
+                    PrivateKey::from_bytes(&vault.get(&self.pseudonym_role(collection))?),
                     chain.clone(),
                 ))
             })
@@ -3364,13 +3336,7 @@ impl Settings {
             Ok(prior) => prior.clone(),
             Err(error) => {
                 let earlier = self.lineage.iter().find_map(|step| {
-                    let manifest = step.manifest.as_bytes();
-                    let hash = HEXLOWER
-                        .decode(manifest)
-                        .ok()
-                        .and_then(|bytes| SignedManifest::from_bytes(&bytes).ok())
-                        .and_then(|signed| signed.verify(self.publisher).ok())?
-                        .hash();
+                    let hash = step.verified(self.publisher).ok()?.from;
                     request
                         .verify(me, self.publisher, hash, (time, SKEW))
                         .ok()

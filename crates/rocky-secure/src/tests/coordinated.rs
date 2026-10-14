@@ -122,6 +122,9 @@ impl DomainLog for Client {
             result
         })
     }
+    fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+        self.inner.cut(scope, cut)
+    }
 }
 struct Peers {
     mesh: Mesh,
@@ -455,6 +458,9 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
             pending: LogPending,
         ) -> CoordinationFuture<'_, LogResult> {
             self.0.acknowledge(scope, pending)
+        }
+        fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+            self.0.cut(scope, cut)
         }
     }
     fixture.mesh.add(&member_key, &member);

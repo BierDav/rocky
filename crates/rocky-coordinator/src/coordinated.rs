@@ -2,6 +2,7 @@
 use crate::{certified::encode, machine::Request};
 use p2panda_core::PublicKey;
 use rocky_core::{Commitment, CoordinationError, MAX_COUNTER, Scope, commitment};
+use rocky_credentials::{CutPoint, MAX_CUT_AUTHORITY_BYTES, SignedCut};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -39,6 +40,14 @@ pub enum Action {
         pending: Pending,
         acknowledgments: Vec<Request>,
     },
+    /// An owner-signed `rocky_credentials::SignedCut` of the exact head,
+    /// with the owner's credential chain for devices.
+    Cut {
+        #[serde(with = "bytes")]
+        record: Vec<u8>,
+        #[serde(with = "bytes")]
+        authority: Vec<u8>,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pending {
@@ -65,6 +74,19 @@ pub struct Head {
     pub pending: Option<Pending>,
     #[serde(with = "hashes")]
     pub hashes: VecDeque<Commitment>,
+    /// The latest admitted cut; its digest is the entry hash at `position`.
+    pub cut: Option<Box<Cut>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cut {
+    #[serde(with = "bytes")]
+    pub record: Vec<u8>,
+    #[serde(with = "bytes")]
+    pub authority: Vec<u8>,
+    pub digest: Commitment,
+    pub sequence: u64,
+    pub position: u64,
+    pub running_hash: Commitment,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Result {
@@ -82,6 +104,10 @@ pub enum Result {
         epoch: u64,
     },
     Configured,
+    Cut {
+        position: u64,
+        running_hash: Commitment,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Retry {
@@ -110,6 +136,7 @@ impl Log {
                 members: Vec::new(),
                 pending: None,
                 hashes: VecDeque::new(),
+                cut: None,
             },
             retries: Vec::new(),
             minute: 0,
@@ -125,11 +152,116 @@ impl Log {
     }
     pub fn bytes(&self) -> usize {
         // Conservative admission accounting including encoded retry outcomes.
-        if self.retries.is_empty() {
+        let cut = self
+            .head
+            .cut
+            .as_ref()
+            .map_or(0, |cut| 256 + cut.record.len() + cut.authority.len());
+        if self.retries.is_empty() && cut == 0 {
             0
         } else {
-            1024 + 32 * (80 + 512) + HASH_WINDOW * 40
+            1024 + 32 * (80 + 512) + HASH_WINDOW * 40 + cut
         }
+    }
+    /// Admits an owner-signed cut of the exact head; the caller has checked
+    /// the signer's authority. The cut commits at `a+1`, clears the in-sync
+    /// set and moves the epoch. A retry of the retained record answers the
+    /// same commit.
+    pub fn cut(
+        &mut self,
+        scope: Scope,
+        record: &[u8],
+        authority: &[u8],
+    ) -> std::result::Result<Result, CoordinationError> {
+        let signed = SignedCut::from_bytes(record).map_err(|_| CoordinationError::Denied)?;
+        if authority.len() > MAX_CUT_AUTHORITY_BYTES {
+            return Err(CoordinationError::Denied);
+        }
+        let digest = signed.digest().map_err(|_| CoordinationError::Denied)?;
+        if let Some(cut) = self.head.cut.as_ref().filter(|cut| cut.digest == digest) {
+            return Ok(Result::Cut {
+                position: cut.position,
+                running_hash: cut.running_hash,
+            });
+        }
+        let statement = &signed.statement;
+        if statement.log != scope {
+            return Err(CoordinationError::Denied);
+        }
+        let (sequence, previous, floor) = match &self.head.cut {
+            Some(cut) => (cut.sequence + 1, Some(cut.digest), cut.position),
+            None => (1, None, 0),
+        };
+        if self.head.pending.is_some()
+            || statement.replaced.position != self.head.commit
+            || statement.replaced.running != self.head.running_hash
+            || statement.epoch != self.head.epoch
+            || statement.sequence != sequence
+            || statement.previous != previous
+        {
+            return Err(CoordinationError::StaleHead);
+        }
+        // A cut never abandons a cut, and its prefix chains from a point
+        // the window or the genesis anchor authenticates.
+        if statement.retained.position < floor
+            || !self.endorses(statement.verified, statement.retained)
+        {
+            return Err(CoordinationError::Denied);
+        }
+        let epoch = self
+            .head
+            .epoch
+            .checked_add(1)
+            .ok_or(CoordinationError::StaleEpoch)?;
+        let position = statement.entry();
+        let running_hash = rocky_core::coordinated_chain(self.head.running_hash, position, digest);
+        self.head.epoch = epoch;
+        self.head.head = position;
+        self.head.commit = position;
+        self.head.running_hash = running_hash;
+        self.head.members.clear();
+        self.head.hashes.push_back(digest);
+        if self.head.hashes.len() > HASH_WINDOW {
+            self.head.hashes.pop_front();
+        }
+        self.head.cut = Some(Box::new(Cut {
+            record: record.to_vec(),
+            authority: authority.to_vec(),
+            digest,
+            sequence,
+            position,
+            running_hash,
+        }));
+        Ok(Result::Cut {
+            position,
+            running_hash,
+        })
+    }
+    /// Whether `verified` is the genesis anchor or chains through the window
+    /// to the commit, and `retained` follows from it where the window
+    /// reaches. Entries before the window are endorsed by the record alone.
+    fn endorses(&self, verified: CutPoint, retained: CutPoint) -> bool {
+        let head = &self.head;
+        let first = head.commit + 1 - head.hashes.len() as u64;
+        let hash = |position: u64| head.hashes[(position - first) as usize];
+        if verified.position == 0 {
+            if verified.running != head.genesis {
+                return false;
+            }
+        } else if verified.position + 1 < first {
+            return false;
+        }
+        if verified.position + 1 < first {
+            return true;
+        }
+        let mut running = verified.running;
+        for position in verified.position + 1..=head.commit {
+            running = rocky_core::coordinated_chain(running, position, hash(position));
+            if position == retained.position && running != retained.running {
+                return false;
+            }
+        }
+        running == head.running_hash
     }
     pub fn apply(
         &mut self,
@@ -323,6 +455,42 @@ impl Log {
     }
 }
 
+mod bytes {
+    use serde::{Deserializer, Serializer, de::Visitor};
+    pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(value)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Bytes;
+        impl<'de> Visitor<'de> for Bytes {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a byte string")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    if bytes.len() == 64 * 1024 {
+                        return Err(serde::de::Error::custom("byte string too large"));
+                    }
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(bytes)
+            }
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                Ok(bytes.to_vec())
+            }
+        }
+        deserializer.deserialize_byte_buf(Bytes)
+    }
+}
+
 mod hashes {
     use super::*;
     use serde::{
@@ -424,6 +592,10 @@ impl Head {
                 .collect(),
             pending: self.pending.as_ref().map(Pending::port),
             hashes: self.hashes.iter().copied().collect(),
+            cut: self.cut.as_ref().map(|cut| rocky_core::LogCut {
+                record: cut.record.clone(),
+                authority: cut.authority.clone(),
+            }),
         }
     }
 }
@@ -439,6 +611,8 @@ pub struct MemoryLog {
 #[derive(Default)]
 struct MemoryLogs {
     logs: std::collections::BTreeMap<[u8; 48], (Log, Vec<PublicKey>)>,
+    /// Each domain's control authority, which signs its cuts.
+    owners: std::collections::BTreeMap<[u8; 48], PublicKey>,
     /// Seconds added to the system clock.
     skew: u64,
     unavailable: bool,
@@ -468,10 +642,14 @@ impl MemoryLog {
         minimum: usize,
     ) -> std::result::Result<(), CoordinationError> {
         let owner = PublicKey::from_bytes(&[0; 32]).map_err(|_| CoordinationError::Corrupt)?;
-        self.with(scope, |log, _, time| {
+        self.with(scope, |log, _, time, _| {
             log.apply(owner, &Action::Configure { minimum }, time, true)
                 .map(|_| ())
         })
+    }
+    /// Names `scope`'s control authority, the only signer of its cuts.
+    pub fn set_owner(&self, scope: Scope, owner: PublicKey) {
+        self.lock().owners.insert(scope_key(scope), owner);
     }
     /// Moves this log's clock, so deadlines pass without sleeping.
     pub fn advance(&self, seconds: u64) {
@@ -482,7 +660,7 @@ impl MemoryLog {
         self.lock().unavailable = !available;
     }
     pub fn head(&self, scope: Scope) -> std::result::Result<Head, CoordinationError> {
-        self.with(scope, |log, _, _| Ok(log.head.clone()))
+        self.with(scope, |log, _, _, _| Ok(log.head.clone()))
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, MemoryLogs> {
         self.state
@@ -492,7 +670,12 @@ impl MemoryLog {
     fn with<T>(
         &self,
         scope: Scope,
-        f: impl FnOnce(&mut Log, &mut Vec<PublicKey>, u64) -> std::result::Result<T, CoordinationError>,
+        f: impl FnOnce(
+            &mut Log,
+            &mut Vec<PublicKey>,
+            u64,
+            Option<PublicKey>,
+        ) -> std::result::Result<T, CoordinationError>,
     ) -> std::result::Result<T, CoordinationError> {
         let mut state = self.lock();
         if state.unavailable {
@@ -503,6 +686,7 @@ impl MemoryLog {
             .map_err(|_| CoordinationError::Corrupt)?
             .as_secs()
             + state.skew;
+        let owner = state.owners.get(&scope_key(scope)).copied();
         let (log, acknowledged) = state
             .logs
             .entry(scope_key(scope))
@@ -513,7 +697,7 @@ impl MemoryLog {
             log.resolve(&pending, acknowledged, time)?;
             acknowledged.clear();
         }
-        f(log, acknowledged, time)
+        f(log, acknowledged, time, owner)
     }
 }
 pub struct MemoryLogClient {
@@ -540,7 +724,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 running_hash,
                 sequence,
             };
-            match self.logs.with(scope, |log, _, time| {
+            match self.logs.with(scope, |log, _, time, _| {
                 log.apply(self.key, &action, time, true)
             })? {
                 Result::Joined { epoch } => Ok(epoch),
@@ -561,7 +745,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 deadline: append.deadline,
                 sequence: append.sequence,
             };
-            match self.logs.with(scope, |log, _, time| {
+            match self.logs.with(scope, |log, _, time, _| {
                 log.apply(self.key, &action, time, true)
             })? {
                 Result::Assigned(pending) => Ok(pending.port()),
@@ -576,7 +760,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
     ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
         Box::pin(async move {
             let pending = Pending::from_port(&pending)?;
-            self.logs.with(scope, |log, acknowledged, time| {
+            self.logs.with(scope, |log, acknowledged, time, _| {
                 if log.head.pending.as_ref() != Some(&pending)
                     || !log.head.members.iter().any(|m| m.key == self.key)
                 {
@@ -599,6 +783,35 @@ impl rocky_core::DomainLog for MemoryLogClient {
                     Ok(_) => Err(CoordinationError::Corrupt),
                     Err(CoordinationError::Backpressure) => Ok(rocky_core::LogResult::Acknowledged),
                     Err(error) => Err(error),
+                }
+            })
+        })
+    }
+    fn cut(
+        &self,
+        scope: Scope,
+        cut: rocky_core::LogCut,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
+        Box::pin(async move {
+            let signer = SignedCut::from_bytes(&cut.record)
+                .map_err(|_| CoordinationError::Denied)?
+                .signer;
+            self.logs.with(scope, |log, acknowledged, _, owner| {
+                if owner != Some(signer) {
+                    return Err(CoordinationError::Denied);
+                }
+                match log.cut(scope, &cut.record, &cut.authority)? {
+                    Result::Cut {
+                        position,
+                        running_hash,
+                    } => {
+                        acknowledged.clear();
+                        Ok(rocky_core::LogResult::Committed {
+                            position,
+                            running_hash,
+                        })
+                    }
+                    _ => Err(CoordinationError::Corrupt),
                 }
             })
         })

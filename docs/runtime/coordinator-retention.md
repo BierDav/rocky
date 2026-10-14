@@ -148,7 +148,7 @@ domain adds 1,024 bytes and its encoded control. This is an admission budget,
 not a measurement of RSS. The encoded-object ceiling independently fails closed.
 
 Logs are separate synced files; hard state is an atomic checksummed file
-(format 4; other formats, including the old single-image `raft.cbor`, are
+(format 5; other formats, including the old single-image `raft.cbor`, are
 refused with `UnsupportedFormat`, never reset). Snapshots preserve floors,
 time, controls, heads and retry windows together. Physical purge waits for a
 durable snapshot covering the purge point; an interrupted pending snapshot is

@@ -738,4 +738,22 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
+    fn cut(&self, scope: Scope, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
+        Box::pin(async move {
+            let action = crate::coordinated::Action::Cut {
+                record: cut.record,
+                authority: cut.authority,
+            };
+            match self.coordinated(scope, action).await? {
+                Outcome::Coordinated(crate::coordinated::Result::Cut {
+                    position,
+                    running_hash,
+                }) => Ok(LogResult::Committed {
+                    position,
+                    running_hash,
+                }),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
 }

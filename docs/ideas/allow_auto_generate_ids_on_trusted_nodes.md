@@ -1,1 +1,0 @@
-this means that the autogenerate flag is also set on the partial replica, but all attempts to write will be refused, this makes the constraint transparent to everyone

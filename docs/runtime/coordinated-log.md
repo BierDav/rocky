@@ -55,7 +55,28 @@ head: the pending descriptor disappears, the commit index stays, and the assigne
 head returns to that index. In both cases missing nodes leave. Membership epoch
 changes fence old acknowledgments, including a later attempt at the same position.
 A node outside the set must catch up before rejoining. An entire missing set
-cannot invent a committed continuation; exceptional recovery belongs to phase 10.
+cannot invent a committed continuation; only an owner-signed cut can.
+
+## Owner-signed cuts
+
+`Action::Cut { record, authority }` carries a `rocky_credentials::SignedCut` of
+the exact current head ([decision 0074](../decisions/0074-owner-signed-recovery-cuts.md)).
+A trusted node or the control authority submits it; the record's signer must be
+the domain's control authority. Admission requires no pending entry, the
+replaced position, running hash and epoch equal to the head, the next cut
+sequence with the previous cut's digest, and a retained prefix end no earlier
+than the previous cut's entry. The verified point must be the genesis anchor or
+chain through the hash window to the head; where the window reaches, the
+retained running hash must match too. Positions before the window are endorsed
+by the record alone.
+
+The cut commits at `a+1` with the record digest as its entry hash, empties the
+in-sync set and increments the epoch, so positions are never reused. The head
+retains the latest record (at most 2 KiB) and its authority chain (at most
+8 KiB, never verified by the coordinator) and exposes both in `LogHead::cut`.
+Resubmitting the retained record returns the same `Result::Cut`; any other
+stale record returns `StaleHead`. `DomainLog::cut` reports it as `Committed`.
+`MemoryLog::set_owner` names the in-process signer.
 
 ## Retention and limits
 
@@ -71,7 +92,9 @@ members, retry outcomes and the full window; this is admission accounting, not
 RSS or actual encoded size. Commits cannot need more accounted capacity after an
 append. The newest 1,024 hashes occupy a 32,768-byte string; their positions are
 `commit - hashes.len() + 1` through `commit`. The running hash persists after
-older entry hashes are dropped. See [retention](coordinator-retention.md).
+older entry hashes are dropped. A retained cut adds its record and authority
+bytes plus 256. Store and snapshot format 5 holds the cut; every other format is
+refused before writes. See [retention](coordinator-retention.md).
 
 ## Evidence
 

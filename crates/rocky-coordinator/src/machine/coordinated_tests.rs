@@ -2,16 +2,16 @@ use super::*;
 use crate::coordinated::{Action, Pending, Result as LogResult};
 use p2panda_core::PrivateKey;
 
-const T: u64 = 1_900_000_000;
-struct Fixture {
-    state: Metadata,
-    owner: PrivateKey,
-    nodes: Vec<PrivateKey>,
-    voter: PrivateKey,
-    scope: Scope,
+pub(super) const T: u64 = 1_900_000_000;
+pub(super) struct Fixture {
+    pub(super) state: Metadata,
+    pub(super) owner: PrivateKey,
+    pub(super) nodes: Vec<PrivateKey>,
+    pub(super) voter: PrivateKey,
+    pub(super) scope: Scope,
 }
 impl Fixture {
-    fn new(minimum: usize, limits: Limits) -> Self {
+    pub(super) fn new(minimum: usize, limits: Limits) -> Self {
         let root = PrivateKey::new();
         let owner = PrivateKey::new();
         let nodes: Vec<_> = (0..2).map(|_| PrivateKey::new()).collect();
@@ -91,7 +91,7 @@ impl Fixture {
         }
         fixture
     }
-    fn request(&self, key: &PrivateKey, action: Action, time: u64) -> Request {
+    pub(super) fn request(&self, key: &PrivateKey, action: Action, time: u64) -> Request {
         Request::sign_at(
             self.state.genesis.id().unwrap(),
             crate::transport::nonce(),
@@ -104,7 +104,7 @@ impl Fixture {
         )
         .unwrap()
     }
-    fn run(
+    pub(super) fn run(
         &mut self,
         node: usize,
         action: Action,
@@ -113,11 +113,15 @@ impl Fixture {
         let request = self.request(&self.nodes[node], action, time);
         self.state.apply_at(time, &request)
     }
-    fn run_owner(&mut self, action: Action, time: u64) -> Result<Outcome, CoordinationError> {
+    pub(super) fn run_owner(
+        &mut self,
+        action: Action,
+        time: u64,
+    ) -> Result<Outcome, CoordinationError> {
         let request = self.request(&self.owner, action, time);
         self.state.apply_at(time, &request)
     }
-    fn append(&mut self, n: usize, sequence: u64, hash: u8) -> Pending {
+    pub(super) fn append(&mut self, n: usize, sequence: u64, hash: u8) -> Pending {
         let head = self.state.log_head(self.scope).unwrap();
         match self
             .run(
@@ -137,7 +141,7 @@ impl Fixture {
             other => panic!("unexpected {other:?}"),
         }
     }
-    fn resolve(
+    pub(super) fn resolve(
         &mut self,
         pending: &Pending,
         nodes: &[usize],

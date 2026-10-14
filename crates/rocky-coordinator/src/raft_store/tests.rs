@@ -4,6 +4,11 @@ use p2panda_core::PrivateKey;
 use rocky_core::*;
 use std::collections::BTreeSet;
 fn certified() -> (CertifiedGenesis, PrivateKey, Scope) {
+    let (genesis, executor, _, scope) = certified_with_authority();
+    (genesis, executor, scope)
+}
+/// Also returns the scope's control authority.
+fn certified_with_authority() -> (CertifiedGenesis, PrivateKey, PrivateKey, Scope) {
     let root = PrivateKey::new();
     let directory = PrivateKey::new();
     let executor = PrivateKey::new();
@@ -54,7 +59,7 @@ fn certified() -> (CertifiedGenesis, PrivateKey, Scope) {
         &root,
     )
     .unwrap();
-    (genesis, executor, scope)
+    (genesis, executor, directory, scope)
 }
 struct Builder(CertifiedGenesis);
 impl openraft::testing::StoreBuilder<Types, Store, Store, tempfile::TempDir> for Builder {
@@ -222,7 +227,7 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
 #[test]
 fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
     let (genesis, _, _) = certified();
-    for format in [0, 1, 2, FORMAT - 1, FORMAT + 1] {
+    for format in [0, 1, 2, 3, FORMAT - 1, FORMAT + 1] {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
         drop(Store::open(&source, genesis.clone(), true, Limits::default()).unwrap());
@@ -357,4 +362,80 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
         Err(CoordinationError::StaleHead)
     );
     assert_eq!(store.log_head(scope).await.unwrap().hashes.len(), 1);
+}
+
+#[tokio::test]
+async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
+    use crate::coordinated::{Action, Result as LogResult};
+    use crate::machine::Outcome;
+    use openraft::storage::RaftLogStorageExt;
+    use rocky_credentials::{CutPoint, CutStatement, SignedCut};
+    let (genesis, executor, authority, scope) = certified_with_authority();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+    let time = now().unwrap();
+    let request = |key: &PrivateKey, action| {
+        Request::sign_at(
+            genesis.id().unwrap(),
+            crate::transport::nonce(),
+            Operation::Coordinated { scope, action },
+            key,
+            time,
+        )
+        .unwrap()
+    };
+    async fn write(store: &mut Store, request: Request, index: u64, time: u64) -> Outcome {
+        let entry = Entry::<Types> {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(Proposal { time, request }),
+        };
+        store.blocking_append([entry.clone()]).await.unwrap();
+        store.save_committed(Some(entry.log_id)).await.unwrap();
+        store.apply([entry]).await.unwrap().remove(0).unwrap()
+    }
+    let head = store.log_head(scope).await.unwrap();
+    let anchor = CutPoint {
+        position: 0,
+        running: head.genesis,
+    };
+    let record = SignedCut::sign(
+        CutStatement {
+            log: scope,
+            sequence: 1,
+            previous: None,
+            verified: anchor,
+            retained: anchor,
+            replaced: anchor,
+            epoch: head.epoch,
+            issued: time,
+        },
+        &authority,
+    )
+    .unwrap();
+    let cut = Action::Cut {
+        record: record.to_bytes().unwrap(),
+        authority: vec![7; 64],
+    };
+    let admitted = write(&mut store, request(&executor, cut.clone()), 1, time).await;
+    let Outcome::Coordinated(LogResult::Cut { position: 1, .. }) = admitted else {
+        panic!("cut {admitted:?}")
+    };
+    let after = store.log_head(scope).await.unwrap();
+    drop(store);
+    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
+    let entries = store.try_get_log_entries(1..=1).await.unwrap();
+    store.apply(entries).await.unwrap();
+    assert_eq!(store.log_head(scope).await.unwrap(), after);
+    store.build_snapshot().await.unwrap();
+    drop(store);
+    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
+    let head = store.log_head(scope).await.unwrap();
+    assert_eq!(head, after);
+    let retained = head.cut.unwrap();
+    assert_eq!(retained.digest, record.digest().unwrap());
+    assert_eq!(retained.authority, vec![7; 64]);
+    assert_eq!(
+        write(&mut store, request(&executor, cut), 2, time).await,
+        admitted
+    );
 }

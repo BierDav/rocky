@@ -864,6 +864,17 @@ impl Metadata {
         use crate::coordinated::Action;
         match action {
             Action::Configure { .. } => self.closure_authorized(request, scope),
+            // A trusted node or the authority submits; the authority signs.
+            Action::Cut { record, .. } => {
+                let signer = rocky_credentials::SignedCut::from_bytes(record)
+                    .map_err(|_| CoordinationError::Denied)?
+                    .signer;
+                if !self.authority(scope, signer) || self.issuer(scope) != Some(signer) {
+                    return Err(CoordinationError::Denied);
+                }
+                self.closure_authorized(request, scope)
+                    .or_else(|_| self.authorized(scope, request, true, time).map(|_| ()))
+            }
             Action::Resolve { .. } => {
                 if self
                     .genesis
@@ -962,6 +973,7 @@ impl Metadata {
                     appends < u64::from(crate::coordinated::APPENDS_PER_MINUTE),
                 )
             }
+            Action::Cut { record, authority } => next.cut(scope, record, authority),
             _ => next.apply(request.key, action, self.state.time, true),
         };
         let growth = next.bytes().saturating_sub(domain.coordinated.bytes());
@@ -1183,3 +1195,6 @@ mod retention_tests;
 #[cfg(test)]
 #[path = "machine/coordinated_tests.rs"]
 mod coordinated_tests;
+#[cfg(test)]
+#[path = "machine/cut_tests.rs"]
+mod cut_tests;

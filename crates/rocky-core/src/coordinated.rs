@@ -36,6 +36,16 @@ pub struct LogHead {
     pub pending: Option<LogPending>,
     /// The newest committed entry hashes, the last at `commit`.
     pub hashes: Vec<Commitment>,
+    /// The latest owner-signed cut, retained so no device must explain it.
+    pub cut: Option<LogCut>,
+}
+/// An owner-signed cut as the coordinator retains it: the encoded signed
+/// record, whose digest is its entry hash, and the owner's credential chain
+/// devices verify. The coordinator checks the record, never the chain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LogCut {
+    pub record: Vec<u8>,
+    pub authority: Vec<u8>,
 }
 impl LogHead {
     /// The committed hash at `position`, while the window still holds it.
@@ -79,6 +89,9 @@ pub trait DomainLog: Send + Sync {
     fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending>;
     /// Promises that this node durably stored the exact pending entry.
     fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult>;
+    /// Submits an owner-signed cut of the exact current head. A retry of the
+    /// retained record returns the same commit.
+    fn cut(&self, scope: Scope, cut: LogCut) -> CoordinationFuture<'_, LogResult>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Append {

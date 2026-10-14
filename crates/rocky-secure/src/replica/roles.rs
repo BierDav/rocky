@@ -645,6 +645,8 @@ impl<A: RowApplication> Inner<A> {
         }
         let blob = encode(&scope)?;
         let mut used = 0;
+        // A log stops at a frame of an uncommitted coordinated entry.
+        let staged = self.staged().await?;
         for log in &own.logs {
             let mut start = request.held(log.author);
             if let Some((author, sequence)) = after {
@@ -720,6 +722,9 @@ impl<A: RowApplication> Inner<A> {
                     return Err(Error::Corrupt("retained operation".into()));
                 };
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
+                if staged.contains(&frame.id()?) {
+                    break;
+                }
                 let manifest = frame.operation()?.header.extensions.manifest;
                 // Every frame of a revoked author is refused, so none is
                 // sent.

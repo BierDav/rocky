@@ -95,8 +95,12 @@ when the schema is generated.
 
 Register columns hold values. `SET count = count + 1` publishes the number
 the author computed, so two devices incrementing concurrently keep one of the
-two results. Counters and sets need a command, not a SQL expression. Clock
-and random functions run once, on the author.
+two results. Writes that must not race, such as a counter or a sequential
+number, are [coordinated writes](coordinated-writes.md): a secure SQL
+transaction begun on a coordinated slot and committed with
+`commit_coordinated` (SDK: `"coordinated": true` on `BEGIN` and `COMMIT`)
+becomes true only once the domain's trusted nodes stored it. Clock and random
+functions run once, on the author.
 
 A derived column takes its installed rule's value at commit whatever a
 statement wrote. A value outside a column's declared type, such as text in an

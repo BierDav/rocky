@@ -72,6 +72,15 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
      */
     suspend fun <T> reauthor(id: String, handle: String = newMutationHandle(), block: suspend SqlWrite.() -> T): T = transaction(handle, id, block)
 
+    /**
+     * Runs `block` as a coordinated write: it reads this device's committed state, and the commit returns once every
+     * trusted device of the in-sync set stored it. Needs a coordinated log; see [CoordinatedSql] and `coordinated`.
+     */
+    suspend fun <T> coordinated(handle: String = newMutationHandle(), block: suspend CoordinatedSql.() -> T): CoordinatedCommit<T> = writing.withLock { client.coordinated(handleBytes(handle), block) }
+
+    /** This device's position on its domain's coordinated log, after deciding what it stores. */
+    suspend fun coordinatedStatus(): CoordinatedStatus = client.coordinatedStatus()
+
     private suspend fun <T> transaction(handle: String, reauthors: String?, block: suspend SqlWrite.() -> T): T = writing.withLock {
         val committed = handleBytes(handle)
         val transaction = object : SqlWrite {

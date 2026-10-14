@@ -24,6 +24,7 @@ pub mod link;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
 mod commands;
 mod delivery;
+mod entries;
 mod existence;
 mod frontiers;
 pub(crate) mod holdings;
@@ -39,6 +40,7 @@ pub use commands::NO_COORDINATION;
 use contacts::ContactMessage;
 use delivery::DeliveryMessage;
 pub use delivery::{DELIVERY_PAGE, Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
+use entries::EntryMessage;
 use existence::ExistenceMessage;
 pub use frontiers::FrontierExchange;
 use frontiers::FrontierMessage;
@@ -133,6 +135,7 @@ enum Message {
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
     LinkState(Vec<(ResourceScope, Commitment)>),
+    Entries(EntryMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -165,6 +168,7 @@ families!(
     Contacts(ContactMessage),
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
+    Entries(EntryMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -194,6 +198,8 @@ pub struct NativeSession {
     proved: std::collections::BTreeSet<ResourceScope>,
     offered: std::collections::BTreeSet<ResourceScope>,
     served_frames: std::collections::BTreeMap<Hash, ResourceScope>,
+    /// A coordinated entry the peer is sending page by page.
+    entry: Option<entries::Receiving>,
     contact_requests: usize,
     contact_handed: usize,
     contact_received: usize,
@@ -369,6 +375,7 @@ impl NativeSession {
             proved: Default::default(),
             offered: Default::default(),
             served_frames: Default::default(),
+            entry: None,
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,
@@ -548,6 +555,7 @@ impl NativeSession {
             Message::HorizonRelay(message) => self.answer_horizon_relay(replica, message).await,
             Message::Frontiers(message) => self.answer_frontiers(replica, message).await,
             Message::Existence(message) => self.answer_existence(replica, message).await,
+            Message::Entries(message) => self.answer_entries(replica, message).await,
             Message::Delivery(_) => Err(denied("this peer serves no envelope delivery")),
             _ => Err(denied("unexpected native request")),
         }

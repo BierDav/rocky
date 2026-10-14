@@ -323,7 +323,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
 }
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v17", manifest, node))
+    encode(&("rocky.encrypted-replica.v18", manifest, node))
 }
 /// A newer definition keeps what replicas of the older one agree on: its
 /// methods, operations and domains, and every table and field it still

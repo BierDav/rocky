@@ -91,6 +91,15 @@ impl<A: RowApplication> Drop for SecureSql<A> {
     }
 }
 
+/// What a commit resolves besides its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Plain,
+    /// The held change it re-authors.
+    Reauthors(Commitment),
+    Coordinated(Slot),
+}
+
 enum Sealed {
     Commit(SecureCommit),
     /// The handle committed these frames before; this transaction rolls back.
@@ -343,12 +352,13 @@ impl<A: RowApplication> SecureSql<A> {
     /// Runs one statement. Transaction control is interpreted here, as in
     /// a trusted `SqlSession`.
     pub async fn run(&self, sql: &str, params: Vec<SqlValue>) -> Result<SecureRows, Error> {
-        self.call(sql, params, None, None).await
+        self.call(sql, params, None, Kind::Plain).await
     }
     /// Commits the open transaction under `handle`. The same handle and
     /// changed rows return the committed frames again; other rows conflict.
     pub async fn commit(&self, handle: Commitment) -> Result<SecureRows, Error> {
-        self.call("COMMIT", Vec::new(), Some(handle), None).await
+        self.call("COMMIT", Vec::new(), Some(handle), Kind::Plain)
+            .await
     }
     /// Commits the open transaction as the re-authoring of the held change
     /// `held`, which leaves the list in the same transaction. The rows are
@@ -358,8 +368,26 @@ impl<A: RowApplication> SecureSql<A> {
         handle: Commitment,
         held: Commitment,
     ) -> Result<SecureRows, Error> {
-        self.call("COMMIT", Vec::new(), Some(handle), Some(held))
+        self.call("COMMIT", Vec::new(), Some(handle), Kind::Reauthors(held))
             .await
+    }
+    /// Commits the open transaction as a coordinated write staged at
+    /// `slot`: the bundle stays unsent until `EncryptedReplica::propose`
+    /// commits it, and is voided if it aborts. Durable on return.
+    pub async fn commit_coordinated(
+        &self,
+        handle: Commitment,
+        slot: Slot,
+    ) -> Result<SecureRows, Error> {
+        let trusted = &self.session.replica.domain_log;
+        trusted.begin_proposal(slot.log);
+        let staged = self
+            .call("COMMIT", Vec::new(), Some(handle), Kind::Coordinated(slot))
+            .await;
+        if staged.is_err() {
+            trusted.end_proposal(slot.log);
+        }
+        staged
     }
     /// Rolls the open transaction back; later statements report
     /// `Aborted(Cancelled)` until the caller sends `ROLLBACK`.
@@ -381,7 +409,7 @@ impl<A: RowApplication> SecureSql<A> {
         sql: &str,
         params: Vec<SqlValue>,
         handle: Option<Commitment>,
-        reauthors: Option<Commitment>,
+        commit: Kind,
     ) -> Result<SecureRows, Error> {
         let control = classify(sql).map_err(Error::Sql)?;
         let mut lease = self.lease.lock().await;
@@ -432,7 +460,7 @@ impl<A: RowApplication> SecureSql<A> {
             {
                 Err(refused("no transaction is active"))
             }
-            Control::Commit => self.finish(&mut lease, handle, None, reauthors).await,
+            Control::Commit => self.finish(&mut lease, handle, None, commit).await,
             Control::Rollback => {
                 lease.held = None;
                 Ok(empty(&lease, SqlState::Idle))
@@ -440,7 +468,7 @@ impl<A: RowApplication> SecureSql<A> {
             Control::Release(name) => {
                 let index = position(&lease, &name)?;
                 if index == 0 && lease.implicit {
-                    return self.finish(&mut lease, handle, None, None).await;
+                    return self.finish(&mut lease, handle, None, Kind::Plain).await;
                 }
                 self.engine(&lease, &format!("RELEASE rocky_user_{index}"))?;
                 lease.savepoints.truncate(index);
@@ -536,7 +564,7 @@ impl<A: RowApplication> SecureSql<A> {
                 return Err(error);
             }
         };
-        self.finish(lease, handle, Some(rows), None).await
+        self.finish(lease, handle, Some(rows), Kind::Plain).await
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
         let inner = self.session.replica.inner.clone().lock_owned().await;
@@ -775,7 +803,7 @@ impl<A: RowApplication> SecureSql<A> {
         lease: &mut Lease<A>,
         handle: Option<Commitment>,
         rows: Option<SecureRows>,
-        reauthors: Option<Commitment>,
+        commit: Kind,
     ) -> Result<SecureRows, Error> {
         let mut held = lease.held.take().ok_or(Error::Closed)?;
         lease.savepoints.clear();
@@ -785,7 +813,7 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         qualification_kill("before");
-        let sealed = self.seal(inner, handle, reauthors).await;
+        let sealed = self.seal(inner, handle, commit).await;
         inner.strict_projection = false;
         let committed = match sealed? {
             // `held` rolls the repeated transaction back.
@@ -811,7 +839,9 @@ impl<A: RowApplication> SecureSql<A> {
             .iter()
             .map(EncryptedFrame::scope)
             .collect::<Result<BTreeSet<_>, _>>()?;
-        if self.options.acknowledge == CommitClass::Flushed {
+        if self.options.acknowledge == CommitClass::Flushed
+            || matches!(commit, Kind::Coordinated(_))
+        {
             // The frames may leave the device.
             inner.flush()?;
             inner.maintain(&scopes).await;
@@ -831,7 +861,7 @@ impl<A: RowApplication> SecureSql<A> {
         &self,
         inner: &mut Inner<A>,
         handle: Option<Commitment>,
-        reauthors: Option<Commitment>,
+        commit: Kind,
     ) -> Result<Sealed, Error> {
         let capture_error = |reason: String| Error::Sql(SqlError::Capture(reason));
         let conn = inner.conn.connection();
@@ -1015,8 +1045,8 @@ impl<A: RowApplication> SecureSql<A> {
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);
             handle
         });
-        if writes.is_empty() && reauthors.is_some() {
-            return Err(denied("re-authoring a held change writes rows"));
+        if writes.is_empty() && commit != Kind::Plain {
+            return Err(denied("re-authoring or a coordinated write writes rows"));
         }
         if writes.is_empty() {
             return Ok(Sealed::Commit(SecureCommit {
@@ -1031,12 +1061,16 @@ impl<A: RowApplication> SecureSql<A> {
                 limit: MAX_BUNDLE_BYTES,
             });
         }
-        let input = match reauthors {
-            Some(held) => rocky_core::commitment(
+        let input = match commit {
+            Kind::Reauthors(held) => rocky_core::commitment(
                 "rocky.secure-reauthor-input.v1",
                 &encode(&(held, serde_bytes::Bytes::new(&encoded)))?,
             ),
-            None => rocky_core::commitment("rocky.secure-bundle-input.v1", &encoded),
+            Kind::Coordinated(slot) => rocky_core::commitment(
+                "rocky.secure-coordinated-input.v1",
+                &encode(&(slot.log, slot.expected, serde_bytes::Bytes::new(&encoded)))?,
+            ),
+            Kind::Plain => rocky_core::commitment("rocky.secure-bundle-input.v1", &encoded),
         };
         match inner.lookup_bundle(handle, input).await? {
             Some(Ok(frames)) => return Ok(Sealed::Replayed(SecureCommit { handle, frames })),
@@ -1048,11 +1082,21 @@ impl<A: RowApplication> SecureSql<A> {
             None => {}
         }
         inner.strict_projection = true;
+        let entry = match commit {
+            Kind::Coordinated(slot) => Some(slot.expected + 1),
+            _ => None,
+        };
         let frames = inner
-            .author_bundle(handle, input, &writes, &[], now()?)
+            .author_bundle(handle, input, &writes, &[], now()?, entry)
             .await?;
-        if let Some(held) = reauthors {
-            inner.resolve_held(held).await?;
+        match commit {
+            Kind::Reauthors(held) => inner.resolve_held(held).await?,
+            Kind::Coordinated(slot) => {
+                let transaction =
+                    super::bundle::transaction_id(inner.config.node.public_key(), &handle);
+                inner.stage_entry(&slot, transaction, &frames).await?;
+            }
+            Kind::Plain => {}
         }
         Ok(Sealed::Commit(SecureCommit { handle, frames }))
     }

@@ -298,6 +298,9 @@ pub(crate) struct Membership {
     pub transaction: Commitment,
     pub index: u16,
     pub members: Vec<Vec<u8>>,
+    /// The coordinated log position of a coordinated write's bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<u64>,
 }
 #[derive(Serialize, Deserialize)]
 struct BundleBody {

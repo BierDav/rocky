@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 2;
+pub(super) const HANDSHAKE_VERSION: u32 = 3;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -738,7 +738,7 @@ mod tests {
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v2");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v3");
     }
 }
 

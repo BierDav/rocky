@@ -124,6 +124,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             bindings(values),
         ).await?).await?;
         let limited = records.len() == 33;
+        let staged = inner.staged().await?;
         let mut frames = Vec::new();
         let mut used = 0;
         let mut last = None;
@@ -139,6 +140,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             let id = Hash::try_from(id.as_slice()).map_err(|_| denied("invalid operation hash"))?;
             let frame = inner.stored_frame(header.clone(), body.clone()).await?;
             if !scopes.contains(&frame.scope()?) {
+                continue;
+            }
+            if staged.contains(&id) {
+                last = Some(id);
                 continue;
             }
             let manifest = frame.operation()?.header.extensions.manifest;

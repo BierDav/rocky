@@ -1,0 +1,744 @@
+//! Coordinated writes: invoices numbered without gaps on every device,
+//! recovery at every step, members that only see committed entries and
+//! catch-up before rejoining. See `docs/runtime/coordinated-writes.md`.
+use super::generations::{Lineage, identity_insert, select, session, text};
+use super::*;
+use crate::replica::{
+    CommittedEntry, CoordinatedEntry, CoordinatedError, ENTRY_DEADLINE, EntryPeers, PeerFuture,
+};
+use rocky_coordinator::coordinated::MemoryLog;
+use rocky_core::{
+    Append, CoordinationError, CoordinationFuture, DomainLog, LogHead, LogPending, LogResult,
+    NodeKey, Scope, SqlValue, TypedRows,
+};
+use std::sync::{Arc, Mutex as StdMutex};
+
+type Replica = EncryptedReplica<TypedRows>;
+
+/// The in-process transport between trusted nodes.
+#[derive(Clone)]
+struct Mesh {
+    log: MemoryLog,
+    nodes: Arc<StdMutex<Vec<Peer>>>,
+}
+#[derive(Clone)]
+struct Peer {
+    key: PrivateKey,
+    replica: Replica,
+    reachable: bool,
+    /// Stores entries but crashes before acknowledging them.
+    acknowledges: bool,
+}
+impl Mesh {
+    fn new(minimum: usize, domain: Scope) -> Self {
+        let log = MemoryLog::new();
+        log.configure(domain, minimum).unwrap();
+        Self {
+            log,
+            nodes: Arc::default(),
+        }
+    }
+    fn add(&self, key: &PrivateKey, replica: &Replica) {
+        let mut nodes = self.nodes.lock().unwrap();
+        nodes.retain(|peer| peer.key.public_key() != key.public_key());
+        nodes.push(Peer {
+            key: key.clone(),
+            replica: replica.clone(),
+            reachable: true,
+            acknowledges: true,
+        });
+    }
+    fn set(&self, key: &PrivateKey, reachable: bool, acknowledges: bool) {
+        for peer in self.nodes.lock().unwrap().iter_mut() {
+            if peer.key.public_key() == key.public_key() {
+                peer.reachable = reachable;
+                peer.acknowledges = acknowledges;
+            }
+        }
+    }
+    fn peer(&self, key: PublicKey) -> Option<Peer> {
+        self.nodes
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|peer| peer.key.public_key() == key && peer.reachable)
+            .cloned()
+    }
+    fn client(&self, key: &PrivateKey) -> Client {
+        Client {
+            inner: self.log.client(key.public_key()),
+            acknowledges: true,
+        }
+    }
+    fn peers(&self, lineage: &Lineage, key: &PrivateKey) -> Peers {
+        Peers {
+            mesh: self.clone(),
+            me: key.public_key(),
+            credentials: lineage.credentials(3, key),
+        }
+    }
+    /// Moves the coordinator's and the replicas' clocks together.
+    fn advance(&self, seconds: u64) {
+        self.log.advance(seconds);
+        crate::CLOCK_SKEW.with(|skew| skew.set(skew.get() + seconds));
+    }
+}
+struct Client {
+    inner: rocky_coordinator::coordinated::MemoryLogClient,
+    acknowledges: bool,
+}
+impl DomainLog for Client {
+    fn node(&self) -> NodeKey {
+        self.inner.node()
+    }
+    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+        self.inner.log_head(scope)
+    }
+    fn join(
+        &self,
+        scope: Scope,
+        position: u64,
+        running_hash: Commitment,
+        sequence: u64,
+    ) -> CoordinationFuture<'_, u64> {
+        self.inner.join(scope, position, running_hash, sequence)
+    }
+    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
+        self.inner.append(scope, append)
+    }
+    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        if !self.acknowledges {
+            return Box::pin(async { Err(CoordinationError::Unavailable) });
+        }
+        self.inner.acknowledge(scope, pending)
+    }
+}
+struct Peers {
+    mesh: Mesh,
+    me: PublicKey,
+    credentials: CredentialChain,
+}
+impl EntryPeers for Peers {
+    fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()> {
+        Box::pin(async move {
+            let peer = self
+                .mesh
+                .peer(node)
+                .ok_or_else(|| Error::Rejected("unreachable".into()))?;
+            let mut client = self.mesh.client(&peer.key);
+            client.acknowledges = peer.acknowledges;
+            peer.replica
+                .store_entry(entry.clone(), &client)
+                .await
+                .map(|_| ())
+                .map_err(|error| Error::Rejected(error.to_string()))
+        })
+    }
+    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+        Box::pin(async move {
+            let nodes = self.mesh.nodes.lock().unwrap().clone();
+            for peer in nodes
+                .iter()
+                .filter(|peer| peer.reachable && peer.key.public_key() != self.me)
+            {
+                let entries = peer
+                    .replica
+                    .committed_entries(self.me, &self.credentials, log, after)
+                    .await?;
+                if !entries.is_empty() {
+                    return Ok(entries);
+                }
+            }
+            Ok(Vec::new())
+        })
+    }
+}
+
+/// A two-node fixture: alice and bob are trusted nodes, carol a member.
+struct Fixture {
+    lineage: Lineage,
+    dir: TempDir,
+    mesh: Mesh,
+    alice: (PrivateKey, Replica),
+    bob: (PrivateKey, Replica),
+}
+impl Fixture {
+    async fn new(minimum: usize) -> Self {
+        let lineage = Lineage::new();
+        let dir = TempDir::new().unwrap();
+        let mesh = Mesh::new(minimum, lineage.domain);
+        let alice_key = PrivateKey::new();
+        let bob_key = PrivateKey::new();
+        let alice = open(&lineage, &dir, "alice", &alice_key).await;
+        let bob = open(&lineage, &dir, "bob", &bob_key).await;
+        mesh.add(&alice_key, &alice);
+        mesh.add(&bob_key, &bob);
+        let fixture = Self {
+            lineage,
+            dir,
+            mesh,
+            alice: (alice_key, alice),
+            bob: (bob_key, bob),
+        };
+        // Both join; the first is alone below a minimum of 2.
+        let first = fixture.slot(&fixture.alice).await;
+        assert!(
+            first.is_ok() || (minimum == 2 && first == Err(CoordinatedError::BelowMinimum)),
+            "{first:?}"
+        );
+        fixture.slot(&fixture.bob).await.unwrap();
+        fixture
+    }
+    /// Crashes a node: every handle is dropped, then the file reopens.
+    async fn restart(self, alice: bool) -> Self {
+        let Self {
+            lineage,
+            dir,
+            mesh,
+            alice: first,
+            bob: second,
+        } = self;
+        let (name, (key, replica), other) = if alice {
+            ("alice", first, second)
+        } else {
+            ("bob", second, first)
+        };
+        mesh.nodes
+            .lock()
+            .unwrap()
+            .retain(|peer| peer.key.public_key() != key.public_key());
+        drop(replica);
+        let replica = open(&lineage, &dir, name, &key).await;
+        mesh.add(&key, &replica);
+        let node = (key, replica);
+        let (alice, bob) = if alice { (node, other) } else { (other, node) };
+        Self {
+            lineage,
+            dir,
+            mesh,
+            alice,
+            bob,
+        }
+    }
+    async fn slot(&self, node: &(PrivateKey, Replica)) -> Result<Slot, CoordinatedError> {
+        node.1
+            .coordinated_slot(
+                self.lineage.domain,
+                &self.mesh.client(&node.0),
+                &self.mesh.peers(&self.lineage, &node.0),
+            )
+            .await
+    }
+    /// Stages the next invoice computed on the slot's committed state.
+    async fn stage(
+        &self,
+        node: &(PrivateKey, Replica),
+        slot: Slot,
+        title: &str,
+    ) -> Result<Vec<EncryptedFrame>, CoordinatedError> {
+        let sql = session(&node.1).await;
+        sql.run("BEGIN", vec![]).await?;
+        let count = match sql
+            .run("SELECT COUNT(*) FROM items", vec![])
+            .await?
+            .rows
+            .as_slice()
+        {
+            [row] => match row.as_slice() {
+                [SqlValue::Integer(count)] => *count,
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        };
+        identity_insert(
+            &sql,
+            "INSERT INTO items(key,title) VALUES(?,?)",
+            vec![text(&format!("{:04}", count + 1)), text(title)],
+        )
+        .await?;
+        let mut handle = [0; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);
+        let committed = sql.commit_coordinated(handle, slot).await?;
+        Ok(committed.committed.unwrap().frames)
+    }
+    async fn propose(
+        &self,
+        node: &(PrivateKey, Replica),
+    ) -> Result<crate::replica::CoordinatedCommit, CoordinatedError> {
+        node.1
+            .propose(
+                self.lineage.domain,
+                &self.mesh.client(&node.0),
+                &self.mesh.peers(&self.lineage, &node.0),
+            )
+            .await
+    }
+    async fn resolve(&self, node: &(PrivateKey, Replica)) -> crate::replica::CoordinatedStatus {
+        node.1
+            .resolve_coordinated(
+                self.lineage.domain,
+                &self.mesh.client(&node.0),
+                &self.mesh.peers(&self.lineage, &node.0),
+            )
+            .await
+            .unwrap()
+    }
+    /// Issues one invoice, retrying lost races; returns its frames.
+    async fn invoice(&self, node: &(PrivateKey, Replica), title: &str) -> Vec<EncryptedFrame> {
+        for _ in 0..200 {
+            let attempt = async {
+                let slot = self.slot(node).await?;
+                self.stage(node, slot, title).await?;
+                self.propose(node).await
+            };
+            match attempt.await {
+                Ok(commit) => return commit.frames,
+                Err(
+                    CoordinatedError::Conflict
+                    | CoordinatedError::Aborted
+                    | CoordinatedError::Undecided,
+                ) => tokio::time::sleep(std::time::Duration::from_millis(2)).await,
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        panic!("no invoice committed")
+    }
+}
+async fn open(lineage: &Lineage, dir: &TempDir, name: &str, key: &PrivateKey) -> Replica {
+    lineage
+        .open(
+            &dir.path().join(format!("{name}.db")),
+            key,
+            3,
+            Some(lineage_upgrade(lineage)),
+        )
+        .await
+        .unwrap()
+}
+fn lineage_upgrade(lineage: &Lineage) -> crate::Upgrade {
+    lineage.upgrade(1, 3)
+}
+async fn invoices(replica: &Replica) -> Vec<String> {
+    select(replica, "SELECT key FROM items ORDER BY key")
+        .await
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [SqlValue::Text(key)] => key.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+fn numbered(count: usize) -> Vec<String> {
+    (1..=count).map(|number| format!("{number:04}")).collect()
+}
+/// Syncs `target` from `source` by range pages, voids first, as a member does.
+async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {
+    let scope = lineage.scope("items");
+    let credentials = lineage.credentials(3, key);
+    let mut after = None;
+    loop {
+        let frontier = target.frontier(scope).await.unwrap();
+        let page = source
+            .range_page(
+                key.public_key(),
+                &credentials,
+                &frontier,
+                after,
+                MAX_SECURE_FRAME,
+            )
+            .await
+            .unwrap();
+        for status in target.receive_voids(&page.voids).await {
+            status.unwrap();
+        }
+        for status in target.receive_all(page.frames).await {
+            status.unwrap();
+        }
+        after = page.next;
+        if after.is_none() {
+            return;
+        }
+    }
+}
+async fn held(replica: &Replica) -> BTreeSet<Hash> {
+    stored_frames(replica, "SELECT header,body FROM secure_operations")
+        .await
+        .iter()
+        .map(|frame| frame.id().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn concurrent_invoices_are_sequential_on_every_device_and_members_see_no_aborted_entry() {
+    let fixture = Fixture::new(2).await;
+    let (alice, bob) = (&fixture.alice, &fixture.bob);
+    // Both compute invoice 1 on the same committed state.
+    let alice_slot = fixture.slot(alice).await.unwrap();
+    let bob_slot = fixture.slot(bob).await.unwrap();
+    assert_eq!(alice_slot.expected, bob_slot.expected);
+    fixture.stage(alice, alice_slot, "alice").await.unwrap();
+    let lost = fixture.stage(bob, bob_slot, "bob").await.unwrap();
+    assert_eq!(invoices(&bob.1).await, numbered(1));
+    // Neither staged entry leaves its node before it commits.
+    let carol_key = PrivateKey::new();
+    let carol = open(&fixture.lineage, &fixture.dir, "carol", &carol_key).await;
+    sync(&fixture.lineage, &bob.1, &carol, &carol_key).await;
+    assert!(invoices(&carol).await.is_empty());
+    let page = bob
+        .1
+        .transfer_page(
+            carol_key.public_key(),
+            &fixture.lineage.credentials(3, &carol_key),
+            &[fixture.lineage.scope("items")],
+            None,
+            MAX_SECURE_FRAME,
+        )
+        .await
+        .unwrap();
+    assert!(page.frames.is_empty());
+    // A checkpoint could not roll the entry back; none is made.
+    assert!(
+        bob.1
+            .checkpoint(fixture.lineage.scope("items"))
+            .await
+            .is_err()
+    );
+    let (won, refused) = tokio::join!(fixture.propose(alice), async {
+        tokio::task::yield_now().await;
+        fixture.propose(bob).await
+    });
+    let won = won.unwrap();
+    assert_eq!(won.position, 1);
+    assert!(
+        matches!(refused, Err(CoordinatedError::Conflict)),
+        "{refused:?}"
+    );
+    // The loser's invoice 1 is voided and rolled back; alice's is stored
+    // on bob and applies there once bob resolves.
+    fixture.resolve(bob).await;
+    assert_eq!(invoices(&bob.1).await, numbered(1));
+    let lost: BTreeSet<Hash> = lost.iter().map(|frame| frame.id().unwrap()).collect();
+    assert!(held(&bob.1).await.is_disjoint(&lost));
+
+    // More invoices from both nodes at once.
+    let issue = |node: &'static str| {
+        let fixture = &fixture;
+        async move {
+            let party = if node == "alice" {
+                &fixture.alice
+            } else {
+                &fixture.bob
+            };
+            let mut frames = Vec::new();
+            for _ in 0..4 {
+                frames.extend(fixture.invoice(party, node).await);
+            }
+            frames
+        }
+    };
+    tokio::join!(issue("alice"), issue("bob"));
+    fixture.resolve(alice).await;
+    fixture.resolve(bob).await;
+    for replica in [&alice.1, &bob.1] {
+        assert_eq!(invoices(replica).await, numbered(9));
+    }
+    // A member syncing from both trusted nodes sees the same numbers and
+    // never the aborted entry.
+    sync(&fixture.lineage, &bob.1, &carol, &carol_key).await;
+    sync(&fixture.lineage, &alice.1, &carol, &carol_key).await;
+    assert_eq!(invoices(&carol).await, numbered(9));
+    assert!(held(&carol).await.is_disjoint(&lost));
+    let status = alice
+        .1
+        .coordinated_status(fixture.lineage.domain)
+        .await
+        .unwrap();
+    assert_eq!((status.position, status.undecided), (9, 0));
+}
+
+#[tokio::test]
+async fn a_proposer_crashing_before_its_append_commits_it_after_restart() {
+    let fixture = Fixture::new(2).await;
+    let slot = fixture.slot(&fixture.alice).await.unwrap();
+    fixture.stage(&fixture.alice, slot, "alice").await.unwrap();
+    let fixture = fixture.restart(true).await;
+    // Unsent until the restart; resolving appends, stores and commits it.
+    assert_eq!(
+        fixture
+            .alice
+            .1
+            .coordinated_status(fixture.lineage.domain)
+            .await
+            .unwrap()
+            .undecided,
+        1
+    );
+    let status = fixture.resolve(&fixture.alice).await;
+    assert_eq!((status.position, status.undecided), (1, 0));
+    fixture.resolve(&fixture.bob).await;
+    assert_eq!(invoices(&fixture.alice.1).await, numbered(1));
+    assert_eq!(invoices(&fixture.bob.1).await, numbered(1));
+}
+
+#[tokio::test]
+async fn crashes_before_acknowledging_never_leave_an_entry_true_on_one_node_only() {
+    for minimum in [1, 2] {
+        // The proposer stores on bob, then crashes before its own
+        // acknowledgment: the deadline decides for both.
+        let fixture = Fixture::new(minimum).await;
+        let slot = fixture.slot(&fixture.alice).await.unwrap();
+        fixture.stage(&fixture.alice, slot, "alice").await.unwrap();
+        let mut crashing = fixture.mesh.client(&fixture.alice.0);
+        crashing.acknowledges = false;
+        let peers = fixture.mesh.peers(&fixture.lineage, &fixture.alice.0);
+        let proposal = fixture
+            .alice
+            .1
+            .propose(fixture.lineage.domain, &crashing, &peers);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), proposal)
+                .await
+                .is_err()
+        );
+        let fixture = fixture.restart(true).await;
+        fixture.mesh.advance(ENTRY_DEADLINE + 1);
+        let alice = fixture.resolve(&fixture.alice).await;
+        let bob = fixture.resolve(&fixture.bob).await;
+        // With a minimum of 1 bob alone commits it; with 2 it aborts.
+        let committed = u64::from(minimum == 1);
+        assert_eq!((alice.position, bob.position), (committed, committed));
+        let expected = numbered(committed as usize);
+        assert_eq!(
+            invoices(&fixture.alice.1).await,
+            expected,
+            "minimum {minimum}"
+        );
+        assert_eq!(
+            invoices(&fixture.bob.1).await,
+            expected,
+            "minimum {minimum}"
+        );
+        crate::CLOCK_SKEW.with(|skew| skew.set(0));
+
+        // Bob stores alice's next entry and crashes before acknowledging.
+        let fixture = Fixture::new(minimum).await;
+        let slot = fixture.slot(&fixture.alice).await.unwrap();
+        fixture.stage(&fixture.alice, slot, "alice").await.unwrap();
+        fixture.mesh.set(&fixture.bob.0, true, false);
+        let (decided, ()) = tokio::join!(fixture.propose(&fixture.alice), async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            fixture.mesh.advance(ENTRY_DEADLINE + 1);
+        });
+        let fixture = fixture.restart(false).await;
+        let bob = &fixture.bob;
+        let status = fixture.resolve(bob).await;
+        if minimum == 1 {
+            assert_eq!(decided.unwrap().position, 1);
+            assert_eq!(status.position, 1);
+        } else {
+            assert!(
+                matches!(decided, Err(CoordinatedError::Aborted)),
+                "{decided:?}"
+            );
+            assert_eq!(status.position, 0);
+        }
+        let expected = numbered(if minimum == 1 { 1 } else { 0 });
+        assert_eq!(invoices(&fixture.alice.1).await, expected);
+        assert_eq!(invoices(&bob.1).await, expected);
+        assert_eq!(status.undecided, 0);
+        crate::CLOCK_SKEW.with(|skew| skew.set(0));
+    }
+}
+
+#[tokio::test]
+async fn a_node_that_missed_entries_proposes_only_after_catching_up() {
+    let fixture = Fixture::new(1).await;
+    let (alice, bob) = (&fixture.alice, &fixture.bob);
+    fixture.slot(bob).await.unwrap();
+    // Bob is unreachable: alice's first entry evicts it at the deadline.
+    fixture.mesh.set(&bob.0, false, true);
+    let slot = fixture.slot(alice).await.unwrap();
+    fixture.stage(alice, slot, "alice").await.unwrap();
+    let (first, ()) = tokio::join!(fixture.propose(alice), async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        fixture.mesh.advance(ENTRY_DEADLINE + 1);
+    });
+    assert_eq!(first.unwrap().position, 1);
+    for _ in 0..2 {
+        fixture.invoice(alice, "alice").await;
+    }
+    let head = fixture.mesh.log.head(fixture.lineage.domain).unwrap();
+    assert_eq!((head.commit, head.members.len()), (3, 1));
+    // Back, but no trusted peer can supply the entries yet: no slot.
+    fixture.mesh.set(&bob.0, true, true);
+    fixture.mesh.set(&alice.0, false, true);
+    assert!(matches!(
+        fixture.slot(bob).await,
+        Err(CoordinatedError::Behind)
+    ));
+    assert!(invoices(&bob.1).await.is_empty());
+    // Caught up from alice, bob rejoins and numbers after every entry.
+    fixture.mesh.set(&alice.0, true, true);
+    let slot = fixture.slot(bob).await.unwrap();
+    assert_eq!(slot.expected, 3);
+    assert_eq!(invoices(&bob.1).await, numbered(3));
+    fixture.invoice(bob, "bob").await;
+    fixture.resolve(alice).await;
+    assert_eq!(invoices(&alice.1).await, numbered(4));
+    assert_eq!(invoices(&bob.1).await, numbered(4));
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+}
+
+#[tokio::test]
+async fn without_a_coordinator_or_below_the_minimum_a_write_fails_typed_and_rolls_back() {
+    // Fixture::new checks that the first node alone is below the minimum.
+    let fixture = Fixture::new(2).await;
+    let alice = &fixture.alice;
+    let slot = fixture.slot(alice).await.unwrap();
+    let staged = fixture.stage(alice, slot, "alice").await.unwrap();
+    fixture.mesh.log.set_available(false);
+    assert!(matches!(
+        fixture.propose(alice).await,
+        Err(CoordinatedError::Unavailable)
+    ));
+    // Nothing stays: the frames are voided and the invoice rolled back.
+    assert!(invoices(&alice.1).await.is_empty());
+    let staged: BTreeSet<Hash> = staged.iter().map(|frame| frame.id().unwrap()).collect();
+    assert!(held(&alice.1).await.is_disjoint(&staged));
+    assert!(matches!(
+        fixture.slot(alice).await,
+        Err(CoordinatedError::Unavailable)
+    ));
+    fixture.mesh.log.set_available(true);
+    fixture.invoice(alice, "alice").await;
+    fixture.resolve(&fixture.bob).await;
+    assert_eq!(invoices(&fixture.bob.1).await, numbered(1));
+}
+
+/// A trusted peer reached over a live link, each request on its own channel.
+struct Linked {
+    local: (PrivateKey, Replica, CredentialChain),
+    remote: (PrivateKey, Replica, CredentialChain),
+}
+impl Linked {
+    async fn session(&self) -> Result<crate::network::NativeSession, Error> {
+        let (session, mut served) = crate::network::link::testing::sessions(
+            (&self.local.1, self.local.0.clone(), self.local.2.clone()),
+            (&self.remote.1, self.remote.0.clone(), self.remote.2.clone()),
+        )
+        .await?;
+        let remote = self.remote.1.clone();
+        tokio::spawn(async move {
+            let _ = served.serve(&remote).await;
+        });
+        Ok(session)
+    }
+}
+impl EntryPeers for Linked {
+    fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()> {
+        Box::pin(async move {
+            assert_eq!(node, self.remote.0.public_key());
+            let mut session = self.session().await?;
+            session.store_entry(entry).await?;
+            session.close().await
+        })
+    }
+    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+        Box::pin(async move {
+            let mut session = self.session().await?;
+            let entries = session.committed_entries(log, after).await?;
+            session.close().await?;
+            Ok(entries)
+        })
+    }
+}
+
+#[tokio::test]
+async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
+    let fixture = Fixture::new(2).await;
+    let (alice, bob) = (&fixture.alice, &fixture.bob);
+    let domain = fixture.lineage.domain;
+    let end = |node: &(PrivateKey, Replica)| {
+        (
+            node.0.clone(),
+            node.1.clone(),
+            fixture.lineage.credentials(3, &node.0),
+        )
+    };
+    // Bob acknowledges what it stores through its own client.
+    bob.1
+        .set_domain_log(Some(Arc::new(fixture.mesh.client(&bob.0))));
+    let to_bob = Linked {
+        local: end(alice),
+        remote: end(bob),
+    };
+    // An entry of 70 rows: three frames.
+    let slot = fixture.slot(alice).await.unwrap();
+    let sql = session(&alice.1).await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    for number in 1..=70 {
+        identity_insert(
+            &sql,
+            "INSERT INTO items(key,title) VALUES(?,?)",
+            vec![text(&format!("{number:04}")), text("batch")],
+        )
+        .await
+        .unwrap();
+    }
+    sql.commit_coordinated([7; 32], slot).await.unwrap();
+    drop(sql);
+    let commit = alice
+        .1
+        .propose(domain, &fixture.mesh.client(&alice.0), &to_bob)
+        .await
+        .unwrap();
+    assert_eq!((commit.position, commit.frames.len()), (1, 3));
+    // Every member carries the log position; the hash commits to its frames.
+    let ids: Vec<Hash> = commit
+        .frames
+        .iter()
+        .map(|frame| frame.id().unwrap())
+        .collect();
+    assert_eq!(
+        crate::replica::entry_hash(domain, 1, &ids).unwrap(),
+        commit.hash
+    );
+    for frame in &commit.frames {
+        let operation = frame.operation().unwrap();
+        let key = {
+            let inner = bob.1.inner.lock().await;
+            inner
+                .config
+                .keys
+                .iter()
+                .find(|key| key.scope == operation.header.extensions.scope)
+                .unwrap()
+                .key
+        };
+        let payload = crate::wire::RowPayload::decode(
+            &crate::wire::decrypt(
+                &key,
+                &encode(&operation.header.extensions).unwrap(),
+                &frame.body,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload.membership().unwrap().entry, Some(1));
+    }
+    fixture.resolve(bob).await;
+    assert_eq!(invoices(&bob.1).await, numbered(70));
+    // Bob serves the committed position and frame ids; frames travel by
+    // range sync, so a node lacking them is still behind.
+    let from_bob = Linked {
+        local: end(alice),
+        remote: end(bob),
+    };
+    let entries = from_bob.committed(domain, 0).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        (entries[0].position, entries[0].hash, entries[0].ids.len()),
+        (1, commit.hash, 3)
+    );
+    assert!(entries[0].frames.is_empty());
+}

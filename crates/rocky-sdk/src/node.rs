@@ -3,6 +3,7 @@
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
 mod adoption;
 mod command_mesh;
+mod coordinated;
 mod delivery;
 mod discovery;
 mod held;
@@ -157,6 +158,8 @@ struct Subscription {
 /// One session's reader and subscriptions. Sessions share the database.
 pub(crate) struct Client {
     reader: Mutex<Option<Reader>>,
+    /// The slot a coordinated transaction began at, until it commits.
+    slot: std::sync::Mutex<Option<rocky_secure::Slot>>,
     cursor_key: [u8; 32],
     subscriptions: std::sync::Mutex<BTreeMap<u64, Subscription>>,
     next: AtomicU64,
@@ -501,6 +504,7 @@ impl Node {
         }
         let client = Arc::new(Client {
             reader: Mutex::new(None),
+            slot: std::sync::Mutex::new(None),
             cursor_key: rand::random(),
             subscriptions: std::sync::Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(1),
@@ -847,6 +851,7 @@ impl Node {
             }
             "generation" => self.generation().await,
             "held_changes" => self.held_changes().await,
+            "coordinated" => self.coordinated_status().await,
             "drop_held" => self.drop_held(request).await,
             "retention" => self.retention(request).await,
             "horizon" => self.horizon(request).await,
@@ -3897,6 +3902,35 @@ impl Node {
         if values.len() > 256 {
             return Err(refused("SQL parameter quota"));
         }
+        let coordinated = match request.get("coordinated") {
+            None => false,
+            Some(flag) => flag
+                .as_bool()
+                .ok_or_else(|| refused("coordinated must be boolean"))?,
+        };
+        let slot = |client: &Client| {
+            client
+                .slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+        };
+        if coordinated && sql.trim().to_ascii_uppercase().starts_with("BEGIN") {
+            // The write must read committed state: decide, catch up and
+            // join before the transaction begins.
+            let next = self.coordinated_slot().await?;
+            let result = reader.sql.run(sql, Vec::new()).await?;
+            *client.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(next);
+            return Ok(
+                json!({"columns": result.columns, "rows": [], "changes": result.changes.to_string(), "committed": null, "position": next.expected.to_string()}),
+            );
+        }
+        // Any other end of the transaction ends its slot.
+        if !coordinated
+            && ["ROLLBACK", "COMMIT", "END"].contains(&sql.trim().to_ascii_uppercase().as_str())
+        {
+            slot(client);
+        }
         let result = if sql.trim().eq_ignore_ascii_case("COMMIT") && request.get("handle").is_some()
         {
             if !values.is_empty() {
@@ -3907,6 +3941,33 @@ impl Node {
             let handle: [u8; 32] = handle
                 .try_into()
                 .map_err(|_| refused("handle must be 32 bytes"))?;
+            if coordinated {
+                if request.get("reauthors").is_some() {
+                    return Err(refused("a coordinated write re-authors nothing"));
+                }
+                let next = slot(client)
+                    .ok_or_else(|| refused("begin the coordinated transaction with coordinated"))?;
+                let staged = reader
+                    .sql
+                    .commit_coordinated(secure_handle(&handle), next)
+                    .await?;
+                let frames = staged
+                    .committed
+                    .as_ref()
+                    .map_or(0, |commit| commit.frames.len());
+                let committed = self.propose().await?;
+                return Ok(json!({
+                    "columns": staged.columns,
+                    "rows": [],
+                    "changes": staged.changes.to_string(),
+                    "committed": {
+                        "handle": HEXLOWER.encode(&secure_handle(&handle)),
+                        "frames": frames,
+                        "position": committed.position.to_string(),
+                        "hash": HEXLOWER.encode(&committed.hash),
+                    },
+                }));
+            }
             match request.get("reauthors") {
                 Some(_) => {
                     reader
@@ -4142,6 +4203,8 @@ pub fn error(error: &Failure) -> Value {
         ("executor_unavailable", true)
     } else if let Some(pending) = horizon_pending(error) {
         return json!({"code": "horizon_pending", "retryable": true, "message": pending.to_string()});
+    } else if let Some(coordinated) = error.downcast_ref::<coordinated::Coordinated>() {
+        coordinated.code()
     } else if let Some(coordination) = error.downcast_ref::<rocky_core::CoordinationError>() {
         coordination_code(coordination)
     } else if let Some(service) = error.downcast_ref::<ServiceError>() {

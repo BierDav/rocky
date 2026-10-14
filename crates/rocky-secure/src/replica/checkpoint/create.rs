@@ -96,6 +96,10 @@ impl<A: RowApplication> Inner<A> {
         if self.direct.contains(&scope) {
             return Err(denied("the scope is being imported from a checkpoint"));
         }
+        // A checkpoint covering an uncommitted entry could not roll it back.
+        if self.staged_in(scope).await? {
+            return Err(denied("a coordinated entry in the scope is undecided"));
+        }
         transaction!(self, |inner| {
             let id = inner.scope_id(scope).await?;
             let verified = inner.checkpoint_record(id, true).await?;

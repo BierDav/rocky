@@ -531,6 +531,7 @@ impl Handle {
             proved: admission.proved.clone(),
             offered: admission.offered.clone(),
             served_frames: Default::default(),
+            entry: None,
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,

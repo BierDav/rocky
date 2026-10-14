@@ -110,25 +110,27 @@ impl<A: RowApplication> Inner<A> {
         writes: &[RowWrite],
         dependencies: &[Hash],
         time: u64,
+        entry: Option<u64>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
         Box::pin(self.author_bundle_carried(
-            handle,
-            input,
+            (handle, input),
             writes,
             dependencies,
             time,
             &BTreeMap::new(),
+            entry,
         ))
         .await
     }
+    /// The bundle is named by its handle and the commitment to its input.
     pub(super) async fn author_bundle_carried(
         &mut self,
-        handle: Commitment,
-        input: Commitment,
+        (handle, input): (Commitment, Commitment),
         writes: &[RowWrite],
         dependencies: &[Hash],
         time: u64,
         carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
+        entry: Option<u64>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
         let mut births = BTreeMap::<Commitment, Vec<rocky_core::RowIdentity>>::new();
         for write in writes.iter().filter(|write| {
@@ -257,6 +259,7 @@ impl<A: RowApplication> Inner<A> {
                 transaction,
                 index: index as u16,
                 members: members.clone(),
+                entry,
             };
             let stamped = writes
                 .iter()

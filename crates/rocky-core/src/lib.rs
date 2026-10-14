@@ -2,6 +2,8 @@
 mod binding;
 mod capture;
 mod codec;
+mod coordinated;
+pub use coordinated::*;
 mod definition;
 pub use definition::*;
 mod generation;

@@ -24,18 +24,20 @@ mod store;
 mod wire;
 pub use replica::{
     AuditReport, Buffered, CheckpointPage, CheckpointStatement, CheckpointStatus, CiphertextPage,
-    Companion, CurrentValue, CustodySummary, Describe, EXISTENCE_FORMAT, EncryptedReplica,
-    EvictReport, ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent, ExistencePage,
-    ExistenceRecord, FrontierLog, GenerationStatus, GenerationStep, HeldChange, HeldField,
-    HeldKind, HeldRow, Holding, HorizonPage, HorizonPending, HorizonProgress, KeyMaterial,
-    LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, MAX_CHECKPOINT_LOGS,
-    MAX_EXISTENCE_PAGE, MAX_GENERATIONS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS,
-    MAX_UNCONFIGURED_PEERS, PLAN_ROWS, PeerLag, ProjectionPlan, PruneBlock, PruneReport,
-    ROWS_PER_FRAME, RangePage, RebootstrapReport, ReceiveStatus, RemotePage, ReplicaRole,
-    ReplicaStatus, RetentionLimits, RetentionPolicy, RoleConfig, ScopeFrontier, ScopeStatus,
-    SecureCommit, SecureConfig, SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql,
-    SecureTransaction, SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, StrongSummary,
-    UpdateMode, Upgrade,
+    CommittedEntry, Companion, CoordinatedCommit, CoordinatedEntry, CoordinatedError,
+    CoordinatedStatus, CurrentValue, CustodySummary, Describe, ENTRY_DEADLINE, EXISTENCE_FORMAT,
+    EncryptedReplica, EntryPeers, EvictReport, ExistenceBaseAttachment, ExistenceBasePage,
+    ExistenceEvent, ExistencePage, ExistenceRecord, FrontierLog, GenerationStatus, GenerationStep,
+    HeldChange, HeldField, HeldKind, HeldRow, Holding, HorizonPage, HorizonPending,
+    HorizonProgress, KeyMaterial, LogPosition, MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES,
+    MAX_BUNDLE_ROWS, MAX_CATCH_UP_ENTRIES, MAX_CHECKPOINT_LOGS, MAX_EXISTENCE_PAGE,
+    MAX_GENERATIONS, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, MAX_UNCONFIGURED_PEERS, PLAN_ROWS,
+    PeerFuture, PeerLag, ProjectionPlan, PruneBlock, PruneReport, ROWS_PER_FRAME, RangePage,
+    RebootstrapReport, ReceiveStatus, RemotePage, ReplicaRole, ReplicaStatus, RetentionLimits,
+    RetentionPolicy, RoleConfig, ScopeFrontier, ScopeStatus, SecureCommit, SecureConfig,
+    SecurePage, SecureRows, SecureSession, SecureSnapshot, SecureSql, SecureTransaction,
+    SessionStatus, SetSummary, SignedCheckpoint, SignedVoid, Slot, StrongSummary, UpdateMode,
+    Upgrade, entry_hash,
 };
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;

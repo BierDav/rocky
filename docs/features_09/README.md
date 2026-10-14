@@ -1,7 +1,7 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1 to 4 and 6 are implemented. Phase 8 implementation is recorded in its
-[evidence](08-coordinated-log-evidence.md). [features_08](../features_08/README.md)
+Status: accepted roadmap (2026-10-14). Phases 1 to 4, 6, 8 and 9 are implemented; see the
+[phase 8](08-coordinated-log-evidence.md) and [phase 9](09-coordinated-writes-evidence.md) evidence. [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
 ## Destination

@@ -81,6 +81,7 @@ enum Command {
         reply: oneshot::Sender<Result<connection::Reply, SqlFailure>>,
     },
     Disconnect(u64, oneshot::Sender<()>),
+    Coordinate(Option<Arc<dyn rocky_core::DomainLog>>, oneshot::Sender<()>),
     Observe(
         Option<Vec<String>>,
         oneshot::Sender<Result<rocky_runtime::TableObserver, Failure>>,
@@ -285,6 +286,19 @@ impl Database {
             .request(|reply| Command::Attach(network, reply))
             .await??;
         Ok(NetworkService::new(&self.shared, id))
+    }
+    /// Makes this device a trusted node of its domain's coordinated log, so
+    /// it may make and store coordinated writes; `None` ends that. The log
+    /// is the application's and is never closed by Rocky. A database
+    /// composed with a coordination service uses that service's log.
+    pub async fn coordinate(
+        &self,
+        log: Option<Arc<dyn rocky_core::DomainLog>>,
+    ) -> Result<(), Failure> {
+        self.shared
+            .request(|reply| Command::Coordinate(log, reply))
+            .await?;
+        Ok(())
     }
     /// A SQL connection for a database driver: the writer is a secure SQL
     /// session, a reader steps snapshot cursors. See
@@ -1126,6 +1140,8 @@ async fn run(
         let mut acquire: Option<crate::node::Acquire> = None;
         #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
         let mut service: Option<crate::owner::Service> = None;
+        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
+        let mut log: Option<Arc<dyn rocky_core::DomainLog>> = None;
         let coordinator = match setup.commands.as_ref().map(|c| &c.coordinator) {
             None => None,
             Some(crate::Coordination::Composed(coordinator)) => Some(coordinator.clone()),
@@ -1146,6 +1162,7 @@ async fn run(
                     directory.join("coordinator.evidence"),
                     transport,
                 )?);
+                log = Some(client.clone() as Arc<dyn rocky_core::DomainLog>);
                 let acquiring = client.clone();
                 acquire = Some(Arc::new(move |scope, epoch| {
                     let client = acquiring.clone();
@@ -1161,10 +1178,10 @@ async fn run(
             }
         };
         settings.save(&path)?;
-        Ok::<_, Failure>((domain, replica, coordinator, acquire, service))
+        Ok::<_, Failure>((domain, replica, coordinator, acquire, service, log))
     }
     .await;
-    let (domain, replica, coordinator, acquire, service) = match opened {
+    let (domain, replica, coordinator, acquire, service, log) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             if let Some((transport, true)) = &link {
@@ -1190,6 +1207,7 @@ async fn run(
         .with_service(service)
         .with_declared(setup.schema.clone()),
     );
+    node.coordinate(log);
     if let Err(error) = async {
         node.complete_revocation().await?;
         node.refresh_importing().await
@@ -1302,6 +1320,10 @@ async fn run(
             },
             Command::Disconnect(connection, reply) => {
                 connections.close(Some(connection));
+                let _ = reply.send(());
+            }
+            Command::Coordinate(log, reply) => {
+                node.coordinate(log);
                 let _ = reply.send(());
             }
             Command::Observe(tables, reply) => {

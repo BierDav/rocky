@@ -77,19 +77,19 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
         existence_log: false,
     }
 }
-fn text(value: &str) -> SqlValue {
+pub(super) fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
 }
 
 /// Generation 1 has `items(id,title)`; 2 adds a nullable `note` and a
 /// `tags` table; 3 adds a nullable `rank`; 4 removes `note` and `tags`;
 /// 5 adds `note` again.
-struct Lineage {
+pub(super) struct Lineage {
     publisher: PrivateKey,
-    domain: Scope,
+    pub(super) domain: Scope,
 }
 impl Lineage {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let publisher = PrivateKey::new();
         let domain = Scope {
             mesh: MeshId([1; 16]),
@@ -216,7 +216,7 @@ impl Lineage {
             })
             .collect()
     }
-    fn scope(&self, name: &str) -> ResourceScope {
+    pub(super) fn scope(&self, name: &str) -> ResourceScope {
         let schema = self.schema(3);
         ResourceScope {
             domain: self.domain,
@@ -261,7 +261,7 @@ impl Lineage {
             })
             .collect()
     }
-    fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
+    pub(super) fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
         let user = PrivateKey::new();
         let manifest = self.definition(generation).hash();
         let (not_before, expires) = crate::tests::lifetime();
@@ -306,7 +306,7 @@ impl Lineage {
         }
     }
     /// The upgrade from `from` to `to`, with every intermediate step.
-    fn upgrade(&self, from: u32, to: u32) -> Upgrade {
+    pub(super) fn upgrade(&self, from: u32, to: u32) -> Upgrade {
         self.upgrade_at(from, to, 1_000)
     }
     /// `upgrade`, with the step into generation 5 signed at `readded`.
@@ -330,7 +330,7 @@ impl Lineage {
         let items = schema.table("items").unwrap();
         schema.field_id(items, items.column("note").unwrap())
     }
-    async fn open(
+    pub(super) async fn open(
         &self,
         path: &std::path::Path,
         node: &PrivateKey,
@@ -398,7 +398,7 @@ impl Lineage {
         Ok(())
     }
 }
-async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
+pub(super) async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
     let scopes = {
         let inner = replica.inner.lock().await;
         inner.config.keys.iter().map(|key| key.scope).collect()
@@ -411,10 +411,10 @@ async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> 
         .await
         .unwrap()
 }
-async fn select(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
+pub(super) async fn select(replica: &EncryptedReplica<TypedRows>, sql: &str) -> Vec<Vec<SqlValue>> {
     session(replica).await.run(sql, vec![]).await.unwrap().rows
 }
-async fn identity_insert(
+pub(super) async fn identity_insert(
     session: &SecureSql<TypedRows>,
     sql: &str,
     mut values: Vec<SqlValue>,

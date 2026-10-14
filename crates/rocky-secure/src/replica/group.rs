@@ -408,7 +408,7 @@ impl<A: RowApplication> Inner<A> {
                     // under the replica lock, inside the write transaction.
                     Ok(None) => match self.check_authority(*authority) {
                         Ok(()) => self
-                            .author_bundle(*handle, *input, writes, dependencies, time)
+                            .author_bundle(*handle, *input, writes, dependencies, time, None)
                             .await
                             .map(Staged::Bundle),
                         Err(error) => Err(error),

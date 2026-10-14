@@ -36,6 +36,11 @@ frames, also after a restart or recovery import; other writes conflict.
 `RowWrite::assigned` lists fields an update republishes although unchanged.
 Each needs a row/field grant like a changed one.
 
+A [coordinated write](coordinated-writes.md) is a bundle committed with
+`SecureSql::commit_coordinated`: its frames carry their log position and no
+peer receives them before the domain's coordinated log commits the entry;
+an abort voids them.
+
 On adopting a removal, incompatible bundles never offered to any peer are
 [held whole](held-changes.md), voided and rolled back locally. Offered bundles
 keep their original signatures and apply kept fields. Applications inspect
@@ -111,7 +116,7 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v2`; any other version is refused. Every request runs as a
+`rocky.link.v3`; any other version is refused. Every request runs as a
 `NativeSession` on one of the link's request channels. Each session message is
 signed under `rocky.native-frame.v2` over the digest of the session binding,
 its sequence and the digest of its body, so signing hashes the same few bytes
@@ -139,7 +144,8 @@ scopes. Proof memory is local to that link; the application
 `SecureSession` transaction and invalidation rules above are unchanged.
 
 The link's bounded logical channels carry the request handlers for rows,
-checkpoints, existence, horizons, results, envelopes and contacts. Admission
+checkpoints, existence, horizons, results, envelopes, contacts and
+[coordinated entries](coordinated-writes.md). Admission
 and holding proofs bind the link; each channel has its own signed sequence and
 chain table. Committed pushes carry self-contained chains and use the same
 receive transactions as catch-up. Authority changes cancel channels and notify

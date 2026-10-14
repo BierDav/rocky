@@ -764,7 +764,8 @@ impl<A: RowApplication> Inner<A> {
         if encode(&(&writes, &carried))?.len() > super::bundle::MAX_BUNDLE_BYTES {
             return Err(denied(&format!("{name}: move exceeds bundle byte limit")));
         }
-        Box::pin(self.author_bundle_carried(handle, input, &writes, &[], now()?, &carried)).await
+        Box::pin(self.author_bundle_carried((handle, input), &writes, &[], now()?, &carried, None))
+            .await
     }
 }
 
@@ -1021,9 +1022,15 @@ impl<A: RowApplication> Inner<A> {
                 &encode(&(&originals, destination))?,
             );
             self.conn.execute("SAVEPOINT follow", ()).await?;
-            let authored =
-                Box::pin(self.author_bundle_carried(handle, input, &[write], &[], time, &carried))
-                    .await;
+            let authored = Box::pin(self.author_bundle_carried(
+                (handle, input),
+                &[write],
+                &[],
+                time,
+                &carried,
+                None,
+            ))
+            .await;
             if let Err(error) = authored {
                 self.conn.execute("ROLLBACK TO follow", ()).await?;
                 self.conn.execute("RELEASE follow", ()).await?;

@@ -1492,6 +1492,7 @@ mod admission;
 mod bundles;
 mod chains;
 mod constraints;
+mod coordinated;
 mod delegation;
 mod delivery;
 mod existence;

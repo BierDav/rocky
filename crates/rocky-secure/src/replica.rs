@@ -6,6 +6,7 @@ pub(super) mod bundle;
 mod chains;
 pub(crate) mod checkpoint;
 mod constraints;
+mod coordinated;
 mod evict;
 mod existence;
 mod generation;
@@ -46,6 +47,10 @@ pub use checkpoint::{
     AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
     HorizonPage, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, RebootstrapReport,
     RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint, StrongSummary,
+};
+pub use coordinated::{
+    CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, CoordinatedStatus,
+    ENTRY_DEADLINE, EntryPeers, MAX_CATCH_UP_ENTRIES, PeerFuture, Slot, entry_hash,
 };
 pub use evict::EvictReport;
 pub use existence::{
@@ -485,6 +490,8 @@ pub struct EncryptedReplica<A> {
     revisions: watch::Receiver<u64>,
     /// Serializes command execution on this replica.
     pub(super) executing: Arc<super::command::Gate>,
+    /// The coordinated log this trusted node acknowledges stored entries to.
+    domain_log: Arc<coordinated::Trusted>,
 }
 impl<A> Clone for EncryptedReplica<A> {
     fn clone(&self) -> Self {
@@ -493,7 +500,31 @@ impl<A> Clone for EncryptedReplica<A> {
             queue: self.queue.clone(),
             revisions: self.revisions.clone(),
             executing: self.executing.clone(),
+            domain_log: self.domain_log.clone(),
         }
+    }
+}
+impl<A> EncryptedReplica<A> {
+    /// Makes this replica a trusted node of a coordinated log: peers may
+    /// store entries on it, which it acknowledges through `log`.
+    pub fn set_domain_log(&self, log: Option<Arc<dyn rocky_core::DomainLog>>) {
+        *self
+            .domain_log
+            .log
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = log;
+    }
+    pub fn domain_log(&self) -> Option<Arc<dyn rocky_core::DomainLog>> {
+        self.domain_log
+            .log
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    /// Changes whenever this replica stores another proposer's entry, which
+    /// then waits for `resolve_coordinated`.
+    pub fn observe_entries(&self) -> watch::Receiver<u64> {
+        self.domain_log.stored.subscribe()
     }
 }
 fn protocol_schema() -> impl Iterator<Item = &'static str> {
@@ -505,6 +536,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         rebuild::SCHEMA,
         removal::SCHEMA,
         held::SCHEMA,
+        coordinated::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
@@ -551,7 +583,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v17" {
+    if label != "rocky.encrypted-replica.v18" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -836,6 +868,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             queue: Arc::default(),
             revisions,
             executing: Arc::default(),
+            domain_log: Arc::default(),
         };
         replica.settle().await?;
         Ok(replica)

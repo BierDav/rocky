@@ -44,8 +44,10 @@ against the control valid at the acknowledgment's signed time, so later control
 expiry cannot strand an admitted entry. A leader change loses that partial
 knowledge, so nodes acknowledge again. The final acknowledgment resolves through
 Raft and returns `Committed { position, running_hash }`; read the head after any
-unknown outcome. No row data reaches the coordinator, and this phase supplies
-neither staging nor application/publication of bundles.
+unknown outcome. No row data reaches the coordinator. Staging, storing,
+applying and publishing bundles are [coordinated writes](coordinated-writes.md);
+they reach this log through the `rocky_core::DomainLog` port, which
+`NetworkCoordinator` implements and `coordinated::MemoryLog` runs in process.
 
 A pending-entry timer commits at its deadline with the nodes that acknowledged
 if they meet the minimum; otherwise it returns an aborted history through the

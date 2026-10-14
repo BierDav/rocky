@@ -674,3 +674,68 @@ fn persist_cache(path: &std::path::Path, cache: &ClientCache) -> Result<(), Coor
     }
     atomic_write(path, &data, "client_evidence").map_err(|_| CoordinationError::Corrupt)
 }
+impl DomainLog for NetworkCoordinator {
+    fn node(&self) -> NodeKey {
+        *self.key.public_key().as_bytes()
+    }
+    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+        Box::pin(async move { Ok(self.coordinated_head(scope).await?.port()) })
+    }
+    fn join(
+        &self,
+        scope: Scope,
+        position: u64,
+        running_hash: Commitment,
+        sequence: u64,
+    ) -> CoordinationFuture<'_, u64> {
+        Box::pin(async move {
+            let action = crate::coordinated::Action::Join {
+                position,
+                running_hash,
+                sequence,
+            };
+            match self.coordinated(scope, action).await? {
+                Outcome::Coordinated(crate::coordinated::Result::Joined { epoch }) => Ok(epoch),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
+    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
+        Box::pin(async move {
+            let action = crate::coordinated::Action::Append {
+                expected: append.expected,
+                epoch: append.epoch,
+                hash: append.hash,
+                deadline: append.deadline,
+                sequence: append.sequence,
+            };
+            match self.coordinated(scope, action).await? {
+                Outcome::Coordinated(crate::coordinated::Result::Assigned(pending)) => {
+                    Ok(pending.port())
+                }
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
+    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        Box::pin(async move {
+            let pending = crate::coordinated::Pending::from_port(&pending)?;
+            match self
+                .coordinated(scope, crate::coordinated::Action::Acknowledge { pending })
+                .await?
+            {
+                Outcome::Coordinated(crate::coordinated::Result::Acknowledged) => {
+                    Ok(LogResult::Acknowledged)
+                }
+                Outcome::Coordinated(crate::coordinated::Result::Committed {
+                    position,
+                    running_hash,
+                }) => Ok(LogResult::Committed {
+                    position,
+                    running_hash,
+                }),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
+}

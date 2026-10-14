@@ -304,10 +304,8 @@ impl Log {
                 epoch,
             });
         }
-        let mut bytes = self.head.running_hash.to_vec();
-        bytes.extend_from_slice(&pending.position.to_be_bytes());
-        bytes.extend_from_slice(&pending.hash);
-        self.head.running_hash = commitment("rocky.coordinated-chain.v1", &bytes);
+        self.head.running_hash =
+            rocky_core::coordinated_chain(self.head.running_hash, pending.position, pending.hash);
         self.head.commit = pending.position;
         for member in &mut self.head.members {
             member.acknowledged = pending.position;
@@ -378,5 +376,228 @@ mod hashes {
         }
         let human = deserializer.is_human_readable();
         deserializer.deserialize_byte_buf(Hashes { human })
+    }
+}
+
+/// Conversions between this log's types and the `rocky_core` port.
+impl Pending {
+    pub fn port(&self) -> rocky_core::LogPending {
+        rocky_core::LogPending {
+            proposer: *self.proposer.as_bytes(),
+            hash: self.hash,
+            position: self.position,
+            epoch: self.epoch,
+            deadline: self.deadline,
+        }
+    }
+    pub fn from_port(
+        pending: &rocky_core::LogPending,
+    ) -> std::result::Result<Self, CoordinationError> {
+        Ok(Self {
+            proposer: PublicKey::from_bytes(&pending.proposer)
+                .map_err(|_| CoordinationError::InvalidCommitment)?,
+            hash: pending.hash,
+            position: pending.position,
+            epoch: pending.epoch,
+            deadline: pending.deadline,
+        })
+    }
+}
+impl Head {
+    pub fn port(&self) -> rocky_core::LogHead {
+        rocky_core::LogHead {
+            epoch: self.epoch,
+            minimum: self.minimum,
+            head: self.head,
+            commit: self.commit,
+            running_hash: self.running_hash,
+            members: self
+                .members
+                .iter()
+                .map(|member| rocky_core::LogMember {
+                    key: *member.key.as_bytes(),
+                    acknowledged: member.acknowledged,
+                })
+                .collect(),
+            pending: self.pending.as_ref().map(Pending::port),
+            hashes: self.hashes.iter().copied().collect(),
+        }
+    }
+}
+
+/// One process's coordinated logs without Raft or signatures: the same log
+/// machine, acknowledgments and deadline resolution, for tests and
+/// single-process composition. Deadlines resolve on the next call after
+/// them, as the service's leader timer does.
+#[derive(Clone, Default)]
+pub struct MemoryLog {
+    state: std::sync::Arc<std::sync::Mutex<MemoryLogs>>,
+}
+#[derive(Default)]
+struct MemoryLogs {
+    logs: std::collections::BTreeMap<[u8; 48], (Log, Vec<PublicKey>)>,
+    /// Seconds added to the system clock.
+    skew: u64,
+    unavailable: bool,
+}
+fn scope_key(scope: Scope) -> [u8; 48] {
+    let mut key = [0; 48];
+    key[..16].copy_from_slice(&scope.mesh.0);
+    key[16..32].copy_from_slice(&scope.app.0);
+    key[32..].copy_from_slice(&scope.domain.0);
+    key
+}
+impl MemoryLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// A trusted node's client of these logs.
+    pub fn client(&self, key: PublicKey) -> MemoryLogClient {
+        MemoryLogClient {
+            logs: self.clone(),
+            key,
+        }
+    }
+    /// Sets the owner's minimum before the first join.
+    pub fn configure(
+        &self,
+        scope: Scope,
+        minimum: usize,
+    ) -> std::result::Result<(), CoordinationError> {
+        let owner = PublicKey::from_bytes(&[0; 32]).map_err(|_| CoordinationError::Corrupt)?;
+        self.with(scope, |log, _, time| {
+            log.apply(owner, &Action::Configure { minimum }, time, true)
+                .map(|_| ())
+        })
+    }
+    /// Moves this log's clock, so deadlines pass without sleeping.
+    pub fn advance(&self, seconds: u64) {
+        self.lock().skew += seconds;
+    }
+    /// Makes every call fail as an unreachable coordinator does.
+    pub fn set_available(&self, available: bool) {
+        self.lock().unavailable = !available;
+    }
+    pub fn head(&self, scope: Scope) -> std::result::Result<Head, CoordinationError> {
+        self.with(scope, |log, _, _| Ok(log.head.clone()))
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, MemoryLogs> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    fn with<T>(
+        &self,
+        scope: Scope,
+        f: impl FnOnce(&mut Log, &mut Vec<PublicKey>, u64) -> std::result::Result<T, CoordinationError>,
+    ) -> std::result::Result<T, CoordinationError> {
+        let mut state = self.lock();
+        if state.unavailable {
+            return Err(CoordinationError::Unavailable);
+        }
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| CoordinationError::Corrupt)?
+            .as_secs()
+            + state.skew;
+        let (log, acknowledged) = state
+            .logs
+            .entry(scope_key(scope))
+            .or_insert_with(|| (Log::new(scope, [0; 16]), Vec::new()));
+        if let Some(pending) = log.head.pending.clone()
+            && time >= pending.deadline
+        {
+            log.resolve(&pending, acknowledged, time)?;
+            acknowledged.clear();
+        }
+        f(log, acknowledged, time)
+    }
+}
+pub struct MemoryLogClient {
+    logs: MemoryLog,
+    key: PublicKey,
+}
+impl rocky_core::DomainLog for MemoryLogClient {
+    fn node(&self) -> rocky_core::NodeKey {
+        *self.key.as_bytes()
+    }
+    fn log_head(&self, scope: Scope) -> rocky_core::CoordinationFuture<'_, rocky_core::LogHead> {
+        Box::pin(async move { self.logs.head(scope).map(|head| head.port()) })
+    }
+    fn join(
+        &self,
+        scope: Scope,
+        position: u64,
+        running_hash: Commitment,
+        sequence: u64,
+    ) -> rocky_core::CoordinationFuture<'_, u64> {
+        Box::pin(async move {
+            let action = Action::Join {
+                position,
+                running_hash,
+                sequence,
+            };
+            match self.logs.with(scope, |log, _, time| {
+                log.apply(self.key, &action, time, true)
+            })? {
+                Result::Joined { epoch } => Ok(epoch),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
+    fn append(
+        &self,
+        scope: Scope,
+        append: rocky_core::Append,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogPending> {
+        Box::pin(async move {
+            let action = Action::Append {
+                expected: append.expected,
+                epoch: append.epoch,
+                hash: append.hash,
+                deadline: append.deadline,
+                sequence: append.sequence,
+            };
+            match self.logs.with(scope, |log, _, time| {
+                log.apply(self.key, &action, time, true)
+            })? {
+                Result::Assigned(pending) => Ok(pending.port()),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
+    fn acknowledge(
+        &self,
+        scope: Scope,
+        pending: rocky_core::LogPending,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
+        Box::pin(async move {
+            let pending = Pending::from_port(&pending)?;
+            self.logs.with(scope, |log, acknowledged, time| {
+                if log.head.pending.as_ref() != Some(&pending)
+                    || !log.head.members.iter().any(|m| m.key == self.key)
+                {
+                    return Err(CoordinationError::StaleHead);
+                }
+                if !acknowledged.contains(&self.key) {
+                    acknowledged.push(self.key);
+                }
+                match log.resolve(&pending, acknowledged, time) {
+                    Ok(Result::Committed {
+                        position,
+                        running_hash,
+                    }) => {
+                        acknowledged.clear();
+                        Ok(rocky_core::LogResult::Committed {
+                            position,
+                            running_hash,
+                        })
+                    }
+                    Ok(_) => Err(CoordinationError::Corrupt),
+                    Err(CoordinationError::Backpressure) => Ok(rocky_core::LogResult::Acknowledged),
+                    Err(error) => Err(error),
+                }
+            })
+        })
     }
 }

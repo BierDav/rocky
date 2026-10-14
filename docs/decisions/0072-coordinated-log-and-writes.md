@@ -1,6 +1,6 @@
 # 0072: Coordinated log and ordinary coordinated writes
 
-Status: log implemented; application write integration specified for phase 9.
+Status: implemented; the log by phase 8, coordinated writes by phase 9.
 Date: 2026-10-14.
 
 ## Context
@@ -44,6 +44,19 @@ bundles. Nodes catch up from peers before joining; members receive only committe
 entries. Neither this metadata log nor its trusted-node designation grants row
 access. The coordinator cannot verify a storage promise against application data.
 
+A proposer stages its bundle in one flushed local transaction on caught-up state,
+unsent, and records the append before calling the coordinator. The entry hash
+commits to the log, the position and the bundle's frame ids; frames carry the
+position in their bundle membership, not the hash, which would have to cover
+itself. Peers store an entry durably and unapplied, then acknowledge it themselves.
+Committed entries apply in log order. A failure before the coordinator assigned the
+entry, or an abort, voids the proposer's frames with phase 4's void records and
+rebuilds their scopes; unsent bundles that saw them become held changes. Only an
+outcome the coordinator may still decide (`Undecided`) keeps local effects, unsent.
+Catch-up carries positions, hashes and frame ids verified against the head; the
+frames, committed and ordinary, travel by range sync. Runtimes reach the log through
+the metadata-only `rocky_core::DomainLog` port.
+
 ## Consequences
 
 A permanently lost in-sync set needs explicit owner recovery (phase 10); a
@@ -53,8 +66,11 @@ and head reads distinguish assigned from committed positions.
 
 Raft store/snapshots use only format 3, refusing other formats. The signed
 bootstrap and request envelope keep their current shapes; log actions add new
-operations. The current log machine fixes trusted-key, minute-rate and deadline
-caps; changing those caps requires a new store format. Commands still exist until
-phase 11; phase 8 does not implement application bundle staging, publication or
-recovery cuts. See [the log guide](../runtime/coordinated-log.md) and
+operations. Coordinated writes set the encrypted file identity to
+`rocky.encrypted-replica.v18` and the live-link handshake to `rocky.link.v3`, which
+adds the entry message family; other versions are refused. The current log machine
+fixes trusted-key, minute-rate and deadline caps; changing those caps requires a new
+store format. Commands still exist until
+phase 11; recovery cuts are phase 10. See [the log guide](../runtime/coordinated-log.md),
+[coordinated writes](../runtime/coordinated-writes.md) and
 [phase 9](../features_09/09-coordinated-writes.md).

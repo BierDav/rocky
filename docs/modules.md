@@ -26,7 +26,8 @@ and [strong publication](runtime/strong-publication.md).
 
 Implements shared identities, checked counters, canonical operation envelopes,
 versions, dependency readiness, applied history/frontiers, strong commitments and
-protocol errors. Its generic coordinator port carries metadata only.
+protocol errors. Its generic coordinator port carries metadata only, as does the
+`DomainLog` port of [coordinated writes](runtime/coordinated-writes.md).
 It defines unsigned canonical manifests, publisher-bound definition IDs and scoped
 operation references. It defines the shared `Application` reducer and `StoredApplication` compiled
 projection contracts with optional registered command handlers and the tables a checkpoint carries, independent of storage engines.
@@ -178,6 +179,9 @@ the compiled command. Its files are separate from trusted legacy files; see
 bundles and authority-bound sessions are in [secure sessions](runtime/secure-sessions.md);
 never-offered bundles incompatible with a removal become
 [held changes](runtime/held-changes.md), with signed voids and atomic re-authoring;
+[coordinated writes](runtime/coordinated-writes.md) stage, store, decide, void
+and catch up bundles a domain's coordinated log orders, behind the
+`EntryPeers` transport port and the link's entry messages;
 typed tables and SQL sessions over them in [secure SQL](runtime/secure-sql.md),
 read-only command-controlled tables in [confirmed tables](runtime/confirmed-tables.md),
 with availability-checked cursors and table events in
@@ -215,8 +219,9 @@ Start at `crates/rocky-iroh/src/lib.rs`.
 Owns generic executor assignment, leadership epochs, expected-head validation,
 active generations and confirmation deduplication. It also owns the metadata-only
 [coordinated log](runtime/coordinated-log.md), trusted in-sync membership, pending
-entry resolution and bounded hash window; application bundle storage stays outside
-this crate. The deterministic in-memory state
+entry resolution and bounded hash window, served to trusted nodes through the
+`rocky_core::DomainLog` port by `NetworkCoordinator` and the in-process
+`coordinated::MemoryLog`; application bundle storage stays outside this crate. The deterministic in-memory state
 machine supplies fixture registration, acquire/takeover, lookup and receipt
 verification.
 

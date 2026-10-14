@@ -215,6 +215,7 @@ impl<A: RowApplication> Inner<A> {
     /// Marks `hashes` offered in a durable transaction before they leave
     /// the device; a push that fails midway still counts as sent.
     pub(super) async fn offer(&mut self, hashes: &[Hash]) -> Result<(), Error> {
+        self.refuse_staged(hashes).await?;
         let mut unoffered = Vec::new();
         for hash in hashes {
             let mut found = self
@@ -299,7 +300,6 @@ impl<A: RowApplication> Inner<A> {
         if frames.is_empty() {
             return Ok(0);
         }
-        let names = self.item_names().await?;
         let defaults = self.defaults(&fields).await?;
         let null = {
             let mut bytes = Vec::new();
@@ -320,17 +320,54 @@ impl<A: RowApplication> Inner<A> {
                         })
                 })
         };
-        // Only a bundle whose every frame is unoffered can be held whole.
-        let mut bundles: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
-        for (index, frame) in frames.iter().enumerate() {
-            bundles.entry(frame.bundle.clone()).or_default().push(index);
-        }
-        bundles.retain(|_, members| members.len() == frames[members[0]].members);
-        let mut held: BTreeSet<Vec<u8>> = bundles
+        // Only a bundle whose every frame is unoffered can be held whole;
+        // the coordinated log decides an uncommitted entry.
+        let staged = self.staged().await?;
+        let mut bundles = whole_bundles(&frames);
+        bundles.retain(|_, members| {
+            !members
+                .iter()
+                .any(|index| staged.contains(&frames[*index].hash))
+        });
+        let held: BTreeSet<Vec<u8>> = bundles
             .iter()
             .filter(|(_, members)| members.iter().any(|index| touches(&frames[*index])))
             .map(|(bundle, _)| bundle.clone())
             .collect();
+        self.void_closure(&frames, &bundles, held, true).await
+    }
+    /// Voids this device's unoffered bundle `transaction` inside the
+    /// caller's transaction, as an aborted coordinated entry is; unoffered
+    /// bundles that saw its effects are held. Fails when a frame of it was
+    /// offered.
+    pub(super) async fn void_bundle(&self, transaction: Commitment) -> Result<(), Error> {
+        let frames = self.unoffered().await?;
+        let bundles = whole_bundles(&frames);
+        if !bundles.contains_key(transaction.as_slice()) {
+            return Err(Error::Corrupt("a voided bundle was offered".into()));
+        }
+        self.void_closure(
+            &frames,
+            &bundles,
+            BTreeSet::from([transaction.to_vec()]),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+    /// Voids `seeds` and every unoffered bundle that depends on one: their
+    /// frames are deleted, void records signed and their kept scopes
+    /// queued for rebuild. Dependants, and seeds when `hold_seeds`, are
+    /// stored as held changes. Returns how many bundles are held.
+    async fn void_closure(
+        &self,
+        frames: &[Unoffered],
+        bundles: &BTreeMap<Vec<u8>, Vec<usize>>,
+        seeds: BTreeSet<Vec<u8>>,
+        hold_seeds: bool,
+    ) -> Result<usize, Error> {
+        let names = self.item_names().await?;
+        let mut held = seeds.clone();
         // A bundle that saw a held one's effects is held with it.
         loop {
             let voided: HashSet<Hash> = held
@@ -339,7 +376,7 @@ impl<A: RowApplication> Inner<A> {
                 .map(|index| frames[*index].hash)
                 .collect();
             let before = held.len();
-            for (bundle, members) in &bundles {
+            for (bundle, members) in bundles {
                 if !held.contains(bundle)
                     && members.iter().any(|index| {
                         frames[*index]
@@ -357,8 +394,16 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         let mut scopes = BTreeSet::new();
+        let mut recorded = 0;
         for bundle in &held {
             let members: Vec<&Unoffered> = bundles[bundle].iter().map(|i| &frames[*i]).collect();
+            for frame in &members {
+                scopes.insert(frame.header.extensions.scope);
+            }
+            if !hold_seeds && seeds.contains(bundle) {
+                continue;
+            }
+            recorded += 1;
             let id: Commitment = bundle
                 .as_slice()
                 .try_into()
@@ -372,7 +417,6 @@ impl<A: RowApplication> Inner<A> {
                 rows: Vec::new(),
             };
             for frame in &members {
-                scopes.insert(frame.header.extensions.scope);
                 for (write, row) in &frame.writes {
                     stored.rows.push(stored_row(write, *row, &names));
                 }
@@ -415,7 +459,7 @@ impl<A: RowApplication> Inner<A> {
                     .await?;
             }
         }
-        Ok(held.len())
+        Ok(recorded)
     }
     async fn unoffered(&self) -> Result<Vec<Unoffered>, Error> {
         let mut frames = Vec::new();
@@ -941,6 +985,17 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(changes)
     }
+}
+
+/// Unoffered frames by bundle, keeping only bundles whose every member is
+/// unoffered.
+fn whole_bundles(frames: &[Unoffered]) -> BTreeMap<Vec<u8>, Vec<usize>> {
+    let mut bundles: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
+    for (index, frame) in frames.iter().enumerate() {
+        bundles.entry(frame.bundle.clone()).or_default().push(index);
+    }
+    bundles.retain(|_, members| members.len() == frames[members[0]].members);
+    bundles
 }
 
 fn stored_row(

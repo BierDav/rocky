@@ -1,6 +1,8 @@
 # 9. Coordinated writes
 
-Status: proposed; not started.
+Status: implemented; slices 1–5 and every completion gate verified (2026-10-14).
+See [evidence](09-coordinated-writes-evidence.md) and the
+[coordinated writes guide](../runtime/coordinated-writes.md).
 Owner: `rocky-secure` outbox, bundles and admission; `rocky-sdk` coordinated
 write API, sync worker and status; `sdks/kotlin`. Depends on
 [phases 4](04-held-changes.md) and [8](08-coordinated-log.md). Follow the

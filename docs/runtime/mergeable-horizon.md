@@ -123,8 +123,8 @@ serves it to read-only participants; see
 | Horizon statement | Format 5 with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v2` bind statement, node reference and credential alias |
 | Checkpoint | Format 9 carries independent optional admitted and finalized declarations and bases and a required `moves` summary; an admitted cut is never treated as finalized |
 | Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v17` |
-| Live link handshake | `rocky.link.v2` |
+| File identity | `rocky.encrypted-replica.v18` |
+| Live link handshake | `rocky.link.v3` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 5, with an explicit existence-base list.

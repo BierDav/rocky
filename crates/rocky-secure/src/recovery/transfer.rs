@@ -28,6 +28,11 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
         let grants = inner.verify_chain(credentials, recipient, now()?)?;
         authorize(&grants, &scopes)?;
         authorize(&inner.local_grants(now()?)?, &scopes)?;
+        for scope in &scopes {
+            if inner.staged_in(*scope).await? {
+                return Err(denied("an uncommitted coordinated entry is never sent"));
+            }
+        }
         // A recovery package carries complete operation history. A pruned
         // scope travels as a checkpoint instead.
         for scope in &scopes {

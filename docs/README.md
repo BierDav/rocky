@@ -12,6 +12,7 @@ Select the guide for your task rather than reading every document.
 | Inspect phase-9 end-to-end and soak evidence | [End-to-end evidence](runtime/end-to-end-evidence.md) |
 | Upgrade schema/handlers or resume a projection plan | [Generations](runtime/generations.md) |
 | Review, re-author or drop local changes held by a removal | [Held changes](runtime/held-changes.md) |
+| Make writes that must not race, such as sequential numbers | [Coordinated writes](runtime/coordinated-writes.md) |
 | Back up a database and restore under a fresh signer | [Backup/restore](runtime/backup-and-restore.md) |
 | Compose independent Kotlin APIs or consume packaged artifacts | [SDK packaging](runtime/sdk-packaging.md) |
 | Package for iOS and follow application lifecycle | [iOS](runtime/ios.md) |

@@ -1858,7 +1858,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 9);
+    assert_eq!(signed.statement.format, 10);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 

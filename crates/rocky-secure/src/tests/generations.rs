@@ -89,6 +89,10 @@ pub(super) struct Lineage {
     pub(super) domain: Scope,
 }
 impl Lineage {
+    /// The publisher key, which also owns the domain.
+    pub(super) fn publisher(&self) -> &PrivateKey {
+        &self.publisher
+    }
     pub(super) fn new() -> Self {
         let publisher = PrivateKey::new();
         let domain = Scope {

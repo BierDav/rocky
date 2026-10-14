@@ -80,6 +80,8 @@ pub struct ScopeFrontier {
     pub scope: ResourceScope,
     /// Ordered by author, at most `MAX_CHECKPOINT_LOGS`.
     pub logs: Vec<FrontierLog>,
+    /// Cut records of the scope's coordinated log the holder has.
+    pub cuts: u64,
 }
 impl ScopeFrontier {
     pub fn log(&self, author: PublicKey) -> Option<&FrontierLog> {
@@ -180,6 +182,8 @@ pub struct RangePage {
     pub frontier: ScopeFrontier,
     /// Void records consuming positions of the logs the page continues.
     pub voids: Vec<SignedVoid>,
+    /// Cut records of the scope's log the requester lacks; received first.
+    pub cuts: Vec<crate::replica::CutEvidence>,
 }
 /// Lag between this replica and one peer in one scope, by applied operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -416,6 +420,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(ScopeFrontier {
             scope,
+            cuts: self.held_cuts(scope.domain).len() as u64,
             logs: logs
                 .into_iter()
                 .map(|(author, (held, applied))| FrontierLog {
@@ -634,6 +639,7 @@ impl<A: RowApplication> Inner<A> {
             behind: false,
             frontier: own.clone(),
             voids: vec![],
+            cuts: self.cuts_after(scope.domain, request.cuts).await?,
         };
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
@@ -1084,6 +1090,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 let mut theirs = ScopeFrontier {
                     scope,
                     logs: vec![],
+                    cuts: 0,
                 };
                 for log in collect_rows(
                     inner

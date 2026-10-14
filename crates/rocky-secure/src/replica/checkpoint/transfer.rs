@@ -1104,6 +1104,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn begin_rebootstrap(&self, signed: SignedCheckpoint) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         signed.verify_authority(&inner, now()?)?;
+        inner.check_binding(&signed.statement)?;
         let statement = &signed.statement;
         let scope = statement.scope;
         let generation = inner.generation_of(statement.definition, true)?;
@@ -1284,6 +1285,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let signed = staging.signed;
         let direct = staging.direct;
         signed.verify_authority(&inner, time)?;
+        inner.check_binding(&signed.statement)?;
         let statement = signed.statement.clone();
         let moves = match direct {
             true => inner.imported_moves(id).await?,
@@ -1446,6 +1448,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
             // A checkpoint sealed under an earlier generation names what
             // this one removed: its rows and base keep only the rest.
             inner.keep_current(id, scope, true).await?;
+            // A clean base replaces the one a cut tainted.
+            inner
+                .conn
+                .execute(
+                    "DELETE FROM secure_cut_guard WHERE scope=?",
+                    [encode(&scope)?],
+                )
+                .await?;
             for hash in reapply {
                 let frame = inner
                     .frame(hash)

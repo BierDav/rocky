@@ -30,6 +30,8 @@ pub(super) enum CheckpointMessage {
     },
     Checkpoint {
         signed: Option<Box<SignedCheckpoint>>,
+        /// The cut records the checkpoint's binding names.
+        cuts: Vec<CutEvidence>,
     },
     CheckpointPull {
         scope: ResourceScope,
@@ -221,7 +223,7 @@ impl NativeSession {
     ) -> Result<Option<RebootstrapReport>, Error> {
         self.ensure_holding(replica, &[scope]).await?;
         let signed = self
-            .checkpoint_offer(scope)
+            .checkpoint_offer(replica, scope)
             .await?
             .ok_or_else(|| denied("the peer offers no checkpoint"))?;
         self.import_within(replica, signed, quota).await
@@ -237,7 +239,7 @@ impl NativeSession {
         self.ensure_holding(replica, scopes).await?;
         let mut offered = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            offered.push(match self.checkpoint_offer(*scope).await? {
+            offered.push(match self.checkpoint_offer(replica, *scope).await? {
                 Some(signed)
                     if signed.statement.finalized.is_some()
                         || !replica.owns_checkpoint_signer(&signed).await =>
@@ -250,13 +252,15 @@ impl NativeSession {
         Ok(offered)
     }
     /// The peer's current checkpoint of `scope`, if it offers one.
-    async fn checkpoint_offer(
+    async fn checkpoint_offer<A: RowApplication>(
         &mut self,
+        replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<Option<Box<SignedCheckpoint>>, Error> {
         self.send(CheckpointMessage::CheckpointOffer { scope })
             .await?;
-        let CheckpointMessage::Checkpoint { signed } = self.reply::<CheckpointMessage>().await?
+        let CheckpointMessage::Checkpoint { signed, cuts } =
+            self.reply::<CheckpointMessage>().await?
         else {
             return Err(denied("unexpected checkpoint offer response"));
         };
@@ -266,6 +270,7 @@ impl NativeSession {
         {
             return Err(denied("checkpoint outside subscription"));
         }
+        super::rows::receive_cuts(replica, &cuts, &[scope]).await?;
         Ok(signed)
     }
     async fn import_within<A: RowApplication>(
@@ -400,7 +405,7 @@ impl NativeSession {
             }));
         }
         self.ensure_holding(replica, &[scope]).await?;
-        let Some(signed) = self.checkpoint_offer(scope).await? else {
+        let Some(signed) = self.checkpoint_offer(replica, scope).await? else {
             return Ok(None);
         };
         if signed.statement.finalized.is_none() && replica.owns_checkpoint_signer(&signed).await {
@@ -500,8 +505,14 @@ impl NativeSession {
                 let signed = replica
                     .checkpoint_offer(self.peer, &self.credentials, scope)
                     .await?;
+                let named = signed
+                    .as_ref()
+                    .map_or(0, |signed| signed.statement.coordinated.cuts);
+                let mut cuts = replica.cuts_for(&[scope], &[]).await?;
+                cuts.retain(|cut| cut.record.statement.sequence <= named);
                 self.send(CheckpointMessage::Checkpoint {
                     signed: signed.map(Box::new),
+                    cuts,
                 })
                 .await
             }

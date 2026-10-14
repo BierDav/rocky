@@ -104,9 +104,9 @@ the coordinator's window. The scan and reply use bounded pages.
 
 A missing copy, incomplete bundle or entry outside the hash window leaves the
 node `Behind`; even a matching final running hash cannot bypass a missing hash
-in that window. Owner-signed cuts and rollback of abandoned history are not
-implemented. See [phase 10 evidence](../features_09/10-stuck-recovery-evidence.md)
-for the checkpoint recovery contract still missing.
+in that window. Only an owner-signed cut continues past entries no device
+holds, and only a held cut's retained chain verifies positions before the
+window; see [stuck recovery](stuck-recovery.md).
 
 ## APIs
 
@@ -131,8 +131,8 @@ The SDK sends entries only over open live links: a trusted node without one
 to a member of the set leaves the set at the deadline. Kotlin cannot compose
 its own `DomainLog`; it uses a coordination service's.
 
-The encrypted file identity is `rocky.encrypted-replica.v19` and the live
-link handshake `rocky.link.v3`; other versions are refused.
+The encrypted file identity is `rocky.encrypted-replica.v20` and the live
+link handshake `rocky.link.v4`; other versions are refused.
 
 ## Limits
 
@@ -142,7 +142,7 @@ link handshake `rocky.link.v3`; other versions are refused.
   waits for its void and then applies on the rolled-back state.
 - One undecided own entry per log; checkpoints of its scopes wait for it.
 - Commit is decided against the coordinator's window; older positions need
-  an owner-signed recovery cut (not implemented).
+  an owner-signed [recovery cut](stuck-recovery.md).
 
 ## Evidence
 

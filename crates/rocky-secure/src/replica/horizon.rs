@@ -1081,7 +1081,7 @@ impl<A: RowApplication> Inner<A> {
         node: PeerId,
     ) -> Result<bool, Error> {
         if node == PeerId::of(self.config.node.public_key())
-            && self.horizon_bootstrap(scope).await?.is_some()
+            && (self.horizon_bootstrap(scope).await?.is_some() || self.cut_guarded(scope).await?)
         {
             return Ok(true);
         }
@@ -1305,6 +1305,7 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     pub(super) async fn ensure_horizon_current(&self, scope: ResourceScope) -> Result<(), Error> {
+        self.ensure_cut_clean(scope).await?;
         if self
             .horizon_device_behind(scope, self.config.node.public_key())
             .await?

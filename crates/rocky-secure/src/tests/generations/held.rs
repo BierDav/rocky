@@ -339,6 +339,7 @@ async fn offering_one_bundle_member_without_delivery_prevents_holding_after_rest
             &crate::replica::ScopeFrontier {
                 scope,
                 logs: vec![],
+                cuts: 0,
             },
             None,
             MAX_SECURE_FRAME,

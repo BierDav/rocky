@@ -12,6 +12,8 @@ pub(super) enum RowMessage {
         scopes: Vec<ResourceScope>,
         after: Option<Hash>,
         quota: usize,
+        /// Cut records the puller holds of each log of the scopes.
+        cuts: Vec<(rocky_core::Scope, u64)>,
     },
     Page {
         frames: Vec<EncryptedFrame>,
@@ -20,6 +22,8 @@ pub(super) enum RowMessage {
         pruned: Vec<ResourceScope>,
         /// Void records consuming the positions before the frames.
         voids: Vec<SignedVoid>,
+        /// Cut records the puller lacks; received before the frames.
+        cuts: Vec<CutEvidence>,
     },
     Ack {
         id: Hash,
@@ -47,6 +51,7 @@ pub(super) enum RowMessage {
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
         voids: Vec<SignedVoid>,
+        cuts: Vec<CutEvidence>,
     },
     ScopesQuery {
         after: Option<ResourceScope>,
@@ -137,10 +142,12 @@ impl NativeSession {
         quota: usize,
     ) -> Result<Pulled, Error> {
         self.ensure_holding(replica, &scopes).await?;
+        let held = replica.held_cut_counts(&scopes).await;
         self.send(RowMessage::Pull {
             scopes: scopes.clone(),
             after,
             quota,
+            cuts: held,
         })
         .await?;
         let RowMessage::Page {
@@ -148,10 +155,12 @@ impl NativeSession {
             next,
             pruned,
             voids,
+            cuts,
         } = self.reply::<RowMessage>().await?
         else {
             return Err(denied("unexpected native response"));
         };
+        receive_cuts(replica, &cuts, &scopes).await?;
         let mut rebootstrap = Vec::new();
         for scope in pruned {
             if !scopes.contains(&scope) {
@@ -204,7 +213,7 @@ impl NativeSession {
         // The page is received in shared transactions; acknowledgments follow the commit.
         for (id, status) in ids.into_iter().zip(replica.receive_all(frames).await) {
             let status = status?;
-            let applied = status == ReceiveStatus::Applied
+            let applied = matches!(status, ReceiveStatus::Applied | ReceiveStatus::Abandoned)
                 || (status == ReceiveStatus::Duplicate
                     && replica.receipt_status(id).await? == ReceiveStatus::Applied);
             if status != ReceiveStatus::Rejected {
@@ -301,6 +310,7 @@ impl NativeSession {
                 return Ok(report);
             }
             report.frames += page.frames.len();
+            receive_cuts(replica, &page.cuts, &[scope]).await?;
             receive_voids(replica, &page.voids, &[scope]).await?;
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
@@ -350,7 +360,7 @@ impl NativeSession {
                 pushed.behind = true;
                 return Ok(pushed);
             }
-            if page.frames.is_empty() && page.voids.is_empty() {
+            if page.frames.is_empty() && page.voids.is_empty() && page.cuts.is_empty() {
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
@@ -359,6 +369,7 @@ impl NativeSession {
                 scope,
                 frames: page.frames,
                 voids: page.voids,
+                cuts: page.cuts,
             })
             .await?;
             let RowMessage::Frontier { frontier: theirs } = self.reply::<RowMessage>().await?
@@ -454,6 +465,7 @@ impl NativeSession {
                 scopes,
                 after,
                 quota,
+                cuts: held,
             } => {
                 // Leave room for canonical envelope and session signature overhead.
                 if quota > MAX_SECURE_FRAME / 2 {
@@ -479,11 +491,13 @@ impl NativeSession {
                     self.served_frames.insert(frame.id()?, frame.scope()?);
                 }
                 self.carry_chains(&mut page.frames).await?;
+                let cuts = replica.cuts_for(&scopes, &held).await?;
                 self.send(RowMessage::Page {
                     frames: page.frames,
                     next: page.next,
                     pruned: page.pruned,
                     voids: page.voids,
+                    cuts,
                 })
                 .await
             }
@@ -538,6 +552,7 @@ impl NativeSession {
                 scope,
                 frames,
                 voids,
+                cuts,
             } => {
                 if replica
                     .horizon_peer_behind(self.peer, &self.credentials, scope)
@@ -556,6 +571,7 @@ impl NativeSession {
                         return Err(denied("pushed frame outside its scope"));
                     }
                 }
+                receive_cuts(replica, &cuts, &[scope]).await?;
                 receive_voids(replica, &voids, &[scope]).await?;
                 // An incomplete frame is not received; the frontier that
                 // answers the push shows the sender what is still missing.
@@ -607,4 +623,21 @@ pub(super) async fn receive_voids<A: RowApplication>(
         status?;
     }
     Ok(())
+}
+
+/// Admits the cut records a message carries before its frames: each must
+/// be of the log of a requested scope.
+pub(super) async fn receive_cuts<A: RowApplication>(
+    replica: &EncryptedReplica<A>,
+    cuts: &[CutEvidence],
+    scopes: &[ResourceScope],
+) -> Result<(), Error> {
+    if cuts.iter().any(|cut| {
+        !scopes
+            .iter()
+            .any(|scope| scope.domain == cut.record.statement.log)
+    }) {
+        return Err(denied("cut record outside the requested scopes"));
+    }
+    replica.receive_cuts(cuts).await
 }

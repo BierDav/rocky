@@ -63,6 +63,7 @@ fn requests(
     let frontier = ScopeFrontier {
         scope,
         logs: Vec::new(),
+        cuts: 0,
     };
     let invocation = EncryptedPackage {
         scope,
@@ -102,6 +103,7 @@ fn requests(
             scopes: vec![scope],
             after: None,
             quota: 1024,
+            cuts: Vec::new(),
         }
         .into(),
         RowMessage::Range {
@@ -115,6 +117,7 @@ fn requests(
             scope,
             frames: Vec::new(),
             voids: Vec::new(),
+            cuts: Vec::new(),
         }
         .into(),
         RowMessage::FrontierQuery { scope }.into(),
@@ -284,6 +287,7 @@ async fn transcript_case(custody: bool) {
             frontiers: vec![ScopeFrontier {
                 scope: asked,
                 logs: vec![],
+                cuts: 0,
             }],
             partitions: vec![],
             proofs: vec![],
@@ -396,6 +400,7 @@ async fn proofs_are_session_bound_bounded_and_remembered() {
         frontiers: vec![ScopeFrontier {
             scope,
             logs: vec![],
+            cuts: 0,
         }],
         partitions: vec![],
         proofs,
@@ -581,6 +586,7 @@ async fn custody_tuple_offers_relay_only_with_both_grants() {
             frontiers: vec![ScopeFrontier {
                 scope,
                 logs: vec![],
+                cuts: 0,
             }],
             partitions: vec![(scope, f.tuple("customers", 1))],
             proofs: vec![(

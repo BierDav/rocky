@@ -51,7 +51,8 @@ pub use checkpoint::{
 };
 pub use coordinated::{
     CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, CoordinatedStatus,
-    ENTRY_DEADLINE, EntryPeers, MAX_CATCH_UP_ENTRIES, PeerFuture, Slot, entry_hash,
+    CutEvidence, CutRefusal, ENTRY_DEADLINE, EntryPeers, MAX_CATCH_UP_ENTRIES, MAX_PAGE_CUTS,
+    PeerFuture, Slot, entry_hash,
 };
 pub use evict::EvictReport;
 pub use existence::{
@@ -130,6 +131,9 @@ pub enum ReceiveStatus {
     Rejected,
     /// At or before this replica's horizon: already part of its checkpoint.
     Pruned,
+    /// An owner-signed cut abandoned its coordinated position: consumed
+    /// without effect, its author log continues.
+    Abandoned,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Companion {
@@ -387,8 +391,13 @@ pub(super) struct Inner<A> {
     /// When each peer was last served since open, by a growing count; a
     /// peer not served since open counts as the least recent.
     served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
+    /// Verified owner-signed cuts of each coordinated log, in order.
+    cuts: BTreeMap<rocky_core::Scope, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
+    /// Fails after the cut rollback step with this number commits.
+    #[cfg(test)]
+    cut_fault: Option<i64>,
     #[cfg(test)]
     plan_fault: Option<(migrate::PlanStage, usize)>,
     /// The stage fault exits the process instead of returning an error.
@@ -543,6 +552,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         removal::SCHEMA,
         held::SCHEMA,
         coordinated::SCHEMA,
+        coordinated::cut::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
@@ -590,7 +600,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v19" {
+    if label != "rocky.encrypted-replica.v20" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -784,8 +794,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             acknowledged: (0, BTreeMap::new()),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
+            cuts: BTreeMap::new(),
             #[cfg(test)]
             stage_fault: None,
+            #[cfg(test)]
+            cut_fault: None,
             #[cfg(test)]
             plan_fault: None,
             #[cfg(test)]
@@ -869,6 +882,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.validate_keys(now()?)?;
         inner.adopt_keys().await?;
         inner.load_direct().await?;
+        inner.load_cuts().await?;
+        // A rollback a crash interrupted resumes at its durable cursor,
+        // before the projection is checked against history.
+        while inner.cut_step().await? {}
         inner.pull_again().await?;
         inner.verify_open().await?;
         let replica = Self {
@@ -1104,16 +1121,24 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Whether a mutation handle committed, whatever its writes were. A
     /// caller that lost a commit's answer checks this before planning the
     /// writes again. Handles are retained as `RetentionLimits` describes.
+    /// A handle whose write an owner-signed cut abandoned reports that.
     pub async fn handle_committed(&self, handle: Commitment) -> Result<bool, Error> {
         let inner = self.inner.lock().await;
         let mut result = inner
             .conn
             .query(
-                "SELECT 1 FROM secure_handles WHERE handle=?",
+                "SELECT hash FROM secure_handles WHERE handle=?",
                 [handle.to_vec()],
             )
             .await?;
-        Ok(result.next().await?.is_some())
+        let Some(row) = result.next().await? else {
+            return Ok(false);
+        };
+        let hash = Hash::try_from(row.get::<Vec<u8>>(0)?.as_slice())
+            .map_err(|_| denied("invalid handle hash"))?;
+        drop(result);
+        inner.refuse_abandoned(hash).await?;
+        Ok(true)
     }
     /// Flushes first: the status may be acknowledged to the sender.
     pub async fn receipt_status(&self, id: Hash) -> Result<ReceiveStatus, Error> {
@@ -1479,6 +1504,7 @@ impl<A: RowApplication> Inner<A> {
         };
         match row.get::<String>(0)?.as_str() {
             "applied" => Ok(ReceiveStatus::Applied),
+            "abandoned" => Ok(ReceiveStatus::Abandoned),
             "rejected" => Ok(ReceiveStatus::Rejected),
             "pending" => {
                 let header: p2panda_core::Header<Extensions> = decode(&row.get::<Vec<u8>>(1)?)?;
@@ -1511,11 +1537,14 @@ impl<A: RowApplication> Inner<A> {
         let Some(row) = result.next().await? else {
             return Ok(None);
         };
-        if row.get::<Vec<u8>>(0)? != input {
-            return Err(Error::Conflict);
-        }
+        let stored = row.get::<Vec<u8>>(0)?;
         let hash = Hash::try_from(row.get::<Vec<u8>>(1)?.as_slice())
             .map_err(|_| denied("invalid handle hash"))?;
+        drop(result);
+        self.refuse_abandoned(hash).await?;
+        if stored != input {
+            return Err(Error::Conflict);
+        }
         // A handle outlives its pruned operation inside `RetentionLimits::handles`.
         Ok(Some(self.frame(hash).await?.ok_or(hash)))
     }

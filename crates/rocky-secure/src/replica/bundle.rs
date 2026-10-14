@@ -432,6 +432,25 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Outcome, Error> {
         let author = trigger.header.public_key;
         let scope = trigger.header.extensions.scope;
+        // Members fence a coordinated write by its signed log position.
+        if let Some(position) = membership.entry {
+            use super::coordinated::cut::{Fence, fence};
+            match fence(self.held_cuts(scope.domain), position) {
+                Fence::Live => {}
+                Fence::Cut => {
+                    self.reject(trigger.hash).await?;
+                    return Ok(Outcome::Rejected("a frame names a cut position".into()));
+                }
+                Fence::Abandoned => {
+                    let frame = self
+                        .frame(trigger.hash)
+                        .await?
+                        .ok_or_else(|| denied("missing pending operation"))?;
+                    self.abandon_frame(&frame).await?;
+                    return Ok(Outcome::Applied);
+                }
+            }
+        }
         let required = match self.required_members(membership, scope, time).await {
             Ok(required) => required,
             Err(error) => {
@@ -515,6 +534,14 @@ impl<A: RowApplication> Inner<A> {
         match result {
             Ok(()) => {
                 self.conn.execute("RELEASE bundle", ()).await?;
+                if let Some(position) = membership.entry {
+                    let ids = members
+                        .iter()
+                        .map(|(frame, _, _)| frame.id())
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.record_entry_frames(scope.domain, position, &ids)
+                        .await?;
+                }
                 Ok(Outcome::Applied)
             }
             Err(error) if retryable(&error) => Err(error),
@@ -597,7 +624,7 @@ impl<A: RowApplication> Inner<A> {
             drop(result);
             let frame = self.stored_frame(header, body).await?;
             return Ok(match status.as_str() {
-                "applied" => Member::Settled(Some(frame)),
+                "applied" | "abandoned" => Member::Settled(Some(frame)),
                 "rejected" => Member::Rejected,
                 _ => Member::Pending(frame),
             });

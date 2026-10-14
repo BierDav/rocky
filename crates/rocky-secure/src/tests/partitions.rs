@@ -379,7 +379,8 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &credentials,
             &crate::ScopeFrontier {
                 scope: f.scope("B"),
-                logs: vec![]
+                logs: vec![],
+                cuts: 0,
             },
             None,
             65536
@@ -394,6 +395,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             &crate::ScopeFrontier {
                 scope: f.scope("A"),
                 logs: vec![],
+                cuts: 0,
             },
             None,
             65536,
@@ -537,7 +539,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 9);
+    assert_eq!(cp.statement.format, 10);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);

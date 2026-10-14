@@ -5,7 +5,8 @@ use crate::{
     denied, encode, signing_bytes,
 };
 use rocky_core::{
-    Commitment, MAX_COUNTER, PrincipalKind, ResourceScope, Right, RowSelection, Scope,
+    Commitment, MAX_COUNTER, PartitionTuple, PrincipalKind, ResourceScope, Right, RowSelection,
+    Scope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -114,20 +115,21 @@ impl SignedCut {
         signed.verify()?;
         Ok(signed)
     }
-    /// The signer's issuer authority over every scope in `scopes`, as of the
-    /// cut's issue time: the publisher itself, or a publisher-rooted user or
-    /// deployment chain that may delegate and grants whole-scope writes.
+    /// The signer's issuer authority over every scope in `scopes`, with the
+    /// authenticated tuple of a partitioned one, as of the cut's issue
+    /// time: the publisher itself, or a publisher-rooted user or deployment
+    /// chain that may delegate and grants whole-scope writes.
     pub fn verify_owner(
         &self,
         credentials: &CredentialChain,
         publisher: PublicKey,
         manifest: Commitment,
-        scopes: &[ResourceScope],
+        scopes: &[(ResourceScope, Option<&PartitionTuple>)],
     ) -> Result<(), Error> {
         self.verify()?;
         if scopes
             .iter()
-            .any(|scope| scope.domain != self.statement.log)
+            .any(|(scope, _)| scope.domain != self.statement.log)
         {
             return Err(denied("cut authority names another domain"));
         }
@@ -140,19 +142,39 @@ impl SignedCut {
             manifest,
             Some((&revocations, self.statement.issued)),
         )?;
-        let whole = [Right::Read, Right::Insert, Right::Update, Right::Delete];
+        let whole = |rows: &RowSelection, rights: &std::collections::BTreeSet<Right>| {
+            *rows == RowSelection::All
+                && [Right::Read, Right::Insert, Right::Update, Right::Delete]
+                    .iter()
+                    .all(|right| rights.contains(right))
+        };
         if leaf.subject != self.signer
             || matches!(leaf.kind, PrincipalKind::Node | PrincipalKind::Pseudonym)
             || leaf.delegations == 0
-            || scopes.iter().any(|scope| {
-                !leaf.grants.iter().any(|grant| {
-                    grant.scope == *scope
-                        && grant.rows == RowSelection::All
-                        && whole.iter().all(|right| grant.rights.contains(right))
-                })
-            })
         {
             return Err(denied("cut signer is not an issuer of the domain"));
+        }
+        let partitions = leaf.extended()?.partitions;
+        for (scope, tuple) in scopes {
+            let granted = leaf
+                .grants
+                .iter()
+                .any(|grant| grant.scope == *scope && whole(&grant.rows, &grant.rights));
+            let selected = match tuple {
+                Some(tuple) => partitions.iter().any(|grant| {
+                    grant
+                        .resolve(scope.domain, scope.table, tuple)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|resolved| {
+                            resolved.scope == *scope && whole(&resolved.rows, &resolved.rights)
+                        })
+                }),
+                None => false,
+            };
+            if !granted && !selected {
+                return Err(denied("cut signer is not an issuer of the domain"));
+            }
         }
         Ok(())
     }
@@ -294,17 +316,58 @@ mod tests {
                 )
                 .unwrap(),
         ]);
-        let verify = |scopes: &[ResourceScope]| {
+        let verify = |scopes: &[(ResourceScope, Option<&PartitionTuple>)]| {
             by_other.verify_owner(&chain, publisher.public_key(), [0; 32], scopes)
         };
-        verify(&[scope(1)]).unwrap();
-        assert!(verify(&[scope(1), scope(2)]).is_err());
+        verify(&[(scope(1), None)]).unwrap();
+        assert!(verify(&[(scope(1), None), (scope(2), None)]).is_err());
+        // A partitioned scope is covered through a selector of its table.
+        let column = [8; 32];
+        let value = |text: &str| {
+            rocky_core::PartitionValue::new(
+                rocky_core::KeyColumn {
+                    affinity: rocky_core::Affinity::Text,
+                    collation: rocky_core::Collation::Binary,
+                },
+                rocky_core::SqlValue::Text(text.into()),
+            )
+            .unwrap()
+        };
+        let tuple = PartitionTuple::new([(column, value("north"))]).unwrap();
+        let partitioned = tuple.scope(statement().log, [3; 32]).unwrap();
+        let selected = CredentialChain(vec![
+            authority
+                .issue_partition_terms(
+                    other.public_key(),
+                    vec![grant(scope(1), &all)],
+                    vec![crate::PartitionGrant {
+                        domain: statement().log,
+                        table: [3; 32],
+                        selector: rocky_core::PartitionSelector(
+                            [(column, rocky_core::PartitionSelection::Any)].into(),
+                        ),
+                        rows: RowSelection::All,
+                        rights: all.into_iter().collect(),
+                        fields: Default::default(),
+                    }],
+                    (1, None),
+                    (8, 100, 0),
+                )
+                .unwrap(),
+        ]);
+        let owner = |chain: &CredentialChain,
+                     scopes: &[(ResourceScope, Option<&PartitionTuple>)]| {
+            by_other.verify_owner(chain, publisher.public_key(), [0; 32], scopes)
+        };
+        owner(&selected, &[(partitioned, Some(&tuple))]).unwrap();
+        assert!(owner(&selected, &[(partitioned, None)]).is_err());
+        assert!(owner(&chain, &[(partitioned, Some(&tuple))]).is_err());
         let mut later = statement();
         later.issued = 200;
         let expired = SignedCut::sign(later, &other).unwrap();
         assert!(
             expired
-                .verify_owner(&chain, publisher.public_key(), [0; 32], &[scope(1)])
+                .verify_owner(&chain, publisher.public_key(), [0; 32], &[(scope(1), None)])
                 .is_err()
         );
     }

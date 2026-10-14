@@ -89,6 +89,18 @@ impl<A: RowApplication> Inner<A> {
             {
                 continue;
             }
+            // A row an abandoned coordinated write created never existed.
+            if current.is_none()
+                && change.before.is_some()
+                && self.abandoned_dependency(&operation.header).await?
+            {
+                self.consume(
+                    operation.hash,
+                    "the row's creation was abandoned by an owner-signed cut",
+                )
+                .await?;
+                continue;
+            }
             let carried = payload.carried(&change.row);
             if let Some(carried) = carried {
                 if payload.membership().is_none() {

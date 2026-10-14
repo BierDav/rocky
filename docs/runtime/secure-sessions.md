@@ -119,7 +119,7 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v3`; any other version is refused. Every request runs as a
+`rocky.link.v4`; any other version is refused. Every request runs as a
 `NativeSession` on one of the link's request channels. Each session message is
 signed under `rocky.native-frame.v2` over the digest of the session binding,
 its sequence and the digest of its body, so signing hashes the same few bytes

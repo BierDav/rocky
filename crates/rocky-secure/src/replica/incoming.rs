@@ -102,7 +102,7 @@ impl<A: RowApplication> Inner<A> {
         let operation = frame.operation()?;
         // A bundle applies its members together; a later scan finds them settled.
         match self.stored_status(operation.hash).await?.as_deref() {
-            Some("applied") => return Ok(Outcome::Applied),
+            Some("applied" | "abandoned") => return Ok(Outcome::Applied),
             Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
             _ => {}
         }
@@ -319,7 +319,12 @@ impl<A: RowApplication> Inner<A> {
                 validate_backlink(&predecessor.header, &operation.header)
                     .map_err(|_| denied("invalid log predecessor"))?;
             }
-            if !bundle.contains(id) && self.status(*id).await? != ReceiveStatus::Applied {
+            if !bundle.contains(id)
+                && !matches!(
+                    self.status(*id).await?,
+                    ReceiveStatus::Applied | ReceiveStatus::Abandoned
+                )
+            {
                 return Ok(false);
             }
         }

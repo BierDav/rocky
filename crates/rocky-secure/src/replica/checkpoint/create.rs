@@ -100,6 +100,19 @@ impl<A: RowApplication> Inner<A> {
         if self.staged_in(scope).await? {
             return Err(denied("a coordinated entry in the scope is undecided"));
         }
+        // Nothing is sealed over a base holding abandoned effects.
+        self.ensure_cut_clean(scope).await?;
+        if self.cut_pending(scope.domain).await? {
+            return Err(denied("a cut of the scope's log is rolling back"));
+        }
+        if let Some(id) = self.find_scope_id(scope).await?
+            && let Some(base) = self
+                .checkpoint_record(id, true)
+                .await?
+                .and_then(|record| record.signed)
+        {
+            self.check_binding(&base.statement)?;
+        }
         transaction!(self, |inner| {
             let id = inner.scope_id(scope).await?;
             let verified = inner.checkpoint_record(id, true).await?;
@@ -272,6 +285,24 @@ impl<A: RowApplication> Inner<A> {
         generation: rocky_core::KeyEpoch,
         record: Record,
     ) -> Result<Step, Error> {
+        // A cut admitted since the capture may abandon what it replayed.
+        if self.cut_pending(scope.domain).await? {
+            transaction!(self, |inner| {
+                inner
+                    .conn
+                    .execute(
+                        "UPDATE secure_checkpoints SET state='failed' WHERE scope=? AND sequence=?",
+                        [id, record.sequence],
+                    )
+                    .await?;
+                inner
+                    .conn
+                    .execute("DELETE FROM secure_checkpoint_overlay WHERE scope=?", [id])
+                    .await?;
+                Ok(())
+            })?;
+            return Err(denied("a cut of the scope's log is rolling back"));
+        }
         let verified = transaction!(self, |inner| {
             let capture = record
                 .capture
@@ -324,6 +355,7 @@ impl<A: RowApplication> Inner<A> {
                 handles: capture.handles,
                 strong: inner.strong_summary(scope).await?,
                 custody: inner.custody_summary(id, record.position).await?,
+                coordinated: inner.seal_binding(scope, id, record.position).await?,
             };
             let strong_state = inner.capture_strong(scope).await?;
             inner.conn.execute("INSERT INTO secure_checkpoint_strong VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET state=excluded.state", bindings(vec![SqlValue::Integer(id),SqlValue::Blob(encode(&strong_state)?)])).await?;

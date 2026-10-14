@@ -62,7 +62,7 @@ async fn command(f: &Fixture, replica: &Replica, c: &dyn Coordinator, n: u32) ->
 async fn bootstrap(f: &Fixture, source: &Replica, target: &Replica, config: &SecureConfig) {
     for scope in [f.public, f.private] {
         let signed = source.checkpoint(scope).await.unwrap();
-        assert_eq!(signed.statement.format, 9);
+        assert_eq!(signed.statement.format, 10);
         assert_eq!(signed.statement.strong.base, signed.statement.strong.head);
         target.begin_rebootstrap(signed.clone()).await.unwrap();
         let mut cursor = None;

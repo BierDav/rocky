@@ -99,8 +99,18 @@ pub struct CustodySummary {
     /// Recovery archives held for other nodes; a checkpoint never releases them.
     pub archives: SetSummary,
 }
+/// The coordinated history a checkpoint covers: the applied cuts of its
+/// domain's log and the highest entry position among covered frames.
+/// See decision 0074.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoordinatedBinding {
+    pub cuts: u64,
+    /// The digest of the last applied cut; none without one.
+    pub cut: Option<Commitment>,
+    pub highest: u64,
+}
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 9;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 10;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -135,6 +145,7 @@ pub struct CheckpointStatement {
     pub handles: SetSummary,
     pub strong: StrongSummary,
     pub custody: CustodySummary,
+    pub coordinated: CoordinatedBinding,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedCheckpoint {
@@ -311,6 +322,7 @@ impl SignedCheckpoint {
                 .iter()
                 .any(|mark| rocky_core::RowIdentity::new(mark.author, mark.sequence).is_err())
             || statement.sequence == 0
+            || (statement.coordinated.cuts == 0) != statement.coordinated.cut.is_none()
             || statement.frontier.len() > MAX_CHECKPOINT_LOGS
             || statement
                 .frontier
@@ -1193,7 +1205,7 @@ impl<A: RowApplication> Inner<A> {
         let records = collect_rows(
             self.conn
                 .query(
-                    "SELECT a.position,o.header,o.body FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT ?",
+                    "SELECT a.position,o.header,o.body,o.status FROM secure_applied a LEFT JOIN secure_operations o ON o.hash=a.hash WHERE a.scope=? AND a.position>? AND a.position<=? ORDER BY a.position LIMIT ?",
                     bindings(vec![
                         SqlValue::Integer(id),
                         SqlValue::Integer(after),
@@ -1212,12 +1224,18 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Integer(position),
                 SqlValue::Blob(header),
                 SqlValue::Blob(body),
+                SqlValue::Text(status),
             ] = record.as_slice()
             else {
                 return Err(Error::Corrupt(
                     "an applied operation after the checkpoint is not retained".into(),
                 ));
             };
+            // Consumed without effect by an owner-signed cut.
+            if status == "abandoned" {
+                last = Some(*position);
+                continue;
+            }
             let frame = EncryptedFrame::bare(header.clone(), body.clone());
             let operation = frame.operation()?;
             // Stamped before its table was added again: nothing applies.
@@ -1258,7 +1276,8 @@ impl<A: RowApplication> Inner<A> {
                 let current: Option<Materialized> = old.as_deref().map(decode).transpose()?;
                 if current.is_none()
                     && write.change.before.is_some()
-                    && self.names.tables.contains_key(&scope.table)
+                    && (self.names.tables.contains_key(&scope.table)
+                        || self.abandoned_dependency(&operation.header).await?)
                 {
                     continue;
                 }
@@ -1458,10 +1477,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 [handle.to_vec()],
             )
             .await?;
-        match result.next().await? {
-            Some(row) => Ok(Some(hash_of(&row.get::<Vec<u8>>(0)?)?)),
-            None => Ok(None),
-        }
+        let hash = match result.next().await? {
+            Some(row) => hash_of(&row.get::<Vec<u8>>(0)?)?,
+            None => return Ok(None),
+        };
+        drop(result);
+        inner.refuse_abandoned(hash).await?;
+        Ok(Some(hash))
     }
     #[cfg(test)]
     pub(crate) async fn verify_checkpoint_at_for_test(

@@ -8,7 +8,9 @@ use rocky_core::{Append, DomainLog, LogHead, LogPending, LogResult, Scope, coord
 use std::future::Future;
 use std::pin::Pin;
 
+pub(super) mod cut;
 mod recovery;
+pub use cut::{CutEvidence, CutRefusal, MAX_PAGE_CUTS};
 
 pub(super) const SCHEMA: &[&str] = &[
     // Per log: the committed position and running hash this replica holds,
@@ -409,6 +411,7 @@ impl<A: RowApplication> Inner<A> {
                 ]),
             )
             .await?;
+        self.record_entry_frames(slot.log, entry, &ids).await?;
         for frame in frames {
             if frame.scope()?.domain != slot.log {
                 return Err(denied("a coordinated write stays in its log's domain"));
@@ -777,13 +780,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| {
             for id in &ids {
-                inner
-                    .conn
-                    .execute(
-                        "DELETE FROM secure_staged WHERE hash=?",
-                        [id.as_bytes().to_vec()],
-                    )
-                    .await?;
+                for sql in [
+                    "DELETE FROM secure_staged WHERE hash=?",
+                    "DELETE FROM secure_entry_frames WHERE hash=?",
+                ] {
+                    inner.conn.execute(sql, [id.as_bytes().to_vec()]).await?;
+                }
             }
             inner.void_bundle(bundle).await?;
             inner
@@ -885,6 +887,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<CoordinatedStatus, CoordinatedError> {
         let head = coordinator.log_head(log).await.map_err(coordination)?;
         self.inner.lock().await.learn_genesis(log, &head).await?;
+        // Trusted nodes take cuts from the coordinator head only.
+        if let Some(cut) = &head.cut {
+            self.receive_cuts(&[CutEvidence::from_log(cut)?]).await?;
+        }
         let me = coordinator.node();
         // A staged entry whose append a restart lost: its first outcome
         // decides. One this process proposes next is left to `propose`.
@@ -1028,25 +1034,64 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
         through: u64,
     ) -> Result<(), CoordinatedError> {
+        // Hashes before the window that a cut's retained chain endorsed.
+        let mut endorsed: BTreeMap<u64, Commitment> = BTreeMap::new();
         loop {
             let (position, running, _, _) = self.inner.lock().await.log_state(log).await?;
             if position >= through {
                 return Ok(());
             }
-            let entries = peers
+            let next = {
+                let mut inner = self.inner.lock().await;
+                // A held cut whose retained prefix ends here moves past it.
+                if let Some(cut) = inner
+                    .cut_after(log, position)
+                    .filter(|cut| cut.statement.entry() <= head.commit)
+                {
+                    let jumped = transaction!(inner, |inner| inner.jump_cut(&cut).await)?;
+                    inner.flush()?;
+                    if !jumped {
+                        return Err(CoordinatedError::Behind);
+                    }
+                    continue;
+                }
+                inner.next_cut(log, position)
+            };
+            let limit = next
+                .as_ref()
+                .map_or(through, |cut| cut.statement.retained.position.min(through));
+            if head.committed(position + 1).is_none() && !endorsed.contains_key(&(position + 1)) {
+                let (Some(cut), Some(running)) = (&next, running) else {
+                    return Err(CoordinatedError::Behind);
+                };
+                let hashes = cut::endorsed_hashes(log, cut, (position, running), peers).await?;
+                endorsed.extend(
+                    hashes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(offset, hash)| (position + 1 + offset as u64, hash)),
+                );
+            }
+            let entries: Vec<CommittedEntry> = peers
                 .committed(log, position)
                 .await
-                .map_err(|_| CoordinatedError::Behind)?;
+                .map_err(|_| CoordinatedError::Behind)?
+                .into_iter()
+                .take_while(|entry| entry.position <= limit)
+                .collect();
             let Some(first) = entries.first() else {
                 return Err(CoordinatedError::Behind);
             };
             // Verify the whole page before applying any of it.
             let mut chained = running.or(first.before).ok_or(CoordinatedError::Behind)?;
             for (offset, entry) in entries.iter().enumerate() {
+                let expected = head
+                    .committed(entry.position)
+                    .or_else(|| endorsed.get(&entry.position).copied());
                 if entry.position != position + 1 + offset as u64
                     || entry.position > head.commit
                     || entry_hash(log, entry.position, &entry.ids)? != entry.hash
-                    || head.committed(entry.position) != Some(entry.hash)
+                    || expected != Some(entry.hash)
                     || entry
                         .frames
                         .iter()
@@ -1059,10 +1104,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     return Err(CoordinatedError::Behind);
                 }
             }
-            for entry in entries
-                .into_iter()
-                .take_while(|entry| entry.position <= through)
-            {
+            for entry in entries {
                 self.receive_entry(entry.frames, &entry.voids).await?;
                 let mut inner = self.inner.lock().await;
                 for id in &entry.ids {

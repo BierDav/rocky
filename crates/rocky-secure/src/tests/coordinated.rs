@@ -13,6 +13,8 @@ use rocky_core::{
 };
 use std::sync::{Arc, Mutex as StdMutex};
 
+mod cuts;
+
 type Replica = EncryptedReplica<TypedRows>;
 
 /// The in-process transport between trusted nodes.
@@ -512,6 +514,7 @@ async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &Priva
             )
             .await
             .unwrap();
+        target.receive_cuts(&page.cuts).await.unwrap();
         for status in target.receive_voids(&page.voids).await {
             status.unwrap();
         }

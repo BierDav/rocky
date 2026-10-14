@@ -21,15 +21,19 @@ every version that ever wrote. After this phase neither remains.
 - **Cuts are removed.** `SchemaChange::Breaking`, a horizon equal to the new
   generation, the forced rebootstrap, per-cut pseudonym keys and re-sealing
   for cuts are deleted. Decision 0066 is superseded in those parts.
-- **Required fields are additive.** A field that is required with a default
-  is an additive change: rows from older writers read the default.
+- **Required fields are additive.** A field that is required with a default,
+  new or once nullable, is an additive change: rows from older writers read
+  the default. A NULL that a frame of an older generation writes to a field
+  made required reads as its default, on every device; the switch rewrites
+  stored NULLs the same way.
   `migrations` stay and run once on the first issuer as ordinary signed
   writes, of any size after [phase 7](07-migrations-at-any-size.md);
   nobody's work is dropped.
 - **Shopping schema 7** becomes an additive generation; its migration is
   unchanged.
-- **Manifests are a cache.** A device drops a manifest once no retained
-  frame, checkpoint or credential names it; [phase 2](02-adopting-newer-generations.md)
+- **Manifests are a cache.** A device drops a manifest, other than its
+  installed generation's, once no retained frame, checkpoint or credential
+  names it; [phase 2](02-adopting-newer-generations.md)
   fetches it again from whoever serves such a frame. Retained history follows
   the existing horizon finalization, independent of schema versions.
 - **Removed identities** leave nothing behind.
@@ -46,5 +50,7 @@ every version that ever wrote. After this phase neither remains.
 - No code path signs a transition whose horizon is its new generation.
 - A v6 device keeps syncing with v7 devices; its new items read the default
   position.
+- A v6 frame that writes NULL to a field v7 made required reads as the
+  default on every v7 device.
 - Once its last frame is finalized, a version's manifest is gone from every
   device; a frame of that version arriving later fetches it again and applies.

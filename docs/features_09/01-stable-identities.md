@@ -27,8 +27,7 @@ rename around, and need no tooling in any language.
   `category2`. Generating random identities may come as tooling later.
 - **Re-adding an identity** a generation removed is allowed and means the
   same field again; its meaning and type are the developer's responsibility.
-  How devices converge on it is an
-  [open question](README.md#open-questions).
+  [Removal](03-removal.md#settled) settles how devices converge on it.
 - **One identity, one type.** `classify` refuses a changed type, collation or
   key role for an identity.
 - **Kotlin.** `identity` on columns and tables in the builder and the Room

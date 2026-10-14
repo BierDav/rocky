@@ -27,6 +27,11 @@ whatever schema its app declares, and keeps syncing.
   the generation's schema and publisher-signed manifest from the peer that
   served it, as members fetch an issuer's offer today, and verifies them.
   No chain of transitions is needed; ids are stable identities.
+- **A generation is its schema.** Transitions to the same schema hash,
+  signed by issuers that could not reach each other, are one generation. Its
+  baseline is the earliest signing time among them, on every device; a
+  device that learns an earlier one pulls again the frames stamped after it,
+  as [removal](03-removal.md#settled) does for a re-added field.
 - **Migrate first.** The device migrates its database to that generation
   with the existing [backfill and switch](../runtime/generations.md#plan-backfill-and-switch),
   durably and resumable, before it applies that generation's frames. It never
@@ -38,8 +43,7 @@ whatever schema its app declares, and keeps syncing.
   says so.
 - **App older than the database.** Opening with an app schema older than the
   installed one opens the installed database unchanged. Status reports that
-  the app is behind; sync continues. Opening with a newer schema upgrades as
-  today.
+  the app is behind; sync continues.
 - **Room.** The driver's Room profile answers `PRAGMA user_version` with the
   version the app declares, so a Room app older or newer than its database
   still opens; its DAOs that touch what differs fail with SQLite errors.
@@ -50,7 +54,7 @@ whatever schema its app declares, and keeps syncing.
   older generation adopts that generation before it acknowledges or
   finalizes. A copy whose state differs from a finalized cut, participant or
   not, imports the finalized checkpoint, as today.
-- **Older frames. Frames of devices that have not migrated yet are admitted
+- **Older frames.** Frames of devices that have not migrated yet are admitted
   under their own manifest, fetched on demand like a newer one.
 - **Old apps join.** Bootstrap installs the household's current generation,
   whatever the app declares, when the protocol is compatible.
@@ -73,5 +77,7 @@ whatever schema its app declares, and keeps syncing.
 - An old Room app opens the migrated database; a DAO on an unchanged table
   works and one on a removed column fails with a SQLite error.
 - A forged schema or manifest is refused before anything changes.
+- Two issuers that sign the same schema apart end on one generation with the
+  earlier baseline on every device.
 - A device on v8 that receives a v9 horizon statement migrates to v9 before
   acknowledging it.

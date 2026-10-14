@@ -27,8 +27,8 @@ result is published as many bundles.
   version keeps its database at the household's generation; its app's
   queries on what the new version adds fail, and status says an issuer with
   full access must migrate first.
-- **Order.** The issuer signs the generation first; its signing time is the
-  baseline. Then, at open and before the network starts, it runs every
+- **Order.** The issuer signs the generation first; the earliest signing
+  time is the [baseline](02-adopting-newer-generations.md#settled). Then, at open and before the network starts, it runs every
   migration step in one local SQL transaction of any size. That transaction
   also stores the net change as a staged publication and marks the migration
   done, so a crash either repeats nothing or loses nothing.
@@ -42,6 +42,14 @@ result is published as many bundles.
 - **Receivers.** Each bundle is ordinary. Until the last arrives, rows not
   reached yet read their default; the hidden-row rules settle references and
   unique values in between. Every device ends with the same rows.
+- **Concurrent issuers converge.** Issuers that cannot reach each other may
+  each migrate. An `insert` step derives each row's id from the generation,
+  the step and the selected row's key, never from the issuer's partition, so
+  both write the same rows and they merge. Inside a migration Rocky refuses
+  every other id source, such as `next_id` and `rocky_next_id`. Differing
+  updates meet by latest wins. No coordinator is needed;
+  [avoiding the duplicate work](../optimizations_on_demand/coordinated-migrations.md)
+  is deferred.
 - **Rows not held.** Rows the issuer did not hold when it migrated keep
   their default. Rocky guarantees convergence, not that a migration saw
   every row.
@@ -52,7 +60,7 @@ result is published as many bundles.
 
 1. Decision record 0071: staged migration publication and its handles.
 2. Sign-then-migrate flow at open, with the authority check and the
-   durable done mark.
+   durable done mark; deterministic `insert` ids and refused id sources.
 3. Capture beyond the bundle limits for migrations only; staging, chunked
    publication, resume.
 4. Status: publication progress; "an issuer with full access must migrate".
@@ -66,6 +74,8 @@ result is published as many bundles.
   repeating or duplicating a row; a crash before it repeats the migration.
 - An edit a member makes while bundles are still arriving wins on every
   device.
+- Two issuers that cannot reach each other both migrate; after they meet,
+  every device has the same rows and none twice.
 - An issuer without access to one partition cannot sign; a device whose app
   declares the new version keeps syncing on the old generation, and its
   queries on the new field fail with SQL errors.

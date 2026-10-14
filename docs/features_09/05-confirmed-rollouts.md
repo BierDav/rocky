@@ -10,8 +10,8 @@ Owner: `rocky-sdk` `database.rs` open and generation signing, and status; `sdks/
 Read [generations](../runtime/generations.md) and
 [SDK enrollment](../runtime/sdk-enrollment.md).
 
-Removal cannot be undone: once signed, new devices drop the data and old
-ones empty it. The issuer that first opens such a version must not sign it
+Removal cannot be undone: once signed, every device that adopts the
+generation drops the data. The issuer that first opens such a version must not sign it
 unasked. After this phase it reports the impact and signs only after the
 application confirms it.
 
@@ -20,8 +20,7 @@ application confirms it.
 - **When.** Opening a schema whose transition removes anything fails with a
   structured "confirmation required" result before any change. Additive
   transitions need no confirmation.
-- **Impact report.** It lists removed tables, fields and command versions
-  and the rows affected locally. It does not list devices: Rocky cannot know
+- **Impact report.** It lists removed tables and fields and the rows affected locally. It does not list devices: Rocky cannot know
   them, and a key may be used by several.
 - **Confirmation.** The application opens again with the report's digest.
   A digest for a different report is refused, so a confirmation never

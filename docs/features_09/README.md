@@ -25,11 +25,17 @@ still sync:
   the user before Rocky signs it.
 - **Migrations have no size limit.** They run in one local transaction on
   an issuer that can read and write every partition of the tables involved,
-  and leave as many bundles as they need.
+  and leave as many bundles as they need. They need no coordinator: issuers
+  that migrate concurrently converge on the same rows.
 - **No remnants.** Manifests are fetched when a frame needs one and dropped
   when no retained frame does. Transitions no longer carry an admission
   horizon, and the cut mechanism of
   [decision 0066](../decisions/0066-breaking-generations.md) is removed.
+- **Coordinated writes on ordinary rows.** Writes that must not race, such
+  as sequential invoice numbers, are bundles that every connected trusted
+  node stores before they become true; the coordinator orders them and
+  decides which history is canonical, without holding data. Strong commands
+  and command-controlled tables are removed.
 
 Rocky guarantees that every database eventually converges. It does not
 guarantee that no data is lost, nor that an app always runs on the complete
@@ -54,7 +60,8 @@ versions are tolerated belong to the application, not to Rocky.
   every device that runs the new generation, with their constraints; nothing
   is frozen, emptied in place or filled with synthetic values.
 - **Re-adding converges.** A generation that re-adds a removed identity
-  records its signing time as a baseline. Every device ignores writes to the
+  records its signing time as a baseline, the earliest if several issuers
+  signed it. Every device ignores writes to the
   field stamped before it, and a device adopting the generation pulls again
   the frames of that field's tables stamped after it. The
   [mergeable horizon](../runtime/mergeable-horizon.md) guarantees the rest:
@@ -73,8 +80,13 @@ versions are tolerated belong to the application, not to Rocky.
   sent; receivers apply its kept fields. Re-authoring is an ordinary new
   write with a new timestamp; the application can show what it would
   overwrite first.
-- **Commands follow the same rule.** An invocation of a removed command
-  version is held and reported, like a row change.
+- **No split brain.** A coordinated write is committed once every trusted
+  node in the coordinator's in-sync set stored it, and the set has at least
+  the domain's minimum size. A domain whose whole set is permanently cut off
+  is stuck until the domain owner signs a recovery cut; Rocky accepts this.
+- **The coordinator holds no data.** Per domain it keeps the in-sync set, the
+  log head and commit index with a bounded hash window: a few KiB, constant
+  over time, with lazy membership and no heartbeats.
 - **Old apps may join** a newer household when the protocol is compatible;
   their database starts at the household's generation.
 - One current version per format
@@ -91,18 +103,29 @@ versions are tolerated belong to the application, not to Rocky.
 | 5 | [Confirmed rollouts](05-confirmed-rollouts.md) | 3 | M | Removals are signed only after the app confirms an impact report |
 | 6 | [No remnants](06-no-remnants.md) | 2 | M | Cuts are removed; unused manifests are dropped |
 | 7 | [Migrations at any size](07-migrations-at-any-size.md) | 6 | M | A migration of 100,000 rows runs once and leaves as many bundles |
-| 8 | [Qualification](08-qualification.md) | 4, 7 | M | The shopping app removes `items.category` while an older desktop keeps syncing |
+| 8 | [Coordinated log](08-coordinated-log.md) | none | L | The coordinator orders one log per domain and commits entries the in-sync set stored |
+| 9 | [Coordinated writes](09-coordinated-writes.md) | 4, 8 | L | Trusted nodes make race-free writes as ordinary bundles, without split brain |
+| 10 | [Stuck recovery](10-stuck-recovery.md) | 9 | M | A stuck domain recovers what any device holds; the owner signs the rest away |
+| 11 | [Removing strong commands](11-removing-strong-commands.md) | 9 | L | Commands and command-controlled tables are gone; the examples use coordinated writes |
+| 12 | [Qualification](12-qualification.md) | 4, 5, 7, 10, 11 | M | The shopping app removes `items.category` while an older desktop keeps syncing |
 
 ```mermaid
 flowchart LR
-    P1["1 Stable identities (M)"] --> P2["2 Adopting newer generations (L)"]
+    P1["1 Stable identities (S)"] --> P2["2 Adopting newer generations (L)"]
     P2 --> P3["3 Removal (M)"]
     P3 --> P4["4 Held changes (L)"]
     P3 --> P5["5 Confirmed rollouts (M)"]
     P2 --> P6["6 No remnants (M)"]
     P6 --> P7["7 Migrations at any size (M)"]
-    P4 --> P8["8 Qualification (M)"]
-    P7 --> P8
+    P8["8 Coordinated log (L)"] --> P9["9 Coordinated writes (L)"]
+    P4 --> P9
+    P9 --> P10["10 Stuck recovery (M)"]
+    P9 --> P11["11 Removing strong commands (L)"]
+    P4 --> P12["12 Qualification (M)"]
+    P5 --> P12
+    P7 --> P12
+    P10 --> P12
+    P11 --> P12
 ```
 
 ## Reserved decision records
@@ -114,6 +137,8 @@ flowchart LR
 | 0069 | 4 | Held changes, void records and re-authoring |
 | 0070 | 5, 6 | Confirmed rollouts and the end of cuts |
 | 0071 | 7 | Staged migration publication |
+| 0072 | 8, 9 | The coordinated log and coordinated writes |
+| 0073 | 10, 11 | Stuck recovery and the end of strong commands |
 
 ## Open questions
 

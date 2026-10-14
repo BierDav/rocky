@@ -1,8 +1,10 @@
-# 8. Qualification
+# 12. Qualification
 
 Status: proposed; not started.
 Owner: `examples/shoppinglist-app` and its qualification harness. Depends on
-[phases 4](04-held-changes.md) and [7](07-migrations-at-any-size.md). Follow the
+[phases 4](04-held-changes.md), [5](05-confirmed-rollouts.md),
+[7](07-migrations-at-any-size.md), [10](10-stuck-recovery.md) and
+[11](11-removing-strong-commands.md). Follow the
 [execution contract](README.md#agent-execution-contract).
 
 ## Inputs and objective
@@ -43,5 +45,7 @@ while older versions keep syncing.
 - No device's file has `items.category` after it migrates; the app on 6
   fails only where it sets a category, and warns that it should update.
 - The re-authored category link appears on every device on 7 and 8.
+- A request made on the app on 6 is decided once by a coordinated write while
+  the trusted desktop and another trusted device are both in the in-sync set.
 - `./examples/shoppinglist-app/check` passes; measured sync timings are
   recorded with the qualification evidence.

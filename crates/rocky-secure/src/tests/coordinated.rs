@@ -457,6 +457,116 @@ async fn concurrent_invoices_are_sequential_on_every_device_and_members_see_no_a
 }
 
 #[tokio::test]
+async fn importing_a_checkpoint_never_reuses_a_voided_author_position() {
+    let fixture = Fixture::new(2).await;
+    let (alice, bob) = (&fixture.alice, &fixture.bob);
+    let scope = fixture.lineage.scope("items");
+    let first = fixture.slot(alice).await.unwrap();
+    let second = fixture.slot(bob).await.unwrap();
+    fixture.stage(alice, first, "alice").await.unwrap();
+    let lost = fixture.stage(bob, second, "bob").await.unwrap();
+    fixture.propose(alice).await.unwrap();
+    assert!(matches!(
+        fixture.propose(bob).await,
+        Err(CoordinatedError::Conflict)
+    ));
+    fixture.resolve(bob).await;
+
+    // Alice's checkpoint has never seen Bob's consumed position.
+    alice.1.checkpoint(scope).await.unwrap();
+    let credentials = fixture.lineage.credentials(3, &bob.0);
+    let offered = alice
+        .1
+        .checkpoint_offer(bob.0.public_key(), &credentials, scope)
+        .await
+        .unwrap()
+        .expect("checkpoint");
+    let checkpoint = offered.id().unwrap();
+    bob.1.begin_rebootstrap(offered).await.unwrap();
+    let mut after = None;
+    loop {
+        let page = alice
+            .1
+            .checkpoint_page(
+                bob.0.public_key(),
+                &credentials,
+                scope,
+                checkpoint,
+                after,
+                64 * 1024,
+            )
+            .await
+            .unwrap();
+        after = page.next;
+        bob.1.stage_checkpoint_page(page).await.unwrap();
+        if after.is_none() {
+            break;
+        }
+    }
+    bob.1.finish_rebootstrap(scope).await.unwrap();
+    let next = fixture.invoice(bob, "bob").await;
+    let previous = lost.last().unwrap().operation().unwrap();
+    let continued = next[0].operation().unwrap();
+    assert_eq!(continued.header.seq_num, previous.header.seq_num + 1);
+    assert_eq!(continued.header.backlink, Some(previous.hash));
+    fixture.resolve(alice).await;
+    for node in [alice, bob] {
+        assert_eq!(invoices(&node.1).await, numbered(2));
+        node.1.audit(scope).await.unwrap();
+    }
+}
+
+/// A live link disappears once after assignment, then becomes available again.
+struct Reconnecting {
+    peers: Peers,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+impl EntryPeers for Reconnecting {
+    fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()> {
+        Box::pin(async move {
+            if self
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                return Err(Error::Rejected("link is reconnecting".into()));
+            }
+            self.peers.store(node, entry).await
+        })
+    }
+    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+        self.peers.committed(log, after)
+    }
+}
+
+#[tokio::test]
+async fn a_proposal_retries_storage_after_a_transient_link_failure() {
+    let fixture = Fixture::new(2).await;
+    let alice = &fixture.alice;
+    let slot = fixture.slot(alice).await.unwrap();
+    fixture.stage(alice, slot, "alice").await.unwrap();
+    let peers = Reconnecting {
+        peers: fixture.mesh.peers(&fixture.lineage, &alice.0),
+        attempts: Default::default(),
+    };
+    let client = fixture.mesh.client(&alice.0);
+    let committed = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        alice.1.propose(fixture.lineage.domain, &client, &peers),
+    )
+    .await
+    .expect("storage must retry before the entry deadline")
+    .unwrap();
+    assert_eq!(committed.position, 1);
+    assert_eq!(peers.attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    fixture.resolve(&fixture.bob).await;
+    for node in [&fixture.alice, &fixture.bob] {
+        assert_eq!(invoices(&node.1).await, numbered(1));
+        assert_eq!(fixture.resolve(node).await.undecided, 0);
+    }
+}
+
+#[tokio::test]
 async fn a_proposer_crashing_before_its_append_commits_it_after_restart() {
     let fixture = Fixture::new(2).await;
     let slot = fixture.slot(&fixture.alice).await.unwrap();

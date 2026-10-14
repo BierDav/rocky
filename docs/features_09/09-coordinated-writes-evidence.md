@@ -82,6 +82,52 @@ Initial `./scripts/check` failed workspace Clippy:
 `await_holding_lock` in `resolve`. Fixed by passing the bundle identity as
 one pair and dropping the guard before the await; no lint was suppressed.
 
+## Invoice liveness and void-counter correction (2026-10-15)
+
+The Phase 5 full check exposed the live-link invoice gate failing intermittently
+with `no invoice committed`; a direct no-default-feature run also failed with
+`missing_dependencies` / `SQL session: items is not available: Incomplete`.
+The assertions were valid. Investigation found two production bugs:
+
+- A proposer sent storage requests once, then only polled the coordinator while
+  holding its resolution lock. A transient missing/replaced live link left the
+  entry pending although the peer became reachable. The proposer now retries
+  storage with the existing bounded polling backoff, only while that exact
+  position/hash remains pending. The original deadline, required acknowledgments
+  and durability boundaries are unchanged.
+- Importing a peer checkpoint reset the applied log frontier and could erase a
+  local void's higher consumed author position. A later write reused that
+  sequence; the receiver correctly refused it, and subsequent frames waited on
+  its missing backlink. Authoring now compares the applied tip with the last
+  voided position and continues after the newer one, including its hash and
+  clock. The lookup uses the existing `(scope,author,sequence)` primary key.
+
+`a_proposal_retries_storage_after_a_transient_link_failure` deterministically
+refuses the first delivery, then requires the same proposal to commit before its
+deadline and appear on both nodes. `importing_a_checkpoint_never_reuses_a_voided_author_position`
+forces a lost race, imports the winner's checkpoint that lacks the loser's void,
+and checks the next sequence/backlink, both projections and both audits.
+The SDK invoice gate retains its original retries, six invoices and assertions.
+No persisted or wire format changed.
+
+The correction is isolated in change `ptxlnlqx`, directly on Phase 9
+`uywtwqpr`. Phase 5 rollout code is a separate descendant. The SDK invoice
+test and its retry counts, assertions and deadlines are unchanged.
+
+Repair-only verification in `rocky-02` on 2026-10-15:
+
+- `cargo build -p rocky-secure -p rocky-sdk --no-default-features --locked`
+  passed.
+- `cargo test -p rocky-sdk --no-default-features --test coordinated
+  trusted_devices_number_concurrent_invoices_without_gaps --locked -- --exact
+  --nocapture` passed **21 of 21** consecutive runs, with zero failures and
+  no sleeps between invocations. Test durations were 0.47–0.57 s.
+- `cargo test -p rocky-secure tests::coordinated --locked` passed all eight
+  coordinated regression tests; output: `/tmp/rocky02-repair-regressions.log`.
+- Full output: `/tmp/rocky02-repair-build.log` and
+  `/tmp/rocky02-repair-repeat.log`. This sample establishes neither
+  real-network reliability nor an absence of other concurrency failures.
+
 ## Limits
 
 In-process coordinator (`MemoryLog`) and in-memory transports; the voter

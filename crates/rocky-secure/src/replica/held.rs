@@ -661,6 +661,53 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    /// Author counters include voids even when a checkpoint replaced the applied tip.
+    pub(super) async fn author_tip(
+        &self,
+        scope: ResourceScope,
+        id: i64,
+        author: PublicKey,
+    ) -> Result<Option<checkpoint::Log>, Error> {
+        let tip = self.log(id, author).await?;
+        let Some(voided) = self.voided_tip(scope, author).await? else {
+            return Ok(tip);
+        };
+        if tip
+            .as_ref()
+            .is_some_and(|tip| tip.sequence as u64 > voided.seq_num)
+        {
+            return Ok(tip);
+        }
+        if let Some(tip) = &tip
+            && tip.sequence as u64 == voided.seq_num
+            && tip.hash != voided.hash()
+        {
+            return Err(Error::Corrupt(
+                "applied and voided author positions conflict".into(),
+            ));
+        }
+        Ok(Some(checkpoint::Log {
+            sequence: voided.seq_num as i64,
+            hash: voided.hash(),
+            clock: voided.timestamp,
+            horizon: tip.map_or(-1, |tip| tip.horizon),
+        }))
+    }
+    /// The last consumed position, independent of an imported checkpoint's frontier.
+    async fn voided_tip(
+        &self,
+        scope: ResourceScope,
+        author: PublicKey,
+    ) -> Result<Option<Header<Extensions>>, Error> {
+        let mut found = self.conn.query(
+            "SELECT header FROM secure_voids WHERE scope=? AND author=? ORDER BY sequence DESC LIMIT 1",
+            [encode(&scope)?, author.as_bytes().to_vec()],
+        ).await?;
+        match found.next().await? {
+            Some(row) => decode(&row.get::<Vec<u8>>(0)?).map(Some),
+            None => Ok(None),
+        }
+    }
     /// The voided header of `hash`, if a void consumed it.
     async fn voided_header(&self, hash: Hash) -> Result<Option<Header<Extensions>>, Error> {
         let mut found = self

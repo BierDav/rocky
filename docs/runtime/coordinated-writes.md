@@ -37,7 +37,9 @@ of a table coordinated keep that discipline themselves.
 4. **Store, then acknowledge.** The proposer sends the entry, with the void
    records its frames continue after, to every other in-sync node. Each
    stores it durably and unapplied, then acknowledges it itself; the
-   proposer acknowledges last.
+   proposer acknowledges last. While the entry remains pending, the proposer
+   retries storage with bounded backoff, so a replaced live link can recover
+   before the existing deadline.
 5. **Commit, then publish.** Once every in-sync node acknowledged, the
    coordinator commits it. Each node then applies it in log order and may
    serve its frames to members. Members only ever receive committed entries

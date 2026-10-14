@@ -53,7 +53,9 @@ position, or when its log already passed one: a void never covers an offered
 frame. Admitted positions count as consumed: they continue the frontier, a
 later frame whose backlink or dependency is voided applies once the frames
 before the void did, and a frame arriving at a voided position is a fork and
-is not stored.
+is not stored. An imported checkpoint may predate a local void; authoring
+still continues after the highest applied or voided position, preserving its
+backlink and clock.
 
 Range pages, pushes on sessions and live links, and transfer pages carry the
 records their frames continue after. The file identity is

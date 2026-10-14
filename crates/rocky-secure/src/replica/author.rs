@@ -164,7 +164,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("author needs an authorized row key"))?;
         // The log tip outlives its pruned operation, so counters continue.
         let id = self.scope_id(scope).await?;
-        let tip = self.log(id, signing_key.public_key()).await?;
+        let tip = self.author_tip(scope, id, signing_key.public_key()).await?;
         self.admit_author(scope, tip.as_ref().map(|log| log.sequence))
             .await?;
         let (sequence, backlink, mut clock) = match tip {

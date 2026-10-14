@@ -185,6 +185,20 @@ pub struct GenerationStatus {
     /// When the earliest transition into the current generation was signed.
     pub baseline: Option<u64>,
     pub application: DeclaredSchema,
+    /// A migration this device waits for or publishes.
+    pub migration: Option<MigrationStatus>,
+}
+/// A schema migration as this device sees it. See
+/// `docs/runtime/generations.md#migrations`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MigrationStatus {
+    /// The application's schema has migrations this device may not run:
+    /// an issuer that reads and writes every partition must migrate first.
+    FullAccessRequired,
+    /// Bundles of migrations this device ran, and how many of them, in
+    /// order, a peer holds.
+    Publishing { bundles: u64, published: u64 },
 }
 /// How the schema the application declares stands to the installed
 /// generation's. An application behind or ahead of its database still

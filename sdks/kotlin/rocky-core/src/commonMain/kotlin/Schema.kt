@@ -66,8 +66,8 @@ data class Schema(
 }
 
 /**
- * What the first issuer to open the schema runs once, in one transaction, before the fields it now requires are
- * enforced; see `docs/runtime/generations.md#required-fields`.
+ * What the first issuer to sign the schema's generation runs once, after signing, in one transaction of any size;
+ * see `docs/runtime/generations.md#migrations`.
  */
 data class Migration(val version: Int, val steps: List<MigrationStep>) {
     init {

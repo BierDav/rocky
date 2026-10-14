@@ -785,33 +785,30 @@ pub(crate) async fn retain(
     Ok(())
 }
 
-/// Completes requiring fields this issuer started: at the generation that
-/// holds them nullable, runs the schema's migrations once in one
-/// transaction, then signs `schema`. Rows the migrations leave NULL read the
-/// default, like rows of older writers. Nothing leaves this device in
-/// between: the network starts after the open. See
-/// `docs/runtime/generations.md#required-fields`.
+/// Runs the migrations of the generation this issuer signed, above
+/// application version `from`, in one SQL transaction of any size. It
+/// commits as the staged publication of the generation: consecutive
+/// bundles, and the record that marks it done. Nothing leaves this device
+/// before: the network starts after the open. See
+/// `docs/runtime/generations.md#migrations`.
 async fn migrate(
     directory: &Path,
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
     path: &Path,
-    schema: &Schema,
+    from: u32,
 ) -> Result<(), Failure> {
+    let schema = settings.schema.clone();
+    if !crate::generation::migrates(&schema, from) {
+        return crate::generation::Migration::remove(path);
+    }
     let domain = settings.domain()?;
     // Every partition the domain knows is migrated here, or none is.
-    for partition in settings.partitions(&domain)? {
-        if !partition
-            .members
-            .iter()
-            .all(|member| settings.reads_partition(member))
-        {
-            return Err(format!(
-                "a migration needs every partition of group {}; this issuer cannot read one",
-                partition.record.group
-            )
-            .into());
-        }
+    if !settings.may_migrate(&domain)? {
+        return Err(
+            "a migration needs an issuer that reads and writes every partition of the domain"
+                .into(),
+        );
     }
     let replica = EncryptedReplica::open_upgrading(
         directory.join("rocky.sqlite"),
@@ -831,15 +828,13 @@ async fn migrate(
         let key = PrivateKey::from_bytes(&vault.get(&settings.pseudonym_role(&collection))?);
         replica.register_row_author(key, chain).await?;
     }
-    // The installed application version, recorded when the nullable
-    // fields were signed as a step of their own.
-    let marker =
-        crate::generation::Migration::read(path)?.unwrap_or(crate::generation::Migration {
-            from: settings.schema.version,
-            done: false,
-        });
-    let from = marker.from;
-    if !marker.done {
+    let publication = publication(&domain);
+    if !replica
+        .publications()
+        .await?
+        .iter()
+        .any(|done| done.id == publication)
+    {
         let session = replica
             .session(
                 settings
@@ -849,9 +844,13 @@ async fn migrate(
                     .collect(),
             )
             .await?;
+        // A migration is bounded by the transaction's time alone.
         let sql = session
             .sql(rocky_secure::SqlOptions {
-                transaction_timeout: std::time::Duration::from_secs(60),
+                transaction_timeout: rocky_secure::MAX_TRANSACTION_TIMEOUT,
+                statement_budget: rocky_secure::MAX_TRANSACTION_TIMEOUT,
+                captured_rows: usize::MAX,
+                captured_bytes: usize::MAX,
                 ..Default::default()
             })
             .await?;
@@ -881,22 +880,16 @@ async fn migrate(
                 }
             }
         }
-        let handle = rocky_core::commitment(
-            "rocky.sdk.migration.v1",
-            &[settings.manifest.as_bytes(), &schema.version.to_le_bytes()].concat(),
-        );
-        sql.commit(handle).await?;
+        sql.commit_publication(publication).await?;
         drop((sql, session));
         replica.flush().await?;
-        crate::generation::Migration { from, done: true }.write(path)?;
     }
     drop(replica);
-    settings.require(path, vault, schema)?;
-    match std::fs::remove_file(crate::generation::Migration::path(path)) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-        _ => {}
-    }
-    Ok(())
+    crate::generation::Migration::remove(path)
+}
+/// The staged publication of the migration into `domain`'s generation.
+pub(crate) fn publication(domain: &crate::domain::Domain) -> rocky_core::Commitment {
+    rocky_core::commitment("rocky.sdk.migration.v2", &domain.manifest().hash())
 }
 /// Inserts a row of `table` for each row of `select`, with the next id of
 /// its partition, inside the open transaction.
@@ -1106,9 +1099,9 @@ async fn run(
             }
             None => None,
         };
-        // Fields this issuer started requiring: migrate, then require them.
-        if settings.schema != setup.schema && settings.started_requiring(&setup.schema)? {
-            migrate(&directory, &mut settings, &vault, &path, &setup.schema).await?;
+        // The migrations of a generation this issuer signed.
+        if let Some(pending) = crate::generation::Migration::read(&path)? {
+            migrate(&directory, &mut settings, &vault, &path, pending.from).await?;
         }
         let domain = settings.domain()?.hosted(host);
         // A restored file is rebound to this device's identity first.

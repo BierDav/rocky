@@ -193,6 +193,7 @@ impl<A: RowApplication> Inner<A> {
                     "DELETE FROM secure_unoffered WHERE hash=?",
                     "DELETE FROM secure_ack WHERE hash=?",
                     "DELETE FROM secure_applied WHERE hash=?",
+                    "DELETE FROM secure_publication_frames WHERE hash=?",
                 ] {
                     inner.conn.execute(sql, [hash.clone()]).await?;
                 }

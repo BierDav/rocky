@@ -276,9 +276,14 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
     a.close().await;
 
     let a = Device::new(Database::open(open(&dirs("a"), REQUIRED, network("a")))?)?;
+    // Signed first, then migrated in that generation: one step.
     let status = generation(&a).await;
-    assert_eq!(status["current"]["schema"], 3, "{status}");
+    assert_eq!(status["current"]["schema"], 2, "{status}");
     assert_eq!(status["application"], "current");
+    assert_eq!(
+        status["migration"],
+        json!({"state": "publishing", "bundles": 1, "published": 0})
+    );
     let positions = json!([
         [text("apples"), text("0000")],
         [text("bread"), text("0001")],
@@ -295,6 +300,8 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
     c.sync().await.expect("sync");
     c.sync().await.expect("sync");
     assert_eq!(generation(&c).await["application"], "behind");
+    // A peer holds the migration's bundle: nothing is left to publish.
+    assert_eq!(generation(&a).await["migration"], Value::Null);
     assert_eq!(a.titles().await, ["apples", "bread", "cherries", "stale"]);
     assert_eq!(
         rows(&a, "SELECT position FROM items WHERE title='stale'").await,
@@ -404,7 +411,7 @@ async fn requiring_a_field_rebuilds_tables_with_unique_indexes() -> Result<(), F
     a.add(2, "bread").await;
     a.close().await;
     let a = Device::new(Database::open(open(root.path(), UNIQUE_REQUIRED, None))?)?;
-    assert_eq!(generation(&a).await["current"]["schema"], 3);
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
         rows(&a, "SELECT title, position FROM items ORDER BY position").await,
         json!([

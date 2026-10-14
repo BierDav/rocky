@@ -902,3 +902,30 @@ async fn an_earlier_signed_step_moves_the_baseline() -> Result<(), Failure> {
     assert!(merged.earlier_baselines(&at(signed.time - 30)?)?.is_none());
     Ok(())
 }
+
+#[test]
+fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<(), Failure> {
+    let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let domain = issuer.domain()?;
+    assert!(issuer.may_migrate(&domain)?);
+    // A group whose secret this issuer never received: it cannot read it.
+    let mut partition = GroupPartition::resolve(
+        &domain,
+        Some("list"),
+        None,
+        vec![rocky_core::SqlValue::Text("L".into())],
+    )?;
+    let address = crate::groups::record_key(&partition.record.address);
+    issuer
+        .groups
+        .insert(address.clone(), partition.record.clone());
+    assert!(!issuer.may_migrate(&domain)?);
+    // Holding it, under the wildcard grants of its own credentials, it may.
+    partition
+        .record
+        .hold(rocky_core::KeyEpoch::new(1, &[19; 32]))?;
+    issuer.groups.insert(address, partition.record);
+    assert!(issuer.may_migrate(&domain)?);
+    Ok(())
+}

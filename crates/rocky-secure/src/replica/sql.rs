@@ -91,6 +91,14 @@ impl<A: RowApplication> Drop for SecureSql<A> {
     }
 }
 
+/// What a commit publishes the transaction as.
+#[derive(Clone, Copy)]
+enum Target {
+    /// One bundle, under the caller's handle or a random one.
+    Bundle(Option<Commitment>),
+    /// The consecutive bundles of a staged publication.
+    Publication(Commitment),
+}
 /// What a commit resolves besides its rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -99,7 +107,6 @@ enum Kind {
     Reauthors(Commitment),
     Coordinated(Slot),
 }
-
 enum Sealed {
     Commit(SecureCommit),
     /// The handle committed these frames before; this transaction rolls back.
@@ -352,13 +359,19 @@ impl<A: RowApplication> SecureSql<A> {
     /// Runs one statement. Transaction control is interpreted here, as in
     /// a trusted `SqlSession`.
     pub async fn run(&self, sql: &str, params: Vec<SqlValue>) -> Result<SecureRows, Error> {
-        self.call(sql, params, None, Kind::Plain).await
+        self.call(sql, params, Target::Bundle(None), Kind::Plain)
+            .await
     }
     /// Commits the open transaction under `handle`. The same handle and
     /// changed rows return the committed frames again; other rows conflict.
     pub async fn commit(&self, handle: Commitment) -> Result<SecureRows, Error> {
-        self.call("COMMIT", Vec::new(), Some(handle), Kind::Plain)
-            .await
+        self.call(
+            "COMMIT",
+            Vec::new(),
+            Target::Bundle(Some(handle)),
+            Kind::Plain,
+        )
+        .await
     }
     /// Commits the open transaction as the re-authoring of the held change
     /// `held`, which leaves the list in the same transaction. The rows are
@@ -368,8 +381,13 @@ impl<A: RowApplication> SecureSql<A> {
         handle: Commitment,
         held: Commitment,
     ) -> Result<SecureRows, Error> {
-        self.call("COMMIT", Vec::new(), Some(handle), Kind::Reauthors(held))
-            .await
+        self.call(
+            "COMMIT",
+            Vec::new(),
+            Target::Bundle(Some(handle)),
+            Kind::Reauthors(held),
+        )
+        .await
     }
     /// Commits the open transaction as a coordinated write staged at
     /// `slot`: the bundle stays unsent until `EncryptedReplica::propose`
@@ -382,12 +400,32 @@ impl<A: RowApplication> SecureSql<A> {
         let trusted = &self.session.replica.domain_log;
         trusted.begin_proposal(slot.log);
         let staged = self
-            .call("COMMIT", Vec::new(), Some(handle), Kind::Coordinated(slot))
+            .call(
+                "COMMIT",
+                Vec::new(),
+                Target::Bundle(Some(handle)),
+                Kind::Coordinated(slot),
+            )
             .await;
         if staged.is_err() {
             trusted.end_proposal(slot.log);
         }
         staged
+    }
+    /// Commits the open transaction, of any size, as the consecutive
+    /// bundles of `publication`, each within the bundle bounds, parents
+    /// first. Each bundle's handle derives from `publication` and its
+    /// position; the record of the publication commits in the same
+    /// transaction. A recorded publication returns its frames again and
+    /// this transaction rolls back. See [`EncryptedReplica::publications`].
+    pub async fn commit_publication(&self, publication: Commitment) -> Result<SecureRows, Error> {
+        self.call(
+            "COMMIT",
+            Vec::new(),
+            Target::Publication(publication),
+            Kind::Plain,
+        )
+        .await
     }
     /// Rolls the open transaction back; later statements report
     /// `Aborted(Cancelled)` until the caller sends `ROLLBACK`.
@@ -408,7 +446,7 @@ impl<A: RowApplication> SecureSql<A> {
         &self,
         sql: &str,
         params: Vec<SqlValue>,
-        handle: Option<Commitment>,
+        target: Target,
         commit: Kind,
     ) -> Result<SecureRows, Error> {
         let control = classify(sql).map_err(Error::Sql)?;
@@ -460,7 +498,7 @@ impl<A: RowApplication> SecureSql<A> {
             {
                 Err(refused("no transaction is active"))
             }
-            Control::Commit => self.finish(&mut lease, handle, None, commit).await,
+            Control::Commit => self.finish(&mut lease, target, None, commit).await,
             Control::Rollback => {
                 lease.held = None;
                 Ok(empty(&lease, SqlState::Idle))
@@ -468,7 +506,7 @@ impl<A: RowApplication> SecureSql<A> {
             Control::Release(name) => {
                 let index = position(&lease, &name)?;
                 if index == 0 && lease.implicit {
-                    return self.finish(&mut lease, handle, None, Kind::Plain).await;
+                    return self.finish(&mut lease, target, None, Kind::Plain).await;
                 }
                 self.engine(&lease, &format!("RELEASE rocky_user_{index}"))?;
                 lease.savepoints.truncate(index);
@@ -534,7 +572,7 @@ impl<A: RowApplication> SecureSql<A> {
                 if active {
                     self.statement(&mut lease, sql, params, false)
                 } else {
-                    self.autocommit(&mut lease, sql, params, handle).await
+                    self.autocommit(&mut lease, sql, params, target).await
                 }
             }
         }
@@ -546,7 +584,7 @@ impl<A: RowApplication> SecureSql<A> {
         lease: &mut Lease<A>,
         sql: &str,
         params: Vec<SqlValue>,
-        handle: Option<Commitment>,
+        target: Target,
     ) -> Result<SecureRows, Error> {
         {
             let inner = self.session.replica.inner.lock().await;
@@ -564,7 +602,7 @@ impl<A: RowApplication> SecureSql<A> {
                 return Err(error);
             }
         };
-        self.finish(lease, handle, Some(rows), Kind::Plain).await
+        self.finish(lease, target, Some(rows), Kind::Plain).await
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
         let inner = self.session.replica.inner.clone().lock_owned().await;
@@ -801,7 +839,7 @@ impl<A: RowApplication> SecureSql<A> {
     async fn finish(
         &self,
         lease: &mut Lease<A>,
-        handle: Option<Commitment>,
+        target: Target,
         rows: Option<SecureRows>,
         commit: Kind,
     ) -> Result<SecureRows, Error> {
@@ -813,7 +851,7 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         qualification_kill("before");
-        let sealed = self.seal(inner, handle, commit).await;
+        let sealed = self.seal(inner, target, commit).await;
         inner.strict_projection = false;
         let committed = match sealed? {
             // `held` rolls the repeated transaction back.
@@ -860,7 +898,7 @@ impl<A: RowApplication> SecureSql<A> {
     async fn seal(
         &self,
         inner: &mut Inner<A>,
-        handle: Option<Commitment>,
+        target: Target,
         commit: Kind,
     ) -> Result<Sealed, Error> {
         let capture_error = |reason: String| Error::Sql(SqlError::Capture(reason));
@@ -1040,6 +1078,22 @@ impl<A: RowApplication> SecureSql<A> {
             }
         }
         admit(inner, &self.session)?;
+        let handle = match target {
+            Target::Bundle(handle) => handle,
+            Target::Publication(publication) => {
+                inner.strict_projection = true;
+                let (frames, replayed) = inner.stage_publication(publication, writes).await?;
+                let committed = SecureCommit {
+                    handle: publication,
+                    frames,
+                };
+                return Ok(if replayed {
+                    Sealed::Replayed(committed)
+                } else {
+                    Sealed::Commit(committed)
+                });
+            }
+        };
         let handle = handle.unwrap_or_else(|| {
             let mut handle = [0; 32];
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);

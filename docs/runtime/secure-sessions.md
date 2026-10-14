@@ -26,6 +26,9 @@ let frames = replica
 | Rows per bundle (`MAX_BUNDLE_ROWS`) | 2,048; each row once |
 | Encoded writes (`MAX_BUNDLE_BYTES`) | 4 MiB |
 
+A larger SQL transaction commits as consecutive bundles, a
+[staged publication](secure-sql.md#staged-publications).
+
 Every write is admitted against the node's grants and the application checks
 the exact transaction across scopes. One refused write, an exceeded bound or
 a failure before the commit commits nothing, frames already signed for other

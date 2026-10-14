@@ -319,9 +319,9 @@ impl<A: RowApplication> Inner<A> {
         Ok(true)
     }
     /// Replaces tables whose visible rows depend on unique indexes or foreign
-    /// keys: every candidate decides them, so instead of filling shadows the
-    /// tables are recreated and resolved from the stored rows in one
-    /// transaction, as at installation.
+    /// keys, or live in partitions: instead of filling shadows the tables are
+    /// recreated and resolved from the stored rows in one transaction, as at
+    /// installation.
     async fn switch_constrained(
         &mut self,
         record: &Record,
@@ -687,7 +687,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 
-/// Whether either schema's tables carry unique indexes or foreign keys.
+/// Whether either schema's tables carry unique indexes or foreign keys, or
+/// the new one partitions a table: a shadow fills from its table's scope
+/// alone, and partitioned rows are stored under each partition's.
 fn constrained(
     installed: &LogicalSchema,
     schema: &LogicalSchema,
@@ -698,6 +700,10 @@ fn constrained(
         .tables
         .iter()
         .any(|table| installed.constrained(table))
+        || schema
+            .tables
+            .iter()
+            .any(|table| !table.partition_by.is_empty())
         || Typed::new(schema.clone(), domain, readers)?
             .constraints
             .is_some())

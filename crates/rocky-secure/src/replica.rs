@@ -16,6 +16,7 @@ mod holdings;
 mod horizon;
 mod identity;
 mod protection;
+pub(crate) mod publication;
 pub(crate) use horizon::HorizonFinalization;
 pub use horizon::{HorizonPending, HorizonProgress};
 mod incoming;
@@ -63,6 +64,7 @@ pub use migrate::{PLAN_ROWS, ProjectionPlan};
 pub use offload::RemotePage;
 use p2panda_core::validate_backlink;
 use p2panda_store::operations::LocalOperationStore;
+pub use publication::Publication;
 pub use queries::Describe;
 use rocky_core::{
     Commitment, ResourceScope, Right, RowApplication, RowChange, RowFields, RowSelection, RowWrite,
@@ -329,6 +331,10 @@ pub(super) struct Inner<A> {
     names: generation::Names,
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
+    /// Set while a staged publication authors its bundles: one atomic
+    /// transaction of any size, so the retained-history bound cannot hold
+    /// it back; later writes wait until it is delivered and pruned.
+    publishing: bool,
     /// Constrained rows a change may affect, until the frame or commit settles.
     settling: std::sync::Mutex<constraints::Seeds>,
     /// This device's grants as last resolved, for the authority, partition
@@ -550,6 +556,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         horizon::SCHEMA,
         constraints::SCHEMA,
         chains::SCHEMA,
+        publication::SCHEMA,
     ]
     .into_iter()
     .flat_map(|schema| schema.iter().copied())
@@ -583,7 +590,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v18" {
+    if label != "rocky.encrypted-replica.v19" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -751,6 +758,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             previous: Vec::new(),
             names: generation::Names::default(),
             strict_projection: false,
+            publishing: false,
             settling: Default::default(),
             local: Default::default(),
             local_selectors: Default::default(),
@@ -1514,7 +1522,11 @@ impl<A: RowApplication> Inner<A> {
     /// Backpressure once retained history reaches the hard bound; automatic
     /// checkpointing and pruning start at the soft bound and make room.
     async fn check_budget(&self, incoming: usize) -> Result<(), Error> {
+        if self.publishing {
+            return Ok(());
+        }
         let (_, bytes) = self.retained().await?;
+        let bytes = bytes.saturating_sub(self.staged_bytes().await?);
         if bytes.saturating_add(incoming as u64) > self.limits.hard_bytes as u64 {
             return Err(Error::Backpressure);
         }

@@ -120,6 +120,12 @@ truncated.
 | `result_bytes` | 16 MiB | `Quota`; a writing statement's transaction is rolled back |
 | `acknowledge` | `Flushed` | A commit is reported after a full flush |
 
+A secure commit is one bundle, at most 2,048 rows. A schema
+[migration](generations.md#migrations) raises the capture bounds to their
+maximum, runs for up to 60 s and commits as a
+[staged publication](secure-sql.md#staged-publications) of as many bundles as
+it needs.
+
 A transaction holds its file's writer. Every other write of the file, in any
 domain, waits until it ends, so a long transaction delays local writes and
 incoming sync by up to its timeout. Reads are answered meanwhile.

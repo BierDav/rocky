@@ -87,7 +87,7 @@ class SchemaBuilder internal constructor(private val application: String, privat
     var commands: CommandSet? = null
     private val migrations = mutableListOf<Migration>()
 
-    /** Steps computing values for the fields schema [version] requires of existing rows; see [Migration]. */
+    /** Steps computing values schema [version] needs in existing rows; see [Migration]. */
     fun migration(version: Int, block: MigrationBuilder.() -> Unit) {
         migrations += Migration(version, MigrationBuilder().apply(block).steps.toList())
     }

@@ -41,7 +41,7 @@ creates shadow tables, fills 256 stored rows per transaction, verifies projectio
 against canonical stored rows and switches all affected tables in one transaction.
 Concurrent committed updates also maintain the shadow. Readers see the old view
 until switch, then the complete new view. Tables with unique indexes or foreign
-keys have no shadow: every candidate decides which rows show, so the switch
+keys, and every schema with a partitioned table, have no shadow: every candidate decides which rows show, so the switch
 recreates them and resolves the stored rows in one transaction, proportional to
 the domain's rows. Notifications follow commit; old secure
 sessions and cursors become stale at the authority switch.
@@ -106,26 +106,48 @@ projection switch rewrites stored NULLs the same way. A device whose
 application predates the field keeps syncing; its new rows read the
 default.
 
-The first issuer to open the new schema migrates, after asking its known
-issuers for the generation (one already signed is adopted like a member's):
+The schema's `migrations` compute its values once, on one issuer
+([migrations](#migrations)).
 
-1. It signs a step holding the required fields nullable, unless they already are.
-2. At open, before the network starts, it renews its pseudonyms for that
-   generation and runs `migrations` with versions above the installed one in
-   one SQL transaction. A step is SQL, or `{"insert": table, "select": sql}`,
-   which inserts a row per selected row with an `id` Rocky issues in its
-   partition. It needs every partition the domain knows. `migration.json`
-   records the version it migrates from and completion until the generation
-   is signed, so a retry does not run statements twice.
-3. It signs the schema and opens at it.
+## Migrations
 
-The migration's results are ordinary signed writes; nobody's work is
-dropped. A member fetches the generation from an issuer that signed it.
-Rows the migrating issuer did not hold keep their default. The migration is
-one transaction, so it changes at most [2,048 rows](sql-driver.md) until
-[phase 7](../features_09/07-migrations-at-any-size.md). Two issuers that open
-the new schema without reaching each other each migrate; the steps are one
-generation, and their writes merge.
+[Decision 0071](../decisions/0071-staged-migration-publication.md) records
+the design. An issuer whose application declares a schema with migrations
+above its installed version moves the domain to it:
+
+1. It asks its known issuers for the generation; one already signed is
+   adopted like a member's, and nothing runs.
+2. It may migrate only if it holds the key of, and reads and writes, every
+   partition the domain knows. Otherwise it opens at the domain's
+   generation, and status reports `full_access_required`.
+3. It records the version it migrates from in `migration.json` and signs
+   the schema; the earliest signing time is the generation's baseline.
+4. At open, before the network starts, it renews its pseudonyms and runs
+   every migration above that version, in order, in one SQL transaction of
+   any size, in the new generation. A step is SQL, or
+   `{"insert": table, "select": sql}`, which inserts a row per selected row
+   with an `id` Rocky issues in its partition. Migration SQL cannot call
+   `rocky_next_id`.
+5. The transaction commits as a staged publication: the net change as
+   consecutive ordinary bundles within the [bundle bounds](secure-sessions.md#bundles),
+   parents first, all stamped at that commit, and the record that marks the
+   migration done. A crash before the commit repeats the migration; after
+   it, nothing runs again.
+
+The bundles leave by ordinary sync, a restart included, until peers hold
+them. Status `migration` reports `{"state": "publishing", "bundles": n,
+"published": k}`: `k` leading bundles some peer holds. Until its last bundle
+arrives, a receiver reads the default in rows not reached yet; an edit a
+member makes meanwhile is stamped later and wins. A publication's frames do
+not count toward the [retained-history bound](encrypted-checkpoints.md#what-runs-on-its-own) until they
+are pruned. Rows the migrating issuer did not hold keep their default;
+nobody's work is dropped.
+
+Issuers that open the new schema without reaching each other each migrate;
+the steps are one generation. Updates meet by latest wins, and rows an
+`insert` step adds merge when the table is keyed by name. In a table keyed
+by `id` each issuer's rows stay apart: an `insert` step's ids come from the
+issuer's own creation log ([decision 0071](../decisions/0071-staged-migration-publication.md#consequences)).
 
 ## Manifests are a cache
 
@@ -171,6 +193,14 @@ Schema distribution and payload verification stay on application nodes.
 
 ## Evidence
 
+SDK `tests/migrations.rs` runs a migration again after it failed before its
+commit and never after it (`a_failed_migration_runs_again_and_a_committed_one_never`),
+migrates on two issuers apart (`issuers_that_cannot_reach_each_other_both_migrate_and_converge`),
+keeps an issuer without a partition's key at the domain's generation
+(`an_issuer_without_a_partitions_key_keeps_the_households_generation`) and,
+in the e2e tier, fills a required field of 100,000 rows
+(`a_migration_of_100000_rows_converges_on_every_member`). `rocky-secure`
+`tests::sql::publication` commits one transaction as consecutive bundles.
 SDK `tests/generations.rs` also requires a field with a migration while an
 older member keeps its unsynced work and a device whose application stays at
 version 1 keeps syncing (`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),

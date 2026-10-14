@@ -1,6 +1,7 @@
 //! SQL sessions on typed tables of an encrypted replica.
 use super::*;
 mod catch_up;
+mod publication;
 use crate::sql::{AbortReason, SqlError, SqlOptions, SqlState};
 use crate::storage::collect_rows;
 use rocky_core::{

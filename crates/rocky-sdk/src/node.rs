@@ -467,6 +467,30 @@ impl Node {
     pub fn application(&self, settings: &Settings) -> Result<crate::DeclaredSchema, Failure> {
         settings.application(&self.declared)
     }
+    /// The migration this device publishes, or waits for while the
+    /// application declares migrations it may not run.
+    pub(crate) async fn migration(
+        &self,
+        settings: &Settings,
+    ) -> Result<Option<crate::MigrationStatus>, Failure> {
+        let (mut bundles, mut published) = (0, 0);
+        for publication in self.replica.publications().await? {
+            if publication.published < publication.bundles {
+                bundles += publication.bundles;
+                published += publication.published;
+            }
+        }
+        if bundles > 0 {
+            return Ok(Some(crate::MigrationStatus::Publishing {
+                bundles,
+                published,
+            }));
+        }
+        Ok((self.application(settings)? == crate::DeclaredSchema::Ahead
+            && crate::generation::migrates(&self.declared, settings.schema.version)
+            && !settings.may_migrate(&self.domain())?)
+        .then_some(crate::MigrationStatus::FullAccessRequired))
+    }
     /// Every granted scope, the registry's included: what sync covers.
     fn scopes(&self) -> Vec<ResourceScope> {
         self.granted
@@ -1700,7 +1724,13 @@ impl Node {
     /// The definition generation, the earlier ones still admitted and a
     /// table rebuild under way.
     async fn generation(&self) -> Result<Value, Failure> {
-        let application = self.application(&*self.settings.lock().await)?;
+        let (application, migration) = {
+            let settings = self.settings.lock().await;
+            (
+                self.application(&settings)?,
+                self.migration(&settings).await?,
+            )
+        };
         let status = self.replica.generations().await?;
         let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema, "handler": generation.handler});
         Ok(json!({
@@ -1711,6 +1741,7 @@ impl Node {
             "baseline": status.baseline,
             "application": application,
             "held": self.replica.held_changes().await?.len(),
+            "migration": migration,
         }))
     }
     /// Revokes a device and rotates the keys it could read. The intent,

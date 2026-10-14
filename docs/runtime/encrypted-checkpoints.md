@@ -24,7 +24,7 @@ last `maintenance_error`.
 | --- | --- | --- |
 | `checkpoint_operations` | 1,024 | Applied operations after the last checkpoint that start the next |
 | `soft_bytes` | 32 MiB | Retained header and body bytes that start checkpointing and pruning |
-| `hard_bytes` | 64 MiB | Retained bytes at which `author` and `receive` return `Error::Backpressure` |
+| `hard_bytes` | 64 MiB | Retained bytes, other than a [staged publication](secure-sql.md#staged-publications)'s frames, at which `author` and `receive` return `Error::Backpressure` |
 | `handles` | 65,536 | Newest mutation handles kept after their operations are pruned |
 
 Limits are per open replica and not persisted: call `set_retention_limits` after

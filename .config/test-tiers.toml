@@ -59,6 +59,9 @@ filter = '''
 # (3.0 s); the two-process discovery runs enroll three devices and start a
 # second process (4.1 s each). See docs/features_07/15-discovery-evidence.md.
 # features_09 phase 8's three-voter election/deadline/restart gate: 3.62 s alone.
+# features_09 phase 7's full-size migration: 100,000 rows seeded and filled by
+# migrations and pulled by a member, 481 s alone; see
+# docs/features_09/07-migrations-at-any-size.md#evidence.
 [e2e]
 suite = "15m"
 filter = '''
@@ -114,6 +117,9 @@ filter = '''
           test(=a_cut_stream_loses_nothing_and_applies_nothing_in_part)
         | test(=a_slow_reader_holds_the_writer_back_without_loss)
         | test(=inbound_streams_over_budget_are_dropped_and_served_again_later)
+    ))
+    | (binary_id(rocky-sdk::migrations) & (
+          test(=a_migration_of_100000_rows_converges_on_every_member)
     ))
     | (binary_id(rocky-sdk::group_secrets) & (
           test(=an_interrupted_rotation_resumes_to_one_epoch_across_the_group)

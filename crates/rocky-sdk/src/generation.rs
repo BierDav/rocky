@@ -14,7 +14,7 @@ use crate::{
     transport::{Protocol, Transport},
 };
 use data_encoding::HEXLOWER;
-use rocky_core::{Commitment, Generation, GenerationTransition, ItemChanges, SchemaChange};
+use rocky_core::{Commitment, Generation, GenerationTransition, ItemChanges};
 use rocky_credentials::{Profile, SignedTransition};
 use rocky_secure::{GenerationStep, PrivateKey, RevocationSet, SignedManifest, Upgrade};
 use serde::{Deserialize, Serialize};
@@ -63,14 +63,14 @@ impl Step {
         Ok(self.signed_transition()?.verify(publisher)?)
     }
 }
-/// `migration.json` beside the identity while an issuer requires fields:
-/// the application version it migrates from, and whether the migrations
-/// committed.
+/// `migration.json` beside the identity, from before an issuer signs a
+/// generation whose schema has migrations until they commit: the
+/// application version it migrates from. The replica's publication record,
+/// committed with the migration, is the done mark.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Migration {
     pub from: u32,
-    pub done: bool,
 }
 impl Migration {
     pub(crate) fn path(identity: &Path) -> std::path::PathBuf {
@@ -87,6 +87,19 @@ impl Migration {
         rocky_credentials::write_private(&Self::path(identity), &serde_json::to_vec(self)?)?;
         Ok(())
     }
+    pub(crate) fn remove(identity: &Path) -> Result<(), Failure> {
+        match std::fs::remove_file(Self::path(identity)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        }
+    }
+}
+/// Whether `schema` has migrations above application version `from`.
+pub(crate) fn migrates(schema: &Schema, from: u32) -> bool {
+    schema
+        .migrations
+        .iter()
+        .any(|migration| migration.version > from && migration.version <= schema.version)
 }
 /// An issuer's current definition and how it got there.
 #[derive(Serialize, Deserialize)]
@@ -191,13 +204,6 @@ impl Settings {
             rocky_core::classify_commands(old.app.commands(), &commands).map_err(|refusal| {
                 format!("the application's commands cannot replace the installed ones: {refusal}")
             })?;
-        if let SchemaChange::Additive { required, .. } = &change
-            && !required.is_empty()
-        {
-            return self
-                .evolve_required(path, vault, schema, required, transport)
-                .await;
-        }
         if !change.replicated() && !handled {
             let mut draft = self.clone();
             draft.schema = schema.clone();
@@ -211,11 +217,39 @@ impl Settings {
         if self.lineage.len() >= MAX_LINEAGE {
             return Err("the domain has too many generations".into());
         }
-        if self.issuer() {
-            self.sign_generation(path, vault, schema)
-        } else {
-            self.fetch_or_wait(path, vault, schema, transport).await
+        if !self.issuer() {
+            return self.fetch_or_wait(path, vault, schema, transport).await;
         }
+        // Migrations run once, after signing, on an issuer that reads and
+        // writes every partition; one another issuer signed is adopted.
+        let from = Migration::read(path)?.map_or(self.schema.version, |pending| pending.from);
+        if migrates(schema, from) {
+            if let Some(transport) = transport
+                && self
+                    .fetch_generation(path, vault, schema, transport)
+                    .await
+                    .is_ok()
+            {
+                return Migration::remove(path);
+            }
+            if !self.may_migrate(&old)? {
+                return Ok(());
+            }
+            Migration { from }.write(path)?;
+        }
+        self.sign_generation(path, vault, schema)
+    }
+    /// Whether this device may run migrations: an issuer that holds the
+    /// key of, reads and writes every partition the domain knows.
+    pub(crate) fn may_migrate(&self, domain: &Domain) -> Result<bool, Failure> {
+        Ok(self.issuer()
+            && self.partitions(domain)?.iter().all(|partition| {
+                !partition.record.epochs.is_empty()
+                    && partition
+                        .members
+                        .iter()
+                        .all(|member| self.owns_partition(member))
+            }))
     }
     /// A member fetches the generation of `schema` from an issuer that
     /// signed it. Until one does, or while none is reachable, the database
@@ -252,82 +286,6 @@ impl Settings {
             }
         }
         Ok(crate::DeclaredSchema::Ahead)
-    }
-    /// Whether this issuer started requiring fields of `schema`: the
-    /// installed schema holds them nullable, and the open migrates.
-    pub(crate) fn started_requiring(&self, schema: &Schema) -> Result<bool, Failure> {
-        if !self.issuer() {
-            return Ok(false);
-        }
-        let publisher = *self.publisher.as_bytes();
-        Ok(matches!(
-            rocky_core::classify(self.domain()?.logical(), &logical(schema, publisher)?),
-            Ok(SchemaChange::Additive { tables, fields, required, removed })
-                if tables.is_empty() && fields.is_empty() && removed.is_empty() && !required.is_empty()
-        ))
-    }
-    /// Moves to a schema that requires fields rows of the installed one
-    /// lack. A member, or an issuer another issuer already moved, fetches
-    /// the generation. Otherwise this issuer signs the schema with those
-    /// fields nullable here; the open migrates and calls [`Self::require`].
-    async fn evolve_required(
-        &mut self,
-        path: &Path,
-        vault: &Vault,
-        schema: &Schema,
-        required: &BTreeSet<String>,
-        transport: Option<&dyn Transport>,
-    ) -> Result<(), Failure> {
-        let relaxed = relaxed(schema, required)?;
-        // Interrupted after the nullable step: the migration continues.
-        if self.issuer() && self.schema == relaxed {
-            return Ok(());
-        }
-        if self.lineage.len() + 2 > MAX_LINEAGE {
-            return Err("the domain has too many generations".into());
-        }
-        let fetched = match transport {
-            Some(transport) => self.fetch_generation(path, vault, schema, transport).await,
-            None => Err(ServiceError::NetworkRequired("upgrade").into()),
-        };
-        match fetched {
-            Ok(()) => Ok(()),
-            // A member waits for an issuer to migrate; the application is ahead.
-            Err(_) if !self.issuer() => Ok(()),
-            Err(_) => {
-                let publisher = *self.publisher.as_bytes();
-                match rocky_core::classify(self.domain()?.logical(), &logical(&relaxed, publisher)?)
-                {
-                    Ok(SchemaChange::Additive { required, .. }) if required.is_empty() => {
-                        Migration {
-                            from: self.schema.version,
-                            done: false,
-                        }
-                        .write(path)?;
-                        self.sign_generation(path, vault, &relaxed)
-                    }
-                    // Only nullability tightens: the installed schema is the
-                    // generation the migration runs in.
-                    Ok(SchemaChange::Unchanged | SchemaChange::Local) => Ok(()),
-                    Ok(SchemaChange::Additive { .. }) | Err(_) => {
-                        Err("the schema's required fields cannot be added in one step".into())
-                    }
-                }
-            }
-        }
-    }
-    /// After the migration: signs `schema`, which requires the fields the
-    /// installed schema holds nullable.
-    pub(crate) fn require(
-        &mut self,
-        path: &Path,
-        vault: &Vault,
-        schema: &Schema,
-    ) -> Result<(), Failure> {
-        if !self.started_requiring(schema)? {
-            return Err("only fields the installed schema holds can become required".into());
-        }
-        self.sign_generation(path, vault, schema)
     }
     /// The hash of the manifest `schema` defines at schema generation
     /// `generation`.
@@ -834,23 +792,4 @@ pub(crate) async fn ask_bytes(
     addresses: &[String],
 ) -> Result<Vec<u8>, Failure> {
     exchange(transport, addresses, Protocol::Renew, OFFER).await
-}
-
-/// `schema` with each `table.field` of `required` nullable: the generation
-/// the migration runs in before they become required.
-pub(crate) fn relaxed(schema: &Schema, required: &BTreeSet<String>) -> Result<Schema, Failure> {
-    let mut relaxed = schema.clone();
-    let mut found = 0;
-    for table in &mut relaxed.tables {
-        for column in &mut table.columns {
-            if required.contains(&format!("{}.{}", table.name, column.name)) {
-                column.not_null = false;
-                found += 1;
-            }
-        }
-    }
-    if found != required.len() {
-        return Err("a required field is not a column of the schema".into());
-    }
-    Ok(relaxed)
 }

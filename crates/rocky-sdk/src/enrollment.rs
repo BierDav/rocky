@@ -866,6 +866,20 @@ impl Settings {
                     && grant.rights.contains(&Right::Read)
             })
     }
+    /// Whether this device reads, inserts, updates and deletes every row
+    /// of `member`.
+    pub(crate) fn owns_partition(&self, member: &Member) -> bool {
+        let selected = self.selected(&member.scope, &member.tuple);
+        [Right::Read, Right::Insert, Right::Update, Right::Delete]
+            .iter()
+            .all(|right| {
+                self.grants().iter().chain(&selected).any(|grant| {
+                    grant.scope == member.scope
+                        && grant.rows == RowSelection::All
+                        && grant.rights.contains(right)
+                })
+            })
+    }
     /// The members of every known group partition under `domain`'s schema.
     pub(crate) fn partitions(&self, domain: &Domain) -> Result<Vec<GroupPartition>, Failure> {
         self.groups

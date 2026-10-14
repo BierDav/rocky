@@ -2,7 +2,10 @@
 
 Status: accepted; the end of cuts implemented
 ([phase 6](../features_09/06-no-remnants.md)), confirmed rollouts pending
-([phase 5](../features_09/05-confirmed-rollouts.md)).
+([phase 5](../features_09/05-confirmed-rollouts.md)). The nullable step before
+a migration is superseded by
+[decision 0071](0071-staged-migration-publication.md): the issuer signs, then
+migrates.
 Date: 2026-10-14.
 
 ## Context

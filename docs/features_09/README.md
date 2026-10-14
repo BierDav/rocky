@@ -1,7 +1,9 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1 to 4, 6, 8 and 9 are implemented; see the
-[phase 8](08-coordinated-log-evidence.md) and [phase 9](09-coordinated-writes-evidence.md) evidence. [features_08](../features_08/README.md)
+Status: accepted roadmap (2026-10-14). Phases 1 to 4, 6, 7, 8 and 9 are
+implemented; phases 5 and 10 are in progress. Phase 8 implementation is
+recorded in its [evidence](08-coordinated-log-evidence.md) and phase 9 in
+its [evidence](09-coordinated-writes-evidence.md). [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
 ## Destination
@@ -137,7 +139,7 @@ flowchart LR
 | 0068 | 2, 3 | Adopting newer generations and removal |
 | 0069 | 4 | [Held changes, void records and re-authoring](../decisions/0069-held-changes-and-void-records.md) |
 | 0070 | 5, 6 | [Confirmed rollouts and the end of cuts](../decisions/0070-confirmed-rollouts-and-the-end-of-cuts.md) |
-| 0071 | 7 | Staged migration publication |
+| 0071 | 7 | [Staged migration publication](../decisions/0071-staged-migration-publication.md) |
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | Stuck recovery and the end of strong commands |
 

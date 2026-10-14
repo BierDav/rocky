@@ -172,6 +172,26 @@ Kotlin `RockyClient.sql` and `nextId` wrap these. Integer values in rows and
 checkpoint incarnation IDs travel as strings; numeric JSON identities are
 rejected.
 
+## Staged publications
+
+`SecureSql::commit_publication(publication)` commits the open transaction,
+of any size, as consecutive ordinary bundles within the
+[bundle bounds](secure-sessions.md#bundles): rows of referenced tables
+first, new identities in order, deletions of referencing rows before their
+parents. Every write carries the commit's stamp. Bundle `n`'s handle is
+`rocky.secure-publication.v1` over `publication` and `n`, and the record of
+the publication commits in the same transaction; committing it again returns
+the recorded frames and rolls the new transaction back. A transaction that
+changed nothing is recorded too. Raise `SqlOptions::captured_rows` and
+`captured_bytes` for it; the transaction timeout still applies.
+
+`EncryptedReplica::publications()` lists each record with its bundles and how
+many leading ones some peer's frontier holds. A publication's retained frames
+do not count toward `RetentionLimits::hard_bytes` until they are pruned:
+writes that deliver it, such as renewing members, must not wait for it. The
+SDK commits [migrations](generations.md#migrations) this way
+([decision 0071](../decisions/0071-staged-migration-publication.md)).
+
 ## Qualification
 
 `cargo test -p rocky-secure --lib tests::sql` and
@@ -188,6 +208,10 @@ rejected.
 - Cancel, timeout and a dropped session roll back and free the replica.
 - Handles recover a commit across a restart; both update policies; concurrent
   edits converge.
+- A transaction beyond one bundle commits as a staged publication: the
+  first bundle applies alone, an edit made before the second arrives wins,
+  progress follows a peer's frontier and a repeated commit returns the same
+  frames (`tests::sql::publication`).
 - Identity: three replicas with reversed delivery, an N:M pair unlinked and
   relinked in one transaction, concurrent deletion, a late edit to the old
   `id` and checkpoint bootstrap agree; a wrong author number and a reused

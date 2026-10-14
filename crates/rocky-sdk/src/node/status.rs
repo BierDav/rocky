@@ -296,6 +296,7 @@ impl Node {
                         .collect(),
                     baseline: generation.baseline,
                     application: self.application(&settings)?,
+                    migration: self.migration(&settings).await?,
                     rebuilding: generation.plan.map(|plan| RebuildProgress {
                         schema: HEXLOWER.encode(&plan.schema),
                         filled: plan.filled as u64,

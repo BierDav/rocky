@@ -22,8 +22,8 @@ pub struct Schema {
     /// `docs/runtime/generations.md#tables-granted-like-another`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub granted_like: BTreeMap<String, String>,
-    /// SQL the first issuer to require new fields runs once, before it
-    /// requires them; see `docs/runtime/generations.md#required-fields`.
+    /// SQL the first issuer to sign the schema's generation runs once, after
+    /// signing it; see `docs/runtime/generations.md#migrations`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migrations: Vec<Migration>,
 }

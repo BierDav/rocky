@@ -47,8 +47,9 @@ every other device receives like any other.
 
 ## What a household sees
 
-1. The first trusted device to open version 7 migrates and signs it. It needs
-   every list; a trusted device holds all of them.
+1. The first trusted device to open version 7 signs it, then migrates in it
+   before it syncs ([migrations](generations.md#migrations)). It needs every
+   list; a trusted device holds all of them.
 2. Every other device moves its database to version 7 when it meets a device
    that runs it, whatever app version it runs; one that opens version 7
    offline opens at version 6 until then. Edits it made under version 6 are

@@ -1,0 +1,1 @@
+there are applications that don't need to solve Non-I-confluent changes or can rely on other mechanisms to process them. these systems don't need a coordinator. we make coordinator a pluggable first-party module, that doeesn't need to be used at all

@@ -8,6 +8,8 @@ use rocky_core::{Append, DomainLog, LogHead, LogPending, LogResult, Scope, coord
 use std::future::Future;
 use std::pin::Pin;
 
+mod recovery;
+
 pub(super) const SCHEMA: &[&str] = &[
     // Per log: the committed position and running hash this replica holds,
     // the log's genesis hash once known, and the last request sequence.
@@ -168,7 +170,8 @@ pub trait EntryPeers: Send + Sync {
     /// Delivers `entry` to the trusted node `node`, which stores it
     /// durably and acknowledges it to the coordinator itself.
     fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()>;
-    /// Committed entries after `position` from a reachable trusted peer.
+    /// Entry evidence after `position` from any reachable device.
+    /// The receiver checks every hash against the coordinator before use.
     fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>>;
 }
 
@@ -263,15 +266,12 @@ impl<A: RowApplication> Inner<A> {
             *sequence as u64,
         ))
     }
-    /// Records the genesis hash the head shows before any commit.
+    /// Records the coordinator's genesis anchor, including after commits.
     async fn learn_genesis(&self, log: Scope, head: &LogHead) -> Result<(), Error> {
-        if head.commit != 0 {
-            return Ok(());
-        }
         self.conn
             .execute(
                 "INSERT INTO secure_coordinated VALUES(?1,0,?2,?2,0) ON CONFLICT(log) DO UPDATE SET running=COALESCE(running,?2),genesis=COALESCE(genesis,?2) WHERE position=0",
-                [encode(&log)?, head.running_hash.to_vec()],
+                [encode(&log)?, head.genesis.to_vec()],
             )
             .await?;
         Ok(())
@@ -1046,9 +1046,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if entry.position != position + 1 + offset as u64
                     || entry.position > head.commit
                     || entry_hash(log, entry.position, &entry.ids)? != entry.hash
-                    || head
-                        .committed(entry.position)
-                        .is_some_and(|hash| hash != entry.hash)
+                    || head.committed(entry.position) != Some(entry.hash)
                     || entry
                         .frames
                         .iter()
@@ -1144,6 +1142,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 frames,
             });
             before = Some(commitment_of(running)?);
+        }
+        if entries.is_empty() {
+            entries = inner
+                .recovered_entries(peer, credentials, log, after)
+                .await?;
         }
         let hashes = entries
             .iter()

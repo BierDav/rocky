@@ -55,6 +55,7 @@ pub struct Member {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Head {
+    pub genesis: Commitment,
     pub epoch: u64,
     pub minimum: usize,
     pub head: u64,
@@ -100,6 +101,7 @@ impl Log {
     pub fn new(scope: Scope, configuration: [u8; 16]) -> Self {
         Self {
             head: Head {
+                genesis: rocky_core::genesis(scope, configuration),
                 epoch: 0,
                 minimum: 1,
                 head: 0,
@@ -406,6 +408,7 @@ impl Pending {
 impl Head {
     pub fn port(&self) -> rocky_core::LogHead {
         rocky_core::LogHead {
+            genesis: self.genesis,
             epoch: self.epoch,
             minimum: self.minimum,
             head: self.head,

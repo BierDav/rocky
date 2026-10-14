@@ -64,7 +64,8 @@ minority never synthesizes a successful write. Trusted nodes must acknowledge
 only durable, unapplied bundles. Node identities need durable sequence allocation,
 and head reads distinguish assigned from committed positions.
 
-Raft store/snapshots use only format 3, refusing other formats. The signed
+Raft store/snapshots use only format 4, refusing other formats. Phase 10
+adds the genesis anchor to the log head for fresh-node reconstruction. The signed
 bootstrap and request envelope keep their current shapes; log actions add new
 operations. Coordinated writes set the encrypted file identity to
 `rocky.encrypted-replica.v18` and the live-link handshake to `rocky.link.v3`, which

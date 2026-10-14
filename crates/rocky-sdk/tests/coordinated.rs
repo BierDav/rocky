@@ -43,13 +43,15 @@ async fn linked(device: &Device, other: &Device) {
 }
 /// Issues the next invoice: reads the committed count inside a coordinated
 /// transaction and inserts the following number. Retries lost races.
-async fn invoice(device: &Device, handle: u8) -> Value {
+async fn invoice(device: &Device, handle: u8, log: &MemoryLog) -> Value {
+    let mut last_error = None;
     for attempt in 0..200u8 {
         let begun = device
             .call(json!({"type": "sql", "sql": "BEGIN", "coordinated": true}))
             .await;
         if let Err(error) = begun {
             assert_eq!(error["retryable"], true, "{error}");
+            last_error = Some(error);
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             continue;
         }
@@ -88,11 +90,15 @@ async fn invoice(device: &Device, handle: u8) -> Value {
                         .contains(&error["code"].as_str().unwrap_or("")),
                     "{error}"
                 );
+                last_error = Some(error);
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         }
     }
-    panic!("no invoice committed")
+    panic!(
+        "no invoice committed for handle {handle}: {last_error:?}; head: {:?}",
+        log.head(domain(device))
+    )
 }
 /// The invoice numbers once every frame they depend on arrived by sync.
 async fn keys(device: &Device) -> Vec<String> {
@@ -146,6 +152,8 @@ async fn trusted_devices_number_concurrent_invoices_without_gaps() -> Result<(),
     }
     linked(&a, &b).await;
     linked(&b, &a).await;
+    a.sync().await.expect("initial sync from b");
+    b.sync().await.expect("initial sync from a");
     // Both join; the first alone is below the minimum.
     let below = a
         .call(json!({"type": "sql", "sql": "BEGIN", "coordinated": true}))
@@ -153,10 +161,11 @@ async fn trusted_devices_number_concurrent_invoices_without_gaps() -> Result<(),
         .expect_err("below minimum");
     assert_eq!(below["code"], "below_minimum", "{below}");
 
+    let log = &log;
     let issue = |device: &'static Device, base: u8| async move {
         let mut positions = Vec::new();
         for handle in base..base + 3 {
-            let committed = invoice(device, handle).await;
+            let committed = invoice(device, handle, log).await;
             positions.push(committed["position"].as_str().expect("position").to_owned());
         }
         positions

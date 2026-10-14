@@ -88,12 +88,25 @@ recovery is [phase 10](../features_09/10-stuck-recovery.md).
 
 ## Catch-up
 
-A node outside the set reads committed entries from trusted peers: each
+A node outside the set reads entry evidence from any reachable device: each
 position, entry hash and frame ids, verified against the head's hash window
-and running hash before any is recorded. The frames themselves are ordinary
+and running hash before any is recorded. The coordinator supplies the genesis
+anchor even after the first commit, so a fresh identity can start at zero. The frames themselves are ordinary
 committed frames and arrive by range sync; until they are all held the node
 is `Behind`. It joins with the committed position and running hash, and only
-then proposes. Committed entries are kept for the last 1,024 positions.
+then proposes. Trusted nodes keep the committed entry index for the last 1,024 positions.
+A member without that index reconstructs it from complete retained bundles:
+every member must be applied, agree on its signed position and bundle membership,
+and be authorized for the requesting peer. It serves the original encrypted
+frames and void evidence. It neither calls the coordinator nor claims that its
+candidate is canonical; the receiving trusted node requires an exact hash in
+the coordinator's window. The scan and reply use bounded pages.
+
+A missing copy, incomplete bundle or entry outside the hash window leaves the
+node `Behind`; even a matching final running hash cannot bypass a missing hash
+in that window. Owner-signed cuts and rollback of abandoned history are not
+implemented. See [phase 10 evidence](../features_09/10-stuck-recovery-evidence.md)
+for the checkpoint recovery contract still missing.
 
 ## APIs
 
@@ -129,7 +142,7 @@ link handshake `rocky.link.v3`; other versions are refused.
   waits for its void and then applies on the rolled-back state.
 - One undecided own entry per log; checkpoints of its scopes wait for it.
 - Commit is decided against the coordinator's window; older positions need
-  phase 10.
+  an owner-signed recovery cut (not implemented).
 
 ## Evidence
 

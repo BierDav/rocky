@@ -24,6 +24,8 @@ pub struct LogMember {
 /// A domain's log metadata as the coordinator holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogHead {
+    /// The authenticated anchor before the first entry.
+    pub genesis: Commitment,
     pub epoch: u64,
     pub minimum: usize,
     /// The assigned head: `commit`, or the pending entry's position.

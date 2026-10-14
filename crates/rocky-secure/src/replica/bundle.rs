@@ -383,7 +383,7 @@ impl<A: RowApplication> Inner<A> {
     }
 
     /// Every member of the bundle `first` belongs to, by its own openings.
-    async fn members_of(
+    pub(super) async fn members_of(
         &self,
         first: &EncryptedFrame,
     ) -> Result<Result<Vec<EncryptedFrame>, Hash>, Error> {
@@ -648,7 +648,8 @@ impl<A: RowApplication> Inner<A> {
             Some(membership)
                 if usize::from(membership.index) == index
                     && membership.transaction == expected.transaction
-                    && membership.members == expected.members =>
+                    && membership.members == expected.members
+                    && membership.entry == expected.entry =>
             {
                 Ok(payload)
             }

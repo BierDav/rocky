@@ -95,6 +95,8 @@ unreserved record is 0074; 0064 remains reserved for
 | Service boundaries, resource ownership | [sdk-composition](../runtime/sdk-composition.md#design-rationale) |
 | Transport-independent identity, contact records, peer sync | [sdk-transports](../runtime/sdk-transports.md#design-rationale) |
 
+| Stuck coordinated recovery, canonical-base requirements | [0073](0073-stuck-recovery-and-strong-commands.md) |
+
 ## Writing a record
 
 Prefer adding to a guide's rationale section. For a new record, create

@@ -68,6 +68,7 @@ impl Mesh {
         Client {
             inner: self.log.client(key.public_key()),
             acknowledges: true,
+            observed: None,
         }
     }
     fn peers(&self, lineage: &Lineage, key: &PrivateKey) -> Peers {
@@ -86,6 +87,7 @@ impl Mesh {
 struct Client {
     inner: rocky_coordinator::coordinated::MemoryLogClient,
     acknowledges: bool,
+    observed: Option<Arc<tokio::sync::Notify>>,
 }
 impl DomainLog for Client {
     fn node(&self) -> NodeKey {
@@ -110,7 +112,15 @@ impl DomainLog for Client {
         if !self.acknowledges {
             return Box::pin(async { Err(CoordinationError::Unavailable) });
         }
-        self.inner.acknowledge(scope, pending)
+        Box::pin(async move {
+            let result = self.inner.acknowledge(scope, pending).await;
+            if result.is_ok()
+                && let Some(observed) = &self.observed
+            {
+                observed.notify_one();
+            }
+            result
+        })
     }
 }
 struct Peers {
@@ -330,6 +340,154 @@ async fn invoices(replica: &Replica) -> Vec<String> {
 }
 fn numbered(count: usize) -> Vec<String> {
     (1..=count).map(|number| format!("{number:04}")).collect()
+}
+
+#[tokio::test]
+async fn a_fresh_trusted_node_rebuilds_from_a_member_after_the_in_sync_set_is_lost() {
+    let fixture = Fixture::new(1).await;
+    let domain = fixture.lineage.domain;
+    for _ in 0..MAX_CATCH_UP_ENTRIES + 1 {
+        fixture.invoice(&fixture.alice, "retained").await;
+    }
+    let member_key = PrivateKey::new();
+    let member = open(&fixture.lineage, &fixture.dir, "member", &member_key).await;
+    sync(&fixture.lineage, &fixture.alice.1, &member, &member_key).await;
+    assert_eq!(invoices(&member).await, numbered(MAX_CATCH_UP_ENTRIES + 1));
+    assert_eq!(member.coordinated_status(domain).await.unwrap().position, 0);
+    let Fixture {
+        lineage,
+        dir,
+        mesh,
+        alice,
+        bob,
+    } = fixture;
+    mesh.nodes.lock().unwrap().clear();
+    drop(alice);
+    drop(bob);
+    for name in ["alice", "bob"] {
+        std::fs::remove_file(dir.path().join(format!("{name}.db"))).unwrap();
+    }
+    mesh.add(&member_key, &member);
+    let key = PrivateKey::new();
+    let replacement = open(&lineage, &dir, "replacement", &key).await;
+    mesh.add(&key, &replacement);
+    let mut client = mesh.client(&key);
+    let acknowledged = Arc::new(tokio::sync::Notify::new());
+    client.observed = Some(acknowledged.clone());
+    let peers = mesh.peers(&lineage, &key);
+    let slot = replacement
+        .coordinated_slot(domain, &client, &peers)
+        .await
+        .unwrap();
+    assert_eq!(slot.expected, MAX_CATCH_UP_ENTRIES as u64 + 1);
+    assert_eq!(
+        invoices(&replacement).await,
+        numbered(MAX_CATCH_UP_ENTRIES + 1)
+    );
+    // The old set still exists at the coordinator. Missing acknowledgments
+    // evict it at the deadline; the recovered node alone meets the minimum.
+    let sql = session(&replacement).await;
+    sql.run("BEGIN", vec![]).await.unwrap();
+    identity_insert(
+        &sql,
+        "INSERT INTO items(key,title) VALUES(?,?)",
+        vec![
+            text(&format!("{:04}", MAX_CATCH_UP_ENTRIES + 2)),
+            text("continued"),
+        ],
+    )
+    .await
+    .unwrap();
+    sql.commit_coordinated([9; 32], slot).await.unwrap();
+    drop(sql);
+    let (commit, ()) = tokio::join!(replacement.propose(domain, &client, &peers), async {
+        acknowledged.notified().await;
+        mesh.advance(ENTRY_DEADLINE + 1);
+    });
+    assert_eq!(commit.unwrap().position, MAX_CATCH_UP_ENTRIES as u64 + 2);
+    sync(&lineage, &replacement, &member, &member_key).await;
+    assert_eq!(invoices(&member).await, numbered(MAX_CATCH_UP_ENTRIES + 2));
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+}
+
+#[tokio::test]
+async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
+    let fixture = Fixture::new(1).await;
+    fixture.invoice(&fixture.alice, "retained").await;
+    let key = PrivateKey::new();
+    let replica = open(&fixture.lineage, &fixture.dir, "behind", &key).await;
+    let node = (key, replica);
+    let member_key = PrivateKey::new();
+    let member = open(&fixture.lineage, &fixture.dir, "member", &member_key).await;
+    sync(&fixture.lineage, &fixture.alice.1, &member, &member_key).await;
+    fixture.mesh.nodes.lock().unwrap().clear();
+    fixture.mesh.add(&node.0, &node.1);
+    assert_eq!(fixture.slot(&node).await, Err(CoordinatedError::Behind));
+    assert!(invoices(&node.1).await.is_empty());
+    // A head without the entry hash models a gap older than its window.
+    struct OutsideWindow(rocky_coordinator::coordinated::MemoryLogClient);
+    impl DomainLog for OutsideWindow {
+        fn node(&self) -> NodeKey {
+            self.0.node()
+        }
+        fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+            Box::pin(async move {
+                let mut head = self.0.log_head(scope).await?;
+                head.hashes.clear();
+                Ok(head)
+            })
+        }
+        fn join(
+            &self,
+            scope: Scope,
+            position: u64,
+            running: Commitment,
+            sequence: u64,
+        ) -> CoordinationFuture<'_, u64> {
+            self.0.join(scope, position, running, sequence)
+        }
+        fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
+            self.0.append(scope, append)
+        }
+        fn acknowledge(
+            &self,
+            scope: Scope,
+            pending: LogPending,
+        ) -> CoordinationFuture<'_, LogResult> {
+            self.0.acknowledge(scope, pending)
+        }
+    }
+    fixture.mesh.add(&member_key, &member);
+    let client = OutsideWindow(fixture.mesh.log.client(node.0.public_key()));
+    assert_eq!(
+        node.1
+            .coordinated_slot(
+                fixture.lineage.domain,
+                &client,
+                &fixture.mesh.peers(&fixture.lineage, &node.0)
+            )
+            .await,
+        Err(CoordinatedError::Behind),
+    );
+    assert!(invoices(&node.1).await.is_empty());
+    assert_eq!(
+        node.1
+            .coordinated_status(fixture.lineage.domain)
+            .await
+            .unwrap()
+            .position,
+        0
+    );
+    assert!(
+        !fixture
+            .mesh
+            .log
+            .head(fixture.lineage.domain)
+            .unwrap()
+            .members
+            .iter()
+            .any(|member| member.key == node.0.public_key())
+    );
 }
 /// Syncs `target` from `source` by range pages, voids first, as a member does.
 async fn sync(lineage: &Lineage, source: &Replica, target: &Replica, key: &PrivateKey) {

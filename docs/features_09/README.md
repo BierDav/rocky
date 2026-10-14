@@ -4,7 +4,9 @@ Status: accepted roadmap (2026-10-14). Phases 1, 2, 3, 4, 6, 7, 8 and 9 are
 implemented, with [accepted limitations](#accepted-limitations); phases 5 and
 10 are in progress. Phase 8 implementation is recorded in its
 [evidence](08-coordinated-log-evidence.md) and phase 9 in its
-[evidence](09-coordinated-writes-evidence.md). [features_08](../features_08/README.md)
+[evidence](09-coordinated-writes-evidence.md). Phase 10 has a
+[partial collection slice](10-stuck-recovery-evidence.md); owner-signed cuts
+remain unimplemented. [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
 ## Destination
@@ -161,7 +163,7 @@ flowchart LR
 | 0070 | 5, 6 | [Confirmed rollouts and the end of cuts](../decisions/0070-confirmed-rollouts-and-the-end-of-cuts.md) |
 | 0071 | 7 | [Staged migration publication](../decisions/0071-staged-migration-publication.md) |
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
-| 0073 | 10, 11 | Stuck recovery and the end of strong commands |
+| 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-strong-commands.md) |
 
 ## Open questions
 

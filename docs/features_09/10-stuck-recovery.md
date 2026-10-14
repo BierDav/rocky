@@ -1,6 +1,7 @@
 # 10. Stuck recovery
 
-Status: proposed; not started.
+Status: partial; retained-bundle collection implemented. Owner-signed cuts and
+abandoned-history rollback are not implemented; see [evidence](10-stuck-recovery-evidence.md).
 Owner: `rocky-coordinator` recovery operation; `rocky-secure` admission and
 projection; `rocky-sdk` recovery flow. Depends on
 [phase 9](09-coordinated-writes.md). Follow the
@@ -47,3 +48,13 @@ domain owner's signature.
 - Without any copy, appends stay refused until the owner signs a cut.
 - A member returning later with an abandoned entry reverts it, and every
   device ends with the same rows.
+
+## Remaining contract
+
+The cut gate cannot be implemented by rewinding `secure_coordinated` alone.
+Current bundle positions carry no history identity, so position reuse cannot
+fence an abandoned frame. A verified checkpoint can already include the
+abandoned suffix while its frame evidence is pruned; the current checkpoint
+has no coordinated-log position/hash binding and rebuilding starts from that
+same base. Recovery needs authenticated canonical-base replacement as well as
+frame fencing. No cut API reports success before those contracts exist.

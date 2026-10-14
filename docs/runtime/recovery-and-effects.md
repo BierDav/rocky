@@ -60,6 +60,22 @@ missing payloads never become a fabricated empty confirmed state. A newer policy
 must be learned explicitly before importing its package. Revoked/expired pending
 invocations remain denied; import cannot renew their authority.
 
+## Stuck coordinated domains
+
+A trusted node that lost committed entries can rebuild from a member's complete
+retained bundles, using the [coordinated catch-up path](coordinated-writes.md#catch-up).
+The coordinator verifies metadata only; its genesis anchor and exact retained
+entry hashes let the node verify the original frames before rejoining. Missing
+entries or a gap outside the hash window keep appends refused.
+
+Owner-signed cuts are not implemented. Existing command-domain replacement below
+is a different operation and cannot recover a coordinated log. A cut needs a
+history identity to fence abandoned frames at reused positions and a verified
+canonical checkpoint base when the abandoned effects have already been pruned.
+The present checkpoint format supplies neither coordinated-history binding nor
+an authenticated replacement base for this case. See
+[decision 0073](../decisions/0073-stuck-recovery-and-strong-commands.md).
+
 ## Explicit acknowledged loss
 
 `MemoryCoordinator::replace_domain` and the certified

@@ -222,7 +222,7 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
 #[test]
 fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
     let (genesis, _, _) = certified();
-    for format in [0, FORMAT - 1, FORMAT + 1] {
+    for format in [0, 1, 2, FORMAT - 1, FORMAT + 1] {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
         drop(Store::open(&source, genesis.clone(), true, Limits::default()).unwrap());

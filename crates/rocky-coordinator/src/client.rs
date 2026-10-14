@@ -340,6 +340,30 @@ impl NetworkCoordinator {
         .await
         .map_err(|_| CoordinationError::Unavailable)?
     }
+    /// Metadata-only log call. Join/append sequences must be durably increasing per domain/node.
+    pub async fn coordinated(
+        &self,
+        scope: Scope,
+        action: crate::coordinated::Action,
+    ) -> Result<Outcome, CoordinationError> {
+        self.call(
+            crate::transport::nonce(),
+            Operation::Coordinated { scope, action },
+        )
+        .await
+    }
+    pub async fn coordinated_head(
+        &self,
+        scope: Scope,
+    ) -> Result<crate::coordinated::Head, CoordinationError> {
+        match self
+            .coordinated(scope, crate::coordinated::Action::Head)
+            .await?
+        {
+            Outcome::CoordinatedHead(head) => Ok(head),
+            _ => Err(CoordinationError::InvalidCommitment),
+        }
+    }
     pub async fn acquire(
         &self,
         scope: Scope,

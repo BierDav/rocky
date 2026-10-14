@@ -44,6 +44,7 @@ naturally holds.
 | [0067](0067-names-are-identities.md) | Names are table and field identities, kept forever |
 | [0068](0068-adopting-newer-generations.md) | Devices adopt any newer generation they meet; no admission horizon; removal |
 | [0070](0070-confirmed-rollouts-and-the-end-of-cuts.md) | No cuts: required fields are additive; manifests are a cache of the transition lineage |
+| [0072](0072-coordinated-log-and-writes.md) | Metadata domain log and ordinary coordinated writes |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for

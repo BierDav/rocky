@@ -39,7 +39,7 @@ filter = '''
     | (package(rocky-secure) & test(/^network::link::integration_tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
-    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::public_tests)::/))
+    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests))::/))
     | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/) & !test(/^node::command_mesh::tests::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
@@ -58,10 +58,12 @@ filter = '''
 # Phase 15: the mDNS run waits 2 s to show that another topic stays silent
 # (3.0 s); the two-process discovery runs enroll three devices and start a
 # second process (4.1 s each). See docs/features_07/15-discovery-evidence.md.
+# features_09 phase 8's three-voter election/deadline/restart gate: 3.62 s alone.
 [e2e]
 suite = "15m"
 filter = '''
-    (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
+    (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
+    | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
     | (binary_id(rocky-sdk::commands) & test(=mesh_forwarder_restart_drops_inflight_work_and_same_ticket_completes))
     | test(/::soak_/)
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))

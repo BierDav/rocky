@@ -15,6 +15,7 @@ pub struct ReplacementRecord {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Domain {
     scope: Scope,
+    coordinated: coordinated::Log,
     owner: PrincipalId,
     eligible: Vec<NodeId>,
     invokers: Vec<(NodeId, PrincipalId)>,
@@ -39,6 +40,7 @@ impl Domain {
     ) -> Self {
         Self {
             scope,
+            coordinated: coordinated::Log::new(scope, configuration),
             owner,
             eligible,
             invokers,
@@ -118,7 +120,10 @@ impl State {
         }
     }
     fn bytes(&self) -> usize {
-        self.domains.iter().map(|d| d.sessions.bytes()).sum()
+        self.domains
+            .iter()
+            .map(|d| d.sessions.bytes() + d.coordinated.bytes())
+            .sum()
     }
     fn domain(&mut self, scope: Scope) -> Result<&mut Domain, CoordinationError> {
         if !self.available {
@@ -137,6 +142,7 @@ impl State {
     ) -> Result<ReplacementRecord, CoordinationError> {
         let old = self.domain(record.lost_head.scope)?;
         if old.owner != control
+            || old.coordinated.head.pending.is_some()
             || old.closed
             || !record.acknowledged_loss
             || !record.uncertain_effects
@@ -194,7 +200,10 @@ impl State {
         head: &StrongHead,
     ) -> Result<StrongHead, CoordinationError> {
         let domain = self.domain(head.scope)?;
-        if domain.owner != control || domain.replacement.is_some() {
+        if domain.owner != control
+            || domain.replacement.is_some()
+            || domain.coordinated.head.pending.is_some()
+        {
             return Err(CoordinationError::Denied);
         }
         if domain.closed {
@@ -588,3 +597,6 @@ mod raft_store;
 mod retention;
 pub mod service;
 mod transport;
+
+/// Ordered metadata for coordinated ordinary writes.
+pub mod coordinated;

@@ -178,7 +178,10 @@ pub struct VoterService {
     /// Each tenant's share of `clients`; unregistered keys share one lane.
     lanes: std::sync::Mutex<HashMap<Option<PublicKey>, Arc<Semaphore>>>,
     fenced: AtomicBool,
+    acknowledgments: tokio::sync::Mutex<HashMap<Scope, VolatileAcknowledgments>>,
 }
+mod coordinated;
+use coordinated::VolatileAcknowledgments;
 impl VoterService {
     pub async fn open(
         path: &Path,
@@ -242,6 +245,7 @@ impl VoterService {
             clients: Arc::new(Semaphore::new(lanes)),
             lanes: Default::default(),
             fenced: AtomicBool::new(fence.is_some()),
+            acknowledgments: Default::default(),
         });
         log(
             node,
@@ -254,6 +258,7 @@ impl VoterService {
         if fence.is_some() {
             tokio::spawn(service.clone().await_readmission());
         }
+        Self::watch_log_deadlines(&service);
         Ok(service)
     }
     /// Lifts the restore fence once the membership authority has re-added
@@ -360,6 +365,20 @@ impl VoterService {
                 return Err(CoordinationError::Denied);
             }
             self.store.preflight(&request).await?;
+            if let Operation::Coordinated {
+                scope,
+                action: crate::coordinated::Action::Acknowledge { pending },
+            } = &request.operation
+            {
+                let outcome = self.acknowledge_log(&request, *scope, pending).await?;
+                let log = self
+                    .raft
+                    .metrics()
+                    .borrow()
+                    .last_applied
+                    .ok_or(CoordinationError::Unavailable)?;
+                return Ok((Ok(outcome), log));
+            }
             if let Some(read) = self.read(&request).await {
                 return read;
             }

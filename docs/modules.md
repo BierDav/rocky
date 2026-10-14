@@ -211,7 +211,10 @@ Start at `crates/rocky-iroh/src/lib.rs`.
 ## rocky-coordinator
 
 Owns generic executor assignment, leadership epochs, expected-head validation,
-active generations and confirmation deduplication. The deterministic in-memory state
+active generations and confirmation deduplication. It also owns the metadata-only
+[coordinated log](runtime/coordinated-log.md), trusted in-sync membership, pending
+entry resolution and bounded hash window; application bundle storage stays outside
+this crate. The deterministic in-memory state
 machine supplies fixture registration, acquire/takeover, lookup and receipt
 verification.
 

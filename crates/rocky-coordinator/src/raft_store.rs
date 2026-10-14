@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
 /// The storage format this build reads; older images are refused.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -276,7 +276,18 @@ fn check_store_format(path: &Path, backup: bool) -> Result<(), CoordinationError
         }
         let state = path.join("state.cbor");
         if state.exists() {
-            if unseal::<Hard>(STATE_LABEL, &read(&state)?)?.format != FORMAT {
+            let data = read(&state)?;
+            let (hash, payload): (Commitment, Encoded) = decode(&data)?;
+            if hash != commitment(STATE_LABEL, &payload.0) {
+                return Err(CoordinationError::Corrupt);
+            }
+            #[derive(Deserialize)]
+            struct Header {
+                format: u32,
+            }
+            let header: Header = p2panda_core::cbor::decode_cbor(payload.0.as_slice())
+                .map_err(|_| CoordinationError::Corrupt)?;
+            if header.format != FORMAT {
                 return Err(CoordinationError::UnsupportedFormat);
             }
             for directory in ["snapshots", "log"] {
@@ -535,6 +546,17 @@ impl Store {
     }
     pub async fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         self.0.image.lock().await.metadata.read(request)
+    }
+    pub(crate) async fn pending_logs(
+        &self,
+    ) -> Vec<(rocky_core::Scope, crate::coordinated::Pending)> {
+        self.0.image.lock().await.metadata.pending_logs()
+    }
+    pub(crate) async fn log_head(
+        &self,
+        scope: rocky_core::Scope,
+    ) -> Result<crate::coordinated::Head, CoordinationError> {
+        self.0.image.lock().await.metadata.log_head(scope)
     }
     /// The committed authority time.
     pub async fn time(&self) -> u64 {

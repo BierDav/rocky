@@ -1,6 +1,6 @@
 # 8. Coordinated log
 
-Status: proposed; not started.
+Status: complete (2026-10-14); slices 1–4 and every completion gate verified.
 Owner: `rocky-coordinator` machine, retention, service and client. Follow the
 [execution contract](README.md#agent-execution-contract). Takes decision record 0072.
 
@@ -65,3 +65,11 @@ canonical. It never holds entry data.
 - A leader change during a pending entry loses no commit and commits nothing
   twice.
 - A measured per-domain footprint and per-write message count are recorded.
+
+## Implementation evidence
+
+Decision [0072](../decisions/0072-coordinated-log-and-writes.md), the
+[log guide](../runtime/coordinated-log.md) and
+[execution evidence](08-coordinated-log-evidence.md) describe the metadata boundary,
+retry identities, bounded capacity and verification. Application bundle integration
+remains phase 9; exceptional owner recovery remains phase 10.

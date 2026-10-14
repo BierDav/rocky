@@ -5,6 +5,13 @@ Bounded admission and retirement in `rocky-coordinator` (`retention.rs`,
 receipts, never application payloads. A [public service](public-coordination.md)
 applies the same windows per tenant. Evidence: [coordinator evidence](coordinator-evidence.md#retention-probe).
 
+The [coordinated log](coordinated-log.md) instead retains one latest join/append
+outcome per trusted node and 1,024 committed hashes, plus its running hash. The
+first admitted node request reserves 60,928 bytes against tenant and mesh limits;
+window growth cannot exhaust commit capacity. Partial storage acknowledgments are
+leader memory; resolving Raft entries bind signed proofs and snapshots keep only
+committed member positions. Its evidence is [recorded separately](../features_09/08-coordinated-log-evidence.md).
+
 ## Request identities and windows
 
 Request sequences are per domain and per invoking node. The upper 40 bits are
@@ -141,7 +148,7 @@ domain adds 1,024 bytes and its encoded control. This is an admission budget,
 not a measurement of RSS. The encoded-object ceiling independently fails closed.
 
 Logs are separate synced files; hard state is an atomic checksummed file
-(format 2; other formats, including the old single-image `raft.cbor`, are
+(format 3; other formats, including the old single-image `raft.cbor`, are
 refused with `UnsupportedFormat`, never reset). Snapshots preserve floors,
 time, controls, heads and retry windows together. Physical purge waits for a
 durable snapshot covering the purge point; an interrupted pending snapshot is

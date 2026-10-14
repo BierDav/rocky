@@ -26,6 +26,12 @@ failed. The [retention windows](coordinator-retention.md) apply: confirmation
 within 24 hours of issue, responses retrievable for seven days unless
 acknowledged; after that only the evidence your devices keep proves an outcome.
 
+The same registered domains support the [coordinated log](coordinated-log.md).
+Control-certified executor keys are its trusted nodes; invoker/member keys cannot
+call it. Its minimum and storage acknowledgments are independent of command
+assignment. Tenant `Usage` includes reserved bounded log capacity, and tenant-wide
+trusted-key and append-rate limits prevent dividing a budget across domains.
+
 ## Register a domain
 
 A tenant is a `CoordinatorControl` key; it coordinates metadata only, so use one

@@ -7,6 +7,11 @@
 [public coordination](public-coordination.md) (tenant registration, client lane),
 [operations](coordinator-operations.md) and [evidence](coordinator-evidence.md).
 
+The service also orders a [coordinated domain log](coordinated-log.md): trusted
+nodes propose hashes, store entries peer to peer and acknowledge storage. Raft
+persists ordering, membership and resolution; partial acknowledgments are leader
+memory. Application bundle staging and publication are phase 9 work.
+
 ## Bootstrap from empty state
 
 Construct `CertifiedGenesis` with an independently pinned root public key and

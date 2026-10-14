@@ -250,3 +250,111 @@ fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
         assert!(!output.exists());
     }
 }
+
+#[tokio::test]
+async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
+    use crate::coordinated::{Action, Result as LogResult};
+    use crate::machine::Outcome;
+    use openraft::storage::RaftLogStorageExt;
+    let (genesis, executor, scope) = certified();
+    let voter = PrivateKey::new();
+    let root = PrivateKey::new();
+    let mut definition = genesis.genesis;
+    definition.voters[0].key = voter.public_key();
+    let genesis = CertifiedGenesis::sign(definition, &root).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
+    let time = now().unwrap();
+    let request = |key: &PrivateKey, action| {
+        Request::sign_at(
+            genesis.id().unwrap(),
+            crate::transport::nonce(),
+            Operation::Coordinated { scope, action },
+            key,
+            time,
+        )
+        .unwrap()
+    };
+    async fn write(
+        store: &mut Store,
+        request: Request,
+        index: u64,
+        time: u64,
+    ) -> Result<Outcome, CoordinationError> {
+        let entry = Entry::<Types> {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(Proposal { time, request }),
+        };
+        store.blocking_append([entry.clone()]).await.unwrap();
+        store.save_committed(Some(entry.log_id)).await.unwrap();
+        store.apply([entry]).await.unwrap().remove(0)
+    }
+    let head = store.log_head(scope).await.unwrap();
+    write(
+        &mut store,
+        request(
+            &executor,
+            Action::Join {
+                position: 0,
+                running_hash: head.running_hash,
+                sequence: 1,
+            },
+        ),
+        1,
+        time,
+    )
+    .await
+    .unwrap();
+    let head = store.log_head(scope).await.unwrap();
+    let append = request(
+        &executor,
+        Action::Append {
+            expected: 0,
+            epoch: head.epoch,
+            hash: [7; 32],
+            deadline: time + 30,
+            sequence: 2,
+        },
+    );
+    let assigned = write(&mut store, append.clone(), 2, time).await.unwrap();
+    let Outcome::Coordinated(LogResult::Assigned(pending)) = &assigned else {
+        panic!("assignment")
+    };
+    let pending = pending.as_ref();
+    drop(store);
+    store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
+    // OpenRaft replays committed entries through its state-machine interface on startup.
+    let entries = store.try_get_log_entries(1..=2).await.unwrap();
+    store.apply(entries).await.unwrap();
+    assert_eq!(
+        store.log_head(scope).await.unwrap().pending.as_ref(),
+        Some(pending)
+    );
+    assert_eq!(write(&mut store, append, 3, time).await.unwrap(), assigned);
+    let resolve = request(
+        &voter,
+        Action::Resolve {
+            pending: pending.clone(),
+            acknowledgments: vec![request(
+                &executor,
+                Action::Acknowledge {
+                    pending: pending.clone(),
+                },
+            )],
+        },
+    );
+    let committed = write(&mut store, resolve.clone(), 4, time).await.unwrap();
+    assert!(matches!(
+        committed,
+        Outcome::Coordinated(LogResult::Committed { position: 1, .. })
+    ));
+    store.build_snapshot().await.unwrap();
+    drop(store);
+    store = Store::open(dir.path(), genesis, false, Limits::default()).unwrap();
+    assert_eq!(store.log_head(scope).await.unwrap().commit, 1);
+    assert_eq!(
+        write(&mut store, resolve, 5, time).await,
+        Err(CoordinationError::StaleHead)
+    );
+    assert_eq!(store.log_head(scope).await.unwrap().hashes.len(), 1);
+}

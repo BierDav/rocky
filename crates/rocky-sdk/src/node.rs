@@ -5,6 +5,7 @@ mod adoption;
 mod command_mesh;
 mod delivery;
 mod discovery;
+mod held;
 mod horizon;
 mod live_links;
 mod mesh;
@@ -845,6 +846,8 @@ impl Node {
                 Ok(json!({"open": self.settings.lock().await.invitation_open(uri)?}))
             }
             "generation" => self.generation().await,
+            "held_changes" => self.held_changes().await,
+            "drop_held" => self.drop_held(request).await,
             "retention" => self.retention(request).await,
             "horizon" => self.horizon(request).await,
             "retention_limits" => {
@@ -1702,6 +1705,7 @@ impl Node {
             "rebuilding": status.plan.map(|plan| json!({"filled": plan.filled, "tables": plan.tables})),
             "baseline": status.baseline,
             "application": application,
+            "held": self.replica.held_changes().await?.len(),
         }))
     }
     /// Revokes a device and rotates the keys it could read. The intent,
@@ -3903,7 +3907,18 @@ impl Node {
             let handle: [u8; 32] = handle
                 .try_into()
                 .map_err(|_| refused("handle must be 32 bytes"))?;
-            reader.sql.commit(secure_handle(&handle)).await?
+            match request.get("reauthors") {
+                Some(_) => {
+                    reader
+                        .sql
+                        .commit_reauthoring(
+                            secure_handle(&handle),
+                            held::held_id(request, "reauthors")?,
+                        )
+                        .await?
+                }
+                None => reader.sql.commit(secure_handle(&handle)).await?,
+            }
         } else {
             reader
                 .sql

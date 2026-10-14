@@ -1,6 +1,7 @@
 //! Removal: a generation drops tables and fields on every device that
 //! adopts it, and one that adds a name again ignores the writes stamped
-//! before its baseline. See `docs/runtime/removal.md`.
+//! before its baseline; an unsent change it would split is held. See
+//! `docs/runtime/removal.md` and `docs/runtime/held-changes.md`.
 mod common;
 use common::{Device, Failure, introduce};
 use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
@@ -153,7 +154,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     b.sync().await.expect("sync");
     assert_eq!(b.titles().await, ["apples", "bread"]);
     // The member, still at the first generation, writes a removed and a
-    // kept field in one frame.
+    // kept field in one frame and sends it.
     write(
         &b,
         "items",
@@ -161,13 +162,14 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
         "UPDATE items SET title='green apples', category='produce' WHERE title='apples'",
     )
     .await;
+    b.sync().await.expect("sync");
 
     a.close().await;
     let a = Device::new(Database::open(open(&a_dir, UNSHELVED, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
-    assert_eq!(a.titles().await, ["apples", "bread"]);
-    // The member adopts the generation before it applies its frames; its
-    // own frame applies the kept field on both.
+    assert_eq!(a.titles().await, ["bread", "green apples"]);
+    // The member adopts the generation; its frame was sent, so it is not
+    // held and applies the kept field on both.
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     for device in [&a, &b] {
@@ -228,11 +230,13 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
             invitation,
         )?)
     };
-    // c is a second issuer; d writes; e only ever meets a.
+    // c is a second issuer; d writes; f takes d's frame; e only ever
+    // meets a.
     let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
     let d = join("d", &a.invite().await)?;
     let e = join("e", &a.invite().await)?;
-    for member in [&c, &d, &e] {
+    let f = join("f", &a.invite().await)?;
+    for member in [&c, &d, &e, &f] {
         introduce(&a, member).await;
     }
     introduce(&c, &d).await;
@@ -272,12 +276,15 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
     ))?)?
     .close()
     .await;
-    // d, at the first generation, writes the note after that baseline. It
-    // meets c, adopts the second generation and hands c its frame as
-    // signed; c ignores the note.
+    // d, at the first generation, writes the note after that baseline and
+    // sends it to f. It meets c, adopts the second generation and hands c
+    // its frame as signed: sent, so not held. c ignores the note.
     d.set(3, &apples, "note", json!("late")).await;
+    introduce(&d, &f).await;
+    let _ = f.sync().await;
     let _ = d.sync().await;
     assert_eq!(generation(&d).await["current"]["schema"], 2);
+    assert_eq!(generation(&d).await["held"], 0);
     assert_eq!(generation(&c).await["current"]["schema"], 2);
 
     // c meets a at the third generation and pulls the frame again.
@@ -306,8 +313,156 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
         assert_eq!(generation(device).await["current"]["schema"], 3);
         assert_eq!(rows(device, notes).await, expected);
     }
-    for device in [&c, &d, &e, &a] {
+    for device in [&c, &d, &e, &f, &a] {
         device.close().await;
     }
+    Ok(())
+}
+
+/// Runs `statements` as one transaction committed under `handle`, with
+/// `extra` fields on the COMMIT request.
+async fn transaction(device: &Device, handle: u8, statements: &[&str], extra: Value) -> Value {
+    let scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
+    common::identity::prepare(&scope, "items", &|request| device.call(request))
+        .await
+        .expect("prepare");
+    device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
+    for sql in statements {
+        device.ok(json!({"type": "sql", "sql": sql})).await;
+    }
+    let mut commit = json!({"type": "sql", "sql": "COMMIT", "handle": vec![handle; 32]});
+    if let (Some(commit), Some(extra)) = (commit.as_object_mut(), extra.as_object()) {
+        commit.extend(extra.clone());
+    }
+    device.ok(commit).await
+}
+/// The held change's row of `table` and its field `name`.
+fn held_field<'a>(held: &'a Value, table: &str, name: &str) -> &'a Value {
+    held["changes"][0]["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["table"] == table))
+        .and_then(|row| row["fields"].as_array())
+        .and_then(|fields| fields.iter().find(|field| field["name"] == name))
+        .unwrap_or(&Value::Null)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_update()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::new(Database::create(open(&a_dir, SHELVED, network("a")), None)?)?;
+    let b = Device::new(Database::join(
+        open(&b_dir, SHELVED, network("b")),
+        &a.invite_as(json!({"kind": "writer", "scopes": ["items", "shelves"]}))
+            .await,
+    )?)?;
+    introduce(&a, &b).await;
+    create(
+        &a,
+        1,
+        "items",
+        json!({"title": "apples", "completed": false}),
+    )
+    .await;
+    create(
+        &a,
+        2,
+        "items",
+        json!({"title": "bread", "completed": false}),
+    )
+    .await;
+    b.sync().await.expect("sync");
+    // Offline, the member edits a kept table and the table the next
+    // version removes in one transaction, and never sends it.
+    let scope: Value = serde_json::from_str(&b.database.scope())?;
+    common::identity::prepare(&scope, "shelves", &|request| b.call(request))
+        .await
+        .map_err(|error| error.to_string())?;
+    b.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
+    b.ok(
+        json!({"type": "sql", "sql": "UPDATE items SET title='green apples' WHERE title='apples'"}),
+    )
+    .await;
+    let id = b.ok(json!({"type": "next_id", "table": "shelves"})).await["id"].clone();
+    b.ok(json!({
+        "type": "sql",
+        "sql": "INSERT INTO shelves(key,label,id) VALUES('cellar','cellar',?)",
+        "values": [{"type": "integer", "value": id.to_string().trim_matches('"')}],
+    }))
+    .await;
+    b.ok(json!({"type": "sql", "sql": "COMMIT", "handle": vec![3; 32]}))
+        .await;
+    assert_eq!(b.titles().await, ["bread", "green apples"]);
+
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, UNSHELVED, network("a")))?)?;
+    b.sync().await.expect("sync");
+    b.sync().await.expect("sync");
+    // Held whole: its kept edit is rolled back at once, on both.
+    assert_eq!(generation(&b).await["current"]["schema"], 2);
+    assert_eq!(generation(&b).await["held"], 1);
+    a.sync().await.expect("sync");
+    for device in [&a, &b] {
+        assert_eq!(device.titles().await, ["apples", "bread"]);
+    }
+    let held = b.ok(json!({"type": "held_changes"})).await;
+    assert_eq!(held["count"], 1);
+    let title = held_field(&held, "items", "title");
+    assert_eq!(
+        (&title["written"], &title["value"]),
+        (&json!(true), &text("green apples"))
+    );
+    assert_eq!(title["current"]["value"], text("apples"));
+    assert_eq!(held_field(&held, "shelves", "label")["removed"], true);
+
+    // Its frames are voided: the member's later edits reach the issuer.
+    write(
+        &b,
+        "items",
+        4,
+        "UPDATE items SET completed=1 WHERE title='bread'",
+    )
+    .await;
+    b.sync().await.expect("sync");
+    let completed = "SELECT title, completed FROM items WHERE completed=1";
+    assert_eq!(
+        rows(&a, completed).await,
+        json!([[text("bread"), {"type": "integer", "value": "1"}]])
+    );
+
+    // The issuer writes meanwhile; after the update the held change lists
+    // that newer value, and re-authoring wins over it on every device.
+    write(
+        &a,
+        "items",
+        5,
+        "UPDATE items SET title='red apples' WHERE title='apples'",
+    )
+    .await;
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
+    b.sync().await.expect("sync");
+    let held = b.ok(json!({"type": "held_changes"})).await;
+    let current = &held_field(&held, "items", "title")["current"];
+    assert_eq!(current["value"], text("red apples"));
+    assert!(current["time"].as_u64() > held["changes"][0]["time"].as_u64());
+    let id = held["changes"][0]["id"].clone();
+    transaction(
+        &b,
+        6,
+        &["UPDATE items SET title='green apples' WHERE title='red apples'"],
+        json!({"reauthors": id}),
+    )
+    .await;
+    assert_eq!(b.ok(json!({"type": "held_changes"})).await["count"], 0);
+    b.sync().await.expect("sync");
+    for device in [&a, &b] {
+        assert_eq!(device.titles().await, ["bread", "green apples"]);
+    }
+    a.close().await;
+    b.close().await;
     Ok(())
 }

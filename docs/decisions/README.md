@@ -43,6 +43,7 @@ naturally holds.
 | [0066](0066-breaking-generations.md) | Issuer-run migrations and tables granted like another; its cuts superseded by 0070 |
 | [0067](0067-names-are-identities.md) | Names are table and field identities, kept forever |
 | [0068](0068-adopting-newer-generations.md) | Devices adopt any newer generation they meet; no admission horizon; removal |
+| [0069](0069-held-changes-and-void-records.md) | Held changes, signed void records and fresh re-authoring |
 | [0070](0070-confirmed-rollouts-and-the-end-of-cuts.md) | No cuts: required fields are additive; manifests are a cache of the transition lineage |
 | [0072](0072-coordinated-log-and-writes.md) | Metadata domain log and ordinary coordinated writes |
 

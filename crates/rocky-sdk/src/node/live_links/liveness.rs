@@ -74,15 +74,20 @@ impl Node {
                         } => opened
                             .channels
                             .reconcile(frame.direction, generation, started)?,
-                        Message::Push { scope, frames } if frame.direction != direction => {
+                        Message::Push {
+                            scope,
+                            frames,
+                            voids,
+                        } if frame.direction != direction => {
                             if requests.len() >= 8 {
                                 return Err("link request queue quota".into());
                             }
                             let handle = opened.channels.handle.clone();
                             requests.push(Box::pin(async move {
                                 let _publishing = service.live.publishing.lock().await;
-                                let (complete, received) =
-                                    handle.receive_push(&self.replica, scope, frames).await?;
+                                let (complete, received) = handle
+                                    .receive_push(&self.replica, scope, frames, voids)
+                                    .await?;
                                 self.received_push(service, peer, scope, received).await?;
                                 if !complete {
                                     self.link_pending(peer);

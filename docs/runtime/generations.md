@@ -76,6 +76,10 @@ field under their original authority. Re-adding a name uses the earliest
 signing baseline and replays retained frames after it. See
 [removal](removal.md) for grants, checkpoint and recovery rules.
 
+Never-offered local bundles that touch removed items are held whole and
+voided; their effects on kept tables roll back during the switch. The app
+lists, re-authors or drops them through the [held-change API](held-changes.md).
+
 ## Tables granted like another
 
 Grant profiles name tables, so a table added later is in no existing grant.

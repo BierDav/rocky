@@ -133,6 +133,16 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
                 .iter()
                 .map(EncryptedFrame::id)
                 .collect::<Result<_, _>>()?;
+            // The package leaves the device: its frames count as offered.
+            for id in &ids {
+                inner
+                    .conn
+                    .execute(
+                        "DELETE FROM secure_unoffered WHERE hash=?",
+                        [id.as_bytes().to_vec()],
+                    )
+                    .await?;
+            }
             for record in rows(
                 &inner.conn,
                 "SELECT handle,input,hash FROM secure_handles ORDER BY handle",
@@ -272,6 +282,11 @@ impl<A: RowCommandApplication> EncryptedReplica<A> {
             package.signature = inner.config.node.sign(&package.signing_bytes()?);
             package.to_bytes()?;
             package.open(recovery_key)?;
+            Ok(package)
+        })
+        .and_then(|package| {
+            // Durable before the package leaves the device.
+            inner.flush()?;
             Ok(package)
         })
     }

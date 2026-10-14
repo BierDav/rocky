@@ -377,7 +377,7 @@ impl Handle {
         if page.behind {
             return Ok(false);
         }
-        if page.frames.is_empty() {
+        if page.frames.is_empty() && page.voids.is_empty() {
             return Ok(true);
         }
         let frame = Frame::new(
@@ -385,6 +385,7 @@ impl Handle {
             Message::Push {
                 scope: cursor.scope,
                 frames: page.frames,
+                voids: page.voids,
             },
         );
         let bytes = encode(&frame)?;
@@ -410,10 +411,11 @@ impl Handle {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
+        voids: Vec<SignedVoid>,
     ) -> Result<(bool, Vec<(PublicKey, u64)>), Error> {
         if !self.admission.offered.contains(&scope)
-            || frames.is_empty()
-            || frames.len() > rows::MAX_SECURE_PAGE
+            || (frames.is_empty() && voids.is_empty())
+            || frames.len() + voids.len() > rows::MAX_SECURE_PAGE
         {
             return Err(denied("unproved or overfull link push"));
         }
@@ -426,7 +428,13 @@ impl Handle {
         {
             return Err(denied("phase-3 rebootstrap required before sync or write"));
         }
+        rows::receive_voids(replica, &voids, &[scope]).await?;
         let mut received = Vec::new();
+        for void in &voids {
+            for (_, header, _) in void.verify()? {
+                received.push((header.public_key, header.seq_num.saturating_add(1)));
+            }
+        }
         for frame in &frames {
             if frame.scope()? != scope {
                 return Err(denied("pushed frame outside its scope"));

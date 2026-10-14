@@ -5,6 +5,10 @@ requests, Kotlin client wrappers and the [SQL driver](sql-driver.md).
 Transaction semantics follow the trusted [SQL sessions](sql-sessions.md); a
 commit is one [secure bundle](secure-sessions.md#bundles).
 
+`commit_reauthoring(handle, held_id)` commits a mapped [held change](held-changes.md)
+with fresh stamps and resolves its ID in the same transaction. Kotlin exposes
+this as `RockySession.reauthor(id) { ... }`.
+
 A [row move](row-moves.md) uses `SecureSql::move_row` as a dedicated atomic
 mutation, carrying children, identity proofs and field stamps.
 

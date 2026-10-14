@@ -58,7 +58,21 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     suspend fun generation(): JsonObject = client.call(request("generation"))
     override fun observe(query: JsonObject): Flow<JsonObject> = client.observe(query)
     override suspend fun read(query: JsonObject): JsonObject = client.read(query)
-    override suspend fun <T> write(handle: String, block: suspend SqlWrite.() -> T): T = writing.withLock {
+    override suspend fun <T> write(handle: String, block: suspend SqlWrite.() -> T): T = transaction(handle, null, block)
+
+    /** Local changes held because a newer schema removed what they write; see [HeldChanges]. */
+    suspend fun heldChanges(): HeldChanges = HeldChanges.decode(client.call(request("held_changes")))
+
+    /** Drops held change `id`; it is never sent. */
+    suspend fun dropHeld(id: String): HeldChanges = HeldChanges.decode(client.call(request("drop_held") { put("id", id) }))
+
+    /**
+     * Re-authors held change `id` as `block`: an ordinary new transaction under `handle`, mapped to this schema and
+     * stamped now, so it replaces what [HeldField.current] shows. The change leaves the list when it commits.
+     */
+    suspend fun <T> reauthor(id: String, handle: String = newMutationHandle(), block: suspend SqlWrite.() -> T): T = transaction(handle, id, block)
+
+    private suspend fun <T> transaction(handle: String, reauthors: String?, block: suspend SqlWrite.() -> T): T = writing.withLock {
         val committed = handleBytes(handle)
         val transaction = object : SqlWrite {
             override suspend fun nextId(table: String): Long = client.nextId(table).toLong()
@@ -72,6 +86,7 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
                     request("sql") {
                         put("sql", "COMMIT")
                         put("handle", committed)
+                        reauthors?.let { put("reauthors", it) }
                     },
                 )
             }

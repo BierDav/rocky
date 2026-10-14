@@ -152,6 +152,14 @@ under it is a new commit. Ask for an uncertain outcome before then.
 
 The runtime never reruns a transaction body.
 
+On the encrypted profile, [held changes](held-changes.md) retain transactions
+that a later removal makes incompatible before they were offered to peers.
+The application maps a held change to current SQL, then uses
+`SecureSql::commit_reauthoring(handle, held_id)` (Kotlin `reauthor(id) { ... }`).
+Its fresh writes and removal from the held list commit atomically; a failure
+leaves both unchanged. The handle binds the held ID as well as the writes.
+Dropping a held change is a separate explicit operation.
+
 ## Qualification
 
 `cargo test -p rocky-sdk --test sql` and

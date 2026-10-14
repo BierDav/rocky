@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 1;
+pub(super) const HANDSHAKE_VERSION: u32 = 2;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -32,6 +32,8 @@ pub enum Message {
     Push {
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
+        /// Void records consuming the positions before the frames.
+        voids: Vec<SignedVoid>,
     },
     Ready {
         persistent: bool,
@@ -86,8 +88,9 @@ impl Frame {
         {
             return Err(denied("link signal scope quota"));
         }
-        if let Message::Push { frames, .. } = &self.message
-            && (frames.is_empty() || frames.len() > rows::MAX_SECURE_PAGE)
+        if let Message::Push { frames, voids, .. } = &self.message
+            && ((frames.is_empty() && voids.is_empty())
+                || frames.len() + voids.len() > rows::MAX_SECURE_PAGE)
         {
             return Err(denied("link push frame quota"));
         }
@@ -735,7 +738,7 @@ mod tests {
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v1");
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v2");
     }
 }
 

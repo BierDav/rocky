@@ -515,6 +515,13 @@ impl<A: RowApplication> Inner<A> {
             }
             return Ok(Staged::Covered);
         }
+        // A void consumed this position: the frame forks its log.
+        if self
+            .voided_position(scope, operation.header.public_key, operation.header.seq_num)
+            .await?
+        {
+            return Ok(Staged::Covered);
+        }
         self.admit_scope(&operation.header).await?;
         self.check_budget(bytes).await?;
         self.keep_chain(frame.chain()?).await?;

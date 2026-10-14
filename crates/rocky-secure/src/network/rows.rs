@@ -18,6 +18,8 @@ pub(super) enum RowMessage {
         next: Option<Hash>,
         /// Subscribed scopes whose history is pruned at the sender.
         pruned: Vec<ResourceScope>,
+        /// Void records consuming the positions before the frames.
+        voids: Vec<SignedVoid>,
     },
     Ack {
         id: Hash,
@@ -44,6 +46,7 @@ pub(super) enum RowMessage {
     Push {
         scope: ResourceScope,
         frames: Vec<EncryptedFrame>,
+        voids: Vec<SignedVoid>,
     },
     ScopesQuery {
         after: Option<ResourceScope>,
@@ -144,6 +147,7 @@ impl NativeSession {
             frames,
             next,
             pruned,
+            voids,
         } = self.reply::<RowMessage>().await?
         else {
             return Err(denied("unexpected native response"));
@@ -188,6 +192,7 @@ impl NativeSession {
         {
             return Err(denied("native page quota"));
         }
+        receive_voids(replica, &voids, &scopes).await?;
         let (frames, incomplete) = self.complete_frames(frames)?;
         let mut ids = Vec::with_capacity(frames.len());
         for frame in &frames {
@@ -273,9 +278,9 @@ impl NativeSession {
                 return Err(denied("unexpected range response"));
             };
             if page.scope != scope
-                || page.frames.len() > MAX_SECURE_PAGE
+                || page.frames.len() + page.voids.len() > MAX_SECURE_PAGE
                 || page.frontier.scope != scope
-                || (page.behind && !page.frames.is_empty())
+                || (page.behind && !(page.frames.is_empty() && page.voids.is_empty()))
             {
                 return Err(denied("range page outside request"));
             }
@@ -296,6 +301,7 @@ impl NativeSession {
                 return Ok(report);
             }
             report.frames += page.frames.len();
+            receive_voids(replica, &page.voids, &[scope]).await?;
             let (frames, incomplete) = self.complete_frames(page.frames)?;
             report.incomplete += incomplete;
             // The page is received in shared transactions and one flush.
@@ -344,7 +350,7 @@ impl NativeSession {
                 pushed.behind = true;
                 return Ok(pushed);
             }
-            if page.frames.is_empty() {
+            if page.frames.is_empty() && page.voids.is_empty() {
                 return Ok(pushed);
             }
             pushed.frames += page.frames.len();
@@ -352,6 +358,7 @@ impl NativeSession {
             self.send(RowMessage::Push {
                 scope,
                 frames: page.frames,
+                voids: page.voids,
             })
             .await?;
             let RowMessage::Frontier { frontier: theirs } = self.reply::<RowMessage>().await?
@@ -476,6 +483,7 @@ impl NativeSession {
                     frames: page.frames,
                     next: page.next,
                     pruned: page.pruned,
+                    voids: page.voids,
                 })
                 .await
             }
@@ -526,7 +534,11 @@ impl NativeSession {
                 let frontier = replica.frontier(scope).await?;
                 self.send(RowMessage::Frontier { frontier }).await
             }
-            RowMessage::Push { scope, frames } => {
+            RowMessage::Push {
+                scope,
+                frames,
+                voids,
+            } => {
                 if replica
                     .horizon_peer_behind(self.peer, &self.credentials, scope)
                     .await?
@@ -536,7 +548,7 @@ impl NativeSession {
                 replica
                     .authorize_scope_peer(self.peer, &self.credentials, scope)
                     .await?;
-                if frames.len() > MAX_SECURE_PAGE {
+                if frames.len() + voids.len() > MAX_SECURE_PAGE {
                     return Err(denied("native page quota"));
                 }
                 for frame in &frames {
@@ -544,6 +556,7 @@ impl NativeSession {
                         return Err(denied("pushed frame outside its scope"));
                     }
                 }
+                receive_voids(replica, &voids, &[scope]).await?;
                 // An incomplete frame is not received; the frontier that
                 // answers the push shows the sender what is still missing.
                 let (frames, _) = self.complete_frames(frames)?;
@@ -572,4 +585,26 @@ impl NativeSession {
             _ => Err(denied("unexpected native request")),
         }
     }
+}
+
+/// Admits the void records a page carries before its frames: each must be
+/// of a requested scope. A refused record is skipped; the frames after it
+/// keep waiting.
+pub(super) async fn receive_voids<A: RowApplication>(
+    replica: &EncryptedReplica<A>,
+    voids: &[SignedVoid],
+    scopes: &[ResourceScope],
+) -> Result<(), Error> {
+    if voids.len() > MAX_SECURE_PAGE {
+        return Err(denied("native page quota"));
+    }
+    for void in voids {
+        if !scopes.contains(&void.scope()?) {
+            return Err(denied("void record outside the requested scopes"));
+        }
+    }
+    for status in replica.receive_voids(voids).await {
+        status?;
+    }
+    Ok(())
 }

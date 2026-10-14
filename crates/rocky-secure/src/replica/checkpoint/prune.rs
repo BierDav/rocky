@@ -282,6 +282,7 @@ impl<A: RowApplication> Inner<A> {
                 for sql in [
                     "DELETE FROM secure_operations WHERE hash=?",
                     "DELETE FROM secure_outbox WHERE hash=?",
+                    "DELETE FROM secure_unoffered WHERE hash=?",
                     "DELETE FROM secure_ack WHERE hash=?",
                     "DELETE FROM secure_applied WHERE hash=?",
                 ] {

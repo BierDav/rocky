@@ -428,7 +428,7 @@ pub fn fillable(schema: &LogicalSchema) -> BTreeSet<Commitment> {
 }
 /// The value of a column's default literal, as the definition writes it:
 /// an integer, a real or a quoted string. NULL and anything else is none.
-pub(crate) fn default_value(column: &crate::LogicalColumn) -> Option<SqlValue> {
+pub fn default_value(column: &crate::LogicalColumn) -> Option<SqlValue> {
     let literal = column.default.as_deref()?;
     let value = if let Some(text) = literal
         .strip_prefix('\'')

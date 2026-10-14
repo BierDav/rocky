@@ -282,6 +282,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
             authored.push(frame);
         }
+        self.record_bundle(transaction, &authored).await?;
         self.verify_sql_projection(&writes).await?;
         self.put_handle(&handle, &input, authored[0].id()?.as_bytes())
             .await?;

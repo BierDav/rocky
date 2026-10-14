@@ -303,7 +303,10 @@ impl<A: RowApplication> Inner<A> {
                     {
                         continue;
                     }
-                    None => return Ok(false),
+                    None => match self.voided_dependency(&operation.header, *id).await? {
+                        Some(true) => continue,
+                        Some(false) | None => return Ok(false),
+                    },
                 }
             };
             let predecessor = dependency.operation()?;

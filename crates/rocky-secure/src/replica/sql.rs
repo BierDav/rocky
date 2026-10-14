@@ -343,12 +343,23 @@ impl<A: RowApplication> SecureSql<A> {
     /// Runs one statement. Transaction control is interpreted here, as in
     /// a trusted `SqlSession`.
     pub async fn run(&self, sql: &str, params: Vec<SqlValue>) -> Result<SecureRows, Error> {
-        self.call(sql, params, None).await
+        self.call(sql, params, None, None).await
     }
     /// Commits the open transaction under `handle`. The same handle and
     /// changed rows return the committed frames again; other rows conflict.
     pub async fn commit(&self, handle: Commitment) -> Result<SecureRows, Error> {
-        self.call("COMMIT", Vec::new(), Some(handle)).await
+        self.call("COMMIT", Vec::new(), Some(handle), None).await
+    }
+    /// Commits the open transaction as the re-authoring of the held change
+    /// `held`, which leaves the list in the same transaction. The rows are
+    /// an ordinary new bundle stamped now.
+    pub async fn commit_reauthoring(
+        &self,
+        handle: Commitment,
+        held: Commitment,
+    ) -> Result<SecureRows, Error> {
+        self.call("COMMIT", Vec::new(), Some(handle), Some(held))
+            .await
     }
     /// Rolls the open transaction back; later statements report
     /// `Aborted(Cancelled)` until the caller sends `ROLLBACK`.
@@ -370,6 +381,7 @@ impl<A: RowApplication> SecureSql<A> {
         sql: &str,
         params: Vec<SqlValue>,
         handle: Option<Commitment>,
+        reauthors: Option<Commitment>,
     ) -> Result<SecureRows, Error> {
         let control = classify(sql).map_err(Error::Sql)?;
         let mut lease = self.lease.lock().await;
@@ -420,7 +432,7 @@ impl<A: RowApplication> SecureSql<A> {
             {
                 Err(refused("no transaction is active"))
             }
-            Control::Commit => self.finish(&mut lease, handle, None).await,
+            Control::Commit => self.finish(&mut lease, handle, None, reauthors).await,
             Control::Rollback => {
                 lease.held = None;
                 Ok(empty(&lease, SqlState::Idle))
@@ -428,7 +440,7 @@ impl<A: RowApplication> SecureSql<A> {
             Control::Release(name) => {
                 let index = position(&lease, &name)?;
                 if index == 0 && lease.implicit {
-                    return self.finish(&mut lease, handle, None).await;
+                    return self.finish(&mut lease, handle, None, None).await;
                 }
                 self.engine(&lease, &format!("RELEASE rocky_user_{index}"))?;
                 lease.savepoints.truncate(index);
@@ -524,7 +536,7 @@ impl<A: RowApplication> SecureSql<A> {
                 return Err(error);
             }
         };
-        self.finish(lease, handle, Some(rows)).await
+        self.finish(lease, handle, Some(rows), None).await
     }
     async fn begin(&self, lease: &mut Lease<A>, sql: &str) -> Result<(), Error> {
         let inner = self.session.replica.inner.clone().lock_owned().await;
@@ -763,6 +775,7 @@ impl<A: RowApplication> SecureSql<A> {
         lease: &mut Lease<A>,
         handle: Option<Commitment>,
         rows: Option<SecureRows>,
+        reauthors: Option<Commitment>,
     ) -> Result<SecureRows, Error> {
         let mut held = lease.held.take().ok_or(Error::Closed)?;
         lease.savepoints.clear();
@@ -772,7 +785,7 @@ impl<A: RowApplication> SecureSql<A> {
         let inner = &mut *held.0;
         #[cfg(feature = "qualification")]
         qualification_kill("before");
-        let sealed = self.seal(inner, handle).await;
+        let sealed = self.seal(inner, handle, reauthors).await;
         inner.strict_projection = false;
         let committed = match sealed? {
             // `held` rolls the repeated transaction back.
@@ -818,6 +831,7 @@ impl<A: RowApplication> SecureSql<A> {
         &self,
         inner: &mut Inner<A>,
         handle: Option<Commitment>,
+        reauthors: Option<Commitment>,
     ) -> Result<Sealed, Error> {
         let capture_error = |reason: String| Error::Sql(SqlError::Capture(reason));
         let conn = inner.conn.connection();
@@ -1001,6 +1015,9 @@ impl<A: RowApplication> SecureSql<A> {
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut handle);
             handle
         });
+        if writes.is_empty() && reauthors.is_some() {
+            return Err(denied("re-authoring a held change writes rows"));
+        }
         if writes.is_empty() {
             return Ok(Sealed::Commit(SecureCommit {
                 handle,
@@ -1014,7 +1031,13 @@ impl<A: RowApplication> SecureSql<A> {
                 limit: MAX_BUNDLE_BYTES,
             });
         }
-        let input = rocky_core::commitment("rocky.secure-bundle-input.v1", &encoded);
+        let input = match reauthors {
+            Some(held) => rocky_core::commitment(
+                "rocky.secure-reauthor-input.v1",
+                &encode(&(held, serde_bytes::Bytes::new(&encoded)))?,
+            ),
+            None => rocky_core::commitment("rocky.secure-bundle-input.v1", &encoded),
+        };
         match inner.lookup_bundle(handle, input).await? {
             Some(Ok(frames)) => return Ok(Sealed::Replayed(SecureCommit { handle, frames })),
             Some(Err(_)) => {
@@ -1028,6 +1051,9 @@ impl<A: RowApplication> SecureSql<A> {
         let frames = inner
             .author_bundle(handle, input, &writes, &[], now()?)
             .await?;
+        if let Some(held) = reauthors {
+            inner.resolve_held(held).await?;
+        }
         Ok(Sealed::Commit(SecureCommit { handle, frames }))
     }
 }

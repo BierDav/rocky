@@ -1808,3 +1808,5 @@ async fn a_transition_that_hides_a_removal_is_refused() {
         Err(Error::Incompatible(_))
     ));
 }
+
+mod held;

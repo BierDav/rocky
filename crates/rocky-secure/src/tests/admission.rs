@@ -218,7 +218,7 @@ async fn another_session_version_is_refused_with_the_authentication_error() {
             &b,
             (bob.clone(), f.credentials(&bob, f.full())),
             Some(alice.public_key()),
-            2,
+            1,
         )
     );
     match accepted {

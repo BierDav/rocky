@@ -178,6 +178,8 @@ pub struct RangePage {
     pub behind: bool,
     /// The sender's own frontier, for lag reporting.
     pub frontier: ScopeFrontier,
+    /// Void records consuming positions of the logs the page continues.
+    pub voids: Vec<SignedVoid>,
 }
 /// Lag between this replica and one peer in one scope, by applied operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,7 +366,7 @@ impl<A: RowApplication> Inner<A> {
         for record in collect_rows(
             self.conn
                 .query(
-                    "SELECT DISTINCT author FROM secure_operations WHERE scope=?",
+                    "SELECT author FROM secure_operations WHERE scope=?1 UNION SELECT author FROM secure_voids WHERE scope=?1",
                     [blob.clone()],
                 )
                 .await?,
@@ -381,7 +383,8 @@ impl<A: RowApplication> Inner<A> {
                 let next = collect_rows(
                     self.conn
                         .query(
-                            "SELECT sequence FROM secure_operations WHERE scope=? AND author=? AND sequence>=? ORDER BY sequence LIMIT 256",
+                            // A voided position is consumed: it continues the prefix.
+                            "SELECT sequence FROM secure_operations WHERE scope=?1 AND author=?2 AND sequence>=?3 UNION SELECT sequence FROM secure_voids WHERE scope=?1 AND author=?2 AND sequence>=?3 ORDER BY sequence LIMIT 256",
                             bindings(vec![
                                 SqlValue::Blob(blob.clone()),
                                 SqlValue::Blob(author.as_bytes().to_vec()),
@@ -586,6 +589,26 @@ impl<A: RowApplication> Inner<A> {
         after: Option<(PublicKey, u64)>,
         byte_quota: usize,
     ) -> Result<RangePage, Error> {
+        let page = self
+            .range_frames(peer, credentials, request, after, byte_quota)
+            .await?;
+        // Frames leave the device: they count as offered from here on.
+        let hashes = page
+            .frames
+            .iter()
+            .map(EncryptedFrame::id)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.offer(&hashes).await?;
+        Ok(page)
+    }
+    async fn range_frames(
+        &mut self,
+        peer: PublicKey,
+        credentials: &CredentialChain,
+        request: &ScopeFrontier,
+        after: Option<(PublicKey, u64)>,
+        byte_quota: usize,
+    ) -> Result<RangePage, Error> {
         request.validate()?;
         let scope = request.scope;
         self.authorize_peer(peer, credentials, scope)?;
@@ -610,6 +633,7 @@ impl<A: RowApplication> Inner<A> {
             next: None,
             behind: false,
             frontier: own.clone(),
+            voids: vec![],
         };
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {
@@ -645,7 +669,48 @@ impl<A: RowApplication> Inner<A> {
                     .await?,
             )
             .await?;
-            for record in records {
+            // Voided positions interleave with the log's frames.
+            let mut voids = self
+                .voids_from(scope, log.author, start, RANGE_FRAMES + 1)
+                .await?
+                .into_iter()
+                .peekable();
+            let mut records = records.into_iter().peekable();
+            loop {
+                let next_frame = match records.peek().map(Vec::as_slice) {
+                    Some([SqlValue::Integer(sequence), ..]) => Some(*sequence as u64),
+                    Some(_) => return Err(Error::Corrupt("retained operation".into())),
+                    None => None,
+                };
+                if let Some((sequence, _, _)) = voids.peek()
+                    && next_frame.is_none_or(|frame| *sequence < frame)
+                {
+                    let Some((sequence, digest, record)) = voids.next() else {
+                        break;
+                    };
+                    if !page
+                        .voids
+                        .iter()
+                        .any(|held| held.digest().ok() == Some(digest))
+                    {
+                        let weight = record.weight();
+                        if page.frames.len() + page.voids.len() == RANGE_FRAMES
+                            || used + weight > byte_quota
+                        {
+                            if page.frames.is_empty() && page.voids.is_empty() {
+                                return Err(denied("byte quota smaller than one frame"));
+                            }
+                            return Ok(page);
+                        }
+                        used += weight;
+                        page.voids.push(record);
+                    }
+                    page.next = Some((log.author, sequence));
+                    continue;
+                }
+                let Some(record) = records.next() else {
+                    break;
+                };
                 let [
                     SqlValue::Integer(sequence),
                     SqlValue::Blob(header),
@@ -671,8 +736,10 @@ impl<A: RowApplication> Inner<A> {
                     break;
                 }
                 let weight = frame.weight();
-                if page.frames.len() == RANGE_FRAMES || used + weight > byte_quota {
-                    if page.frames.is_empty() {
+                if page.frames.len() + page.voids.len() == RANGE_FRAMES
+                    || used + weight > byte_quota
+                {
+                    if page.frames.is_empty() && page.voids.is_empty() {
                         return Err(denied("byte quota smaller than one frame"));
                     }
                     return Ok(page);

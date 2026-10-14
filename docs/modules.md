@@ -176,6 +176,8 @@ apart from whatever delivers it ([typed commands](runtime/typed-commands.md)).
 the compiled command. Its files are separate from trusted legacy files; see
 [permissions and sync](runtime/permissions-and-sync.md). Multi-scope transaction
 bundles and authority-bound sessions are in [secure sessions](runtime/secure-sessions.md);
+never-offered bundles incompatible with a removal become
+[held changes](runtime/held-changes.md), with signed voids and atomic re-authoring;
 typed tables and SQL sessions over them in [secure SQL](runtime/secure-sql.md),
 read-only command-controlled tables in [confirmed tables](runtime/confirmed-tables.md),
 with availability-checked cursors and table events in

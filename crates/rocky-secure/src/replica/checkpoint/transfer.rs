@@ -925,6 +925,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if signed.id()? != checkpoint {
             return Err(denied("checkpoint superseded; restart the rebootstrap"));
         }
+        if after.is_none() {
+            // The checkpoint carries this device's frames it covers.
+            let logs: Vec<_> = signed
+                .statement
+                .frontier
+                .iter()
+                .map(|log| (log.author, log.sequence))
+                .collect();
+            inner.offer_covered(scope, &logs).await?;
+        }
         let strong = if after.is_none() {
             let mut record = inner
                 .conn
@@ -1574,6 +1584,7 @@ impl<A: RowApplication> Inner<A> {
                     for sql in [
                         "DELETE FROM secure_operations WHERE hash=?",
                         "DELETE FROM secure_outbox WHERE hash=?",
+                        "DELETE FROM secure_unoffered WHERE hash=?",
                         "DELETE FROM secure_ack WHERE hash=?",
                         "DELETE FROM secure_applied WHERE hash=?",
                     ] {

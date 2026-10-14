@@ -345,6 +345,7 @@ impl<A: RowApplication> Inner<A> {
                 [operation.hash.as_bytes().to_vec()],
             )
             .await?;
+        self.record_unoffered(operation.hash, writes).await?;
         self.record_key(key).await?;
         Ok(frame)
     }

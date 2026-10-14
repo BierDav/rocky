@@ -99,6 +99,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 number,
             },
         );
+        // Held frames of this author's logs are voided once it signs.
+        if inner.unsigned_voids().await? {
+            transaction!(inner, |inner| inner.sign_voids().await)?;
+        }
         drop(inner);
         self.settle().await
     }

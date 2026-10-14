@@ -154,22 +154,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if frames.is_empty() {
                     return Err(denied("byte quota smaller than one frame"));
                 }
-                return Ok(CiphertextPage {
-                    frames,
-                    next: last,
-                    pruned,
-                });
+                return inner.offered_page(frames, last, pruned).await;
             }
             used += weight;
             last = Some(id);
             frames.push(frame);
         }
         // Skipped frames can leave a full query short of a full page.
-        Ok(CiphertextPage {
-            frames,
-            next: if limited { last } else { None },
-            pruned,
-        })
+        let next = if limited { last } else { None };
+        inner.offered_page(frames, next, pruned).await
     }
     pub async fn acknowledge(
         &self,
@@ -316,5 +309,28 @@ impl<A: RowApplication> Inner<A> {
                 return Ok(page);
             }
         }
+    }
+}
+
+impl<A: RowApplication> Inner<A> {
+    /// A transfer page with the voids its frames continue after, its
+    /// frames marked offered before they leave.
+    async fn offered_page(
+        &mut self,
+        frames: Vec<EncryptedFrame>,
+        next: Option<Hash>,
+        pruned: Vec<ResourceScope>,
+    ) -> Result<CiphertextPage, Error> {
+        let hashes = frames
+            .iter()
+            .map(EncryptedFrame::id)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.offer(&hashes).await?;
+        Ok(CiphertextPage {
+            voids: self.voids_before(&frames).await?,
+            frames,
+            next,
+            pruned,
+        })
     }
 }

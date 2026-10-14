@@ -10,6 +10,7 @@ mod evict;
 mod existence;
 mod generation;
 pub(super) mod group;
+mod held;
 mod holdings;
 mod horizon;
 mod identity;
@@ -52,6 +53,7 @@ pub use existence::{
     ExistenceRecord, MAX_EXISTENCE_PAGE,
 };
 pub use generation::{GenerationStatus, GenerationStep, MAX_GENERATIONS, Upgrade};
+pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};
 pub use migrate::{PLAN_ROWS, ProjectionPlan};
 pub use offload::RemotePage;
 use p2panda_core::validate_backlink;
@@ -154,6 +156,8 @@ pub struct CiphertextPage {
     /// Requested scopes with pruned history. A receiver compares
     /// `horizon_page` with what it holds before it relies on this pass.
     pub pruned: Vec<ResourceScope>,
+    /// Void records consuming the positions before the frames.
+    pub voids: Vec<SignedVoid>,
 }
 /// A stamp: which write of which author last set a field. Stored as a
 /// tuple in every row record, so it carries no field names.
@@ -500,6 +504,7 @@ fn protocol_schema() -> impl Iterator<Item = &'static str> {
         backup::SCHEMA,
         rebuild::SCHEMA,
         removal::SCHEMA,
+        held::SCHEMA,
         bundle::SCHEMA,
         typed::SCHEMA,
         identity::SCHEMA,
@@ -546,7 +551,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v16" {
+    if label != "rocky.encrypted-replica.v17" {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));

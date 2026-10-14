@@ -41,6 +41,10 @@ reopens at the new generation and switches then; a crash during the plan
 resumes it. The schema's `migrations` never run here: their results arrive
 as signed writes.
 
+Before dropping removed items, activation records incompatible never-offered
+bundles as [held changes](held-changes.md). Kept-table effects are rebuilt
+without them before the switch returns; status reports their count in `held`.
+
 ## Applications behind and ahead
 
 | The application declares | Opening does | Status `application` |

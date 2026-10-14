@@ -44,6 +44,8 @@ every device still applies the same rule to the same stamps.
 
 In the activation transaction the replica:
 
+- holds and voids incompatible never-offered local bundles, scheduling their
+  kept scopes for replay ([held changes](held-changes.md));
 - deletes a removed table's stored rows, row keys, subscription and
   retention policy; its signed history and checkpoint stay, so a generation
   that adds it again can pull them again;
@@ -56,7 +58,7 @@ The [projection plan](generations.md#plan-backfill-and-switch) then
 recreates the tables, indexes and constraints of the new schema from the
 stored rows. Stored rows stay a replay of the checkpoint base and the frames
 after it, which the open-time audit checks. File identity
-`rocky.encrypted-replica.v16`.
+`rocky.encrypted-replica.v17` (including [held changes](held-changes.md)).
 
 ## Frames and checkpoint pages
 
@@ -98,7 +100,7 @@ issuers that sign the same schema apart hold the same key.
 ## Limits
 
 Signing a removal waits for [confirmed rollouts](../features_09/05-confirmed-rollouts.md);
-held changes are [phase 4](../features_09/04-held-changes.md). A remaining
+held changes are implemented in [phase 4](../features_09/04-held-changes.md). A remaining
 table's reader scope must stay as it was: a removal that would split a
 reader scope another table shares is refused by the projection plan.
 

@@ -36,6 +36,12 @@ frames, also after a restart or recovery import; other writes conflict.
 `RowWrite::assigned` lists fields an update republishes although unchanged.
 Each needs a row/field grant like a changed one.
 
+On adopting a removal, incompatible bundles never offered to any peer are
+[held whole](held-changes.md), voided and rolled back locally. Offered bundles
+keep their original signatures and apply kept fields. Applications inspect
+the held list and current values, then re-author through a secure SQL
+transaction or drop the change; neither bypasses ordinary write admission.
+
 ## What a receiver applies
 
 Each frame carries the bundle's member list, every entry sealed under its own
@@ -105,7 +111,7 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v1`; any other version is refused. Every request runs as a
+`rocky.link.v2`; any other version is refused. Every request runs as a
 `NativeSession` on one of the link's request channels. Each session message is
 signed under `rocky.native-frame.v2` over the digest of the session binding,
 its sequence and the digest of its body, so signing hashes the same few bytes

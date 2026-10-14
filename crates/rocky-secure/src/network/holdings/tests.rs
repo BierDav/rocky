@@ -114,6 +114,7 @@ fn requests(
         RowMessage::Push {
             scope,
             frames: Vec::new(),
+            voids: Vec::new(),
         }
         .into(),
         RowMessage::FrontierQuery { scope }.into(),

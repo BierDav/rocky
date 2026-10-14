@@ -1,6 +1,8 @@
 # 4. Held changes
 
-Status: proposed; not started.
+Status: implemented; all three completion gates passed. See
+[evidence](04-held-changes-evidence.md) and
+[decision 0069](../decisions/0069-held-changes-and-void-records.md).
 Owner: `rocky-secure` author logs, outbox and admission; `rocky-sdk` status
 and the Kotlin API. Depends on [phase 3](03-removal.md). Follow the
 [execution contract](README.md#agent-execution-contract). Takes decision record 0069.

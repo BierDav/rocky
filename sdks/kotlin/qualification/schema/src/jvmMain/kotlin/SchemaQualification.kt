@@ -480,7 +480,7 @@ fun main(args: Array<String>) {
             primaryKey("recipient", "list")
         }
     }
-    val listsExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.ShoppingDatabase/4.json").readText()
+    val listsExport = File(root, "examples/shoppinglist-app/shared/schemas/org.example.examples.shopping.data.db.ShoppingDatabase/4.json").readText()
     val listsOverlay: SchemaBuilder.() -> Unit = {
         table("lists") { partitionBy("id", group = "list") }
         table("categories") { partitionBy("list", group = "list") }

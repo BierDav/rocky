@@ -96,6 +96,7 @@ unreserved record is 0074; 0064 remains reserved for
 | Transport-independent identity, contact records, peer sync | [sdk-transports](../runtime/sdk-transports.md#design-rationale) |
 
 | Stuck coordinated recovery, canonical-base requirements | [0073](0073-stuck-recovery-and-strong-commands.md) |
+| Owner-signed recovery cuts, history fencing, checkpoint binding | [0074](0074-owner-signed-recovery-cuts.md) |
 
 ## Writing a record
 

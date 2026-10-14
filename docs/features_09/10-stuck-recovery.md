@@ -58,3 +58,8 @@ abandoned suffix while its frame evidence is pruned; the current checkpoint
 has no coordinated-log position/hash binding and rebuilding starts from that
 same base. Recovery needs authenticated canonical-base replacement as well as
 frame fencing. No cut API reports success before those contracts exist.
+
+[Decision 0074](../decisions/0074-owner-signed-recovery-cuts.md) settles both:
+the cut is a log entry after the replaced head, so positions are never reused;
+checkpoints bind their coordinated history, and a tainted base is replaced by a
+clean import. It also fixes the format changes, tests and landing order.

@@ -74,7 +74,8 @@ history identity to fence abandoned frames at reused positions and a verified
 canonical checkpoint base when the abandoned effects have already been pruned.
 The present checkpoint format supplies neither coordinated-history binding nor
 an authenticated replacement base for this case. See
-[decision 0073](../decisions/0073-stuck-recovery-and-strong-commands.md).
+[decision 0073](../decisions/0073-stuck-recovery-and-strong-commands.md);
+[decision 0074](../decisions/0074-owner-signed-recovery-cuts.md) designs the cut.
 
 ## Explicit acknowledged loss
 

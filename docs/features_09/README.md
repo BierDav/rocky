@@ -164,6 +164,7 @@ flowchart LR
 | 0071 | 7 | [Staged migration publication](../decisions/0071-staged-migration-publication.md) |
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-strong-commands.md) |
+| 0074 | 10 | [Owner-signed recovery cuts](../decisions/0074-owner-signed-recovery-cuts.md) |
 
 ## Open questions
 

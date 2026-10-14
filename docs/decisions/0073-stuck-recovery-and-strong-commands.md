@@ -45,6 +45,7 @@ requires a verified canonical replacement base, preservation/reconciliation of
 ordinary writes, and propagation of signed fencing evidence. Merely marking
 retained suffix frames rejected and rewinding the log would not converge.
 No cut is admitted or acknowledged as success in this slice.
+[Decision 0074](0074-owner-signed-recovery-cuts.md) designs the cut and rollback.
 
 [Phase 11](../features_09/11-removing-strong-commands.md) owns removal of strong
 commands. This change removes none of them and does not depend on phase 7.

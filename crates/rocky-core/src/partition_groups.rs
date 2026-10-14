@@ -34,14 +34,14 @@ impl LogicalSchema {
                     || self.format != LOGICAL_SCHEMA_FORMAT)
             {
                 return Err(SchemaError::Invalid(format!(
-                    "{}: group {name} requires a valid name and partition columns in format 4",
+                    "{}: group {name} requires a valid name and partition columns in format 5",
                     table.sql_name
                 )));
             }
             if table.partition_by.is_empty() {
                 continue;
             }
-            let name = table.partition_group.as_deref().unwrap_or(&table.logical);
+            let name = table.partition_group.as_deref().unwrap_or(&table.sql_name);
             let slots = table
                 .partition_by
                 .iter()
@@ -145,7 +145,7 @@ mod tests {
         AppId, DomainId, MeshId, Profile, SchemaChange, SchemaDefinition, Unsupported, classify,
     };
     fn definition() -> SchemaDefinition {
-        serde_json::from_value(serde_json::json!({"format":5,"publisher":"11".repeat(32),"application":"groups","tables":[
+        serde_json::from_value(serde_json::json!({"format":6,"publisher":"11".repeat(32),"application":"groups","tables":[
             {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}
         ]})).unwrap()

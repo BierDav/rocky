@@ -10,7 +10,8 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   replicated definition. A local plan keeps the manifest and row identities.
 - Adding a mergeable table or nullable field requires a publisher-signed
   `GenerationTransition`. Rows from an older definition supply null for newly
-  added nullable fields. Logical names remain stable identities.
+  added nullable fields. Names are the identities of tables and fields
+  ([decision 0067](../decisions/0067-names-are-identities.md)).
 - Requiring a field of an existing table, newly added or once nullable, is a
   [breaking generation](#breaking-generations): the field needs a default,
   and the schema's migrations compute its values once.
@@ -19,7 +20,7 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   requires a new handler generation. Removing/redefining one is refused.
 - Key rotation/revocation uses the existing explicit credential policy mechanism.
   Generation plans refuse reader-scope remapping. Key/type changes, removals
-  and renames are unsupported, cuts included.
+  and renames, which remove the old name, are unsupported, cuts included.
 
 Partition group membership and names are immutable for existing tables, as are
 partition columns. A new mergeable table may join an existing group with matching

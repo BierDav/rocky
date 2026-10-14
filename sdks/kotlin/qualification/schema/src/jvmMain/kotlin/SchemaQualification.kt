@@ -15,7 +15,7 @@ fun main(args: Array<String>) {
         }
     }
     val data = Json.parseToJsonElement(samples.definitionJson("09".repeat(32))).jsonObject
-    check(data.getValue("format").jsonPrimitive.int == 5)
+    check(data.getValue("format").jsonPrimitive.int == 6)
     check(
         runCatching {
             schema("reserved") {
@@ -55,12 +55,7 @@ fun main(args: Array<String>) {
     val root = File(args[1])
     // The flat shopping entity: its key is the id Rocky issues.
     val shoppingExport = File(root, "sdks/kotlin/qualification/schema/schemas/rocky.qualification.FlatDatabase/2.json").readText()
-    val shopping = schemaFromRoom("shopping", shoppingExport) {
-        table("shopping_items") {
-            logical = "items"
-            configureColumn("title") { it.copy(logical = "label") }
-        }
-    }
+    val shopping = schemaFromRoom("shopping", shoppingExport)
     val handmade = schema("shopping", version = 2) {
         table("shopping_items") {
             text("title")
@@ -68,8 +63,6 @@ fun main(args: Array<String>) {
             column(Column.text("searchTitle").copy(default = JsonPrimitive("")))
             primaryKey("id")
             index("index_shopping_items_completed_title", "completed", "title")
-            logical = "items"
-            configureColumn("title") { it.copy(logical = "label") }
         }
     }
     check(shopping.definitionJson("09".repeat(32)) == handmade.definitionJson("09".repeat(32)))
@@ -186,11 +179,10 @@ fun main(args: Array<String>) {
     val manualDefaults = schema("defaults", 2) {
         table("shopping_items") {
             text("title")
-            column(Column.boolean("completed").copy(default = JsonPrimitive(false), logical = "completed"))
+            column(Column.boolean("completed").copy(default = JsonPrimitive(false)))
             column(Column.text("searchTitle").copy(default = JsonPrimitive("")))
             primaryKey("id")
             index("index_shopping_items_completed_title", "completed", "title")
-            logical = "shopping_items"
         }
     }
     check(importedDefaults.definitionJson("09".repeat(32)) == manualDefaults.definitionJson("09".repeat(32)))

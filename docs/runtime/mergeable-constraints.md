@@ -56,7 +56,7 @@ Generated statements, compared exactly at installation:
 | Partitioned `set_null` index, references between different partition groups, or partitioned child to an unlogged parent outside its group | Always |
 
 Policies and delete actions enter the replicated shape and manifest by
-logical names; unconstrained tables keep their manifest items. The SDK puts
+name; unconstrained tables keep their manifest items. The SDK puts
 reference-connected tables into one deterministic reader scope (the scope hash
 of the lexically first SQL table name); a reference to an existence-log table
 does not connect them. Grants and keys stay per table. Direct

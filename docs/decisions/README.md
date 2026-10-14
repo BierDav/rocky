@@ -41,12 +41,14 @@ naturally holds.
 | [0064](0064-sync-on-live-links.md) | Sync on live links |
 | [0065](0065-iroh-only-transport.md) | iroh as the only transport, with its liveness and path measurements |
 | [0066](0066-breaking-generations.md) | Breaking generations with issuer-run migrations; tables granted like another |
+| [0067](0067-names-are-identities.md) | Names are table and field identities, kept forever |
 
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0066; 0064 remains reserved for
-[features_08](../features_08/README.md#reserved-decision-records).
+unreserved record is 0074; 0064 remains reserved for
+[features_08](../features_08/README.md#reserved-decision-records) and 0068 to
+0073 for [features_09](../features_09/README.md#reserved-decision-records).
 
 ## Rationale by topic
 

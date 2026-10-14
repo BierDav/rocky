@@ -26,7 +26,6 @@ struct Typed {
 }
 fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     LogicalColumn {
-        logical: name.into(),
         sql_name: name.into(),
         affinity,
         not_null,
@@ -45,7 +44,6 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
         sql.trim_end_matches(')')
     );
     LogicalTable {
-        logical: name.into(),
         sql_name: name.into(),
         class: TableClass::Mergeable,
         create_sql: sql,
@@ -1324,7 +1322,7 @@ async fn secure_table_events_follow_commits_receipts_and_authority() {
 async fn definition_compound_keys_indexes_real_and_blob_survive_bundles_and_reopen() {
     let publisher = PrivateKey::new();
     let definition = r#"{
-        "format":5, "publisher": "PUBLISHER",
+        "format":6, "publisher": "PUBLISHER",
         "application": "samples", "tables": [
             {"name":"items", "class":"mergeable", "columns":[
                 {"name":"sensor", "type":"text", "not_null":true},
@@ -1455,7 +1453,7 @@ fn identity_fixture() -> Typed {
     let publisher = PrivateKey::new();
     // Use definition generation, not handwritten identity DDL.
     let definition = r#"{
-        "format":5, "publisher": "PUBLISHER",
+        "format":6, "publisher": "PUBLISHER",
         "application": "identity-descriptor", "tables": [
             {"name": "items", "class": "mergeable", "columns": [
                 {"name": "key", "type": "text", "not_null": true},
@@ -1866,7 +1864,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
 #[tokio::test]
 async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replacement() {
     let publisher = PrivateKey::new();
-    let definition = r#"{"format":5,"publisher":"PUBLISHER","application":"pair_identity","tables":[
+    let definition = r#"{"format":6,"publisher":"PUBLISHER","application":"pair_identity","tables":[
         {"name":"items","class":"mergeable","columns":[{"name":"left","type":"text","not_null":true},{"name":"right","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["left","right"]},
         {"name":"salaries","class":"mergeable","columns":[{"name":"amount","type":"integer","not_null":true}],"primary_key":["id"]}
     ]}"#.replace("PUBLISHER", &publisher.public_key().to_string());

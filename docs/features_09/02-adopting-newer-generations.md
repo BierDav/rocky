@@ -26,7 +26,8 @@ whatever schema its app declares, and keeps syncing.
 - **Fetch and verify.** A device that meets an unknown newer manifest fetches
   the generation's schema and publisher-signed manifest from the peer that
   served it, as members fetch an issuer's offer today, and verifies them.
-  No chain of transitions is needed; ids are stable identities.
+  No chain of transitions is needed; ids derive from names, which never
+  change meaning.
 - **A generation is its schema.** Transitions to the same schema hash,
   signed by issuers that could not reach each other, are one generation. Its
   baseline is the earliest signing time among them, on every device; a

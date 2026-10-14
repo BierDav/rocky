@@ -25,7 +25,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 mod common;
 
 /// The shared items collection and a partitioned one for partition grants.
-const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":5,"tables":[
+const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables":[
  {"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"completed","type":"integer","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]},
  {"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#;
 

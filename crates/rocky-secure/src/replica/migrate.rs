@@ -145,11 +145,10 @@ impl<A: RowApplication> Inner<A> {
                 TableClass::LocalOnly | TableClass::CommandControlled
             )
         }) {
-            if schema.table(&table.sql_name).is_none_or(|new| {
-                new.class != table.class
-                    || new.create_sql != table.create_sql
-                    || new.logical != table.logical
-            }) {
+            if schema
+                .table(&table.sql_name)
+                .is_none_or(|new| new.class != table.class || new.create_sql != table.create_sql)
+            {
                 return Err(incompatible(format!(
                     "{} table {} must stay as it is; only its indexes may change",
                     if table.class == TableClass::LocalOnly {

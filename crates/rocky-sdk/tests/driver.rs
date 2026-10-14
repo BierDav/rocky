@@ -16,7 +16,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const SHOPPING: &str = r#"{"format":5,"application":"shopping","version":3,"tables":[
+const SHOPPING: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"mergeable","columns":[
    {"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],
   "primary_key":["key"]},
@@ -993,7 +993,7 @@ async fn room_housekeeping_is_answered_from_the_catalog_and_the_file() -> Result
 #[tokio::test]
 async fn room_reads_each_reference_action_when_references_share_a_partition_column()
 -> Result<(), Failure> {
-    const GROUPED: &str = r#"{"format":5,"application":"grouped","version":1,"tables":[
+    const GROUPED: &str = r#"{"format":6,"application":"grouped","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true}],

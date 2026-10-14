@@ -9,7 +9,7 @@ descriptor and both fingerprints are identical.
 
 ```json
 {
-  "format": 5,
+  "format": 6,
   "publisher": "6b6b…6b",
   "application": "notebook",
   "update_policy": "changed",
@@ -31,11 +31,11 @@ descriptor and both fingerprints are identical.
 
 | Entry | Meaning |
 | --- | --- |
-| `format` | 5, including partition groups, optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)) and the SDK schema's `granted_like` and `migrations` ([generations](generations.md)); others are refused. The built descriptor is format 4 |
-| `publisher`, `application` | Bind table and field identities; 64 hexadecimal digits |
+| `format` | 6, including partition groups, optional `partition_by` and `views` ([partitioned scopes](partitioned-scopes.md)) and the SDK schema's `granted_like` and `migrations` ([generations](generations.md)); others are refused. The built descriptor is format 5 |
+| `publisher`, `application` | Bind table and field ids; 64 hexadecimal digits |
 | `update_policy` | `changed` (default) or `assigned`; see [SQL sessions](sql-sessions.md#what-a-commit-publishes) |
+| table and column `name` | The identity forever: a renamed item is another one, and a name added again keeps its meaning and type ([decision 0067](../decisions/0067-names-are-identities.md)) |
 | table `class` | `mergeable`, `local_only`, [`command_controlled`](confirmed-tables.md) or `confirmed_read_only` (trusted only) |
-| table or column `logical` | The identity kept after a rename; the name by default |
 | column `type` | `integer`, `real`, `text`, `blob`; `numeric` only in local tables |
 | column `not_null`, `default`, `collation` | A JSON scalar default; `binary`, `nocase` or `rtrim` |
 | column `derived` | An expression over the row's replicated columns (trusted only) |
@@ -51,7 +51,7 @@ is explicit and non-null. Auto-generated keys have no entry.
 `SchemaDefinition::parse(bytes)?.build()?` returns the canonical descriptor:
 the same definition always builds the same bytes, with generated `CREATE`
 statements, source kind `rocky.definition` and a commitment to the definition
-as its identity. Tables are emitted in logical-name order and indexes in name
+as its identity. Tables are emitted in name order and indexes in name
 order; column and key order are part of the declaration. Install it with
 `TypedApp::new(schema, domains)` on the trusted runtime or `TypedRows::new`
 with `EncryptedReplica::install_tables` on the secure one. The SDK schema
@@ -76,7 +76,7 @@ val Samples = schema("samples") {
 
 `boolean` declares an INTEGER column, with Boolean defaults normalized to 0/1.
 `column(Column.text(...).copy(default = JsonPrimitive(...)))` adds defaults,
-collation or logical/derived metadata. `tableClass`, `logical`,
+collation or derived metadata. `tableClass`,
 `existenceLog`, `partitionBy`, `view` and `updatePolicy` set the definition
 attributes; `unique`, `onConflict` and `reference` declare
 [constraints](mergeable-constraints.md#declare-them).
@@ -86,10 +86,7 @@ attributes; `unique`, `onConflict` and `reference` declare
 
 ```kotlin
 val Shopping = schemaFromRoom("shopping", exportedJson) {
-    table("shopping_items") {
-        logical = "items"
-        configureColumn("title") { it.copy(logical = "label") }
-    }
+    table("shopping_items") { existenceLog = true }
 }
 ```
 

@@ -7,7 +7,7 @@ use std::{path::Path, sync::Arc};
 mod support;
 use support::secrets;
 
-const SCHEMA: &str = r#"{"format":5,"application":"lists","version":1,"tables":[
+const SCHEMA: &str = r#"{"format":6,"application":"lists","version":1,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],
@@ -23,7 +23,7 @@ const SCHEMA: &str = r#"{"format":5,"application":"lists","version":1,"tables":[
 const TABLES: [&str; 3] = ["lists", "categories", "items"];
 /// Version 2: ordered items in any number of categories, migrated from one
 /// category per item, as the shopping example's version 7.
-const ORDERED: &str = r#"{"format":5,"application":"lists","version":2,"tables":[
+const ORDERED: &str = r#"{"format":6,"application":"lists","version":2,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],

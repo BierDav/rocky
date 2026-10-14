@@ -47,7 +47,7 @@ impl Domain {
                     .columns
                     .iter()
                     .filter(|column| {
-                        added.contains(&format!("{}.{}", table.logical, column.logical))
+                        added.contains(&format!("{}.{}", table.sql_name, column.sql_name))
                     })
                     .map(|column| logical.field_id(table, column))
             })
@@ -374,7 +374,7 @@ impl Domain {
                 columns: table
                     .columns
                     .iter()
-                    .map(|column| (column.logical.clone(), logical.field_id(table, column)))
+                    .map(|column| (column.sql_name.clone(), logical.field_id(table, column)))
                     .collect(),
                 invokes: methods(&|descriptor| descriptor.invocation == table.sql_name),
                 executes: methods(&|descriptor| descriptor.resources.contains(&table.sql_name)),
@@ -409,12 +409,12 @@ mod tests {
     use rocky_core::Affinity;
     #[test]
     fn typed_app_and_sdk_definitions_refuse_historical_formats() {
-        let json = r#"{"format":5,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
+        let json = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"]}]}"#;
         // The portable builder supplies both required columns.
         let mut definition = Schema::parse(json).unwrap().definition([1; 32]).unwrap();
         let descriptor = definition.build().unwrap();
-        // Definitions are format 5; the descriptors they build stay format 4.
-        for format in [0, 1, 2, 3, 4, 6] {
+        // Definitions are format 6; the descriptors they build are format 5.
+        for format in [0, 1, 2, 3, 4, 5, 7] {
             definition.format = format;
             assert!(
                 definition
@@ -423,12 +423,12 @@ mod tests {
                     .to_string()
                     .contains("unsupported schema definition format")
             );
-            let input = json.replace("\"format\":5", &format!("\"format\":{format}"));
+            let input = json.replace("\"format\":6", &format!("\"format\":{format}"));
             let error = Schema::parse(&input).unwrap_err().to_string();
             assert!(error.contains("unsupported schema"), "{error}");
         }
         assert_eq!(descriptor.format, rocky_core::LOGICAL_SCHEMA_FORMAT);
-        for format in [0, 1, 2, 3, 5] {
+        for format in [0, 1, 2, 3, 4, 6] {
             let mut old = descriptor.clone();
             old.format = format;
             let error = crate::TypedApp::new(old, &[]).err().unwrap().to_string();
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn definition_tables_keep_keys_indexes_and_scalar_types() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":5,"application":"measurements","version":1,"tables":[{
+            r#"{"format":6,"application":"measurements","version":1,"tables":[{
             "name":"samples","class":"mergeable",
             "columns":[{"name":"sensor","type":"text","not_null":true},
                        {"name":"sequence","type":"integer","not_null":true},
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn identity_references_share_readers_but_keep_table_resources() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":5,"application":"references","version":1,"tables":[
+            r#"{"format":6,"application":"references","version":1,"tables":[
             {"name":"parents","class":"mergeable","columns":[{"name":"next","type":"integer"}],"primary_key":["id"],
              "foreign_keys":[{"columns":["next"],"table":"children","on_delete":"set_null"}]},
             {"name":"children","class":"mergeable","columns":[{"name":"parent","type":"integer"}],"primary_key":["id"],
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn references_to_an_existence_log_keep_their_reader_scopes() -> Result<(), Failure> {
         let schema = Schema::parse(
-            r#"{"format":5,"application":"logs","version":1,"tables":[
+            r#"{"format":6,"application":"logs","version":1,"tables":[
             {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"existence_log":true},
             {"name":"items","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true}],"primary_key":["id"],
              "foreign_keys":[{"columns":["list"],"table":"lists","on_delete":"cascade"}]}
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn a_command_controlled_table_needs_a_command() {
-        let json = r#"{"format":5,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
+        let json = r#"{"format":6,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
         let error = Schema::parse(json).unwrap_err().to_string();
         assert!(error.contains("resource of no command"), "{error}");
         let confirmed = json.replace("command_controlled", "confirmed_read_only");

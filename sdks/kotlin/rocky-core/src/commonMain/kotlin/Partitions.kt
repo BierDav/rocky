@@ -4,7 +4,7 @@ import kotlinx.serialization.json.*
 
 /**
  * Group partition lifecycle. A group is named by `partitionBy(..., group = ...)`, or by the
- * table's logical name when omitted; values fill its slots in `partitionBy` declaration order.
+ * table's name when omitted; values fill its slots in `partitionBy` declaration order.
  * One secret per group partition and epoch derives every member table's key.
  */
 class Partitions internal constructor(private val client: RockyClient) {

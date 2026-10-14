@@ -10,7 +10,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 type Failure = Box<dyn std::error::Error + Send + Sync>;
 
-const SCHEMA: &str = r#"{"application":"market","version":1,"format":5,
+const SCHEMA: &str = r#"{"application":"market","version":1,"format":6,
  "commands":{"format":1,"handler":1,"commands":[
   {"name":"Restock","version":1,"handler":"stock.restock.v1",
    "arguments":[{"name":"item","type":"text"},{"name":"quantity","type":"integer"}],

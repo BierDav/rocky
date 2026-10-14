@@ -40,7 +40,6 @@ pub(crate) const DOMAINS: [rocky_core::DomainId; 2] =
     [rocky_core::DomainId([4; 16]), rocky_core::DomainId([5; 16])];
 pub(crate) fn schema() -> LogicalSchema {
     let column = |name: &str| LogicalColumn {
-        logical: name.into(),
         sql_name: name.into(),
         affinity: Affinity::Text,
         not_null: true,
@@ -59,7 +58,6 @@ pub(crate) fn schema() -> LogicalSchema {
         },
         update_policy: UpdatePolicy::Changed,
         tables: vec![LogicalTable {
-            logical: "notes".into(),
             sql_name: "notes".into(),
             class: TableClass::Mergeable,
             create_sql: NOTES.into(),

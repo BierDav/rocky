@@ -15,7 +15,6 @@ const DOMAIN: DomainId = DomainId([1; 16]);
 
 fn column(name: &str, affinity: Affinity, not_null: bool) -> LogicalColumn {
     LogicalColumn {
-        logical: name.into(),
         sql_name: name.into(),
         affinity,
         not_null,
@@ -38,7 +37,7 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
                 "TEXT"
             };
             let null = if column.not_null { " NOT NULL" } else { "" };
-            let key = if column.logical == "key" {
+            let key = if column.sql_name == "key" {
                 " PRIMARY KEY"
             } else {
                 ""
@@ -55,7 +54,6 @@ fn table(name: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable {
         })
         .collect();
     LogicalTable {
-        logical: name.into(),
         sql_name: name.into(),
         class: TableClass::Mergeable,
         create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
@@ -158,7 +156,7 @@ impl Lineage {
         let added = items
             .columns
             .iter()
-            .filter(|column| ["note", "rank"].contains(&column.logical.as_str()))
+            .filter(|column| ["note", "rank"].contains(&column.sql_name.as_str()))
             .map(|column| schema.field_id(items, column))
             .collect();
         TypedRows::new(schema.clone(), vec![DOMAIN])
@@ -612,9 +610,9 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
         .unwrap()
     };
     assert!(format!("{plan:?}").contains("items_title"), "{plan:?}");
-    // A schema the definition does not allow is refused before a plan.
+    // A renamed field is another field: refused before a plan.
     let mut renamed = lineage.schema(1);
-    renamed.tables[0].columns[1].logical = "name".into();
+    renamed.tables[0].columns[1].sql_name = "name".into();
     assert!(matches!(
         replica
             .install_tables(renamed, lineage.domain, lineage.readers(1))

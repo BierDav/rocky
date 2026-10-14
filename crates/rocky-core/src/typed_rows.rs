@@ -458,7 +458,6 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
         LogicalColumn {
-            logical: name.into(),
             sql_name: name.into(),
             affinity,
             not_null: true,
@@ -479,7 +478,6 @@ mod tests {
             },
             update_policy: UpdatePolicy::Changed,
             tables: vec![LogicalTable {
-                logical: "items".into(),
                 sql_name: "items".into(),
                 class: TableClass::Mergeable,
                 create_sql: "CREATE TABLE items(key TEXT NOT NULL COLLATE NOCASE PRIMARY KEY,n INTEGER NOT NULL,id INTEGER NOT NULL,row_kind INTEGER NOT NULL DEFAULT 0)".into(),

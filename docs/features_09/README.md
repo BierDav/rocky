@@ -2,7 +2,8 @@
 
 Status: proposed roadmap (2026-10-14), not yet accepted. It does not replace
 [features_08](../features_08/README.md) as the next-work authority until that
-roadmap finishes or this one is accepted. No phase has started.
+roadmap finishes or this one is accepted. Phase 1 is implemented; no other
+phase has started.
 
 ## Destination
 
@@ -46,12 +47,13 @@ versions are tolerated belong to the application, not to Rocky.
 
 ## Settled
 
-- **Identities, not names.** A table or field's identity is a plain string
-  in the schema, its name by default. Renaming keeps the old string as its
-  identity. A new field takes a new one, such as `category2`; re-adding a
-  removed identity is allowed, and keeping its meaning and type is the
-  developer's responsibility. No language-specific tooling is involved. The same identity keeps one type; a
-  new type is a new field.
+- **Names are identities.** A table or field's name is its identity
+  forever; there is no separate identity and no translation layer. A name
+  removed and added again means the same thing with the same type, which is
+  the developer's responsibility. A field whose meaning or type changes takes
+  a new name, such as `category2`; renaming is a removal and an addition. An
+  app that must keep old versions from misreading a name enforces a minimum
+  app version itself.
 - **Adopt on discovery.** A device that meets a newer generation fetches its
   schema and publisher-signed manifest, verifies them and migrates its
   database to it with the existing backfill and switch, before it applies
@@ -59,7 +61,7 @@ versions are tolerated belong to the application, not to Rocky.
 - **The same schema everywhere.** Removed tables and fields are dropped on
   every device that runs the new generation, with their constraints; nothing
   is frozen, emptied in place or filled with synthetic values.
-- **Re-adding converges.** A generation that re-adds a removed identity
+- **Re-adding converges.** A generation that re-adds a removed name
   records its signing time as a baseline, the earliest if several issuers
   signed it. Every device ignores writes to the
   field stamped before it, and a device adopting the generation pulls again
@@ -96,7 +98,7 @@ versions are tolerated belong to the application, not to Rocky.
 
 | Phase | Brief | Depends on | Size | Required result |
 | --- | --- | --- | --- | --- |
-| 1 | [Stable identities](01-stable-identities.md) | none | S | Identities are strings in the schema; names change without a transition |
+| 1 | [Names as identities](01-stable-identities.md) | none | S | A name is its table or field's identity forever; no separate identity |
 | 2 | [Adopting newer generations](02-adopting-newer-generations.md) | 1 | L | A device migrates its database to any newer generation it meets, whatever its app version |
 | 3 | [Removal](03-removal.md) | 2 | M | A generation drops tables and fields on every device that adopts it |
 | 4 | [Held changes](04-held-changes.md) | 3 | L | Incompatible local changes are held, voided and re-authored or dropped by the app |
@@ -111,7 +113,7 @@ versions are tolerated belong to the application, not to Rocky.
 
 ```mermaid
 flowchart LR
-    P1["1 Stable identities (S)"] --> P2["2 Adopting newer generations (L)"]
+    P1["1 Names as identities (S)"] --> P2["2 Adopting newer generations (L)"]
     P2 --> P3["3 Removal (M)"]
     P3 --> P4["4 Held changes (L)"]
     P3 --> P5["5 Confirmed rollouts (M)"]
@@ -132,7 +134,7 @@ flowchart LR
 
 | Record | Phase | Topic |
 | --- | --- | --- |
-| 0067 | 1 | Table and field identities and their reuse |
+| 0067 | 1 | [Names are table and field identities](../decisions/0067-names-are-identities.md) |
 | 0068 | 2, 3 | Adopting newer generations and removal |
 | 0069 | 4 | Held changes, void records and re-authoring |
 | 0070 | 5, 6 | Confirmed rollouts and the end of cuts |

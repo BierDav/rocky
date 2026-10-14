@@ -17,7 +17,7 @@ use std::path::Path;
 const CALLER: PrincipalId = PrincipalId([7; 16]);
 const DOMAIN: DomainId = DomainId([3; 16]);
 const DEFINITION: &str = r#"{
-    "format":5,
+    "format":6,
     "publisher": "6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
     "application": "notebook",
     "tables": [

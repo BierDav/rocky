@@ -934,7 +934,7 @@ async fn insert_rows(
     }
     Ok(())
 }
-/// The SQL names of logical `table.column`.
+/// The declared `table.column`, which must exist.
 fn sql_names(
     schema: &rocky_core::LogicalSchema,
     table: &str,
@@ -943,12 +943,12 @@ fn sql_names(
     let table = schema
         .tables
         .iter()
-        .find(|candidate| candidate.logical == table)
+        .find(|candidate| candidate.sql_name == table)
         .ok_or("required field of no table")?;
     let column = table
         .columns
         .iter()
-        .find(|candidate| candidate.logical == column)
+        .find(|candidate| candidate.sql_name == column)
         .ok_or("required field of no column")?;
     Ok((table.sql_name.clone(), column.sql_name.clone()))
 }
@@ -1425,7 +1425,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn old_database_is_refused_before_enrollment_or_database_writes() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":5,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":6,"application":"refusal","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         for format in [0, 1, 2, 3, 5] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("rocky.sqlite");
@@ -1479,7 +1479,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn populated_numeric_consumer_restores_pseudonym_after_reopen() -> Result<(), Failure> {
-        const SCHEMA: &str = r#"{"format":5,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
+        const SCHEMA: &str = r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         async fn call(
             database: &Database,
             session: &Session,
@@ -1579,7 +1579,7 @@ mod tests {
         let opened = Database::create(
             Open {
                 directory: directory.path(),
-                schema: r#"{"application":"saturation","version":1,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
+                schema: r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,
                 network: None,
                 commands: None,

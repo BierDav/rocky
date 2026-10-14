@@ -396,10 +396,8 @@ pub(crate) fn relaxed(schema: &Schema, required: &BTreeSet<String>) -> Result<Sc
     let mut relaxed = schema.clone();
     let mut found = 0;
     for table in &mut relaxed.tables {
-        let name = table.logical.clone().unwrap_or_else(|| table.name.clone());
         for column in &mut table.columns {
-            let field = column.logical.as_ref().unwrap_or(&column.name);
-            if required.contains(&format!("{name}.{field}")) {
+            if required.contains(&format!("{}.{}", table.name, column.name)) {
                 column.not_null = false;
                 found += 1;
             }

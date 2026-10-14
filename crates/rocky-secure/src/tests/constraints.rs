@@ -6,7 +6,7 @@ use crate::{Describe, ReceiveStatus, SecureSql};
 use rocky_core::{DomainId, LogicalSchema, Scope, SqlValue, TypedRows};
 
 const DEFINITION: &str = r#"{
-    "format":5, "publisher": "PUBLISHER", "application": "shop",
+    "format":6, "publisher": "PUBLISHER", "application": "shop",
     "tables": [
         {"name": "lists", "class": "mergeable",
          "columns": [{"name": "title", "type": "text", "not_null": true}],

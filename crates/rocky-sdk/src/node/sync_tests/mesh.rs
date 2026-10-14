@@ -400,7 +400,7 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
 async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
 -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
-        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":5,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#)?;
+        let schema = Schema::parse(r#"{"application":"mesh_partition","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#)?;
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let a = enrolled_schema(&root.path().join("a"), &hub, "a", None, &schema).await?;

@@ -242,7 +242,6 @@ pub(super) struct World {
 }
 fn column(name: &str, affinity: Affinity) -> LogicalColumn {
     LogicalColumn {
-        logical: name.into(),
         sql_name: name.into(),
         affinity,
         not_null: true,
@@ -261,7 +260,6 @@ fn table(name: &str, sql: &str, mut columns: Vec<LogicalColumn>) -> LogicalTable
         sql.trim_end_matches(')')
     );
     LogicalTable {
-        logical: name.into(),
         sql_name: name.into(),
         class: TableClass::Mergeable,
         create_sql: sql,

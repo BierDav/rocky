@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 /// The `SchemaSource::kind` of descriptors built from a definition.
 pub const DEFINITION_SOURCE: &str = "rocky.definition";
-/// Format 5 adds the SDK's `granted_like` and `migrations`; descriptors
-/// keep `LOGICAL_SCHEMA_FORMAT`.
-pub const DEFINITION_FORMAT: u32 = 5;
+/// Format 6: names are the identities of tables and fields, with no
+/// separate entry. It builds `LOGICAL_SCHEMA_FORMAT` descriptors.
+pub const DEFINITION_FORMAT: u32 = 6;
 /// Largest definition document `SchemaDefinition::parse` accepts.
 pub const MAX_DEFINITION_BYTES: usize = 1024 * 1024;
 
@@ -38,9 +38,6 @@ fn changed() -> UpdatePolicy {
 #[serde(deny_unknown_fields)]
 pub struct TableDefinition {
     pub name: String,
-    /// The identity to keep after a rename; the name by default.
-    #[serde(default)]
-    pub logical: Option<String>,
     pub class: TableClass,
     pub columns: Vec<ColumnDefinition>,
     pub primary_key: Vec<String>,
@@ -78,8 +75,6 @@ pub struct ForeignKeyDefinition {
 #[serde(deny_unknown_fields)]
 pub struct ColumnDefinition {
     pub name: String,
-    #[serde(default)]
-    pub logical: Option<String>,
     #[serde(rename = "type")]
     pub affinity: Affinity,
     #[serde(default)]
@@ -226,7 +221,7 @@ impl SchemaDefinition {
                 table.foreign_keys.push(key);
             }
         }
-        tables.sort_by(|a, b| a.logical.cmp(&b.logical));
+        tables.sort_by(|a, b| a.sql_name.cmp(&b.sql_name));
         let identity =
             serde_json::to_vec(self).map_err(|error| SchemaError::Invalid(error.to_string()))?;
         let schema = LogicalSchema {
@@ -290,10 +285,6 @@ impl TableDefinition {
             part.push_str(collation(column.collation));
             parts.push(part);
             columns.push(LogicalColumn {
-                logical: column
-                    .logical
-                    .clone()
-                    .unwrap_or_else(|| column.name.clone()),
                 sql_name: column.name.clone(),
                 affinity: column.affinity,
                 not_null: column.not_null,
@@ -310,7 +301,6 @@ impl TableDefinition {
                     .unwrap_or_default();
                 parts.push(format!("{} INTEGER NOT NULL{sql_default}", quoted(name)));
                 columns.push(LogicalColumn {
-                    logical: name.into(),
                     sql_name: name.into(),
                     affinity: Affinity::Integer,
                     not_null: true,
@@ -407,7 +397,6 @@ impl TableDefinition {
         }
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(LogicalTable {
-            logical: self.logical.clone().unwrap_or_else(|| name.clone()),
             sql_name: name.clone(),
             class: self.class,
             create_sql: format!("CREATE TABLE {} ({})", quoted(name), parts.join(", ")),
@@ -430,7 +419,7 @@ mod tests {
     use crate::{Incompatibility, Profile};
 
     pub(super) const DEFINITION: &str = r#"{
-        "format":5,
+        "format":6,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "notes",
         "tables": [
@@ -491,7 +480,6 @@ mod tests {
 
         definition.tables[0].columns.push(ColumnDefinition {
             name: "search".into(),
-            logical: None,
             affinity: Affinity::Text,
             not_null: false,
             default: None,
@@ -517,8 +505,8 @@ mod tests {
 
     #[test]
     fn unsupported_definition_and_descriptor_versions_are_refused() {
-        // Definitions are format 5; the descriptors they build stay format 4.
-        for format in [0, 1, 2, 3, 4, 6] {
+        // Definitions are format 6; the descriptors they build are format 5.
+        for format in [0, 1, 2, 3, 4, 5, 7] {
             let mut definition = SchemaDefinition::parse(DEFINITION.as_bytes()).unwrap();
             definition.format = format;
             let error = definition.build().unwrap_err().to_string();
@@ -527,7 +515,7 @@ mod tests {
                 SchemaError::Invalid("unsupported schema definition format".into()).to_string()
             );
         }
-        for format in [0, 1, 2, 3, 5] {
+        for format in [0, 1, 2, 3, 4, 6] {
             let mut descriptor = SchemaDefinition::parse(DEFINITION.as_bytes())
                 .unwrap()
                 .build()
@@ -620,7 +608,7 @@ mod constraint_tests {
     use crate::{Incompatibility, Profile};
 
     const SHOP: &str = r#"{
-        "format":5,
+        "format":6,
         "publisher": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         "application": "shop",
         "tables": [
@@ -812,7 +800,7 @@ mod constraint_tests {
 mod partition_tests {
     use super::*;
     fn definition() -> SchemaDefinition {
-        SchemaDefinition::parse(br#"{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
+        SchemaDefinition::parse(br#"{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true,"collation":"nocase"},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"]}]}"#).unwrap()
     }
     #[test]
     fn partition_shape_identity_and_manifest_are_bound() {
@@ -862,7 +850,7 @@ mod partition_tests {
         };
         let items = |extra: &str| {
             format!(
-                r#"{{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
+                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"partitions","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text"}}],"primary_key":["id"]}},{{"name":"items","class":"mergeable","columns":[{{"name":"list","type":"text","not_null":true}},{{"name":"key","type":"text","not_null":true}},{{"name":"code","type":"text"}},{{"name":"parent","type":"integer"}}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"{extra}}}]}}"#
             )
         };
         assert_eq!(
@@ -934,7 +922,7 @@ mod partition_tests {
     fn existence_logs_bind_the_manifest_and_refuse_nondeterministic_support_rows() {
         let shop = |lists: &str, extra: &str| {
             format!(
-                r#"{{"format":5,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
+                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"logs","tables":[{{"name":"lists","class":"mergeable","columns":[{{"name":"title","type":"text","not_null":true}},{{"name":"owner","type":"integer","not_null":true}}],"primary_key":{lists},"foreign_keys":[{{"columns":["owner"],"table":"owners","on_delete":"cascade"}}]{extra}}},{{"name":"owners","class":"mergeable","columns":[{{"name":"name","type":"text","not_null":true}}],"primary_key":["name"]}}]}}"#
             )
         };
         let build = |json: String| {

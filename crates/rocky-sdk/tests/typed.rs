@@ -857,8 +857,8 @@ async fn physical_namespaces_and_checkpoint_imports_keep_row_identity() {
     assert!(!tables.is_empty() && tables.iter().all(|name| name != LINES));
 }
 
-#[tokio::test]
-async fn renamed_tables_and_columns_keep_their_identity_between_replicas() {
+#[test]
+fn renamed_tables_and_columns_are_other_items() {
     let schema = shopping();
     let mut renamed = schema.clone();
     let table = &mut renamed.tables[0];
@@ -897,41 +897,26 @@ async fn renamed_tables_and_columns_keep_their_identity_between_replicas() {
         }
     }
     renamed.validate().expect("renamed descriptor");
+    // Names are identities: a renamed table is another table.
     assert_ne!(
-        schema.fingerprint().expect("old"),
-        renamed.fingerprint().expect("new")
-    );
-    assert_eq!(
         schema.replicated_fingerprint(),
         renamed.replicated_fingerprint()
     );
-
-    let dir = tempfile::tempdir().expect("dir");
-    let old = Device::open(dir.path(), 1, &schema).await.expect("old");
-    let new = Device::open(dir.path(), 2, &renamed).await.expect("new");
-    let tea = old
-        .commit(
-            old.insert(ITEMS, &item("t", "Tea", false), &[])
-                .expect("insert"),
-        )
-        .await;
-    sync(&[&old, &new]).await;
-    let groceries = "SELECT key,name,completed,searchTitle FROM groceries";
-    assert_eq!(new.read(groceries).await, vec![shown("t", "Tea", false)]);
-    let edit = new
-        .update("groceries", tea, &[("name", text("Green Tea"))])
-        .expect("update");
-    new.commit(edit).await;
-    sync(&[&old, &new]).await;
-    assert_eq!(old.items().await, vec![shown("t", "Green Tea", false)]);
-    assert_eq!(new.read(groceries).await, old.items().await);
-
-    // A rename without the logical name is another definition and another app.
-    let mut other = renamed.clone();
-    other.tables[0].logical = "groceries".into();
+    assert_eq!(
+        rocky_core::classify(&schema, &renamed),
+        Err(rocky_core::Unsupported::RemovedTable(
+            "shopping_items".into()
+        ))
+    );
+    let mut column = schema.clone();
+    column.tables[0].columns.iter_mut().for_each(|column| {
+        if column.sql_name == "title" {
+            column.sql_name = "name".into();
+        }
+    });
     assert_ne!(
-        schema.replicated_fingerprint(),
-        other.replicated_fingerprint()
+        schema.manifest(&[DOMAIN]).hash(),
+        column.manifest(&[DOMAIN]).hash()
     );
 }
 
@@ -1059,7 +1044,7 @@ async fn incompatible_schemas_bindings_and_codecs_are_refused() {
 #[tokio::test]
 async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
     let definition = serde_json::json!({
-        "format":5, "publisher": "11".repeat(32), "application": "identity-descriptor",
+        "format":6, "publisher": "11".repeat(32), "application": "identity-descriptor",
         "tables": [
             {"name": "links", "class": "mergeable", "columns": [
                 {"name": "a", "type": "text", "not_null": true},
@@ -1089,7 +1074,7 @@ async fn identity_descriptor_installs_the_shared_columns_on_trusted_nodes() {
 
 #[tokio::test]
 async fn trusted_id_reservations_roll_back_and_continue_after_tombstones_and_reopen() {
-    let definition = serde_json::json!({"format":5,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
+    let definition = serde_json::json!({"format":6,"publisher":"11".repeat(32),"application":"trusted-identities", "tables":[{"name":"links","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()
@@ -1203,7 +1188,7 @@ async fn trusted_id_reservations_roll_back_and_continue_after_tombstones_and_reo
 
 #[tokio::test]
 async fn trusted_partition_ids_and_agreed_statements() {
-    let definition = serde_json::json!({"format":5,"publisher":"11".repeat(32),"application":"trusted-partitions","tables":[{"name":"bookings","class":"mergeable","columns":[{"name":"month","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["month","key"],"partition_by":["month"]}],"views":[{"name":"partial_bookings","create_sql":"CREATE VIEW partial_bookings AS SELECT * FROM bookings WHERE row_kind=0"}]});
+    let definition = serde_json::json!({"format":6,"publisher":"11".repeat(32),"application":"trusted-partitions","tables":[{"name":"bookings","class":"mergeable","columns":[{"name":"month","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"amount","type":"integer","not_null":true}],"primary_key":["month","key"],"partition_by":["month"]}],"views":[{"name":"partial_bookings","create_sql":"CREATE VIEW partial_bookings AS SELECT * FROM bookings WHERE row_kind=0"}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()
@@ -1283,7 +1268,7 @@ async fn trusted_partition_ids_and_agreed_statements() {
 
 #[tokio::test]
 async fn trusted_move_keeps_foreign_identity_and_follows_original_stamp_once() {
-    let definition = serde_json::json!({"format":5,"publisher":"11".repeat(32),"application":"trusted-moves","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","id"],"partition_by":["list"]}]});
+    let definition = serde_json::json!({"format":6,"publisher":"11".repeat(32),"application":"trusted-moves","tables":[{"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["list","id"],"partition_by":["list"]}]});
     let schema = rocky_core::SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
         .unwrap()
         .build()

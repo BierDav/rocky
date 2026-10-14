@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Current descriptor format, including row identities and partition groups.
-pub const LOGICAL_SCHEMA_FORMAT: u32 = 4;
+pub const LOGICAL_SCHEMA_FORMAT: u32 = 5;
 /// Largest canonical descriptor a parser accepts.
 pub const MAX_LOGICAL_SCHEMA_BYTES: usize = 4 * 1024 * 1024;
 
@@ -77,8 +77,7 @@ pub struct SchemaSource {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalColumn {
-    /// Stable identity; survives a rename of `sql_name`.
-    pub logical: String,
+    /// The field's identity, forever; see decision 0067.
     pub sql_name: String,
     pub affinity: Affinity,
     pub not_null: bool,
@@ -130,8 +129,7 @@ pub struct LogicalView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogicalTable {
-    /// Stable identity; survives a rename of `sql_name`.
-    pub logical: String,
+    /// The table's identity, forever; see decision 0067.
     pub sql_name: String,
     pub class: TableClass,
     /// The ORM's own statement, naming `sql_name`.
@@ -158,7 +156,7 @@ pub struct LogicalSchema {
     pub application: String,
     pub source: SchemaSource,
     pub update_policy: UpdatePolicy,
-    /// Sorted by logical name.
+    /// Sorted by name, each table's identity.
     pub tables: Vec<LogicalTable>,
     pub views: Vec<LogicalView>,
 }
@@ -576,7 +574,7 @@ impl LogicalTable {
     }
     fn validate(&self) -> Result<(), SchemaError> {
         let name = &self.sql_name;
-        if !identifier(name) || reserved(name) || !identifier(&self.logical) {
+        if !identifier(name) || reserved(name) {
             return invalid(format!("table name {name}"));
         }
         let statement = tokenize(&self.create_sql).unwrap_or_default();
@@ -587,12 +585,9 @@ impl LogicalTable {
         if self.columns.is_empty() || self.columns.len() > 2000 {
             return invalid(format!("{name} column count"));
         }
-        let (mut names, mut logical) = (BTreeSet::new(), BTreeSet::new());
+        let mut names = BTreeSet::new();
         for column in &self.columns {
-            if !identifier(&column.sql_name)
-                || !identifier(&column.logical)
-                || !names.insert(column.sql_name.to_ascii_lowercase())
-                || !logical.insert(&column.logical)
+            if !identifier(&column.sql_name) || !names.insert(column.sql_name.to_ascii_lowercase())
             {
                 return invalid(format!("{name} column {}", column.sql_name));
             }
@@ -810,7 +805,7 @@ impl LogicalTable {
 
 #[derive(Serialize)]
 struct ReplicatedColumn<'a> {
-    logical: &'a str,
+    name: &'a str,
     affinity: Affinity,
     not_null: bool,
     collation: Collation,
@@ -829,7 +824,7 @@ struct ReplicatedReference<'a> {
 #[derive(Serialize)]
 struct ReplicatedTable<'a> {
     class: TableClass,
-    logical: &'a str,
+    name: &'a str,
     key: Vec<ReplicatedColumn<'a>>,
     fields: Vec<ReplicatedColumn<'a>>,
     unique: Vec<ReplicatedUnique<'a>>,
@@ -847,7 +842,7 @@ struct Replicated<'a> {
 }
 fn replicated_column(column: &LogicalColumn) -> ReplicatedColumn<'_> {
     ReplicatedColumn {
-        logical: &column.logical,
+        name: &column.sql_name,
         affinity: column.affinity,
         not_null: column.not_null,
         collation: column.collation,
@@ -855,11 +850,11 @@ fn replicated_column(column: &LogicalColumn) -> ReplicatedColumn<'_> {
 }
 fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> ReplicatedTable<'a> {
     let mut fields: Vec<_> = table.registers().map(replicated_column).collect();
-    fields.sort_by_key(|column| column.logical);
-    let logical = |name: &str| {
+    fields.sort_by_key(|column| column.name);
+    let name = |name: &str| {
         table
             .column(name)
-            .map_or_else(|| "", |column| column.logical.as_str())
+            .map_or_else(|| "", |column| column.sql_name.as_str())
     };
     let mut unique: Vec<_> = table
         .policy_indexes()
@@ -867,7 +862,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
             columns: index
                 .columns
                 .iter()
-                .map(|column| logical(&column.name))
+                .map(|column| name(&column.name))
                 .collect(),
             on_conflict,
         })
@@ -878,17 +873,17 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         .iter()
         .filter(|_| table.class == TableClass::Mergeable)
         .map(|key| ReplicatedReference {
-            columns: key.columns.iter().map(|name| logical(name)).collect(),
+            columns: key.columns.iter().map(|column| name(column)).collect(),
             table: schema
                 .table(&key.table)
-                .map_or(key.table.as_str(), |parent| parent.logical.as_str()),
+                .map_or(key.table.as_str(), |parent| parent.sql_name.as_str()),
             on_delete: &key.on_delete,
         })
         .collect();
     references.sort();
     ReplicatedTable {
         class: table.class,
-        logical: &table.logical,
+        name: &table.sql_name,
         key: table.key().map(replicated_column).collect(),
         fields,
         unique,
@@ -896,7 +891,7 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         partition_by: table
             .partition_by
             .iter()
-            .filter_map(|name| table.column(name).map(|column| column.logical.as_str()))
+            .filter_map(|name| table.column(name).map(|column| column.sql_name.as_str()))
             .collect(),
         partition_group: table.partition_group.as_deref(),
         existence_log: table.existence_log,
@@ -910,11 +905,11 @@ pub(crate) fn table_shape(schema: &LogicalSchema, table: &LogicalTable) -> Strin
 pub(crate) fn key_shape(table: &LogicalTable) -> String {
     json(&table.key().map(replicated_column).collect::<Vec<_>>())
 }
-/// The replicated shape of every register, by logical name.
+/// The replicated shape of every register, by name.
 pub(crate) fn register_shapes(table: &LogicalTable) -> std::collections::BTreeMap<String, String> {
     table
         .registers()
-        .map(|column| (column.logical.clone(), json(&replicated_column(column))))
+        .map(|column| (column.sql_name.clone(), json(&replicated_column(column))))
         .collect()
 }
 fn json(value: &impl Serialize) -> String {
@@ -935,8 +930,8 @@ impl LogicalSchema {
         if self.source.kind.is_empty() || self.tables.is_empty() {
             return invalid("source or tables missing");
         }
-        if !self.tables.is_sorted_by(|a, b| a.logical < b.logical) {
-            return invalid("tables are not sorted by unique logical name");
+        if !self.tables.is_sorted_by(|a, b| a.sql_name < b.sql_name) {
+            return invalid("tables are not sorted by unique name");
         }
         self.partition_groups()?;
         let mut names = BTreeSet::new();
@@ -966,11 +961,11 @@ impl LogicalSchema {
                 for name in ["id", "row_kind"] {
                     let column = table.column(name).ok_or_else(|| {
                         SchemaError::Invalid(format!(
-                            "{}.{} is required by descriptor format 4",
+                            "{}.{} is required by descriptor format 5",
                             table.sql_name, name
                         ))
                     })?;
-                    if column.logical != name
+                    if column.sql_name != name
                         || column.affinity != Affinity::Integer
                         || !column.not_null
                         || column.collation != Collation::Binary
@@ -1229,7 +1224,7 @@ impl LogicalSchema {
         Ok(commitment("rocky.logical-schema.v1", &self.canonical()?))
     }
     /// Commits to what replicas must agree on: mergeable and command-
-    /// controlled tables by logical name, their class, keys and registers,
+    /// controlled tables by name, their class, keys and registers,
     /// and the update policy.
     pub fn replicated_fingerprint(&self) -> Commitment {
         let replicated = Replicated {
@@ -1312,10 +1307,10 @@ impl LogicalSchema {
             .find(|table| table.sql_name.eq_ignore_ascii_case(sql_name))
     }
     pub fn table_id(&self, table: &LogicalTable) -> Commitment {
-        definition_item_id(self.publisher, self.app_id(), "entity", &table.logical)
+        definition_item_id(self.publisher, self.app_id(), "entity", &table.sql_name)
     }
     pub fn field_id(&self, table: &LogicalTable, column: &LogicalColumn) -> Commitment {
-        let name = format!("{}.{}", table.logical, column.logical);
+        let name = format!("{}.{}", table.sql_name, column.sql_name);
         definition_item_id(self.publisher, self.app_id(), "field", &name)
     }
     /// The replicated definition as an unsigned manifest for `domains`. Its
@@ -1336,10 +1331,10 @@ impl LogicalSchema {
         for table in self.typed() {
             let replicated = replicated_table(self, table);
             for column in replicated.key.iter().chain(&replicated.fields) {
-                let name = format!("{}.{}", table.logical, column.logical);
+                let name = format!("{}.{}", table.sql_name, column.name);
                 fields.push(item("field", name, json(column)));
             }
-            entities.push(item("entity", table.logical.clone(), json(&replicated)));
+            entities.push(item("entity", table.sql_name.clone(), json(&replicated)));
         }
         let shape = format!("rocky.sdk.typed.v1:{:?}", self.update_policy);
         ApplicationManifest {
@@ -1384,7 +1379,6 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity) -> LogicalColumn {
         LogicalColumn {
-            logical: name.into(),
             sql_name: name.into(),
             affinity,
             not_null: true,
@@ -1405,7 +1399,6 @@ mod tests {
             },
             update_policy: UpdatePolicy::Changed,
             tables: vec![LogicalTable {
-                logical: "items".into(),
                 sql_name: "items".into(),
                 class: TableClass::Mergeable,
                 create_sql: "CREATE TABLE `items` (`key` TEXT NOT NULL, `title` TEXT NOT NULL, `id` INTEGER NOT NULL, `row_kind` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`key`))".into(),
@@ -1530,8 +1523,33 @@ mod tests {
         assert!(missing.validate().is_err());
     }
     #[test]
-    fn renames_and_local_details_keep_the_replicated_identity() {
+    fn local_details_keep_the_replicated_identity_and_renames_do_not() {
         let schema = schema();
+        let mut local = schema.clone();
+        local.tables[0].indexes.push(LogicalIndex {
+            name: "by_title".into(),
+            unique: false,
+            columns: vec![IndexColumn {
+                name: "title".into(),
+                descending: false,
+            }],
+            create_sql: "CREATE INDEX by_title ON items(title)".into(),
+            on_conflict: None,
+        });
+        local.source.identity = "def".into();
+        local.installable().unwrap();
+        assert_ne!(schema.fingerprint().unwrap(), local.fingerprint().unwrap());
+        assert_eq!(
+            schema.replicated_fingerprint(),
+            local.replicated_fingerprint()
+        );
+        let domain = [DomainId([1; 16])];
+        assert_eq!(
+            schema.manifest(&domain).hash(),
+            local.manifest(&domain).hash()
+        );
+        schema.manifest(&domain).validate().unwrap();
+        // Names are identities: a renamed table or column is another item.
         let mut renamed = schema.clone();
         let table = &mut renamed.tables[0];
         table.sql_name = "shopping".into();
@@ -1540,37 +1558,16 @@ mod tests {
             .create_sql
             .replace("items", "shopping")
             .replace("title", "name");
-        table.indexes.push(LogicalIndex {
-            name: "by_name".into(),
-            unique: false,
-            columns: vec![IndexColumn {
-                name: "name".into(),
-                descending: false,
-            }],
-            create_sql: "CREATE INDEX by_name ON shopping(name)".into(),
-            on_conflict: None,
-        });
-        renamed.source.identity = "def".into();
         renamed.installable().unwrap();
         assert_ne!(
-            schema.fingerprint().unwrap(),
-            renamed.fingerprint().unwrap()
-        );
-        assert_eq!(
-            schema.replicated_fingerprint(),
-            renamed.replicated_fingerprint()
-        );
-        let domain = [DomainId([1; 16])];
-        assert_eq!(
             schema.manifest(&domain).hash(),
             renamed.manifest(&domain).hash()
         );
-        schema.manifest(&domain).validate().unwrap();
-        assert_eq!(
+        assert_ne!(
             schema.field_id(&schema.tables[0], &schema.tables[0].columns[1]),
             renamed.field_id(&renamed.tables[0], &renamed.tables[0].columns[1])
         );
-        // A new logical name, a new type or another publisher is another definition.
+        // A new type or another publisher is another definition.
         let mut retyped = schema.clone();
         retyped.tables[0].columns[1].affinity = Affinity::Blob;
         assert_ne!(

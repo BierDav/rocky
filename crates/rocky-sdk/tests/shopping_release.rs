@@ -7,7 +7,7 @@ use rocky_sdk::{Database, Network, Open, Session, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-const SCHEMA: &str = r#"{"format":5,"application":"shopping","version":3,"tables":[
+const SCHEMA: &str = r#"{"format":6,"application":"shopping","version":3,"tables":[
  {"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],
   "primary_key":["id"],"partition_by":["id"],"partition_group":"list"},
  {"name":"categories","class":"mergeable","columns":[{"name":"list","type":"integer","not_null":true},{"name":"name","type":"text","not_null":true}],

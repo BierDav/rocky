@@ -4,7 +4,7 @@ internal fun validatePartitionGroups(tables: List<Table>) {
     for (table in tables) {
         require(table.partitionGroup == null || (table.partitionGroup.matches(IDENTIFIER) && table.partitionBy.isNotEmpty())) { "${table.name}: group requires a valid name and partition columns" }
     }
-    for ((name, members) in tables.filter { it.partitionBy.isNotEmpty() }.groupBy { it.partitionGroup ?: it.logical ?: it.name }) {
+    for ((name, members) in tables.filter { it.partitionBy.isNotEmpty() }.groupBy { it.partitionGroup ?: it.name }) {
         val first = members.first()
         fun slots(table: Table) = table.partitionBy.map { column ->
             if (column == "id") {

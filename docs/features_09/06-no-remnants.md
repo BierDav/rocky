@@ -36,7 +36,7 @@ every version that ever wrote. After this phase neither remains.
   names it; [phase 2](02-adopting-newer-generations.md)
   fetches it again from whoever serves such a frame. Retained history follows
   the existing horizon finalization, independent of schema versions.
-- **Removed identities** leave nothing behind.
+- **Removed names** leave nothing behind.
 
 ## Ordered slices
 

@@ -19,8 +19,10 @@ signing waits for [confirmation](05-confirmed-rollouts.md).
 
 ## Settled
 
-- **Classification.** A removed identity is allowed in an additive
-  transition. Removing a key or partition column removes its table. The new
+- **Classification.** A removed table or field is allowed in an additive
+  transition. A rename is a removal of the old name and an addition of the
+  new one; values are not carried over unless the issuer's migration copies
+  them. Removing a key or partition column removes its table. The new
   schema must be valid on its own, so foreign keys, indexes, partition
   groups, `granted_like`, views and existence logs that name a
   removed item go with it.
@@ -31,7 +33,8 @@ signing waits for [confirmation](05-confirmed-rollouts.md).
 - **Field by field.** Every device ignores removed fields and tables in
   incoming frames and checkpoint pages and applies the rest, so a frame from
   a device that has not migrated yet converges everywhere.
-- **Re-adding an identity.** A generation that re-adds a removed identity
+- **Re-adding a name.** A generation that re-adds a removed name, which
+  keeps its meaning and type ([decision 0067](../decisions/0067-names-are-identities.md)),
   records its [baseline](02-adopting-newer-generations.md#settled). Every device ignores writes to the
   field stamped before it; the issuer's migration refills it after. A device
   adopting the generation pulls again the frames of the field's tables

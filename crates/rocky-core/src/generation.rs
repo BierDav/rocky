@@ -16,7 +16,7 @@ pub enum SchemaChange {
     /// tables, and nullable fields of existing ones.
     Additive {
         tables: BTreeSet<String>,
-        /// `table.field`, by logical name.
+        /// `table.field`.
         fields: BTreeSet<String>,
     },
     /// Additions with required fields of existing tables, new or once
@@ -101,8 +101,9 @@ impl std::fmt::Display for Unsupported {
 }
 impl std::error::Error for Unsupported {}
 
-/// Classifies `new` against the installed `old`. Renames are removals:
-/// logical names are the identity of tables and fields.
+/// Classifies `new` against the installed `old`. Names are the identity of
+/// tables and fields: a rename is a removal, and a name keeps its type,
+/// collation and key role. See decision 0067.
 pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange, Unsupported> {
     if old.publisher != new.publisher || old.application != new.application {
         return Err(Unsupported::Application);
@@ -120,25 +121,25 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
         schema
             .tables
             .iter()
-            .find(|table| table.logical == name)
+            .find(|table| table.sql_name == name)
             .map(|table| table.class)
     };
     let (mut tables, mut fields, mut required) =
         (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     for table in new.mergeable() {
-        match class(old, &table.logical) {
+        match class(old, &table.sql_name) {
             None => {
-                tables.insert(table.logical.clone());
+                tables.insert(table.sql_name.clone());
             }
             Some(TableClass::Mergeable) => {}
-            Some(_) => return Err(Unsupported::TableClass(table.logical.clone())),
+            Some(_) => return Err(Unsupported::TableClass(table.sql_name.clone())),
         }
     }
     for before in old.mergeable() {
-        let name = &before.logical;
+        let name = &before.sql_name;
         let after = new
             .mergeable()
-            .find(|table| table.logical == *name)
+            .find(|table| table.sql_name == *name)
             .ok_or_else(|| match class(new, name) {
                 Some(_) => Unsupported::TableClass(name.clone()),
                 None => Unsupported::RemovedTable(name.clone()),
@@ -156,7 +157,7 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
             table
                 .columns
                 .iter()
-                .find(|column| column.logical == field)
+                .find(|column| column.sql_name == field)
                 .cloned()
         };
         for (field, shape) in &old_fields {
@@ -206,7 +207,7 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
             .tables
             .iter()
             .filter(|table| table.class == TableClass::CommandControlled)
-            .map(|table| (table.logical.clone(), logical::table_shape(schema, table)))
+            .map(|table| (table.sql_name.clone(), logical::table_shape(schema, table)))
             .collect()
     };
     let (before, after) = (commanded(old), commanded(new));
@@ -379,7 +380,6 @@ mod tests {
 
     fn column(name: &str, not_null: bool) -> LogicalColumn {
         LogicalColumn {
-            logical: name.into(),
             sql_name: name.into(),
             affinity: if ["id", "row_kind"].contains(&name) {
                 Affinity::Integer
@@ -398,7 +398,7 @@ mod tests {
             .iter()
             .map(|column| {
                 let null = if column.not_null { " NOT NULL" } else { "" };
-                let key = if column.logical == "id" {
+                let key = if column.sql_name == "id" {
                     " PRIMARY KEY"
                 } else {
                     ""
@@ -415,7 +415,6 @@ mod tests {
             })
             .collect();
         LogicalTable {
-            logical: name.into(),
             sql_name: name.into(),
             class: TableClass::Mergeable,
             create_sql: format!("CREATE TABLE {name}({})", sql.join(",")),
@@ -555,12 +554,44 @@ mod tests {
         assert_eq!(classify(&old, &other), Err(Unsupported::Application));
     }
     #[test]
+    fn names_are_identities_and_keep_one_type() {
+        let old = schema(vec![items(&[("name", true), ("note", false)])]);
+        // A renamed field is another field: the old one is removed.
+        let mut renamed = old.clone();
+        let table = &mut renamed.tables[0];
+        table.columns[1].sql_name = "label".into();
+        table.create_sql = table.create_sql.replace("name", "label");
+        renamed.validate().unwrap();
+        assert_ne!(old.manifest(&[]).hash(), renamed.manifest(&[]).hash());
+        assert_eq!(
+            classify(&old, &renamed),
+            Err(Unsupported::RemovedField("items.name".into()))
+        );
+        // A name keeps its type, collation and key role.
+        let mut retyped = old.clone();
+        retyped.tables[0].columns[2].affinity = Affinity::Blob;
+        let mut collated = old.clone();
+        collated.tables[0].columns[2].collation = Collation::Nocase;
+        for new in [retyped, collated] {
+            assert_eq!(
+                classify(&old, &new),
+                Err(Unsupported::ChangedField("items.note".into()))
+            );
+        }
+        let mut keyed = old.clone();
+        keyed.tables[0].primary_key = vec!["name".into(), "id".into()];
+        assert_eq!(
+            classify(&old, &keyed),
+            Err(Unsupported::ChangedKey("items".into()))
+        );
+    }
+    #[test]
     fn required_fields_with_defaults_are_breaking() {
         let defaulted = |table: &mut LogicalTable, name: &str| {
             for column in table
                 .columns
                 .iter_mut()
-                .filter(|column| column.logical == name)
+                .filter(|column| column.sql_name == name)
             {
                 column.default = Some("''".into());
             }

@@ -2,7 +2,7 @@ use super::*;
 use rocky_credentials::PartitionGrant;
 use rocky_credentials::device_chain;
 
-const SCHEMA: &str = r#"{"format":5,"application":"holders","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
+const SCHEMA: &str = r#"{"format":6,"application":"holders","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"}]}"#;
 
 #[test]
 fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
@@ -252,7 +252,7 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
     Ok(())
 }
 
-const TWO: &str = r#"{"format":5,"application":"two","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
+const TWO: &str = r#"{"format":6,"application":"two","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},{"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]}]}"#;
 
 /// A new issuer of `schema` with its identity saved at `path`.
 fn issuer_at(

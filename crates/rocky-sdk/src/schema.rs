@@ -68,12 +68,7 @@ impl Schema {
         schema.validate()?;
         {
             let tables = &mut schema.tables;
-            tables.sort_by(|a, b| {
-                a.logical
-                    .as_ref()
-                    .unwrap_or(&a.name)
-                    .cmp(b.logical.as_ref().unwrap_or(&b.name))
-            });
+            tables.sort_by(|a, b| a.name.cmp(&b.name));
             for table in tables {
                 table.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             }
@@ -97,13 +92,10 @@ impl Schema {
             {
                 return Err("definition table or column quota".into());
             }
-            if tables.iter().any(|table| {
-                table.name.eq_ignore_ascii_case(crate::domain::REGISTRY)
-                    || table
-                        .logical
-                        .as_ref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(crate::domain::REGISTRY))
-            }) {
+            if tables
+                .iter()
+                .any(|table| table.name.eq_ignore_ascii_case(crate::domain::REGISTRY))
+            {
                 return Err(format!(
                     "{} is reserved for the SDK's issuer registry",
                     crate::domain::REGISTRY

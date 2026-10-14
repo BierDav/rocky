@@ -7,8 +7,8 @@ paths or historical encodings. Existing installations reinstall. The current
 [roadmap contract](../features_06/README.md#no-backward-compatibility) supersedes
 compatibility clauses in earlier decisions.
 
-- Schema descriptors use format 4 ([partition groups](0037-partition-groups.md)); definitions use
-  format 5 ([breaking generations](0066-breaking-generations.md)). Canonical descriptors carry
+- Schema descriptors use format 5 and definitions format 6
+  ([names are identities](0067-names-are-identities.md)). Canonical descriptors carry
   partition and liveness fields explicitly; replicated shapes carry their class
   and constraints explicitly. Key reuse is a row-incarnation feature, with no
   inert schema flag. Kotlin and native producers use the same format.

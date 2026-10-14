@@ -41,9 +41,9 @@ schemaFromRoom("shopping", exportedJson) {
 `lists.id` and `items.list` map to one group's slot by position. Every member
 must have equal slot counts, affinities and collations; build and installation
 refuse a mismatch naming both tables. Names are case-sensitive and unique in the
-group namespace. Omitting `group` creates a private group named by the table's
-logical identity; another table cannot name that group. An unpartitioned table
-cannot join. Group declarations affect canonical bytes and replicated identity.
+group namespace. Omitting `group` creates a private group named by the table;
+another table cannot name that group. An unpartitioned table cannot join.
+Group declarations affect canonical bytes and replicated identity.
 
 `LogicalSchema.partition_groups()` exposes groups, ordered slots and member
 tables to native runtime/SDK consumers. `group_address(domain, table, values)`
@@ -254,7 +254,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | --- | --- |
 | Partition tuple | Sorted, nonempty map from column commitment to canonical key component, by the business-key codec (affinity, collation). Nulls, duplicates and tuples over 1 KiB are refused |
 | Scope | Encryption commitment over domain, table and tuple under `rocky.partition-scope.v1`; the table commitment is unchanged |
-| Definition/descriptor | Definition format 5, descriptor format 4, including partition groups, optional `partition_by` and views; others are refused before installation writes |
+| Definition/descriptor | Definition format 6, descriptor format 5, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 2, one secret per recipient, bound to manifest, group address, epoch identity and revocation IDs ([0050](../decisions/0050-concurrent-key-epochs.md)) |
 | Frame | Row format 8 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |

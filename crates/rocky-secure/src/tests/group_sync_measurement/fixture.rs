@@ -32,7 +32,7 @@ impl Fixture {
             members.push(table);
         }
         members.push(serde_json::json!({"name":"products","class":"mergeable","columns":[{"name":"title","type":"text"}],"primary_key":["id"],"existence_log":true}));
-        let definition = serde_json::json!({"format":5,"publisher":publisher.public_key().to_string(),"application":"erp-measurement","tables":members});
+        let definition = serde_json::json!({"format":6,"publisher":publisher.public_key().to_string(),"application":"erp-measurement","tables":members});
         let schema = SchemaDefinition::parse(&serde_json::to_vec(&definition).unwrap())
             .unwrap()
             .build()

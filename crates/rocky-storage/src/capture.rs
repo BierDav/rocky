@@ -690,7 +690,6 @@ mod tests {
 
     fn column(name: &str, affinity: Affinity, collation: Collation) -> LogicalColumn {
         LogicalColumn {
-            logical: name.into(),
             sql_name: name.into(),
             affinity,
             not_null: false,
@@ -701,7 +700,6 @@ mod tests {
     }
     fn table(name: &str, sql: &str, columns: Vec<LogicalColumn>, key: &[&str]) -> LogicalTable {
         LogicalTable {
-            logical: name.into(),
             sql_name: name.into(),
             class: TableClass::Mergeable,
             create_sql: sql.into(),

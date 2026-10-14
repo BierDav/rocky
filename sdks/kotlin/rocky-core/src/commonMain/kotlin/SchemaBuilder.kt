@@ -119,7 +119,6 @@ class TableBuilder internal constructor(val name: String) {
     private val indexes = linkedMapOf<String, Index>()
     private val foreignKeys = mutableListOf<ForeignKey>()
     var tableClass: TableClass = TableClass.Mergeable
-    var logical: String? = null
 
     /**
      * Every device of the domain may read this table's row creations and deletions (never values),
@@ -234,6 +233,6 @@ class TableBuilder internal constructor(val name: String) {
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }
         require(roomIdentityIndex == null || roomIdentityIndex == identity) { "$name: Room identity index must contain partition columns followed by id" }
-        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, logical, foreignKeys.toList(), partitions, existenceLog = existenceLog, partitionGroup = partitionGroup, grantedLike = grantedLike)
+        return Table(name, columns.values.toList(), key, indexes.values.toList(), tableClass, foreignKeys.toList(), partitions, existenceLog = existenceLog, partitionGroup = partitionGroup, grantedLike = grantedLike)
     }
 }

@@ -166,6 +166,9 @@ finds the version it expects in `PRAGMA user_version`, which is the
 replicated schema's version, and never runs `onCreate`. A Room migration or
 destructive fallback fails at its first schema change: the replicated schema
 changes through Rocky's [generations](generations.md), never through Room.
+Table and column names are their identities: renaming an entity's table or
+`@ColumnInfo` name makes another table or field
+([decision 0067](../decisions/0067-names-are-identities.md)).
 Values for a field an upgrade requires come from the schema's SQL
 [migrations](generations.md#breaking-generations), declared with
 `migration(version, …)` in the Kotlin schema or its Room overlay.

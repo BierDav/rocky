@@ -15,7 +15,7 @@ use std::{
 
 mod support;
 
-const SCHEMA: &str = r#"{"format":5,"application":"groupsecrets","version":1,"tables":[
+const SCHEMA: &str = r#"{"format":6,"application":"groupsecrets","version":1,"tables":[
 {"name":"notes","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true}],"primary_key":["key"]},
 {"name":"lists","class":"mergeable","columns":[{"name":"name","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["name"],"partition_by":["name"],"partition_group":"list"},
 {"name":"items","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true},{"name":"title","type":"text"}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"},

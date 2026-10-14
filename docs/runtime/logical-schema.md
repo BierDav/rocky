@@ -15,24 +15,25 @@ The canonical form is the JSON encoding of the validated, sorted value;
 | --- | --- |
 | `source` | The origin's own identity (Room's `identityHash` and version), uninterpreted |
 | `fingerprint` | Everything installed |
-| `replicated_fingerprint` | What replicas must agree on: mergeable tables' logical names, key order, affinity, nullability, key collation, update policy, unique policies and foreign-key delete actions |
+| `replicated_fingerprint` | What replicas must agree on: mergeable tables' names, key order, affinity, nullability, key collation, update policy, unique policies and foreign-key delete actions |
 
-A non-unique index, a default, a derived rule, a local table or a rename under
-a kept logical name leaves the replicated fingerprint unchanged. Table and
-field identities are `definition_item_id(publisher, app, kind, logical name)`,
-so replicas that spell a column differently interoperate; a rename that drops
-the logical name is a new item. The descriptor is stored in the file at
-install and another one is refused at open; shapes change through
-[generations](generations.md).
+A non-unique index, a default, a derived rule or a local table leaves the
+replicated fingerprint unchanged. A table or field's name is its identity
+forever ([decision 0067](../decisions/0067-names-are-identities.md)): ids are
+`definition_item_id(publisher, app, kind, name)`, with `table.field` for
+fields. A renamed table or field is another item, and a name added again
+means what it meant before, with the same type. The descriptor is stored in
+the file at install and another one is refused at open; shapes change
+through [generations](generations.md).
 
-Format 4 installs row identity, partition groups, optional `partition_by` and static views
+Format 5 installs row identity, partition groups, optional `partition_by` and static views
 ([partitioned scopes](partitioned-scopes.md)). Any other format is
 refused by a read-only preflight before database initialization or SDK
 enrollment writes.
 
 SQL table and column lookups compare ASCII case insensitively, including
 foreign-key targets. Missing target columns report the table and column name.
-Logical names retain their declared identity.
+Ids use names as declared.
 
 ## Row identity
 

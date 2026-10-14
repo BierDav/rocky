@@ -2,7 +2,7 @@ package rocky
 
 import kotlinx.serialization.json.*
 
-/** A format-5 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
+/** A format-6 definition: every table has implicit `id` and `row_kind` columns and is written with SQL. */
 data class Schema(
     val application: String,
     val version: Int = 1,
@@ -30,8 +30,8 @@ data class Schema(
     fun json(): String = buildJsonObject {
         put("application", application)
         put("version", version)
-        put("format", 5)
-        put("tables", JsonArray(tables.sortedBy { it.logical ?: it.name }.map { it.definition() }))
+        put("format", 6)
+        put("tables", JsonArray(tables.sortedBy { it.name }.map { it.definition() }))
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
         // Part of the domain's signed definition: every device declares the same commands.
@@ -46,12 +46,12 @@ data class Schema(
     fun definitionJson(publisher: String): String {
         require(publisher.matches(Regex("[0-9a-fA-F]{64}"))) { "publisher must be 64 hexadecimal digits" }
         return buildJsonObject {
-            put("format", 5)
+            put("format", 6)
             put("publisher", publisher.lowercase())
             put("application", application)
             if (views.isNotEmpty()) put("views", viewsJson())
             put("update_policy", updatePolicy.wire)
-            put("tables", JsonArray(tables.sortedBy { it.logical ?: it.name }.map { it.definition() }))
+            put("tables", JsonArray(tables.sortedBy { it.name }.map { it.definition() }))
         }.toString()
     }
     private fun viewsJson(): JsonArray = JsonArray(
@@ -108,13 +108,14 @@ class MigrationBuilder internal constructor() {
     }
 }
 internal val IDENTIFIER = Regex("[A-Za-z][A-Za-z0-9_]{0,63}")
+
+/** A table; its [name], like each column's, is its identity forever (decision 0067). */
 data class Table(
     val name: String,
     val columns: List<Column>,
     val primaryKey: List<String> = emptyList(),
     val indexes: List<Index> = emptyList(),
     val tableClass: TableClass = TableClass.Mergeable,
-    val logical: String? = null,
     val foreignKeys: List<ForeignKey> = emptyList(),
     val partitionBy: List<String> = emptyList(),
     internal val roomIdentityIndex: List<String>? = null,
@@ -130,7 +131,6 @@ data class Table(
     }
     internal fun definition(): JsonObject = buildJsonObject {
         put("name", name)
-        logical?.takeUnless { it == name }?.let { put("logical", it) }
         put("class", tableClass.wire)
         put("columns", JsonArray(columns.map { it.definition() }))
         put("primary_key", JsonArray(primaryKey.map(::JsonPrimitive)))
@@ -151,7 +151,6 @@ data class Column(
     val nullable: Boolean,
     val default: JsonElement? = null,
     val collation: Collation = Collation.Binary,
-    val logical: String? = null,
     val derived: String? = null,
     val localOnly: Boolean = false,
 ) {
@@ -168,7 +167,6 @@ data class Column(
             put("default", if (boolean == null) it else JsonPrimitive(if (boolean) 1 else 0))
         }
         put("collation", collation.wire)
-        logical?.takeUnless { it == name }?.let { put("logical", it) }
         derived?.let { put("derived", it) }
         put("local_only", localOnly)
     }

@@ -336,3 +336,229 @@ async fn the_session_api_follows_the_json_contract() -> Result<(), Failure> {
     assert_eq!(session.tip_status().await?.tip, sealed.tip);
     Ok(())
 }
+
+/// Coordinated seals: a seal or a move off an open tip ends that tip's log
+/// first. See `docs/runtime/coordinated-writes.md#seals-and-moves`.
+mod coordinated {
+    use super::*;
+    use rocky_coordinator::coordinated::{MemoryLog, MemoryLogClient};
+    use rocky_core::{
+        Append, Commitment, CoordinationFuture, DomainLog, LogCut, LogHead, LogPending, LogResult,
+        LogTerminal, NodeKey, TipId, TipLog,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    /// A client whose next `seal` waits until the test releases it, so
+    /// another node can end the log in between.
+    struct Gated {
+        inner: MemoryLogClient,
+        armed: AtomicBool,
+        entered: Notify,
+        release: Notify,
+    }
+    impl DomainLog for Gated {
+        fn node(&self) -> NodeKey {
+            self.inner.node()
+        }
+        fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
+            self.inner.log_head(log)
+        }
+        fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+            self.inner.configure(log, minimum)
+        }
+        fn join(
+            &self,
+            log: TipLog,
+            position: u64,
+            running_hash: Commitment,
+            sequence: u64,
+        ) -> CoordinationFuture<'_, u64> {
+            self.inner.join(log, position, running_hash, sequence)
+        }
+        fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
+            self.inner.append(log, append)
+        }
+        fn acknowledge(
+            &self,
+            log: TipLog,
+            pending: LogPending,
+        ) -> CoordinationFuture<'_, LogResult> {
+            self.inner.acknowledge(log, pending)
+        }
+        fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
+            self.inner.cut(log, cut)
+        }
+        fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult> {
+            Box::pin(async move {
+                if self.armed.swap(false, Ordering::SeqCst) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.seal(log, terminal).await
+            })
+        }
+    }
+
+    fn domain(device: &Device) -> rocky_core::Scope {
+        serde_json::from_str(&device.database.scope()).expect("scope")
+    }
+    async fn node_key(device: &Device) -> rocky_sdk::credentials::PublicKey {
+        device.node().await.parse().expect("node key")
+    }
+    fn tip(hex: &Value) -> TipId {
+        TipId(
+            data_encoding::HEXLOWER
+                .decode(hex.as_str().expect("tip").as_bytes())
+                .expect("hex")
+                .try_into()
+                .expect("tip"),
+        )
+    }
+    fn log_of(device: &Device, tip_hex: &Value) -> TipLog {
+        TipLog {
+            scope: domain(device),
+            tip: tip(tip_hex),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_seal_ends_its_tips_coordinated_log() -> Result<(), Failure> {
+        let root = tempfile::tempdir()?;
+        let a = Device::create(root.path(), None)?;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        let genesis = main(&a).await["tip"].clone();
+        a.add(1, "milk").await;
+        let sealed = ok(&a, "seal", json!({})).await;
+        let seal = seal_of(
+            &ok(&a, "inspect", json!({})).await,
+            genesis.as_str().ok_or("tip")?,
+        );
+        let terminal = log
+            .head(log_of(&a, &genesis))?
+            .terminal
+            .ok_or("log not ended")?;
+        assert_eq!(hex(&terminal.digest), seal["id"]);
+        assert_eq!(terminal.continuation, Some(tip(&sealed["tip"])));
+        // Writes continue on the continuation, whose own log is open.
+        a.add(2, "eggs").await;
+        assert_eq!(a.titles().await, ["eggs", "milk"]);
+        assert_eq!(log.head(log_of(&a, &sealed["tip"]))?.terminal, None);
+        a.close().await;
+        Ok(())
+    }
+    fn hex(digest: &Commitment) -> Value {
+        json!(data_encoding::HEXLOWER.encode(digest))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_seal_another_node_ended_first_fails_sealed() -> Result<(), Failure> {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let a = Device::create(
+            &root.path().join("a"),
+            Some(Network::Owned(hub.connector("a"))),
+        )?;
+        // A joiner seals only a tip it holds history of, not the one it imported.
+        main(&a).await;
+        let open = ok(&a, "seal", json!({})).await["tip"].clone();
+        let b = Device::join(
+            &root.path().join("b"),
+            &a.invite_as(json!({"kind": "issuer"})).await,
+            Network::Owned(hub.connector("b")),
+        )?;
+        introduce(&a, &b).await;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        let gated = Arc::new(Gated {
+            inner: log.client(node_key(&a).await),
+            armed: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        a.database.coordinate(Some(gated.clone())).await?;
+        b.database
+            .coordinate(Some(Arc::new(log.client(node_key(&b).await))))
+            .await?;
+        b.sync().await.expect("graph sync");
+        ok(&b, "follow", json!({"name": "main"})).await;
+
+        // a's seal passed its checks and waits at the coordinator while b
+        // ends the log and hands a its seal.
+        gated.armed.store(true, Ordering::SeqCst);
+        let a = Arc::new(a);
+        let sealing = tokio::spawn({
+            let a = a.clone();
+            async move { tips(&a, "seal", json!({})).await }
+        });
+        gated.entered.notified().await;
+        let theirs = ok(&b, "seal", json!({})).await;
+        let _ = b.sync().await;
+        gated.release.notify_one();
+        let refused = sealing.await?.expect_err("a lost the race");
+        assert_eq!(refused["code"], "sealed", "{refused}");
+        assert_eq!(refused["retryable"], false);
+        // The log ended with b's seal, and a follows b's continuation.
+        let terminal = log
+            .head(log_of(&a, &open))?
+            .terminal
+            .ok_or("log not ended")?;
+        assert_eq!(terminal.continuation, Some(tip(&theirs["tip"])));
+        // a published nothing: the first seal and b's.
+        let inspection = ok(&a, "inspect", json!({})).await;
+        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(2));
+        assert_eq!(ok(&a, "status", json!({})).await["tip"], theirs["tip"]);
+        b.close().await;
+        a.close().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreachable_coordinator_refuses_seals_and_moves_and_publishes_nothing()
+    -> Result<(), Failure> {
+        let root = tempfile::tempdir()?;
+        let a = Device::create(root.path(), None)?;
+        let log = MemoryLog::new();
+        log.configure(domain(&a), 1)?;
+        a.database
+            .coordinate(Some(Arc::new(log.client(node_key(&a).await))))
+            .await?;
+        let genesis = main(&a).await["tip"].clone();
+        let first = ok(&a, "seal", json!({})).await;
+        a.add(1, "milk").await;
+
+        log.set_available(false);
+        for (action, body) in [
+            ("seal", json!({})),
+            ("seal", json!({"close": true})),
+            // Moving `main` back off its open tip needs that tip's close seal.
+            ("move", json!({"name": "main", "tip": genesis})),
+        ] {
+            let refused = tips(&a, action, body).await.expect_err("unconfirmed");
+            assert_eq!(refused["code"], "coordinator_unavailable", "{refused}");
+            assert_eq!(refused["retryable"], true);
+        }
+        let inspection = ok(&a, "inspect", json!({})).await;
+        assert_eq!(inspection["seals"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            inspection["bookmarks"][0]["moves"].as_array().map(Vec::len),
+            Some(2)
+        );
+        let status = ok(&a, "status", json!({})).await;
+        assert_eq!(status["tip"], first["tip"]);
+
+        // Once the coordinator answers, the same call succeeds.
+        log.set_available(true);
+        assert_eq!(log.head(log_of(&a, &first["tip"]))?.terminal, None);
+        let sealed = ok(&a, "seal", json!({})).await;
+        assert_ne!(sealed["tip"], first["tip"]);
+        assert!(log.head(log_of(&a, &first["tip"]))?.terminal.is_some());
+        assert_eq!(a.titles().await, ["milk"]);
+        a.close().await;
+        Ok(())
+    }
+}

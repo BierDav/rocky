@@ -23,7 +23,6 @@ class CoordinatedRowsTest {
         try {
             log.configure(database)
             database.coordinate(log)
-            database.installRoomAuthors(tables = listOf("stock", "holds"))
             val opened = Room.databaseBuilder<MarketDatabase>(File(directory, "room").path).setRockyDatabase(database).build().also { room = it }
             val market = opened.market()
             jobs += launch(Dispatchers.IO) { opened.followRocky(database) }

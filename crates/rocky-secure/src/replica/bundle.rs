@@ -148,8 +148,8 @@ impl<A: RowApplication> Inner<A> {
         for (table, mut ids) in births {
             ids.sort();
             let author = self
-                .row_authors
-                .get(&table)
+                .node_author
+                .as_ref()
                 .ok_or_else(|| denied("birth requires a table author"))?;
             let scope = writes
                 .iter()
@@ -200,29 +200,12 @@ impl<A: RowApplication> Inner<A> {
         let mut next = BTreeMap::new();
         for frame in &frames {
             let scope = frame[0].change.scope;
-            let author = if self
-                .app
-                .row_identity(&frame[0].change)
-                .map_err(|message| denied(&message))?
-                .is_some()
-            {
-                Some(
-                    self.row_authors
-                        .get(&scope.table)
-                        .ok_or_else(|| {
-                            denied("register a table pseudonym before issuing row identities")
-                        })?
-                        .key
-                        .public_key(),
-                )
-            } else {
-                None
-            };
+            let author = Some(node);
             let sequence = match next.get(&scope) {
                 Some(sequence) => *sequence,
                 None => {
                     let id = self.scope_id(scope).await?;
-                    self.author_tip(scope, id, author.unwrap_or(node))
+                    self.author_tip(scope, id, node)
                         .await?
                         .map_or(0, |log| log.sequence as u64 + 1)
                 }

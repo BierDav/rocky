@@ -199,9 +199,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .filter(|table| table.partition_by == ["id"])
             .ok_or_else(|| denied("table must be partitioned by its own id"))?;
         let author = inner
-            .row_authors
-            .get(&table.table.id)
-            .ok_or_else(|| denied("register a table pseudonym first"))?;
+            .node_author
+            .as_ref()
+            .ok_or_else(|| denied("node author credential missing"))?;
         let identity = rocky_core::RowIdentity::next(
             author.number,
             inner.highest_identity(table.scope, author.number).await?,

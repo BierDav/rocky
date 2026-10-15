@@ -221,9 +221,9 @@ impl<A: RowApplication> SecureSql<A> {
             .by_name(table)
             .ok_or_else(|| refused("unknown typed table"))?;
         let author = inner
-            .row_authors
-            .get(&table.scope.table)
-            .ok_or_else(|| denied("register a table pseudonym before issuing row identities"))?;
+            .node_author
+            .as_ref()
+            .ok_or_else(|| denied("node author credential missing"))?;
         let own_id = typed
             .rows
             .schema()

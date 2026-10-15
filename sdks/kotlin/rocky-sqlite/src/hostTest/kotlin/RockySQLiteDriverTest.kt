@@ -34,10 +34,6 @@ class RockySQLiteDriverTest {
         val directory: File = Files.createTempDirectory("rocky-sqlite").toFile()
         val database = RockyDatabase.local(directory.path, shopping)
         try {
-            // The creator issues itself the table authors its inserts are signed under.
-            for (table in listOf("lists", "items")) {
-                database.credentials.installPseudonym(database.credentials.assignPseudonym(database.credentials.pseudonymRequest(table)))
-            }
             block(database, RockySQLiteDriver(database))
         } finally {
             database.close()

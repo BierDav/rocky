@@ -45,7 +45,7 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         user.public_key(),
         vec![],
         grants.clone(),
-        (1, None),
+        (1, Some(rocky_credentials::AuthorRange::ALL)),
         issuer.validity()?,
     )?;
     let mut rows = BTreeMap::new();
@@ -55,7 +55,17 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
     assert_eq!(registry.get(&device.node).ok_or("record")?.grants.len(), 1);
     let me = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let renew = |issuer: &Settings, node: &PrivateKey| -> Result<Vec<u8>, Failure> {
-        let chain = device_chain(capability.clone(), &user, node.public_key())?;
+        let chain = device_chain(
+            capability.clone().clone(),
+            &user,
+            node.public_key(),
+            capability
+                .clone()
+                .capability
+                .authors()?
+                .ok_or("principal range")?
+                .first,
+        )?;
         let (request, _) = RenewRequest::sign(node, me, chain, now()?)?;
         Ok(issuer.renew(&vault, &request.to_bytes()?, &registry)?.0)
     };
@@ -186,7 +196,16 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
         .first()
         .cloned()
         .ok_or("capability")?;
-    let chain = device_chain(capability, &user, node.public_key())?;
+    let chain = device_chain(
+        capability.clone(),
+        &user,
+        node.public_key(),
+        capability
+            .capability
+            .authors()?
+            .ok_or("principal range")?
+            .first,
+    )?;
     let (_, selectors) = chain.verify_selectors(
         issuer.publisher,
         domain.manifest().hash(),
@@ -375,7 +394,6 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                         .into(),
                         users: BTreeSet::new(),
                         capabilities: BTreeSet::new(),
-                        pseudonyms: BTreeSet::new(),
                     },
                     &publisher,
                     &other,
@@ -462,7 +480,17 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
                  root: &CredentialChain|
      -> Result<Vec<u8>, Failure> {
         let fresh = PrivateKey::new();
-        let chain = device_chain(root.0[0].clone(), user, fresh.public_key())?;
+        let chain = device_chain(
+            root.0[0].clone().clone(),
+            user,
+            fresh.public_key(),
+            root.0[0]
+                .clone()
+                .capability
+                .authors()?
+                .ok_or("principal range")?
+                .first,
+        )?;
         let (request, _) = RenewRequest::sign(&fresh, me, chain, now()?)?;
         Ok(issuer.renew(&vault, &request.to_bytes()?, registry)?.0)
     };
@@ -771,9 +799,18 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,
-        None,
+        Some(AuthorRange::new(2, 1025)?),
     )?;
-    let chain = device_chain(capability, &user, node.public_key())?;
+    let chain = device_chain(
+        capability.clone(),
+        &user,
+        node.public_key(),
+        capability
+            .capability
+            .authors()?
+            .ok_or("principal range")?
+            .first,
+    )?;
     let issuer_node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
     let (request, exchange) = RenewRequest::sign(&node, issuer_node, chain, now()?)?;
     for bytes in [

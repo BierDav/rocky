@@ -22,7 +22,6 @@ collection is its own reader scope with its own key epochs.
 | Publisher | Issuers | Trust anchor: signs manifest, revocation statements and user capabilities |
 | User | Each device | Subject of the capability the publisher issues |
 | Node | Each device | Signs operations, session frames and renewal requests |
-| Pseudonym, per table | Writing devices that request one | Signs as a table author; number and sealed device binding are in its credential |
 | Transport | Each device | Stable key of its routes where the transport has one; no authority |
 | Reader, per collection and epoch | Devices whose grants read it | Encrypts and decrypts that collection's rows |
 | Invitation token | Issuers | Secret of the active invitation |
@@ -42,37 +41,20 @@ non-issuers and malformed or unsupported invitation formats return errors.
 Applications can reconcile their invitation lists from this state instead of
 depending on the bounded, in-memory enrollment activity feed.
 
-## Author installation
+## Node author numbers
 
-Kotlin `RockyDatabase.create` and `join` install the current author pseudonym
-of every writable table before returning when an issuer answers. Issuers
-assign their own authors; members send a signed pseudonym request over the
-renewal lane. `installAuthors()` retries missing or expired assignments and
-returns those newly installed; already-current assignments are unchanged.
-Partition-selector grants use the same installation path without requiring
-collection-wide rights; read-only devices request no authors.
-Member sync retries missing authors. If no issuer answers a member's join,
-the database remains open and assignments retry during sync; inserts requiring
-an author fail until it is installed. Raw local/supplied composition remains
-explicit and can call `installAuthors()` itself.
-
-The `authors` native request returns `installed` entries with `collection`
-and `author`. The counter is saved and the assignment committed to the
-registry before the issuer answers, so a lost reply retried at any issuer
-returns the same number. The
-`rocky.sdk.author.v1` prefix distinguishes this request from ordinary renewal
-and generation offers; it carries the existing signed `PseudonymRequest`.
-Issuers verify its grants, manifest, revocations and device binding through the same
-[author assignment](credential-primitives.md#author-pseudonyms) boundary.
-There is one current request format and no legacy reader.
+The principal grant gives an author range; its node leaf carries one number.
+Every table uses the node key and that number. Row allocation runs locally in
+the SQL transaction, including after reopen and without a network. See
+[principal ranges](credential-primitives.md#principal-ranges-and-node-authors).
+No author-installation API or renewal-protocol assignment request exists.
 
 ## Secret storage
 
 Keys never enter replicated tables or `identity.json`. They live in a
 `SecretStore` ([key provider](credentials.md#key-providers)) under
 `rocky.<installation>.<role>`: reader keys use `reader.<collection>` for epoch 1
-and `reader.<collection>.<epoch>` after; the author-assignment key
-`author-issuer`; table signing keys `pseudonym.<collection>`.
+and `reader.<collection>.<epoch>` after.
 
 ```kotlin
 val store = object : SecretStore {
@@ -93,7 +75,7 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 16 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, pending deliveries, and `contact_refs` indexed by opaque peer references with routes, issuer flags and local metadata; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
+| `identity.json` | 17 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, pending deliveries, and `contact_refs` indexed by opaque peer references with routes, issuer flags and local metadata; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
 | Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
@@ -180,7 +162,7 @@ reachable. Clock skew up to five minutes is accepted.
 `revoke(node)` on an issuer starts a new key epoch for every collection the
 device could read, and a new secret for every group partition it could read or
 was granted ([group secrets](partitioned-scopes.md#group-secrets)), and signs a
-statement revoking its node, its user, its capability and its pseudonyms. The
+statement revoking its node, its user and its capability. The
 intent is saved first; an interruption completes at the next open with the
 same statement and keys. Selection comes from the replicated record, whoever
 enrolled the device: a profile selects collections and group partitions;
@@ -362,7 +344,6 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `install` with `supplied` | Replaces credentials; the new `session` |
 | `devices`, `device_label`, `revoke` with `node` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
 | `renew` | The renewed `session` |
-| `authors` | Newly installed table authors; see [above](#author-installation) |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |
 | `networking_control` with `enabled` | The application's networking control value; no reachability measurement |
@@ -393,7 +374,7 @@ reaches nobody; unknown identity and invitation versions are refused unchanged.
 `--test issuers` destroys the creator after pairing a second issuer, which
 revokes it, invites a third device and renews earlier devices.
 `--test registry`: a device enrolled at A is listed at B after one sync with
-the same profile, partition grants, pseudonyms, chain expiry, command identity
+the same profile, partition grants, node author numbers, chain expiry, command identity
 and label; a member renews at an issuer it never met while the first is gone,
 removes it and keeps syncing (acceptance 4, in-process hub); a member, a
 non-issuing writer and a custody peer hold no registry key or open row while

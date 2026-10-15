@@ -38,12 +38,11 @@ pub struct Revocation {
     pub nodes: BTreeSet<crate::PeerId>,
     pub users: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
-    pub pseudonyms: BTreeSet<PublicKey>,
 }
 impl Revocation {
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.revocation.id.v2",
+            "rocky.revocation.id.v3",
             &encode(self)?,
         ))
     }
@@ -61,13 +60,10 @@ impl Revocation {
     }
     /// Every key the statement revokes as a credential subject.
     pub fn subjects(&self) -> impl Iterator<Item = &PublicKey> {
-        self.users.iter().chain(&self.pseudonyms)
+        self.users.iter()
     }
     fn empty(&self) -> bool {
-        self.nodes.is_empty()
-            && self.users.is_empty()
-            && self.capabilities.is_empty()
-            && self.pseudonyms.is_empty()
+        self.nodes.is_empty() && self.users.is_empty() && self.capabilities.is_empty()
     }
 }
 
@@ -88,8 +84,8 @@ impl SignedRevocation {
             return Err(denied("invalid revocation"));
         }
         let signed = Self {
-            publisher: publisher.sign(&signing_bytes("rocky.revocation.v2", &statement)?),
-            issuer: issuer.sign(&signing_bytes("rocky.revocation-issuer.v2", &statement)?),
+            publisher: publisher.sign(&signing_bytes("rocky.revocation.v3", &statement)?),
+            issuer: issuer.sign(&signing_bytes("rocky.revocation-issuer.v3", &statement)?),
             statement,
         };
         if encode(&signed)?.len() > MAX_REVOCATION_BYTES {
@@ -104,11 +100,11 @@ impl SignedRevocation {
             || self.statement.empty()
             || encode(self)?.len() > MAX_REVOCATION_BYTES
             || !publisher.verify(
-                &signing_bytes("rocky.revocation.v2", &self.statement)?,
+                &signing_bytes("rocky.revocation.v3", &self.statement)?,
                 &self.publisher,
             )
             || !self.statement.issuer.verify(
-                &signing_bytes("rocky.revocation-issuer.v2", &self.statement)?,
+                &signing_bytes("rocky.revocation-issuer.v3", &self.statement)?,
                 &self.issuer,
             )
         {

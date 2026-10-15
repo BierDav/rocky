@@ -373,11 +373,7 @@ impl Domain {
     pub fn registry(&self) -> ResourceScope {
         self.tables[REGISTRY]
     }
-    /// The application's collections, without the registry: what sessions
-    /// of the application read and write.
-    pub fn collections(&self) -> impl Iterator<Item = (&str, ResourceScope)> {
-        self.scopes().filter(|(name, _)| *name != REGISTRY)
-    }
+
     /// What an issuer can grant: every application collection, its scope
     /// and columns. The registry is no grantable resource.
     pub fn resources(&self) -> Vec<Resource> {

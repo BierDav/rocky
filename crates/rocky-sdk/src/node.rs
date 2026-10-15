@@ -31,7 +31,7 @@ use rocky_secure::{
     SecureSession, SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 pub(crate) use shared::Shared;
 use std::{
     collections::BTreeMap,
@@ -756,7 +756,6 @@ impl Node {
                     self.renew(transport, true, None, false).await?;
                     self.status(client).await
                 }
-                "authors" => self.authors(transport).await,
                 "contact" => {
                     let transport = transport.ok_or(ServiceError::NetworkRequired("contact"))?;
                     let settings = self.settings.lock().await.clone();
@@ -920,15 +919,13 @@ impl Node {
                 Ok(json!({}))
             }
             "network" => Ok(serde_json::to_value(self.observed_network().await?)?),
-            "pairing" | "renew" | "sync" | "contact" | "authors" => {
-                self.networked(client, kind, request).await
-            }
+            "pairing" | "renew" | "sync" | "contact" => self.networked(client, kind, request).await,
             "sql" | "next_id" | "move_row" => self.sql_call(client, kind, request).await,
             kind if kind.starts_with("partition_") => self.partition_call(kind, request).await,
             "devices" => self.devices().await,
             "device_label" => self.label(request).await,
             "grant" | "delegate" => self.grant(request).await,
-            kind if kind.starts_with("pseudonym_") => self.pseudonym(kind, request).await,
+
             "install" => self.install_supplied(client, request).await,
             "contact_request" => {
                 let encoded = request["id"]
@@ -1180,66 +1177,7 @@ impl Node {
             Box::pin(self.answer_grant(device, (profile, terms), delegate, contact)).await?;
         Ok(json!({"supplied": supplied}))
     }
-    /// Author pseudonyms: request one, assign one, keep one, find whose it
-    /// is, or claim a range. See `docs/runtime/credential-primitives.md`.
-    async fn pseudonym(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
-        let chain = |name: &str| -> Result<CredentialChain, Failure> {
-            serde_json::from_value(request[name].clone())
-                .map_err(|_| refused(format!("{name} must be a pseudonym chain")))
-        };
-        match kind {
-            "pseudonym_request" => {
-                let collection = request["collection"]
-                    .as_str()
-                    .ok_or_else(|| refused("collection must be a string"))?;
-                let settings = self.settings.lock().await.clone();
-                let made = settings
-                    .pseudonym_request(&self.vault, collection)
-                    .map_err(refused)?;
-                Ok(json!({"request": HEXLOWER.encode(&made.to_bytes()?)}))
-            }
-            "pseudonym_assign" => {
-                let bytes = HEXLOWER
-                    .decode(request["request"].as_str().unwrap_or_default().as_bytes())
-                    .map_err(|_| refused("request must be hexadecimal"))?;
-                let asked = rocky_credentials::PseudonymRequest::from_bytes(&bytes)?;
-                let assigned = Box::pin(self.answer_author(&asked)).await?;
-                Ok(json!({"pseudonym": assigned}))
-            }
-            "pseudonym_install" => {
-                let pseudonym = chain("pseudonym")?;
-                let (collection, author) = self
-                    .configure(|settings| settings.hold_pseudonym(&self.vault, pseudonym.clone()))
-                    .await?;
-                let role = self.settings.lock().await.pseudonym_role(&collection);
-                let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
-                self.replica.register_row_author(key, pseudonym).await?;
-                Ok(json!({"collection": collection, "author": author}))
-            }
-            "pseudonym_owner" => {
-                let settings = self.settings.lock().await.clone();
-                let (node, collection, author) = settings
-                    .pseudonym_owner(&self.vault, &chain("pseudonym")?)
-                    .map_err(refused)?;
-                Ok(json!({"node": node.to_hex(), "collection": collection, "author": author}))
-            }
-            "pseudonym_range" => {
-                let number = |name: &str| {
-                    request[name]
-                        .as_u64()
-                        .and_then(|value| u32::try_from(value).ok())
-                        .ok_or_else(|| refused(format!("{name} must be an author number")))
-                };
-                let range = rocky_credentials::AuthorRange::new(number("first")?, number("last")?)?;
-                self.configure(|settings| settings.claim_authors(range))
-                    .await?;
-                // The issuer's own capability carries the range from now on.
-                self.renew(None, false, None, false).await?;
-                Ok(json!({"first": range.first, "last": range.last}))
-            }
-            other => Err(refused(format!("unsupported request {other}"))),
-        }
-    }
+
     /// Replaces this device's credentials with supplied ones and teaches
     /// the replica, as a renewal does.
     async fn install_supplied(&self, client: &Client, request: &Value) -> Result<Value, Failure> {
@@ -1503,14 +1441,7 @@ impl Node {
             "transport": self.kind(),
             "readable": status.readable.len(),
             "writable": status.writable.len(),
-            "pseudonyms": settings.pseudonyms.iter().map(|(collection, chain)| {
-                let author = chain
-                    .0
-                    .last()
-                    .and_then(|leaf| leaf.capability.authors().ok().flatten())
-                    .and_then(|range| range.single());
-                (collection.clone(), json!(author))
-            }).collect::<Map<String, Value>>(),
+            "author": settings.credentials.author_number()?,
             "authors": settings.minting,
         }))
     }
@@ -1706,9 +1637,6 @@ impl Node {
         *settings = draft;
         self.apply(&settings.revocations, &settings.credentials, keys)
             .await?;
-        for (key, credentials) in settings.row_authors(&self.vault)? {
-            self.replica.register_row_author(key, credentials).await?;
-        }
         for partition in settings.partitions(&self.domain())? {
             let address = crate::groups::record_key(&partition.record.address);
             if rotation.groups.contains_key(&address) {
@@ -1894,34 +1822,6 @@ impl Node {
         }
     }
 
-    /// Installs a pseudonym for every collection this device writes and has
-    /// none for: an issuer assigns its own, a member asks its issuers.
-    async fn authors(&self, transport: Option<&dyn Transport>) -> Result<Value, Failure> {
-        let missing = self.settings.lock().await.missing_authors(&self.domain())?;
-        let mut installed = Vec::new();
-        for collection in missing {
-            let settings = self.settings.lock().await.clone();
-            let request = settings.pseudonym_request(&self.vault, &collection)?;
-            let chain = if settings.issuer() {
-                Box::pin(self.answer_author(&request)).await?
-            } else {
-                let transport = transport.ok_or(ServiceError::NetworkRequired("authors"))?;
-                settings.request_author(transport, &request).await?
-            };
-            let (collection, author) = self
-                .configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
-                .await?;
-            let role = self.settings.lock().await.pseudonym_role(&collection);
-            let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
-            self.replica.register_row_author(key, chain).await?;
-            self.activity.record(
-                "author_installed",
-                json!({"collection": collection, "author": author}),
-            );
-            installed.push(json!({"collection": collection, "author": author}));
-        }
-        Ok(json!({"installed": installed}))
-    }
     /// Records a peer's reachability when it changed and what a sync moved.
     fn record_reach(
         &self,
@@ -2303,17 +2203,6 @@ impl Node {
             } else if renewed.is_err() && settings.expires() <= now()? {
                 return Err("credentials expired; an issuer must be reachable to renew".into());
             }
-        }
-        // A member that joined while no issuer answered asks again here.
-        if member
-            && !self
-                .settings
-                .lock()
-                .await
-                .missing_authors(&self.domain())?
-                .is_empty()
-        {
-            let _ = self.authors(Some(transport)).await;
         }
         let renewable = member || !settings.issuers.is_empty();
         // A served session brought statements: renew for the rotated keys
@@ -3213,16 +3102,6 @@ impl Node {
                     }
                     if request == crate::enrollment::POLICY {
                         return Ok(serde_json::to_vec(&settings.revocations)?);
-                    }
-                    if let Some(asked) = request.strip_prefix(crate::enrollment::AUTHOR) {
-                        let asked = rocky_credentials::PseudonymRequest::from_bytes(asked)?;
-                        let chain = Box::pin(self.answer_author(&asked)).await?;
-                        let collection = settings.collection_name(asked.table).unwrap_or_default();
-                        self.activity.record(
-                            "author_assigned",
-                            json!({"node": asked.node.to_hex(), "collection": collection}),
-                        );
-                        return Ok(serde_json::to_vec(&chain)?);
                     }
                     Box::pin(self.answer_renewal(&request)).await
                 })

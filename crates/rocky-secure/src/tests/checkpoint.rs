@@ -1497,3 +1497,50 @@ async fn an_imported_checkpoint_is_served_onward_with_its_signer_pages() {
     assert_eq!(all_rows(&f, &c).await, all_rows(&f, &a).await);
     c.audit(f.public).await.unwrap();
 }
+
+#[tokio::test]
+async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
+    let fixture = Fixture::new();
+    let directory = TempDir::new().unwrap();
+    let node = PrivateKey::new();
+    let principal = PrivateKey::new();
+    let root = crate::credentials::Authority {
+        publisher: &fixture.publisher,
+        manifest: fixture.app().definition().hash(),
+    }
+    .issue_partition_terms(
+        principal.public_key(),
+        fixture.full(),
+        vec![crate::credentials::PartitionGrant {
+            domain: fixture.private.domain,
+            table: fixture.private.table,
+            selector: rocky_core::PartitionSelector(
+                [(
+                    fixture.app().field("salary"),
+                    rocky_core::PartitionSelection::Any,
+                )]
+                .into(),
+            ),
+            rows: RowSelection::All,
+            rights: [Right::Read].into(),
+            fields: [fixture.app().field("salary")].into(),
+        }],
+        (1, Some(crate::credentials::AuthorRange::new(1, 2).unwrap())),
+        crate::tests::validity(),
+    )
+    .unwrap();
+    let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
+    config.credentials = CredentialChain(vec![root])
+        .complete(&principal, node.public_key(), 1)
+        .unwrap();
+    let replica =
+        EncryptedReplica::open(directory.path().join("mixed.sqlite"), fixture.app(), config)
+            .await
+            .unwrap();
+    let signed = replica.checkpoint(fixture.public).await.unwrap();
+    replica
+        .verify_checkpoint_at_for_test(&signed, now().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(signed.signer(), node.public_key());
+}

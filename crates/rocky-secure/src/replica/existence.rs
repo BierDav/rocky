@@ -22,11 +22,11 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 /// The format of existence records this runtime reads and writes.
-pub const EXISTENCE_FORMAT: u8 = 2;
+pub const EXISTENCE_FORMAT: u8 = 3;
 /// Records per existence page.
 pub const MAX_EXISTENCE_PAGE: usize = 256;
-const SIGNATURE: &str = "rocky.existence-record.v1";
-const HASH: &str = "rocky.existence-record.hash.v1";
+const SIGNATURE: &str = "rocky.existence-record.v2";
+const HASH: &str = "rocky.existence-record.hash.v2";
 
 /// What one existence record states about its row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ struct Statement {
     scope: ResourceScope,
     id: RowIdentity,
     event: ExistenceEvent,
-    /// The table pseudonym's author number.
+    /// The node's author number.
     author: u32,
     /// Position in the signer's log of this scope, from 1.
     sequence: u64,
@@ -156,7 +156,7 @@ impl<A: RowApplication> Inner<A> {
         })
     }
     /// Signs the creations and deletions of `writes`, all in `scope`, with
-    /// the table pseudonym, inside the caller's transaction and before the
+    /// the node, inside the caller's transaction and before the
     /// rows are projected.
     pub(super) async fn author_existence(
         &self,
@@ -167,9 +167,9 @@ impl<A: RowApplication> Inner<A> {
             return Ok(());
         }
         let author = self
-            .row_authors
-            .get(&scope.table)
-            .ok_or_else(|| denied("register a table pseudonym before writing an existence log"))?;
+            .node_author
+            .as_ref()
+            .ok_or_else(|| denied("node author credential missing"))?;
         let signer = author.key.public_key();
         let (mut sequence, mut previous) = self.existence_tip(scope, signer).await?;
         for write in writes {
@@ -325,6 +325,7 @@ impl<A: RowApplication> Inner<A> {
     /// record at one position or a second creation of one `id` is refused.
     async fn store_existence(&self, record: &ExistenceRecord) -> Result<ReceiveStatus, Error> {
         let statement = &record.statement;
+        self.bind_node_author(&statement.credentials).await?;
         if !self
             .horizon_allows_position(statement.scope, record.signer, statement.sequence, true)
             .await?

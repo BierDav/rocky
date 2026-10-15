@@ -44,7 +44,6 @@ class IosCrashProbeTest {
 
     private fun prepare() = runBlocking<Unit> {
         val db = RockyDatabase.local(root, definition)
-        db.installAuthors()
         db.close()
     }
 

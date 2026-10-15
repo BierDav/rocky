@@ -241,7 +241,7 @@ mod tests {
                     fields: Default::default(),
                 }],
                 vec![],
-                (1, None),
+                (1, Some(rocky_credentials::AuthorRange::ALL)),
                 (now().unwrap(), 3600, 5),
             )
             .unwrap();
@@ -251,7 +251,7 @@ mod tests {
                 revocations: fixture.revocations.clone(),
                 node: node.clone(),
                 credentials: CredentialChain(vec![root])
-                    .complete(&user, node.public_key())
+                    .complete(&user, node.public_key(), 1)
                     .unwrap(),
                 keys: vec![],
             }

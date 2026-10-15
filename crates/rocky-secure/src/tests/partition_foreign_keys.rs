@@ -182,7 +182,35 @@ impl Fixture {
         )
         .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let credentials = prefix.clone().complete(&user, node.public_key()).unwrap();
+        let recorded = if path.exists() {
+            let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
+            let mut rows = conn
+                .query(
+                    "SELECT number FROM secure_node_authors WHERE node=?",
+                    [node.public_key().as_bytes().to_vec()],
+                )
+                .await
+                .unwrap();
+            let number = rows
+                .next()
+                .await
+                .unwrap()
+                .map(|row| row.get::<i64>(0).unwrap() as u32);
+            drop(rows);
+            drop(conn);
+            drop(owner);
+            number
+        } else {
+            None
+        };
+        let credentials = prefix
+            .clone()
+            .complete(
+                &user,
+                node.public_key(),
+                recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number)),
+            )
+            .unwrap();
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -209,37 +237,6 @@ impl Fixture {
             )
             .await
             .unwrap();
-        if let Some((_, number)) = signer {
-            for grant in raw {
-                let key = PrivateKey::new();
-                let credentials = prefix
-                    .assign(
-                        &user,
-                        key.public_key(),
-                        number,
-                        node.public_key(),
-                        vec![grant],
-                        time + 3600,
-                        (time, 3600, 5),
-                    )
-                    .unwrap();
-                replica.register_row_author(key, credentials).await.unwrap();
-            }
-            for grant in grants {
-                let key = PrivateKey::new();
-                let credentials = prefix
-                    .assign_partitions(
-                        &user,
-                        key.public_key(),
-                        number,
-                        node.public_key(),
-                        vec![grant],
-                        (time, 3600, 5),
-                    )
-                    .unwrap();
-                replica.register_row_author(key, credentials).await.unwrap();
-            }
-        }
         replica
     }
 

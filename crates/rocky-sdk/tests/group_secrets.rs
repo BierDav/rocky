@@ -581,15 +581,6 @@ async fn a_table_joining_the_group_later_derives_its_key_from_the_held_secret() 
     assert!(uniform(&tables, json!([1])), "{tables:?}");
     assert_eq!(issuer.store.group_secrets(), 1, "no new secret or envelope");
     // The derived key seals and opens a row of the new table.
-    let request = issuer
-        .ok(json!({"type":"pseudonym_request","collection":"attachments"}))
-        .await;
-    let assigned = issuer
-        .ok(json!({"type":"pseudonym_assign","request":request["request"]}))
-        .await;
-    issuer
-        .ok(json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}))
-        .await;
     issuer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
     let id = issuer
         .ok(json!({"type":"next_id","table":"attachments","partition_values":values("A")}))
@@ -660,21 +651,8 @@ async fn a_phone_holds_a_list_and_its_items_while_leaving_out_attachments() {
     issuer.database.close().await.unwrap();
 }
 
-/// Installs a table pseudonym and writes one row of list A.
+/// Writes one row of list A.
 async fn write(peer: &Peer, table: &str, key: &str) {
-    let request = peer
-        .ok(json!({"type":"pseudonym_request","collection":table}))
-        .await;
-    if request
-        .get("request")
-        .is_some_and(|request| !request.is_null())
-    {
-        let assigned = peer
-            .ok(json!({"type":"pseudonym_assign","request":request["request"]}))
-            .await;
-        peer.ok(json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}))
-            .await;
-    }
     peer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
     if table == "lists" && key != "before" {
         // One row per list: a later write updates it.
@@ -751,10 +729,6 @@ async fn readers_open_every_table_from_one_envelope_and_only_live_readers_open_l
     for (reader, _) in &readers {
         // One sync delivers the envelope and then the list's rows.
         reader.ok(json!({"type":"sync"})).await;
-        assert_eq!(
-            reader.ok(json!({"type":"authors"})).await["installed"],
-            json!([])
-        );
         assert_eq!(rows(reader).await, vec![vec!["before".to_owned()]; 3]);
     }
 
@@ -854,11 +828,6 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
     issuer.share("A", &[&device]).await.unwrap();
     // The sync that delivers the envelope also obtains an author per table.
     writer.ok(json!({"type":"sync"})).await;
-    assert_eq!(writer.events("author_installed").await.len(), TABLES.len());
-    assert_eq!(
-        writer.ok(json!({"type":"authors"})).await["installed"],
-        json!([])
-    );
     writer.ok(json!({"type":"sync"})).await;
     writer.ok(json!({"type":"sql","sql":"BEGIN"})).await;
     let id = writer

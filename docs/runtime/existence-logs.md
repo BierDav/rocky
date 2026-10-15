@@ -38,19 +38,19 @@ separate reader scopes and does not merge them.
 
 ## The record
 
-Each table scope with a log has one log per signing pseudonym. The pseudonym
-signs the CBOR statement under `rocky.existence-record.v1`; the commitment is
-`rocky.existence-record.hash.v1` over the signed record.
+Each table scope with a log has one log per signing node. The node
+signs the CBOR statement under `rocky.existence-record.v2`; the commitment is
+`rocky.existence-record.hash.v2` over the signed record.
 
 | Field | Contract |
 | --- | --- |
-| `version` | 2, the sole current format; any other value is refused |
+| `version` | 3, the sole current format; any other value is refused |
 | `manifest` | The admitted generation manifest the author's chain names |
 | `scope` | Domain, reader commitment and table |
 | `partition` | None for installed unpartitioned logs; partitioned logs remain deferred |
 | `id` | The incarnation identity (`RowIdentity`), never 0 |
 | `event` | `Created` or `Deleted` |
-| `author`, `credentials` | The pseudonym's author number and credential chain |
+| `author`, `credentials` | The node's author number and credential chain |
 | `sequence`, `previous` | Position from 1 in the signer's log of this scope; predecessor commitment |
 
 No column value, business key, reference, payload or application timestamp is
@@ -68,7 +68,7 @@ both representations of one creation is not identity reuse.
 ## What devices do
 
 - **Authoring.** A commit that creates or deletes a row of the table signs one
-  record per row with the table pseudonym, in the same transaction as the
+  record per row with the node key, in the same transaction as the
   sealed frames, projection and outbox. Updates write no record.
 - **Liveness.** A row is alive with a verified creation and no verified
   deletion; deletion wins in any order. Missing evidence keeps dependants
@@ -120,7 +120,7 @@ only after the commit that stored them is durable. Direct callers use
 `existence_page`, `existence_frontier` and `receive_existence`.
 
 A record is refused before any state change when its format, manifest, domain,
-table, signature, pseudonym chain, insert/delete right, creation author or log
+table, signature, node chain, insert/delete right, creation author or log
 position is wrong. A gap returns `PendingDependencies` and is not stored.
 
 ## Limits
@@ -134,7 +134,7 @@ position is wrong. A gap returns `PendingDependencies` and is not stored.
   orphaned `CASCADE` parent of its own) does not hide the child; the child's
   foreign key names a puppet there, as on devices without the parent.
 - The schema exposes, to every device of the domain, row counts, creation and
-  deletion times, row `id`s and creating/deleting pseudonyms of each logged
+  deletion times, row `id`s and creating/deleting nodes of each logged
   table.
 
 ## Design rationale

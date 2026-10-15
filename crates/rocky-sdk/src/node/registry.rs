@@ -2,10 +2,7 @@
 //! before they leave, the device list and labels. See
 //! `docs/decisions/0048-replicated-issuer-registry.md`.
 use super::*;
-use crate::{
-    domain::REGISTRY,
-    registry::{self, Changes, Registry},
-};
+use crate::registry::{self, Changes, Registry};
 
 impl Node {
     /// Every record this device holds; empty on a non-issuer, which holds
@@ -16,29 +13,8 @@ impl Node {
         }
         Box::pin(registry::read(&self.replica, self.domain().registry())).await
     }
-    /// Installs this issuer's registry pseudonym, from its own author
-    /// range, unless it holds a current one.
-    async fn registry_author(&self) -> Result<(), Failure> {
-        let settings = self.settings.lock().await.clone();
-        if !settings.issuer() {
-            return Err(refused("only an issuer writes the registry"));
-        }
-        if settings.holds_author(&self.domain(), REGISTRY)? {
-            return Ok(());
-        }
-        let request = settings.pseudonym_request(&self.vault, REGISTRY)?;
-        let (chain, _) = self
-            .configure(|settings| settings.assign_pseudonym(&self.vault, &request, None))
-            .await?;
-        self.configure(|settings| settings.hold_pseudonym(&self.vault, chain.clone()))
-            .await?;
-        let role = self.settings.lock().await.pseudonym_role(REGISTRY);
-        let key = PrivateKey::from_bytes(&self.vault.get(&role)?);
-        self.replica.register_row_author(key, chain).await?;
-        Ok(())
-    }
+
     /// Commits `changes` with this issuer's own record in one transaction.
-    /// The registry author must be installed.
     async fn commit(&self, mut changes: Changes) -> Result<(), Failure> {
         let registry = self.registry().await?;
         let own = self
@@ -59,7 +35,6 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Ok(());
         }
-        self.registry_author().await?;
         self.commit(Changes::default()).await
     }
 
@@ -69,7 +44,6 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer enrolls devices"));
         }
-        self.registry_author().await?;
         let registry = self.registry().await?;
         let (reply, changes) = {
             let mut settings = self.settings.lock().await;
@@ -103,44 +77,13 @@ impl Node {
     }
     /// Answers a renewal of any unrevoked device once its record committed.
     pub(super) async fn answer_renewal(&self, request: &[u8]) -> Result<Vec<u8>, Failure> {
-        self.registry_author().await?;
         let registry = self.registry().await?;
         let settings = self.settings.lock().await.clone();
         let (reply, changes) = settings.renew(&self.vault, request, &registry)?;
         self.commit(changes).await?;
         Ok(reply)
     }
-    /// Assigns a pseudonym on an issuer: the counter is saved, then the
-    /// assignment committed, then the chain returned. A key the registry
-    /// knows keeps its number, whichever issuer assigned it.
-    pub(super) async fn answer_author(
-        &self,
-        request: &rocky_credentials::PseudonymRequest,
-    ) -> Result<CredentialChain, Failure> {
-        if !self.settings.lock().await.issuer() {
-            return self
-                .configure(|settings| {
-                    settings
-                        .assign_pseudonym(&self.vault, request, None)
-                        .map(|(chain, _)| chain)
-                })
-                .await;
-        }
-        // Its own pseudonyms never leave this issuer: its next commit
-        // records them with its own record.
-        let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        if request.node != own {
-            self.registry_author().await?;
-        }
-        let registry = self.registry().await?;
-        let (chain, changes) = self
-            .configure(|settings| settings.assign_pseudonym(&self.vault, request, Some(&registry)))
-            .await?;
-        if request.node != own {
-            self.commit(changes).await?;
-        }
-        Ok(chain)
-    }
+
     /// Issues a profile to a prepared device, granted on an issuer or
     /// delegated: identity saved, record committed, then returned.
     pub(super) async fn answer_grant(
@@ -151,9 +94,6 @@ impl Node {
         contact: Option<String>,
     ) -> Result<crate::Supplied, Failure> {
         let issuer = self.settings.lock().await.issuer();
-        if issuer {
-            self.registry_author().await?;
-        }
         let registry = self.registry().await?;
         let (supplied, changes) = if delegate {
             self.configure(|settings| {
@@ -178,10 +118,10 @@ impl Node {
         device: &crate::DeviceKeys,
         grants: &[rocky_credentials::PartitionGrant],
         delegations: u8,
+        chain: &CredentialChain,
     ) -> Result<(), Failure> {
-        self.registry_author().await?;
         let registry = self.registry().await?;
-        let changes = self
+        let mut changes = self
             .settings
             .lock()
             .await
@@ -193,11 +133,23 @@ impl Node {
                     refused(error)
                 }
             })?;
+        let leaf = chain.0.last().ok_or("missing partition credential")?;
+        changes.capability(
+            &device.node,
+            registry::Capability {
+                authors: leaf
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?,
+                id: leaf.id()?,
+                expires: chain.expires(),
+            },
+            registry.get(&device.node),
+        )?;
         self.commit(changes).await
     }
     /// Writes the tombstone of a revoked device.
     pub(super) async fn record_revocation(&self, node: PublicKey) -> Result<(), Failure> {
-        self.registry_author().await?;
         let mut changes = Changes::default();
         changes.revoked(&node)?;
         self.commit(changes).await
@@ -234,16 +186,6 @@ impl Node {
         }
         let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
         let registry = self.registry().await?;
-        // Building the domain compiles the schema: once, not per pseudonym.
-        let collections: BTreeMap<_, _> = settings
-            .domain()
-            .map(|domain| {
-                domain
-                    .scopes()
-                    .map(|(name, scope)| (scope.table, name.to_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
         let devices: Vec<Value> = registry
             .records
             .iter()
@@ -265,11 +207,7 @@ impl Node {
                     "partitions": record.grants.iter().map(|grant| json!({
                         "grant": grant.grant, "delegations": grant.delegations,
                     })).collect::<Vec<_>>(),
-                    "pseudonyms": record.pseudonyms.iter().map(|pseudonym| json!({
-                        "collection": collections.get(&pseudonym.table),
-                        "key": pseudonym.key.to_hex(),
-                        "author": pseudonym.author,
-                    })).collect::<Vec<_>>(),
+
                 })
             })
             .collect();
@@ -293,7 +231,6 @@ impl Node {
         if !self.settings.lock().await.issuer() {
             return Err(refused("only an issuer labels devices"));
         }
-        self.registry_author().await?;
         let registry = self.registry().await?;
         if registry
             .get(&node)

@@ -39,9 +39,8 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         .await
         .map_err(|error| format!("registry before revocation: {error}"))?;
     let recorded = listed(&b, &node).await;
-    assert_eq!(recorded["pseudonyms"], record["pseudonyms"]);
     let old_chain: CredentialChain =
-        serde_json::from_value(identity(root, "m")?["pseudonyms"]["items"].clone())?;
+        serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
     let response = b.ok(json!({"type":"revoke","node":node})).await;
     let state = identity(root, "b")?;
@@ -74,17 +73,9 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         .try_into()
         .map_err(|_| "capability length")?;
     assert!(statement.statement.capabilities.contains(&capability));
-    for pseudonym in recorded["pseudonyms"].as_array().ok_or("pseudonyms")? {
-        assert!(
-            statement
-                .statement
-                .pseudonyms
-                .contains(&pseudonym["key"].as_str().ok_or("key")?.parse()?)
-        );
-    }
-    assert!(set.ends(old_chain.0.last().ok_or("pseudonym leaf")?)?);
+    assert!(set.ends(old_chain.0.last().ok_or("node leaf")?)?);
     // The same verifier used for incoming frames refuses A's assigned author.
-    let leaf = old_chain.0.last().ok_or("pseudonym leaf")?;
+    let leaf = old_chain.0.last().ok_or("node leaf")?;
     let publisher = state["publisher"].as_str().ok_or("publisher")?.parse()?;
     let manifest = leaf.capability.manifest;
     let author = old_chain

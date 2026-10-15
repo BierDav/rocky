@@ -87,7 +87,6 @@ impl Domain {
             nodes: BTreeSet::new(),
             users: subjects.iter().copied().collect(),
             capabilities: BTreeSet::new(),
-            pseudonyms: BTreeSet::new(),
         };
         let signed = self
             .authority()
@@ -106,10 +105,11 @@ impl Domain {
             .issue(
                 user.public_key(),
                 profile.grants(&self.resources).expect("grants"),
+                rocky_credentials::AuthorRange::ALL,
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(root, &user, node.public_key()).expect("chain");
+        let chain = device_chain(root, &user, node.public_key(), 1).expect("chain");
         (user, node, chain)
     }
     fn verify(
@@ -219,6 +219,7 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
         SignedCapability::sign(long, &domain.publisher).expect("signed"),
         &user,
         node.public_key(),
+        1,
     )
     .expect("chain");
     assert!(domain.verify(&long, &node, &policy, NOW).is_err());
@@ -228,6 +229,7 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
             .issue(
                 user.public_key(),
                 chain.0[0].capability.grants.clone(),
+                rocky_credentials::AuthorRange::ALL,
                 (NOW, MAX_CHAIN_LIFETIME + 1, 300)
             )
             .is_err()
@@ -240,6 +242,7 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
             kind: PrincipalKind::Node,
             delegations: 0,
             extension: Extension::new(Extended {
+                authors: Some(AuthorRange::new(1, 1).unwrap()),
                 node: Some(rocky_credentials::PeerId::of(node.public_key())),
                 ..Default::default()
             })
@@ -317,9 +320,14 @@ fn a_login_principal_alone_grants_nothing() {
         publisher: &user,
         manifest: domain.manifest.hash(),
     }
-    .issue(user.public_key(), grants, VALIDITY)
+    .issue(
+        user.public_key(),
+        grants,
+        rocky_credentials::AuthorRange::ALL,
+        VALIDITY,
+    )
     .expect("self-signed");
-    let chain = device_chain(claimed, &user, node.public_key()).expect("chain");
+    let chain = device_chain(claimed, &user, node.public_key(), 1).expect("chain");
     assert!(domain.verify(&chain, &node, &policy, NOW).is_err());
     assert!(
         chain
@@ -517,7 +525,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         chain.0[0].capability.grants
     );
     let renewed =
-        device_chain(renewal.capability.clone(), &user, node.public_key()).expect("chain");
+        device_chain(renewal.capability.clone(), &user, node.public_key(), 1).expect("chain");
     assert_eq!(
         rights(
             &domain
@@ -615,10 +623,11 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
             .issue(
                 user.public_key(),
                 chain.0[0].capability.grants.clone(),
+                rocky_credentials::AuthorRange::ALL,
                 VALIDITY,
             )
             .expect("capability");
-        let chain = device_chain(reissued, &user, node.public_key()).expect("chain");
+        let chain = device_chain(reissued, &user, node.public_key(), 1).expect("chain");
         assert!(domain.verify(&chain, &node, &revoked, NOW).is_err());
     }
 }
@@ -707,9 +716,15 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     let (holder, holder_node) = (PrivateKey::new(), PrivateKey::new());
     let root = domain
         .authority()
-        .issue_delegable(holder.public_key(), grants.clone(), 2, VALIDITY)
+        .issue_delegable(
+            holder.public_key(),
+            grants.clone(),
+            2,
+            rocky_credentials::AuthorRange::ALL,
+            VALIDITY,
+        )
         .expect("root");
-    let own = device_chain(root.clone(), &holder, holder_node.public_key()).expect("own");
+    let own = device_chain(root.clone(), &holder, holder_node.public_key(), 1).expect("own");
     assert_eq!(own.delegable().0.len(), 1);
     let (delegate, node) = (PrivateKey::new(), PrivateKey::new());
     let mut narrow = grants[0].clone();
@@ -722,7 +737,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
             PrincipalKind::User,
             vec![narrow.clone()],
             1,
-            None,
+            Some(AuthorRange::ALL),
             (NOW, 90 * DAY, 300),
         )
         .expect("delegated");
@@ -730,7 +745,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     assert_eq!(link.expires(), NOW + 30 * DAY);
     let chain = link
         .clone()
-        .complete(&delegate, node.public_key())
+        .complete(&delegate, node.public_key(), 12)
         .expect("chain");
     assert_eq!(chain.0.len(), 3);
     assert_eq!(
@@ -804,164 +819,108 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     assert_eq!(renewed.capability.delegations, 2);
 }
 
-/// An assigner with `authors`, its node chain, and a writer device of notes.
-struct Authors {
-    domain: Domain,
-    policy: RevocationSet,
-    assigner: PrivateKey,
-    prefix: CredentialChain,
-    device: (PrivateKey, CredentialChain),
-}
-impl Authors {
-    fn new(authors: AuthorRange) -> Self {
-        let domain = Domain::new();
-        let policy = domain.policy();
-        let assigner = PrivateKey::new();
-        let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
-        let root = domain
-            .authority()
-            .issue_terms(assigner.public_key(), grants, (1, Some(authors)), VALIDITY)
-            .expect("root");
-        let writer = Profile::Writer {
-            scopes: Domain::names(&["notes"]),
-        };
-        let (_, node, chain) = domain.device(&writer);
-        Self {
-            domain,
-            policy,
-            assigner,
-            prefix: CredentialChain(vec![root]),
-            device: (node, chain),
-        }
-    }
-    fn table(&self) -> Commitment {
-        self.domain.resources[0].scope.table
-    }
-    fn assign(&self, key: &PrivateKey, author: u32) -> Result<CredentialChain, Error> {
-        let (node, chain) = &self.device;
-        self.prefix.assign(
-            &self.assigner,
-            key.public_key(),
-            author,
-            node.public_key(),
-            chain.grants().to_vec(),
-            chain.expires(),
+#[test]
+fn node_leaves_bind_one_number_inside_the_principal_range() {
+    let domain = Domain::new();
+    let identity = PrivateKey::new();
+    let nodes = [PrivateKey::new(), PrivateKey::new()];
+    let grants = Profile::Issuer.grants(&domain.resources).unwrap();
+    let root = domain
+        .authority()
+        .issue_terms(
+            identity.public_key(),
+            grants.clone(),
+            (1, Some(AuthorRange::new(100, 199).unwrap())),
             VALIDITY,
         )
+        .unwrap();
+    let prefix = CredentialChain(vec![root]);
+    let chains: Vec<_> = nodes
+        .iter()
+        .zip([100, 101])
+        .map(|(node, number)| {
+            prefix
+                .clone()
+                .complete(&identity, node.public_key(), number)
+                .unwrap()
+        })
+        .collect();
+    for (index, chain) in chains.iter().enumerate() {
+        let number = 100 + index as u32;
+        for resource in &domain.resources {
+            let verified = chain
+                .verify_author(
+                    domain.publisher.public_key(),
+                    domain.manifest.hash(),
+                    nodes[index].public_key(),
+                    number,
+                    resource.scope.table,
+                    &domain.policy(),
+                    NOW,
+                )
+                .unwrap();
+            assert_eq!(
+                verified,
+                vec![
+                    grants
+                        .iter()
+                        .find(|grant| grant.scope == resource.scope)
+                        .unwrap()
+                        .clone()
+                ]
+            );
+        }
+        let bytes = encode(chain).unwrap();
+        let decoded: CredentialChain = decode_bounded(&bytes, MAX_CREDENTIAL_BYTES).unwrap();
+        assert_eq!(decoded.author_number().unwrap(), number);
+        assert!(
+            decoded
+                .verify_author(
+                    domain.publisher.public_key(),
+                    domain.manifest.hash(),
+                    nodes[index].public_key(),
+                    number + 1,
+                    domain.resources[0].scope.table,
+                    &domain.policy(),
+                    NOW
+                )
+                .is_err()
+        );
     }
-    fn verify_author(
-        &self,
-        chain: &CredentialChain,
-        signer: &PrivateKey,
-        author: u32,
-        table: Commitment,
-    ) -> Result<Vec<ResourceGrant>, Error> {
-        chain.verify_author(
-            self.domain.publisher.public_key(),
-            self.domain.manifest.hash(),
-            signer.public_key(),
-            author,
-            table,
-            &self.policy,
-            NOW,
-        )
+    assert_ne!(
+        rocky_core::RowIdentity::next(100, 0).unwrap(),
+        rocky_core::RowIdentity::next(101, 0).unwrap()
+    );
+    for outside in [0, 99, 200, MAX_AUTHOR + 1] {
+        assert!(
+            prefix
+                .clone()
+                .complete(&identity, nodes[0].public_key(), outside)
+                .is_err()
+        );
     }
-}
-
-#[test]
-fn a_frame_author_must_be_the_number_its_signing_key_was_assigned() {
-    let authors = Authors::new(AuthorRange::new(100, 199).expect("range"));
-    let key = PrivateKey::new();
-    let pseudonym = authors.assign(&key, 150).expect("assigned");
-    let table = authors.table();
-    let grants = authors
-        .verify_author(&pseudonym, &key, 150, table)
-        .expect("author");
-    assert_eq!(grants, authors.device.1.grants());
-    // Another number, table or signer is refused, and so is a number
-    // outside the assigner's range or the reserved author 0.
-    assert!(authors.verify_author(&pseudonym, &key, 151, table).is_err());
+    let mut forged = chains[0].clone();
+    let mut leaf = forged.0.pop().unwrap().capability;
+    leaf.extension = Extension::new(Extended {
+        authors: Some(AuthorRange::new(200, 200).unwrap()),
+        node: Some(rocky_credentials::PeerId::of(nodes[0].public_key())),
+        ..Default::default()
+    })
+    .unwrap();
+    forged
+        .0
+        .push(SignedCapability::sign(leaf, &identity).unwrap());
     assert!(
-        authors
-            .verify_author(
-                &pseudonym,
-                &key,
-                150,
-                authors.domain.resources[1].scope.table
+        forged
+            .verify(
+                domain.publisher.public_key(),
+                domain.manifest.hash(),
+                nodes[0].public_key(),
+                &domain.policy(),
+                NOW
             )
             .is_err()
     );
-    assert!(
-        authors
-            .verify_author(&pseudonym, &PrivateKey::new(), 150, table)
-            .is_err()
-    );
-    for outside in [0, 99, 200, MAX_AUTHOR + 1] {
-        assert!(authors.assign(&key, outside).is_err(), "{outside}");
-    }
-    // A leaf the assigner signs past its range anyway fails verification.
-    let mut forged = pseudonym.clone();
-    let mut leaf = forged.0.pop().expect("leaf").capability;
-    let device = leaf.extended().expect("extended").device;
-    leaf.extension = Extension::new(Extended {
-        partitions: Vec::new(),
-        authors: Some(AuthorRange::new(250, 250).expect("range")),
-        device,
-        node: None,
-    })
-    .expect("extension");
-    forged
-        .0
-        .push(SignedCapability::sign(leaf, &authors.assigner).expect("signed"));
-    assert!(authors.verify_author(&forged, &key, 250, table).is_err());
-    // A pseudonym chain is not a node chain, and a node chain no pseudonym.
-    let anchor = (
-        authors.domain.publisher.public_key(),
-        authors.domain.manifest.hash(),
-    );
-    assert!(
-        pseudonym
-            .verify(anchor.0, anchor.1, key.public_key(), &authors.policy, NOW)
-            .is_err()
-    );
-    let (node, chain) = &authors.device;
-    assert!(
-        chain
-            .verify_pseudonym(anchor.0, anchor.1, node.public_key(), &authors.policy, NOW)
-            .is_err()
-    );
-    // Revoking the pseudonym key ends it like every other chain.
-    let next = authors.domain.revoking(&[key.public_key()]);
-    assert!(
-        pseudonym
-            .verify_author(anchor.0, anchor.1, key.public_key(), 150, table, &next, NOW)
-            .is_err()
-    );
-}
-
-#[test]
-fn only_a_holder_of_the_publisher_key_maps_a_pseudonym_to_its_device() {
-    let authors = Authors::new(AuthorRange::ALL);
-    let key = PrivateKey::new();
-    let pseudonym = authors.assign(&key, 7).expect("assigned");
-    let manifest = authors.domain.manifest.hash();
-    assert_eq!(
-        pseudonym
-            .pseudonym_device(&authors.domain.publisher, manifest)
-            .expect("opened"),
-        authors.device.0.public_key()
-    );
-    // The chain names the assigner, never the device.
-    let bytes = serde_json::to_string(&pseudonym).expect("json");
-    assert!(!bytes.contains(&authors.device.0.public_key().to_hex()));
-    for stranger in [
-        &authors.assigner,
-        &key,
-        &authors.device.0,
-        &PrivateKey::new(),
-    ] {
-        assert!(pseudonym.pseudonym_device(stranger, manifest).is_err());
-    }
 }
 
 #[test]
@@ -1003,7 +962,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     let node = PrivateKey::new();
     let chain = narrowed
         .clone()
-        .complete(&delegate, node.public_key())
+        .complete(&delegate, node.public_key(), 12)
         .expect("chain");
     let verify = |chain: &CredentialChain| {
         chain.verify(
@@ -1020,7 +979,6 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     wide.extension = Extension::new(Extended {
         partitions: Vec::new(),
         authors: Some(AuthorRange::new(5, 15).expect("range")),
-        device: None,
         node: None,
     })
     .expect("extension");
@@ -1028,7 +986,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         root.clone(),
         SignedCapability::sign(wide, &holder).expect("signed"),
     ])
-    .complete(&delegate, node.public_key())
+    .complete(&delegate, node.public_key(), 12)
     .expect("chain");
     assert!(verify(&widened).is_err());
     // A node link cannot carry a user extension.
@@ -1045,7 +1003,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 4,
+        version: 5,
         authors: range,
         rotation: 9,
     })
@@ -1060,90 +1018,6 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         message.contains("unsupported credential extension version"),
         "{message}"
     );
-}
-
-#[test]
-fn a_pseudonym_request_proves_both_keys_and_keeps_an_earlier_number() {
-    let authors = Authors::new(AuthorRange::new(1, 1000).expect("range"));
-    let (node, chain) = &authors.device;
-    let key = PrivateKey::new();
-    let anchor = (
-        authors.domain.publisher.public_key(),
-        authors.domain.manifest.hash(),
-    );
-    let request = PseudonymRequest::sign(node, &key, chain.clone(), authors.table(), None, NOW)
-        .expect("request");
-    let request =
-        PseudonymRequest::from_bytes(&request.to_bytes().expect("bytes")).expect("request");
-    let grants = request
-        .verify(anchor.0, anchor.1, &authors.policy, (NOW, 300))
-        .expect("verified");
-    assert_eq!(grants, chain.grants());
-    // A table the device does not write, a stale or foreign request.
-    let other = PseudonymRequest::sign(
-        node,
-        &key,
-        chain.clone(),
-        authors.domain.resources[1].scope.table,
-        None,
-        NOW,
-    )
-    .expect("request");
-    assert!(
-        other
-            .verify(anchor.0, anchor.1, &authors.policy, (NOW, 300))
-            .is_err()
-    );
-    assert!(
-        request
-            .verify(anchor.0, anchor.1, &authors.policy, (NOW + 301, 300))
-            .is_err()
-    );
-    let stolen = PseudonymRequest::sign(
-        &PrivateKey::new(),
-        &key,
-        chain.clone(),
-        authors.table(),
-        None,
-        NOW,
-    )
-    .expect("request");
-    assert!(
-        stolen
-            .verify(anchor.0, anchor.1, &authors.policy, (NOW, 300))
-            .is_err()
-    );
-    // The same key asking again keeps its number inside the range only.
-    let first = authors.assign(&key, 42).expect("assigned");
-    let again = PseudonymRequest::sign(
-        node,
-        &key,
-        chain.clone(),
-        authors.table(),
-        Some(first.clone()),
-        NOW,
-    )
-    .expect("request");
-    let range = AuthorRange::new(1, 1000).expect("range");
-    assert_eq!(again.previous_author(anchor.0, anchor.1, range), Some(42));
-    assert_eq!(
-        again.previous_author(
-            anchor.0,
-            anchor.1,
-            AuthorRange::new(100, 200).expect("range")
-        ),
-        None
-    );
-    let rekeyed = PseudonymRequest::sign(
-        node,
-        &PrivateKey::new(),
-        chain.clone(),
-        authors.table(),
-        Some(first),
-        NOW,
-    )
-    .expect("request");
-    assert_eq!(rekeyed.previous_author(anchor.0, anchor.1, range), None);
 }
 
 #[test]
@@ -1235,11 +1109,11 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
 }
 
 #[test]
-fn alias_acknowledgments_prove_node_binding_without_disclosing_its_key() {
+fn acknowledgments_bind_the_certified_node_key() {
     let domain = Domain::new();
     let user = PrivateKey::new();
     let node = PrivateKey::new();
-    let alias = PrivateKey::new();
+    let alias = node.clone();
     let capability = domain
         .authority()
         .issue(
@@ -1249,11 +1123,12 @@ fn alias_acknowledgments_prove_node_binding_without_disclosing_its_key() {
             }
             .grants(&domain.resources)
             .unwrap(),
+            rocky_credentials::AuthorRange::ALL,
             VALIDITY,
         )
         .unwrap();
     let chain = CredentialChain(vec![capability])
-        .complete_with_alias(&user, node.public_key(), alias.public_key())
+        .complete_with_alias(&user, node.public_key(), alias.public_key(), 1)
         .unwrap();
     chain
         .verify(
@@ -1280,7 +1155,7 @@ fn alias_acknowledgments_prove_node_binding_without_disclosing_its_key() {
         .unwrap();
     let bytes = encode(&ack).unwrap();
     assert!(
-        !bytes
+        bytes
             .windows(32)
             .any(|part| part == node.public_key().as_bytes())
     );

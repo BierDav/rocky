@@ -79,7 +79,6 @@ pub(crate) fn revoking(
         nodes: BTreeSet::new(),
         users: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
-        pseudonyms: BTreeSet::new(),
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
@@ -134,6 +133,15 @@ impl Fixture {
             expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                authors: Some(if kind == PrincipalKind::Node {
+                    rocky_credentials::AuthorRange::new(
+                        crate::tests::node_number(subject),
+                        crate::tests::node_number(subject),
+                    )
+                    .unwrap()
+                } else {
+                    rocky_credentials::AuthorRange::ALL
+                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 ..Default::default()
             })
@@ -897,14 +905,18 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         not_before: 0,
         expires: 100,
         delegations: 1,
-        extension: rocky_credentials::Extension::new(rocky_credentials::Extended::default())
-            .unwrap(),
+        extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            authors: Some(rocky_credentials::AuthorRange::ALL),
+            ..Default::default()
+        })
+        .unwrap(),
     };
     let base = Capability {
         subject: node.public_key(),
         kind: PrincipalKind::Node,
         delegations: 0,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
             ..Default::default()
         })
@@ -1360,3 +1372,8 @@ mod sql;
 mod partition_foreign_keys;
 
 pub(crate) mod group_sync_measurement;
+
+/// Stable fixture allocation; production numbers come from granted ranges.
+fn node_number(node: PublicKey) -> u32 {
+    (u32::from_le_bytes(node.as_bytes()[..4].try_into().unwrap()) & 0x7fff_ffff).max(1)
+}

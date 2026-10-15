@@ -85,7 +85,10 @@ impl SecureDemo {
                 expires,
                 delegations: 1,
                 extension: rocky_secure::credentials::Extension::new(
-                    rocky_secure::credentials::Extended::default(),
+                    rocky_secure::credentials::Extended {
+                        authors: Some(rocky_secure::credentials::AuthorRange::ALL),
+                        ..Default::default()
+                    },
                 )
                 .map_err(signing)?,
             },
@@ -108,6 +111,13 @@ impl SecureDemo {
                     delegations: 0,
                     extension: rocky_secure::credentials::Extension::new(
                         rocky_secure::credentials::Extended {
+                            authors: Some(
+                                rocky_secure::credentials::AuthorRange::new(
+                                    u32::from(index),
+                                    u32::from(index),
+                                )
+                                .map_err(signing)?,
+                            ),
                             node: Some(rocky_secure::PeerId::of(node.public_key())),
                             ..Default::default()
                         },

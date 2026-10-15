@@ -40,7 +40,7 @@ pub(crate) struct Extensions {
 }
 
 /// The current row frame format: the header names its chain by digest.
-pub(crate) const ROW_FORMAT: u8 = 8;
+pub(crate) const ROW_FORMAT: u8 = 9;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 

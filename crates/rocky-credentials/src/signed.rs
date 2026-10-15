@@ -1,8 +1,8 @@
 //! Signed manifests, capabilities and credential chains.
 use crate::{
     AuthorRange, Error, Extended, Extension, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
-    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, Pseudonym,
-    PublicKey, RevocationSet, decode_bounded, denied, encode, signing_bytes,
+    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, PublicKey,
+    RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
 use rocky_core::{ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
@@ -87,7 +87,7 @@ pub struct Capability {
     pub not_before: u64,
     pub expires: u64,
     pub delegations: u8,
-    /// Author ranges, pseudonym binding and partition selectors.
+    /// Author ranges, node numbers and partition selectors.
     pub extension: Extension,
 }
 impl Capability {
@@ -95,7 +95,7 @@ impl Capability {
     pub fn extended(&self) -> Result<Extended, Error> {
         self.extension.read()
     }
-    /// The author numbers this link assigns, or a pseudonym holds.
+    /// The author numbers this link assigns, or a node holds.
     pub fn authors(&self) -> Result<Option<AuthorRange>, Error> {
         Ok(self.extended()?.authors)
     }
@@ -274,46 +274,16 @@ impl CredentialChain {
             .map(|(leaf, _)| leaf)
             .ok_or_else(|| denied("missing leaf credential"))
     }
-    /// Nodes carry selectors but no author/device binding; pseudonyms
-    /// carry one number, a sealed device and grants on one table.
-    fn shape(capability: &Capability, extended: &Extended, root: bool) -> Result<(), Error> {
+    /// Nodes carry exactly one number, attenuated from their principal's range.
+    fn shape(capability: &Capability, extended: &Extended, _root: bool) -> Result<(), Error> {
         let valid = match capability.kind {
             PrincipalKind::Node => {
-                extended.authors.is_none() && extended.device.is_none() && extended.node.is_some()
+                extended
+                    .authors
+                    .is_some_and(|range| range.single().is_some())
+                    && extended.node == Some(crate::PeerId::of(capability.subject))
             }
-            PrincipalKind::User | PrincipalKind::Deployment => {
-                extended.device.is_none() && extended.node.is_none()
-            }
-            PrincipalKind::Pseudonym => {
-                let first = capability
-                    .grants
-                    .first()
-                    .map(|grant| (grant.scope.domain, grant.scope.table))
-                    .or_else(|| {
-                        extended
-                            .partitions
-                            .first()
-                            .map(|grant| (grant.domain, grant.table))
-                    });
-                let Some((domain, table)) = first else {
-                    return Err(denied("missing pseudonym grants"));
-                };
-                !root
-                    && capability.delegations == 0
-                    && extended.device.is_some()
-                    && extended.node.is_none()
-                    && extended
-                        .authors
-                        .is_some_and(|range| range.single().is_some())
-                    && capability
-                        .grants
-                        .iter()
-                        .all(|grant| grant.scope.domain == domain && grant.scope.table == table)
-                    && extended
-                        .partitions
-                        .iter()
-                        .all(|grant| grant.domain == domain && grant.table == table)
-            }
+            PrincipalKind::User | PrincipalKind::Deployment => extended.node.is_none(),
         };
         if valid {
             Ok(())
@@ -321,41 +291,7 @@ impl CredentialChain {
             Err(denied("invalid credential extension for its principal"))
         }
     }
-    /// The pseudonym `key` under `revocations` at `time`: the chain ends
-    /// at it as a pseudonym leaf. A node chain is refused.
-    pub fn verify_pseudonym(
-        &self,
-        publisher: PublicKey,
-        manifest: Commitment,
-        key: PublicKey,
-        revocations: &RevocationSet,
-        time: u64,
-    ) -> Result<Pseudonym, Error> {
-        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
-        if !leaf.extended()?.partitions.is_empty() {
-            return Err(denied(
-                "partition pseudonyms require a concrete partition tuple",
-            ));
-        }
-        let pseudonym = self.pseudonym_leaf(publisher, manifest)?;
-        if pseudonym.key != key {
-            return Err(denied("the pseudonym credential names another key"));
-        }
-        Ok(pseudonym)
-    }
-    pub fn verify_pseudonym_selectors(
-        &self,
-        publisher: PublicKey,
-        manifest: Commitment,
-        key: PublicKey,
-        revocations: &RevocationSet,
-        time: u64,
-    ) -> Result<(Pseudonym, Vec<crate::PartitionGrant>), Error> {
-        let (_, partitions) = self.verify_selectors(publisher, manifest, key, revocations, time)?;
-        Ok((self.pseudonym_leaf(publisher, manifest)?, partitions))
-    }
-    /// The receiver's check of an authored frame: `signer` holds exactly
-    /// `author` in `table` under `revocations` at `time`. Returns its grants.
+    /// Verifies a node's number and returns its concrete grants for this table.
     #[allow(clippy::too_many_arguments)]
     pub fn verify_author(
         &self,
@@ -367,53 +303,35 @@ impl CredentialChain {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let pseudonym = self.verify_pseudonym(publisher, manifest, signer, revocations, time)?;
-        if pseudonym.author != author || pseudonym.table != table {
-            return Err(denied(
-                "the author number does not belong to the signing key",
-            ));
+        let (grants, partitions) =
+            self.verify_selectors(publisher, manifest, signer, revocations, time)?;
+        if self.author_number()? != author || partitions.iter().any(|grant| grant.table == table) {
+            return Err(denied("author number mismatch or partition tuple required"));
         }
-        Ok(pseudonym.grants)
+        let grants: Vec<_> = grants
+            .into_iter()
+            .filter(|grant| grant.scope.table == table)
+            .collect();
+        if grants.is_empty() {
+            return Err(denied("node has no grants for this table"));
+        }
+        Ok(grants)
     }
-    /// The pseudonym leaf of an authentic chain, whatever its time and
-    /// revocations: what the publisher once let it hold.
-    pub(crate) fn pseudonym_leaf(
-        &self,
-        publisher: PublicKey,
-        manifest: Commitment,
-    ) -> Result<Pseudonym, Error> {
-        let leaf = self.links(publisher, manifest, None)?;
-        if leaf.kind != PrincipalKind::Pseudonym {
-            return Err(denied("the chain ends at no pseudonym"));
+    /// The number certified for this node. Verification checks its granting range.
+    pub fn author_number(&self) -> Result<u32, Error> {
+        let leaf = self
+            .0
+            .last()
+            .ok_or_else(|| denied("missing node credential"))?;
+        if leaf.capability.kind != PrincipalKind::Node {
+            return Err(denied("node credential required"));
         }
-        let extended = leaf.extended()?;
-        let table = leaf
-            .grants
-            .first()
-            .map(|grant| grant.scope.table)
-            .or_else(|| extended.partitions.first().map(|grant| grant.table))
-            .ok_or_else(|| denied("missing pseudonym grants"))?;
-        let author = leaf
+        leaf.capability
             .authors()?
             .and_then(|range| range.single())
-            .ok_or_else(|| denied("invalid pseudonym"))?;
-        let assigner = self
-            .0
-            .iter()
-            .rev()
-            .nth(1)
-            .map(|parent| parent.capability.subject)
-            .ok_or_else(|| denied("invalid pseudonym"))?;
-        Ok(Pseudonym {
-            key: leaf.subject,
-            author,
-            table,
-            grants: leaf.grants.clone(),
-            assigner,
-            expires: self.expires(),
-        })
+            .ok_or_else(|| denied("node requires exactly one author number"))
     }
-    /// Verifies a node's credential signing alias without revealing the node key.
+    /// Verifies the node key bound to a credential reference.
     pub fn verify_node_alias(
         &self,
         publisher: PublicKey,
@@ -430,23 +348,6 @@ impl CredentialChain {
             return Err(denied("credential alias does not bind the node reference"));
         }
         Ok(())
-    }
-    /// The node key of the device a pseudonym chain names, for a holder of
-    /// the publisher key. Nobody else can open it.
-    pub fn pseudonym_device(
-        &self,
-        publisher: &PrivateKey,
-        manifest: Commitment,
-    ) -> Result<PublicKey, Error> {
-        let pseudonym = self.pseudonym_leaf(publisher.public_key(), manifest)?;
-        let device = self
-            .0
-            .last()
-            .map(|leaf| leaf.capability.extended())
-            .transpose()?
-            .and_then(|extended| extended.device)
-            .ok_or_else(|| denied("invalid pseudonym"))?;
-        device.open(publisher, pseudonym.key, pseudonym.author)
     }
     /// The user the chain delegates from: the login principal.
     pub fn principal(&self) -> Option<PublicKey> {

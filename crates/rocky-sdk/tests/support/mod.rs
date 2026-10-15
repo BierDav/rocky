@@ -1,83 +1,8 @@
-//! Consumer fixtures use definition tables and the public SQL/pseudonym APIs.
+//! Consumer fixtures use definition tables and the public SQL APIs.
 #![allow(dead_code)]
 pub mod secrets;
-use rocky_sdk::{Database, Engine};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-enum Issuer {
-    Database(Weak<Database>),
-    Engine(Weak<Engine>),
-}
-static ISSUERS: OnceLock<Mutex<Vec<Issuer>>> = OnceLock::new();
-pub fn database(database: &Arc<Database>) {
-    ISSUERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .push(Issuer::Database(Arc::downgrade(database)));
-}
-pub fn engine(engine: &Arc<Engine>) {
-    ISSUERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .push(Issuer::Engine(Arc::downgrade(engine)));
-}
-fn reply(reply: &str) -> Result<Value, Value> {
-    let reply: Value = serde_json::from_str(reply).map_err(|error| json!(error.to_string()))?;
-    if reply["status"] == "ok" {
-        Ok(reply["value"].clone())
-    } else {
-        Err(reply["error"].clone())
-    }
-}
-async fn assignment(scope: &Value, request: &Value) -> Result<Value, Value> {
-    enum Live {
-        Database(Arc<Database>),
-        Engine(Arc<Engine>),
-    }
-    let issuers: Vec<_> = ISSUERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|issuer| match issuer {
-            Issuer::Database(database) => database.upgrade().map(Live::Database),
-            Issuer::Engine(engine) => engine.upgrade().map(Live::Engine),
-        })
-        .collect();
-    for issuer in issuers {
-        let frame = json!({"version":1,"scope":scope,"request":{"type":"pseudonym_assign","request":request}}).to_string();
-        let response = match issuer {
-            Live::Database(database) => {
-                if serde_json::from_str::<Value>(&database.scope())
-                    .ok()
-                    .as_ref()
-                    != Some(scope)
-                {
-                    continue;
-                }
-                let session = database.session();
-                let response = session.call(frame).await;
-                session.close().await;
-                response
-            }
-            Live::Engine(engine) => {
-                if serde_json::from_str::<Value>(&engine.scope()).ok().as_ref() != Some(scope) {
-                    continue;
-                }
-                engine.call(frame).await
-            }
-        };
-        if let Ok(response) = response
-            && let Ok(response) = reply(&response)
-        {
-            return Ok(response["pseudonym"].clone());
-        }
-    }
-    Err(json!({"message":"fixture has no live author assigner"}))
-}
 fn cell(value: &Value) -> Value {
     match value {
         Value::Null => json!({"type":"null"}),
@@ -96,7 +21,7 @@ fn cell(value: &Value) -> Value {
 }
 /// An application action expressed with modern SQL. `key` is a fixture's
 /// business key; the actual incarnation is allocated and transported separately.
-pub async fn call<F, Fut>(scope: &Value, request: Value, raw: F) -> Result<Value, Value>
+pub async fn call<F, Fut>(_scope: &Value, request: Value, raw: F) -> Result<Value, Value>
 where
     F: Fn(Value) -> Fut + Send + Sync,
     Fut: std::future::Future<Output = Result<Value, Value>> + Send,
@@ -150,7 +75,6 @@ where
     if raw(json!({"type":"mutation_progress","handle":handle})).await?["committed"] == true {
         return Ok(json!({"replayed":true,"handle":key}));
     }
-    prepare(scope, table, &raw).await?;
     raw(json!({"type":"sql","sql":"BEGIN"})).await?;
     let result = async {
         let id = match action["type"].as_str() {
@@ -203,27 +127,6 @@ pub fn identity_row(mut row: Vec<rocky_core::SqlValue>) -> Vec<rocky_core::SqlVa
         rocky_core::SqlValue::Integer(0),
     ]);
     row
-}
-
-pub async fn prepare<F, Fut>(scope: &Value, table: &str, raw: &F) -> Result<(), Value>
-where
-    F: Fn(Value) -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = Result<Value, Value>> + Send,
-{
-    let asked = raw(json!({"type":"pseudonym_request","collection":table})).await?;
-    let bytes = data_encoding::HEXLOWER
-        .decode(asked["request"].as_str().unwrap().as_bytes())
-        .unwrap();
-    let asked_chain = rocky_credentials::PseudonymRequest::from_bytes(&bytes).unwrap();
-    let pseudonym = match assignment(scope, &asked["request"]).await {
-        Ok(chain) => chain,
-        Err(_) => match asked_chain.previous {
-            Some(previous) => serde_json::to_value(previous).unwrap(),
-            None => assignment(scope, &asked["request"]).await?,
-        },
-    };
-    raw(json!({"type":"pseudonym_install","pseudonym":pseudonym})).await?;
-    Ok(())
 }
 
 pub fn reconciled(report: &Value) -> bool {

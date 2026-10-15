@@ -59,22 +59,7 @@ impl Peer {
             .ok_or("uri")?
             .to_owned())
     }
-    async fn author(&self, issuer: &Peer) -> Result<(), Failure> {
-        self.author_tables(issuer, &TABLES).await
-    }
-    async fn author_tables(&self, issuer: &Peer, tables: &[&str]) -> Result<(), Failure> {
-        for table in tables {
-            let request = self
-                .call(json!({"type":"pseudonym_request","collection":table}))
-                .await?;
-            let assigned = issuer
-                .call(json!({"type":"pseudonym_assign","request":request["request"]}))
-                .await?;
-            self.call(json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}))
-                .await?;
-        }
-        Ok(())
-    }
+
     async fn node(&self) -> Result<Value, Failure> {
         Ok(self.call(json!({"type":"session"})).await?["node"].clone())
     }
@@ -234,8 +219,6 @@ async fn topology() -> Result<Topology, Failure> {
         )?
         .database,
     )?;
-    a.author(&a).await?;
-    b.author_tables(&a, &["categories", "items"]).await?;
     introduce(&a, &custody).await?;
     introduce(&b, &custody).await?;
     Ok(Topology {

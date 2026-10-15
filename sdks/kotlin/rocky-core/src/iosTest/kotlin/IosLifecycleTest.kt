@@ -47,7 +47,6 @@ class IosLifecycleTest {
             assertTrue(errors.tryReceive().isFailure)
             lifecycle.unfollow(db)
             lifecycle.unregister()
-            db.installAuthors()
             db.write(RockyDatabase.newHandle()) {
                 val id = nextId("items")
                 execute("INSERT INTO items(id,key) VALUES(?,'still open')", id)

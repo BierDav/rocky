@@ -128,7 +128,7 @@ impl Shop {
             })
             .collect()
     }
-    fn credentials(&self, node: &PrivateKey) -> CredentialChain {
+    fn credentials(&self, node: &PrivateKey, number: u32) -> CredentialChain {
         let user = PrivateKey::new();
         let manifest = self
             .manifest
@@ -145,6 +145,11 @@ impl Shop {
             expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                authors: Some(if kind == PrincipalKind::Node {
+                    rocky_credentials::AuthorRange::new(number, number).unwrap()
+                } else {
+                    rocky_credentials::AuthorRange::ALL
+                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 ..Default::default()
             })
@@ -174,7 +179,7 @@ impl Shop {
                 manifest: self.manifest.clone(),
                 revocations: self.policy.clone(),
                 node: node.clone(),
-                credentials: self.credentials(node),
+                credentials: self.credentials(node, number),
                 // Keys are per table; both tables share one reader scope.
                 keys: [(self.lists, 44), (self.items, 45)]
                     .into_iter()
@@ -196,42 +201,6 @@ impl Shop {
             )
             .await
             .unwrap();
-        for (name, scope) in [("lists", self.lists), ("items", self.items)] {
-            let key = PrivateKey::from_bytes(&rocky_core::commitment(name, node.as_bytes()));
-            let assigner = PrivateKey::new();
-            let grants: Vec<_> = self
-                .grants()
-                .into_iter()
-                .filter(|grant| grant.scope == scope)
-                .collect();
-            let issued = crate::credentials::Authority {
-                publisher: &self.publisher,
-                manifest: self
-                    .manifest
-                    .verify(self.publisher.public_key())
-                    .unwrap()
-                    .hash(),
-            }
-            .issue_terms(
-                assigner.public_key(),
-                grants.clone(),
-                (1, Some(crate::credentials::AuthorRange::ALL)),
-                crate::tests::validity(),
-            )
-            .unwrap();
-            let chain = CredentialChain(vec![issued])
-                .assign(
-                    &assigner,
-                    key.public_key(),
-                    number,
-                    node.public_key(),
-                    grants,
-                    u64::MAX,
-                    (0, u64::MAX, 0),
-                )
-                .unwrap();
-            replica.register_row_author(key, chain).await.unwrap();
-        }
         replica
     }
     async fn sql(&self, replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
@@ -731,7 +700,10 @@ async fn checkpoints_and_evictions_rebuild_the_same_hidden_rows() {
     let fresh = shop
         .open(&dir.path().join("fresh.db"), &fresh_node, 33)
         .await;
-    let credentials = shop.credentials(&fresh_node);
+    let credentials = shop.credentials(
+        &fresh_node,
+        crate::tests::node_number(fresh_node.public_key()),
+    );
     for scope in [shop.items, shop.lists] {
         let signed = a.checkpoint(scope).await.unwrap();
         let checkpoint = signed.id().unwrap();
@@ -814,7 +786,10 @@ async fn author_bindings_are_stored_once_and_travel_with_checkpoint_pages() {
     let page = a
         .checkpoint_page(
             fresh_node.public_key(),
-            &shop.credentials(&fresh_node),
+            &shop.credentials(
+                &fresh_node,
+                crate::tests::node_number(fresh_node.public_key()),
+            ),
             shop.lists,
             signed.id().unwrap(),
             None,

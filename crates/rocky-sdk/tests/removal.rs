@@ -55,11 +55,9 @@ async fn create(device: &Device, handle: u8, collection: &str, values: Value) ->
     reply["id"].as_str().unwrap_or_default().to_owned()
 }
 /// Runs `sql` as one transaction: one frame.
-async fn write(device: &Device, collection: &str, handle: u8, sql: &str) {
-    let scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
-    common::identity::prepare(&scope, collection, &|request| device.call(request))
-        .await
-        .expect("prepare");
+async fn write(device: &Device, _collection: &str, handle: u8, sql: &str) {
+    let _scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
+
     device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
     device.ok(json!({"type": "sql", "sql": sql})).await;
     device
@@ -322,10 +320,8 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
 /// Runs `statements` as one transaction committed under `handle`, with
 /// `extra` fields on the COMMIT request.
 async fn transaction(device: &Device, handle: u8, statements: &[&str], extra: Value) -> Value {
-    let scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
-    common::identity::prepare(&scope, "items", &|request| device.call(request))
-        .await
-        .expect("prepare");
+    let _scope: Value = serde_json::from_str(&device.database.scope()).expect("scope");
+
     device.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
     for sql in statements {
         device.ok(json!({"type": "sql", "sql": sql})).await;
@@ -377,10 +373,8 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
     b.sync().await.expect("sync");
     // Offline, the member edits a kept table and the table the next
     // version removes in one transaction, and never sends it.
-    let scope: Value = serde_json::from_str(&b.database.scope())?;
-    common::identity::prepare(&scope, "shelves", &|request| b.call(request))
-        .await
-        .map_err(|error| error.to_string())?;
+    let _scope: Value = serde_json::from_str(&b.database.scope())?;
+
     b.ok(json!({"type": "sql", "sql": "BEGIN"})).await;
     b.ok(
         json!({"type": "sql", "sql": "UPDATE items SET title='green apples' WHERE title='apples'"}),
@@ -690,10 +684,8 @@ async fn an_impact_report_counts_constraint_suppressed_rows_and_all_local_partit
     for (handle, list) in [(1, "first"), (2, "second")] {
         b.ok(json!({"type":"partition_create", "table":"items", "values":[text(list)]}))
             .await;
-        let scope: Value = serde_json::from_str(&b.database.scope())?;
-        common::identity::prepare(&scope, "items", &|request| b.call(request))
-            .await
-            .map_err(|error| error.to_string())?;
+        let _scope: Value = serde_json::from_str(&b.database.scope())?;
+
         b.ok(json!({"type":"sql", "sql":"BEGIN"})).await;
         let id = b
             .ok(json!({"type":"next_id", "table":"items", "partition_values":[text(list)]}))

@@ -155,20 +155,11 @@ retain `File` overloads. Common randomness uses the platform CSPRNG and time
 uses Kotlin's clock. SQLite numeric rendering retains exact binary-double
 rounding through portable integer limbs instead of `BigDecimal`.
 
-The two original JVM Room failures came from `installAuthors` member lookup
-shadowing the qualification extension. Tests installed authors in schema order
-but generated IDs for lists-first order. The explicitly named
-`installRoomAuthors` fixture restores that agreement; creation-log validation
-and transaction atomicity remain enforced.
-
-After rebasing onto the issuer-registry implementation, the horizon fixture
-compares the declared application scope's digest, row count and cleared
-tombstones, plus Room's parent/child relation. A writer's private registry
-is not expected to match the issuer's registry.
-The packaged consumer's exact author expectation is now 4: the registry owns
-1 and the executor's delegated range owns 2 and 3. The delegate's pseudonym
-is therefore 3. Its consumer API calls remain unchanged; retry identity, owner
-privacy and delegation stay checked.
+The earlier per-table author setup was superseded by
+[phase 13](../features_09/13-identities-and-domain-credentials-evidence.md).
+Room now uses the node's one number for every table. The packaged consumer's
+two-number grant certifies its first node with 2 and delegates 3 to another
+principal. The node keys sign their own frames, without a table-key install.
 
 ## Measured evidence, 2026-10-10
 

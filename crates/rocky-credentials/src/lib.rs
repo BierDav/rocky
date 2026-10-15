@@ -8,6 +8,7 @@ mod cut;
 mod delivery;
 mod discovery;
 mod enroll;
+mod extension;
 mod group;
 mod horizon;
 mod identity;
@@ -15,7 +16,6 @@ mod issue;
 mod keys;
 mod partition;
 mod peer;
-mod pseudonym;
 mod revocation;
 mod signed;
 
@@ -31,6 +31,7 @@ pub use enroll::{
     Admission, Exchange, Invitation, PairRequest, RenewRequest, Renewal, open_enrollment,
     seal_enrollment,
 };
+pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
 pub use horizon::{
     ExistenceBase, ExistenceIdentity, HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonCut,
@@ -45,9 +46,6 @@ pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private
 pub use p2panda_core::{Hash, PrivateKey, PublicKey, Signature};
 pub use partition::PartitionGrant;
 pub use peer::PeerId;
-pub use pseudonym::{
-    AuthorRange, Extended, Extension, MAX_AUTHOR, Pseudonym, PseudonymRequest, SealedDevice,
-};
 pub use revocation::{
     DAY, LIFETIME_SKEW, MAX_CHAIN_LIFETIME, MAX_LIVE_REVOCATIONS, MAX_REVOCATION_BYTES,
     MAX_REVOCATION_SET_BYTES, REVOCATION_SET_FULL, Revocation, RevocationSet, SIGNATURE_OVERHEAD,

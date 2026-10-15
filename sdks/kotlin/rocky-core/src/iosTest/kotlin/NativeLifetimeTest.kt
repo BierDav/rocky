@@ -44,7 +44,6 @@ class NativeLifetimeTest {
         withTimeout(30_000) {
             val root = directory()
             val database = RockyDatabase.local(root, definition)
-            database.installAuthors()
             val events = database.driverTableEvents()
             try {
                 val count = bindingLiveHandles()

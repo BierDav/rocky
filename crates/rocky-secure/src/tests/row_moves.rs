@@ -402,7 +402,7 @@ async fn attachments_move_in_same_bundle_category_nulls_and_b_only_reader_rebuil
     );
     for name in ["items", "attachments"] {
         let checkpoint = b.checkpoint(f.scope(name, partitions[1])).await.unwrap();
-        assert_eq!(checkpoint.statement.format, 11);
+        assert_eq!(checkpoint.statement.format, 12);
         assert_eq!(checkpoint.statement.moves.count, 1);
         b.rebuild_projection(f.scope(name, partitions[1]))
             .await
@@ -492,9 +492,9 @@ async fn two_move_chain_follows_original_update_and_reopen_does_not_repeat() {
         title(&f, &a, partitions[2]).await.as_deref(),
         Some("ticked")
     );
-    let (config, authors) = {
+    let config = {
         let inner = a.inner.lock().await;
-        (clone_config(&inner.config), inner.move_authors())
+        clone_config(&inner.config)
     };
     let before = crate::storage::rows(&a.inner.lock().await.conn, "SELECT * FROM secure_followed")
         .await
@@ -504,9 +504,6 @@ async fn two_move_chain_follows_original_update_and_reopen_does_not_repeat() {
     let a = EncryptedReplica::open(&a_path, f.app(), config)
         .await
         .unwrap();
-    for (key, credentials) in authors {
-        a.register_row_author(key, credentials).await.unwrap();
-    }
     send(&first, &a).await;
     send(&second, &a).await;
     assert_eq!(

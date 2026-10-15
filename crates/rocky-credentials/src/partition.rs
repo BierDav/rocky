@@ -66,7 +66,7 @@ impl PartitionGrant {
 }
 
 impl crate::CredentialChain {
-    /// Verifies a node or pseudonym without discarding its partition selectors.
+    /// Verifies a node without discarding its partition selectors.
     pub fn verify_selectors(
         &self,
         publisher: PublicKey,
@@ -76,18 +76,12 @@ impl crate::CredentialChain {
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<PartitionGrant>), Error> {
         let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
-        if (match leaf.kind {
-            rocky_core::PrincipalKind::Node => {
-                leaf.extended()?.node != Some(crate::PeerId::of(subject))
-            }
-            _ => leaf.subject != subject,
-        }) || leaf.delegations != 0
-            || !matches!(
-                leaf.kind,
-                rocky_core::PrincipalKind::Node | rocky_core::PrincipalKind::Pseudonym
-            )
+        if leaf.kind != rocky_core::PrincipalKind::Node
+            || leaf.subject != subject
+            || leaf.extended()?.node != Some(crate::PeerId::of(subject))
+            || leaf.delegations != 0
         {
-            return Err(denied("session requires a node or pseudonym credential"));
+            return Err(denied("session requires a node credential"));
         }
         Ok((leaf.grants.clone(), leaf.extended()?.partitions))
     }
@@ -113,7 +107,7 @@ impl crate::CredentialChain {
         }
         resolve_leaf(leaf, scope, tuple)
     }
-    /// Verifies an author's pseudonym and partition grant without a reader key.
+    /// Verifies a node's number and partition grant without a reader key.
     #[allow(clippy::too_many_arguments)]
     pub fn verify_partition_author(
         &self,
@@ -127,7 +121,7 @@ impl crate::CredentialChain {
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
         let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
-        if leaf.kind != rocky_core::PrincipalKind::Pseudonym
+        if leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.subject != signer
             || leaf.authors()?.and_then(|range| range.single()) != Some(author)
         {
@@ -169,37 +163,6 @@ impl crate::CredentialChain {
                 ..crate::Extended::default()
             },
             terms.0,
-            validity,
-        )
-    }
-    /// Assigns one table pseudonym with selected partition rights.
-    #[allow(clippy::too_many_arguments)]
-    pub fn assign_partitions(
-        &self,
-        holder: &PrivateKey,
-        key: PublicKey,
-        author: u32,
-        device: PublicKey,
-        partitions: Vec<PartitionGrant>,
-        validity: (u64, u64, u64),
-    ) -> Result<Self, Error> {
-        let publisher = self
-            .0
-            .first()
-            .ok_or_else(|| denied("credential depth"))?
-            .issuer;
-        self.append_partition_link(
-            holder,
-            key,
-            rocky_core::PrincipalKind::Pseudonym,
-            Vec::new(),
-            crate::Extended {
-                authors: Some(crate::AuthorRange::new(author, author)?),
-                node: None,
-                device: Some(crate::SealedDevice::seal(publisher, key, author, device)?),
-                partitions,
-            },
-            0,
             validity,
         )
     }

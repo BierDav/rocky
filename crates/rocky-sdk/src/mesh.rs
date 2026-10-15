@@ -491,7 +491,6 @@ mod tests {
             .into(),
             users: BTreeSet::new(),
             capabilities: BTreeSet::new(),
-            pseudonyms: BTreeSet::new(),
         };
         let signed = SignedRevocation::sign(
             statement.clone(),

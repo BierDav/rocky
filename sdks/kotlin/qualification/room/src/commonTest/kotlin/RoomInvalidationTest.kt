@@ -51,7 +51,6 @@ class RoomInvalidationTest {
         var b: RockyDatabase? = null
         val work = mutableListOf<Job>()
         try {
-            a.installRoomAuthors()
             b = RockyDatabase.join(
                 File(directory, "b").path,
                 schema,
@@ -59,7 +58,6 @@ class RoomInvalidationTest {
                 loopback(),
                 automaticSync = false,
             )
-            b.installRoomAuthors(issuer = a)
             val roomA = Room.databaseBuilder<ShopDatabase>(File(directory, "a.room").path).setRockyDatabase(a).build()
             val roomB = Room.databaseBuilder<ShopDatabase>(File(directory, "b.room").path).setRockyDatabase(b).build()
             work += launch(Dispatchers.IO) { roomB.followRocky(b) }

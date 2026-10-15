@@ -23,7 +23,6 @@ class RoomMovesTest {
         val database = RockyDatabase.local(File(directory, "database").path, definition)
         try {
             for (partition in listOf("A", "B")) database.partitions.create("move_items", JsonArray(listOf(text(partition))))
-            database.credentials.installPseudonym(database.credentials.assignPseudonym(database.credentials.pseudonymRequest("move_items")))
             var id = 0L
             database.write {
                 id = nextId("move_items", "A")

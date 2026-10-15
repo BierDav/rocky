@@ -62,7 +62,7 @@ impl CreationProof {
         table: Commitment,
         id: rocky_core::RowIdentity,
         stamp: Stamp,
-        author: &identity::RowAuthor,
+        author: &identity::NodeAuthor,
     ) -> Result<Self, Error> {
         let mut proof = Self {
             version: 1,
@@ -653,8 +653,8 @@ impl<A: RowApplication> Inner<A> {
                 .find(|key| key.scope == *source)
                 .ok_or_else(|| denied("source key missing"))?;
             let source_author = self
-                .row_authors
-                .get(&source.table)
+                .node_author
+                .as_ref()
                 .ok_or_else(|| denied("source table author missing"))?
                 .key
                 .public_key();
@@ -685,11 +685,8 @@ impl<A: RowApplication> Inner<A> {
                     .entry(*field)
                     .or_insert_with(|| proof.stamp().clone());
             }
-            let author = self.row_authors.get(&destination.table).ok_or_else(|| {
-                denied(&format!(
-                    "{}: move requires a table pseudonym",
-                    table.table.sql_name
-                ))
+            let author = self.node_author.as_ref().ok_or_else(|| {
+                denied(&format!("{}: move requires a node", table.table.sql_name))
             })?;
             for field in nulled {
                 stamps.insert(
@@ -726,8 +723,8 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| denied("move table missing"))?;
             let table_name = &table.table.sql_name;
             let author = self
-                .row_authors
-                .get(&scope.table)
+                .node_author
+                .as_ref()
                 .ok_or_else(|| denied(&format!("{table_name}: move needs a table author")))?;
             let tuple = self
                 .partitions
@@ -823,7 +820,7 @@ impl<A: RowApplication> Inner<A> {
             }))
     }
     pub(super) async fn follow_moves(&mut self, time: u64) -> Result<(), Error> {
-        if self.row_authors.is_empty() || self.local_grants(time).is_err() {
+        if self.node_author.is_none() || self.local_grants(time).is_err() {
             return Ok(());
         }
         let rows = collect_rows(self.conn.query(MOVE_SCAN, ()).await?).await?;
@@ -844,7 +841,7 @@ impl<A: RowApplication> Inner<A> {
             let Some(identity) = record.identity else {
                 continue;
             };
-            let Some(author) = self.row_authors.get(&destination.table) else {
+            let Some(author) = self.node_author.as_ref() else {
                 continue;
             };
             let signer = author.key.public_key();
@@ -982,8 +979,8 @@ impl<A: RowApplication> Inner<A> {
                 assigned: stamps.keys().copied().collect(),
             };
             let author = self
-                .row_authors
-                .get(&destination.table)
+                .node_author
+                .as_ref()
                 .ok_or_else(|| denied("follow author missing"))?;
             let tuple = self
                 .partitions
@@ -1125,15 +1122,5 @@ impl<A: RowApplication> Inner<A> {
             }
         }
         Ok(summary)
-    }
-}
-
-#[cfg(test)]
-impl<A: RowApplication> Inner<A> {
-    pub(crate) fn move_authors(&self) -> Vec<(PrivateKey, CredentialChain)> {
-        self.row_authors
-            .values()
-            .map(|author| (author.key.clone(), author.credentials.clone()))
-            .collect()
     }
 }

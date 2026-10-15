@@ -146,7 +146,7 @@ above its installed version moves the domain to it:
    generation, and status reports `full_access_required`.
 3. It records the version it migrates from in `migration.json` and signs
    the schema; the earliest signing time is the generation's baseline.
-4. At open, before the network starts, it renews its pseudonyms and runs
+4. At open, before the network starts, it runs
    every migration above that version, in order, in one SQL transaction of
    any size, in the new generation. A step is SQL, or
    `{"insert": table, "select": sql}`, which inserts a row per selected row

@@ -57,7 +57,6 @@ class RoomGateTest {
         val directory = Files.createTempDirectory("room-gate").toFile()
         val a = RockyDatabase.create(File(directory, "a"), schema, loopback(), automaticSync = false)
         try {
-            a.installRoomAuthors()
             val b = RockyDatabase.join(
                 File(directory, "b"),
                 schema,
@@ -66,7 +65,6 @@ class RoomGateTest {
                 automaticSync = false,
             )
             try {
-                b.installRoomAuthors(issuer = a)
                 val roomA = room(File(directory, "a"), a)
                 val roomB = room(File(directory, "b"), b)
                 try {
@@ -127,11 +125,11 @@ class RoomGateTest {
         val events = a.driverTableEvents()
         val created = roomA.shop().createList(ShopList("l1", "Groceries"), listOf(item("i1", "Milk"), item("i2", "Eggs")))!!
         assertEquals(setOf("items", "lists"), withTimeout(10_000) { events.next() }.tables.toSet(), "reservations and inserts commit once")
-        // An id is the table author's next sequence: the first list, then consecutive items.
+        // An id is the node's next sequence for this table: the first list, then consecutive items.
         assertEquals(1L, created.list.id and 0xFFFF_FFFFL)
         val ids = created.items.sortedBy { it.key }.map { it.id }
         assertEquals(listOf(1L, 2L), ids.map { it and 0xFFFF_FFFFL })
-        assertNotEquals(created.list.id ushr 32, ids.first() ushr 32, "each table has its own author")
+        assertEquals(created.list.id ushr 32, ids.first() ushr 32, "the node signs every table under one author number")
         assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
         assertEquals(created, roomB.shop().withItems("l1"), "peers see the issued ids")
         // Another device issues under its own author.

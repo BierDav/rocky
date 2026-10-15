@@ -53,15 +53,13 @@ does not match, a wrong subject or a partition outside the leaf's selectors.
 Custody-only grants pass these checks without any reader key. A caller still
 checks that the returned concrete grants permit the requested action.
 
-`assign_partitions` produces a per-table author pseudonym with partition grants
-and a device binding sealed to the publisher. `verify_partition_author` checks
-its signing key, author number, table and concrete partition, then returns its
-paired grants. An insert/update/delete is admitted only if the precise row
-write passes `RowWrite::permitted_by` against those grants. Issuers can still
-open the pseudonym's device through `pseudonym_device`.
+`verify_partition_author` checks the numbered node leaf, its signing key and
+concrete partition, then returns its paired grants. Each node signs every table
+with its own key. An insert/update/delete is admitted only if the precise row
+write passes `RowWrite::permitted_by` against those grants.
 
-Every capability carries [extension version 2](credential-primitives.md#chain-format),
-including an empty selector list. The ordinary `verify`, `verify_pseudonym` and `verify_author` APIs refuse a
+Every capability carries [extension version 4](credential-primitives.md#chain-format),
+including an empty selector list. The ordinary `verify` and `verify_author` APIs refuse a
 partition leaf; callers must not drop its selectors and treat it as a table
 capability. Concrete grants and selector grants attenuate independently;
 converting a selector into a concrete grant inside a delegated chain is not

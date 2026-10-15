@@ -1,4 +1,4 @@
-//! Stored credential chains. A retained operation, a registered row author
+//! Stored credential chains. A retained operation, the local node author
 //! and a horizon credential name a chain by digest; the chain is kept once
 //! and removed with the last of them. See
 //! `docs/decisions/0053-chains-by-reference.md`.
@@ -13,6 +13,7 @@ pub(super) const SCHEMA: &[&str] = &[
 impl<A: RowApplication> Inner<A> {
     /// Stores a chain a row of the same transaction is about to name.
     pub(super) async fn keep_chain(&self, chain: &Chain) -> Result<(), Error> {
+        self.bind_node_author(chain.credentials()).await?;
         if self.chain_kept(chain.digest()).await? {
             return Ok(());
         }
@@ -81,8 +82,8 @@ impl<A: RowApplication> Inner<A> {
     /// interruption leaves an operation without its chain.
     pub(super) async fn sweep_chains(&self) -> Result<(), Error> {
         let registered: Vec<Vec<u8>> = self
-            .row_authors
-            .values()
+            .node_author
+            .iter()
             .map(|author| author.chain.digest().to_vec())
             .collect();
         let unnamed = collect_rows(

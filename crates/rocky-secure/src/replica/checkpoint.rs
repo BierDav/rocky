@@ -93,7 +93,7 @@ pub struct CoordinatedBinding {
     pub highest: u64,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 11;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 12;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -163,88 +163,30 @@ impl SignedCheckpoint {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let kind = self
-            .credentials
-            .0
-            .last()
-            .ok_or_else(|| denied("checkpoint credentials missing"))?
-            .capability
-            .kind;
-        match kind {
-            rocky_core::PrincipalKind::Pseudonym => {
-                let (author, _) = self
-                    .credentials
-                    .verify_pseudonym_selectors(
-                        publisher,
-                        self.statement.definition,
-                        self.node,
-                        revocations,
-                        time,
-                    )
-                    .map_err(credential)?;
-                if author.table != self.statement.scope.table {
-                    return Err(denied("checkpoint author names another table"));
-                }
-                match &self.statement.partition {
-                    Some(tuple) => self
-                        .credentials
-                        .verify_partition_author(
-                            publisher,
-                            self.statement.definition,
-                            self.node,
-                            author.author,
-                            self.statement.scope,
-                            tuple,
-                            revocations,
-                            time,
-                        )
-                        .map_err(credential),
-                    None => Ok(author.grants),
-                }
-            }
-            rocky_core::PrincipalKind::Node => {
-                let node = self
-                    .credentials
-                    .0
-                    .last()
-                    .ok_or_else(|| denied("checkpoint credential missing"))?
-                    .capability
-                    .extended()
-                    .map_err(credential)?
-                    .node
-                    .ok_or_else(|| denied("checkpoint node binding missing"))?;
-                self.credentials
-                    .verify_node_alias(publisher, self.statement.definition, node, self.node)
-                    .map_err(credential)?;
-                let (mut grants, selectors) = self
-                    .credentials
-                    .verify_reference_selectors(
-                        publisher,
-                        self.statement.definition,
-                        node,
-                        revocations,
-                        time,
-                    )
-                    .map_err(credential)?;
-                if let Some(tuple) = &self.statement.partition {
-                    for grant in selectors {
-                        if let Some(grant) = grant
-                            .resolve(
-                                self.statement.scope.domain,
-                                self.statement.scope.table,
-                                tuple,
-                            )
-                            .map_err(credential)?
-                        {
-                            grants.push(grant);
-                        }
-                    }
-                }
-                Ok(grants)
-            }
-            _ => Err(denied(
-                "checkpoint requires a node or table-author credential",
-            )),
+        match &self.statement.partition {
+            Some(tuple) => self
+                .credentials
+                .verify_partition(
+                    publisher,
+                    self.statement.definition,
+                    self.node,
+                    self.statement.scope,
+                    tuple,
+                    revocations,
+                    time,
+                )
+                .map_err(credential),
+            None => self
+                .credentials
+                .verify_selectors(
+                    publisher,
+                    self.statement.definition,
+                    self.node,
+                    revocations,
+                    time,
+                )
+                .map(|(grants, _)| grants)
+                .map_err(credential),
         }
     }
     pub fn signer(&self) -> PublicKey {
@@ -656,8 +598,8 @@ fn integer(value: u64) -> SqlValue {
 
 impl<A: RowApplication> Inner<A> {
     /// The definition the credentials that sign `table`'s checkpoints name.
-    pub(super) fn signing_definition(&self, table: Commitment) -> Commitment {
-        let credentials = match self.row_authors.get(&table) {
+    pub(super) fn signing_definition(&self, _table: Commitment) -> Commitment {
+        let credentials = match self.node_author.as_ref() {
             Some(author) => &author.credentials,
             None => &self.config.credentials,
         };
@@ -670,7 +612,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         statement: CheckpointStatement,
     ) -> Result<SignedCheckpoint, Error> {
-        match self.row_authors.get(&statement.scope.table) {
+        match self.node_author.as_ref() {
             Some(author) => {
                 SignedCheckpoint::sign(statement, &author.key, author.credentials.clone())
             }

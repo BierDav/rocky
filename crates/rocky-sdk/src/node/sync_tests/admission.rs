@@ -36,12 +36,21 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
                         user.public_key(),
                         grants.clone(),
                         Vec::new(),
-                        (1, None),
+                        (1, Some(rocky_credentials::AuthorRange::ALL)),
                         (now()?, crate::enrollment::DEFAULT_TTL, 300),
                     )?;
                     Ok((
                         node.clone(),
-                        device_chain(capability, &user, node.public_key())?,
+                        device_chain(
+                            capability.clone(),
+                            &user,
+                            node.public_key(),
+                            capability
+                                .capability
+                                .authors()?
+                                .ok_or("principal range")?
+                                .first,
+                        )?,
                     ))
                 })
                 .collect::<Result<Vec<_>, Failure>>()?;

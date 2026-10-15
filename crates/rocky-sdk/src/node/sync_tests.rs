@@ -65,7 +65,7 @@ async fn node(
     )
     .await?;
     replica
-        .register_credential_signer(PrivateKey::from_bytes(&vault.get("credential")?))
+        .register_credential_signer(PrivateKey::from_bytes(&vault.get("node")?))
         .await?;
     replica
         .install_readable_tables(domain.logical().clone(), domain.scope, domain.readers())
@@ -170,29 +170,8 @@ async fn enable(node: &Node) -> Result<(), Failure> {
     assert_eq!(statuses.borrow()["retry"], false);
     Ok(())
 }
-async fn install_pseudonym(node: &Node) -> Result<(), Failure> {
-    let client = node.client(1)?;
-    let request = node
-        .dispatch(
-            &client,
-            &json!({"type":"pseudonym_request","collection":"items"}),
-        )
-        .await?;
-    let assigned = node
-        .dispatch(
-            &client,
-            &json!({"type":"pseudonym_assign","request":request["request"]}),
-        )
-        .await?;
-    node.dispatch(
-        &client,
-        &json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await?;
-    Ok(())
-}
+
 async fn add(node: &Node, handle: u8) -> Result<(), Failure> {
-    install_pseudonym(node).await?;
     let client = node.client(1)?;
     node.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
         .await?;
@@ -464,7 +443,7 @@ async fn failed_work_retries_on_clock_and_connectivity_interrupts_backoff() -> R
 }
 
 #[tokio::test]
-async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result<(), Failure> {
+async fn consumer_sql_allocates_string_ids_with_node_author() -> Result<(), Failure> {
     tokio::task::LocalSet::new().run_until(async {
     let root = tempfile::tempdir()?;
     let schema = Schema::parse(
@@ -481,23 +460,6 @@ async fn consumer_sql_allocates_string_ids_with_installed_pseudonyms() -> Result
         .await?;
     let node = node(root.path(), settings, vault, transport).await?;
     let client = node.client(1)?;
-    let request = node
-        .dispatch(
-            &client,
-            &json!({"type":"pseudonym_request","collection":"items"}),
-        )
-        .await?;
-    let assigned = node
-        .dispatch(
-            &client,
-            &json!({"type":"pseudonym_assign","request":request["request"]}),
-        )
-        .await?;
-    node.dispatch(
-        &client,
-        &json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await?;
     node.dispatch(&client, &json!({"type":"sql","sql":"BEGIN"}))
         .await?;
     let identity = node
@@ -530,7 +492,7 @@ async fn a_room_write_commits_while_a_renewal_waits_for_the_replica() -> Result<
         let root = tempfile::tempdir()?;
         let hub = Arc::new(Hub::default());
         let node = enrolled(&root.path().join("a"), &hub, "a", None).await?;
-        install_pseudonym(&node).await?;
+
         let connections = Registry::default();
         let options = ConnectionOptions {
             read_only: false,

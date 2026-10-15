@@ -101,120 +101,52 @@ matters. A device granted `Execute` therefore executes once registered:
   or one for another tenant is refused. Later control revisions need only
   the tenant key.
 
-## Author pseudonyms
+## Principal ranges and node authors
 
-A pseudonym is a separate signing key and a positive 31-bit author number for
-one device and table. The device keeps its secret in the key provider; its
-chain binds the public key, number and table grants. Only a domain issuer can
-open the sealed device key in the chain. Author 0 is reserved.
+`Authority::issue` and `issue_delegable` require an explicit `AuthorRange`.
+A principal grant carries that range of positive 31-bit numbers. The
+principal certifies each node with exactly one number from that range.
+`CredentialChain::complete(holder, node, author)` supplies the number explicitly;
+`device_chain` takes the same final argument. The node key is the leaf subject
+and signs every table's frames, existence records and checkpoints. Row identities
+combine its author number with the table's durable creation sequence.
 
-| Call | Inputs | Result |
-| --- | --- | --- |
-| `pseudonym_request` | `collection` | `request`: hexadecimal bytes signed by the node and its pseudonym key |
-| `pseudonym_assign` | `request` | `pseudonym`: a credential chain with the device's table write grants, narrowed by the assigner's grants |
-| `pseudonym_install` | `pseudonym` | `collection`, `author`; saves the verified chain for the requesting device |
-| `pseudonym_owner` (issuer) | `pseudonym` | `node`, `collection`, `author` |
-| `pseudonym_range` (issuer without a range) | `first`, `last` | Claims a range and renews the issuer's capability with it |
+`verify_author` checks the node key, exact number, table grants, expiry and
+revocations. Partition frames use `verify_partition_author` with the authenticated
+tuple. Every node leaf attenuates its principal's range; a leaf with no number,
+several numbers or an out-of-range number is refused. A replica durably binds a
+node to its first verified number and refuses a different number across tables,
+renewal and reopen. A principal's certificate allocator must give distinct
+numbers to its nodes and retain allocations after revocation or loss.
 
-The application carries private requests to a trusted assigner and returns
-the credential; no sharing or invitation flow is required. Requests and local
-assignment records disclose the device to the assigner. Published credentials
-seal the device binding to the publisher. Issuers sign through an independent
-assignment key, including for their own device. A delegated assigner refuses
-an assignment whose parent chain would name the requesting device's user;
-that device asks an independent assigner instead. Assignment requires a range and a delegable capability with the
-requested grants. A reader gets no writing pseudonym. A lost assignment
-answer retries with the same key and keeps its number, including after the
-assigner reopens. Assignment records and counters commit to `identity.json`
-before an answer leaves the SDK. A failed save returns no assignment.
-
-```kotlin
-val request = phone.credentials.pseudonymRequest("items")
-val credential = issuer.credentials.assignPseudonym(request)
-val author = phone.credentials.installPseudonym(credential) // collection and author number
-val device = issuer.credentials.pseudonymOwner(credential).node
-```
-
-`Credentials.claimAuthorRange(first, last)` is the Kotlin range claim; it
-assigns a range to an issuer that has none. `Credentials.grant` and `Credentials.delegate` take optional `authors`;
-the five pseudonym calls cross the native session's versioned JSON ABI.
-
-The creator starts with `[1, 2³¹−1]`. An issuer invitation splits the free
-numbers, keeping the lower half and handing the upper half to the new issuer.
-The optional `authors` count on `grant` and `delegate` carves numbers for a
-recipient that assigns them itself. The receiver verifies range attenuation
-at every chain admission boundary. Replacing supplied credentials never
-rewinds the allocation counter, even across removal of a range. Delegating
-again with `authors` carves a fresh range; omit it when the recipient no
-longer needs to assign authors.
-
-A [revocation](revocations.md) naming the pseudonym key, or a key or
-capability its chain passes through, ends the pseudonym chain like a device
-chain. After renewing the device credentials, request, assign and install the
-pseudonym again; the key and author number stay the same. Rotation of pseudonym keys is out
-of scope.
-
-`CredentialChain::verify_author` is the receiver primitive: it verifies the
-signing key, exact author number, table, grants and the held revocations. A pseudonym
-chain is refused wherever a node chain is required, including existing frames
-and sessions.
+The SDK creator uses author 1 and starts allocating at 2. Ordinary enrollment
+and grants reserve up to 1,024 available numbers by default; `authors` supplies an explicit count.
+An issuer invitation hands out the upper half of its free range. Allocation is
+saved before credentials leave the SDK. Registry capability entries record the
+granted principal range, so a later grant for that principal can reuse it.
+Delegators also persist outgoing ranges locally, including non-issuer grants.
+Default grants keep half of a small free range for later recipients.
+Neither opening a database nor creating a row contacts an author assigner.
 
 ### Chain format
 
-`Capability.extension` is required canonical CBOR of a format-2 body. All
-fields are explicit, including an empty partition list and null author/device
-bindings. Missing extensions, unknown fields, noncanonical encodings and every
-other version are refused; no earlier signatures or encodings are preserved.
+`Capability.extension` is canonical CBOR of a version-4 body. Every field is
+explicit; missing fields, unknown fields, noncanonical bytes and other versions
+are refused.
 
 | Body field | Content |
 | --- | --- |
-| `version` | 2 |
-| `authors` | `{first, last}`: the numbers this link assigns, or the single number of a pseudonym leaf. `1 ≤ first ≤ last ≤ 2³¹−1` |
-| `device` | Pseudonym leaf only: the node key sealed to the publisher |
+| `version` | 4 |
+| `authors` | `{first, last}` within `1..=2³¹−1`; one number on a node leaf |
+| `node` | Node reference bound to the leaf subject; absent on principal links |
 | `partitions` | [Selector grants](partition-credentials.md#issuance-and-verification) |
 
-- A link's range lies inside its parent's; the publisher's root may carry any
-  range. Node links carry no `authors`.
-- A `Pseudonym` leaf has the pseudonym key as subject, `authors` `[a, a]`,
-  `delegations` 0 and grants on one table. Its parent is a user or deployment
-  link whose range contains `a`.
-- `device` uses an ephemeral X25519 key against the publisher key in
-  Montgomery form and ChaCha20-Poly1305 under a key bound to the pseudonym key
-  and author number.
-- `PseudonymRequest` (version 1, `rocky.credentials.pseudonym-request.v1`)
-  carries the node chain, pseudonym key, table, time and an optional earlier
-  pseudonym chain, signed by the node key and the pseudonym key. An earlier
-  chain for the same key and table inside the assigner's range keeps its number.
+There are no table signing keys, assignment messages or sealed device bindings.
+Portable `AuthorBinding` provenance is version 2 and terminates at the node key.
 
 ## Qualification
 
-```sh
-cargo test -p rocky-credentials
-cargo test -p rocky-secure --lib tests::delegation
-cargo test -p rocky-sdk --test grants --test service --test pseudonyms
-./examples/shoppinglist-app/check
-sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:qualifyPackage
-```
-
-Covered: raw grants resolving and describing back; chains widening rights,
-columns, scope, validity or depth refused at open, renewal, frame receipt,
-sync paging and remote read; a non-issuer executor; pseudonym persistence
-failure, lost answers, reopen, policy renewal, issuer splits and delegated
-ranges; sealed-device privacy. JVM desktop and loopback only.
-
-## Design rationale
-
-Status: compatibility clause superseded on 2026-10-08 by the phase-1
-single-format contract.
-
-- Every capability carries the same version-2 authority body. Ranges, the
-  sealed device and partition selectors are explicit; old bytes and signatures
-  are not retained.
-- The device is sealed asymmetrically to the publisher key so delegates with a
-  range can assign numbers without holding a publisher secret.
-- A device's own user key never signs its pseudonym, and a delegated assigner
-  refuses a device whose user key is in its prefix: either would name the
-  user in every `id`.
-- Ranges between issuers are an allocation discipline. An issuer holds the
-  publisher key and could sign any range; verifiers enforce ranges only
-  against delegates. Counters are never rewound.
+`cargo test -p rocky-credentials` covers range attenuation, exact node numbers,
+selector preservation, table grants and refusal of other extension versions.
+The phase's [lane B evidence](../features_09/13-identities-and-domain-credentials-evidence.md#lane-b--author-ranges-and-node-signing)
+records secure storage and SDK verification separately.

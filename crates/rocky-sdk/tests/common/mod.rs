@@ -30,7 +30,6 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
 impl Device {
     /// Wraps a database opened some other way.
     pub fn new(opened: Opened) -> Result<Self, Failure> {
-        identity::database(&opened.database);
         Ok(Self {
             session: opened.database.session(),
             scope: serde_json::from_str(&opened.database.scope())?,
@@ -123,7 +122,7 @@ impl Device {
     }
     pub async fn sync(&self) -> Result<Value, Value> {
         let result = self.call(json!({"type": "sync"})).await?;
-        let _ = identity::prepare(&self.scope, "items", &|request| self.raw_call(request)).await;
+
         Ok(result)
     }
     /// An invitation for a writer of the schema's one collection.
@@ -171,10 +170,6 @@ impl Device {
 }
 /// Configures each device as the other's peer.
 pub async fn introduce(left: &Device, right: &Device) {
-    for device in [left, right] {
-        let _ =
-            identity::prepare(&device.scope, "items", &|request| device.raw_call(request)).await;
-    }
     left.add_peer(&right.contact().await).await.expect("peer");
     right.add_peer(&left.contact().await).await.expect("peer");
 }

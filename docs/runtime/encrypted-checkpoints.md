@@ -198,5 +198,6 @@ one, else the previous checkpoint stays and pruning stops there) and install
   policy names as trusted, and should recovery packages carry a checkpoint so
   that domains with required custodians can prune?
 
-Typed SDK checkpoints use the table pseudonym as their signing key; its credential
-proves the same whole-scope read and write authority. See [node-key privacy](../decisions/0062-node-references-and-credential-aliases.md).
+Every checkpoint uses the node key. Its numbered node credential proves whole-scope
+read and write authority. Checkpoint format 12 is the sole current version;
+older formats are refused.

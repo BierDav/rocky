@@ -56,6 +56,7 @@ pub struct Device {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capability {
+    pub authors: rocky_credentials::AuthorRange,
     #[serde(with = "hex32")]
     pub id: Commitment,
     pub expires: u64,
@@ -65,17 +66,6 @@ pub struct Capability {
 pub struct Grant {
     pub grant: PartitionGrant,
     pub delegations: u8,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Pseudonym {
-    #[serde(with = "hex32")]
-    pub table: Commitment,
-    pub key: PublicKey,
-    pub author: u32,
-    pub assigned: u64,
-    /// Stored for pseudonym rotation; never set in this format.
-    pub closed: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,7 +84,6 @@ pub struct Record {
     /// Every recorded capability; the latest expiry is the current one.
     pub capabilities: Vec<Capability>,
     pub grants: Vec<Grant>,
-    pub pseudonyms: Vec<Pseudonym>,
     pub label: Option<Vec<u8>>,
 }
 impl Record {
@@ -121,6 +110,20 @@ impl Registry {
     pub fn get(&self, node: &PublicKey) -> Option<&Record> {
         self.records.get(node)
     }
+    /// The range already granted to this principal, if it has a recorded node.
+    pub fn authors(&self, user: PublicKey) -> Option<rocky_credentials::AuthorRange> {
+        self.records
+            .values()
+            .filter(|record| {
+                record
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.user == user)
+            })
+            .filter_map(Record::capability)
+            .map(|capability| capability.authors)
+            .next()
+    }
     /// Records holding a `device` entry: what the bound counts.
     pub fn devices(&self) -> usize {
         self.records
@@ -131,25 +134,7 @@ impl Registry {
     pub fn revoked(&self, node: &PublicKey) -> bool {
         self.get(node).is_some_and(|record| record.revoked)
     }
-    /// The device and table a pseudonym key is assigned to, with its number.
-    pub fn assignment(&self, key: &PublicKey) -> Option<(PublicKey, Pseudonym)> {
-        self.records.iter().find_map(|(node, record)| {
-            record
-                .pseudonyms
-                .iter()
-                .find(|pseudonym| pseudonym.key == *key)
-                .map(|pseudonym| (*node, *pseudonym))
-        })
-    }
-    /// The keys an author number is assigned to.
-    pub fn holders(&self, author: u32) -> Vec<PublicKey> {
-        self.records
-            .values()
-            .flat_map(|record| &record.pseudonyms)
-            .filter(|pseudonym| pseudonym.author == author)
-            .map(|pseudonym| pseudonym.key)
-            .collect()
-    }
+
     fn apply(&mut self, node: &str, entry: &str, value: &str) -> Result<(), Failure> {
         let node: PublicKey = node.parse()?;
         let record = self.records.entry(node).or_default();
@@ -165,7 +150,6 @@ impl Registry {
             }
             ("capability", _) => record.capabilities.push(parse(value)?),
             ("grant", _) => record.grants.push(parse(value)?),
-            ("pseudonym", _) => record.pseudonyms.push(parse(value)?),
             _ => return Err(format!("unknown registry entry {entry}").into()),
         }
         Ok(())
@@ -302,18 +286,7 @@ impl Changes {
             Mode::Keep,
         )
     }
-    pub fn pseudonym(&mut self, node: &PublicKey, pseudonym: &Pseudonym) -> Result<(), Failure> {
-        self.push(
-            node,
-            format!(
-                "pseudonym/{}/{}",
-                HEXLOWER.encode(&pseudonym.table),
-                pseudonym.key.to_hex()
-            ),
-            pseudonym,
-            Mode::Keep,
-        )
-    }
+
     pub fn label(&mut self, node: &PublicKey, label: &[u8]) -> Result<(), Failure> {
         if label.len() > MAX_LABEL {
             return Err(format!("a device label holds at most {MAX_LABEL} bytes").into());

@@ -28,7 +28,6 @@ class ConsumerTest {
         }
         val secrets = MemorySecrets()
         val db = RockyDatabase.local(directory, definition, secrets)
-        db.installAuthors()
         val handle = RockyDatabase.newHandle()
         try {
             db.write(handle) {

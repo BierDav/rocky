@@ -24,9 +24,6 @@ class RoomConstraintsTest {
         try {
             val rocky = RockyDatabase.local(directory, schema)
             try {
-                for (table in listOf("parents", "children")) {
-                    rocky.credentials.installPseudonym(rocky.credentials.assignPseudonym(rocky.credentials.pseudonymRequest(table)))
-                }
                 val room = Room.databaseBuilder<ConstraintDatabase>(File(directory, "room").path).setRockyDatabase(rocky).build()
                 try {
                     val dao = room.dao()

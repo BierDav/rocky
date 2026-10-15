@@ -40,7 +40,7 @@ class RockyClient(private val transport: Transport) {
 
     suspend fun call(request: JsonObject): JsonObject = transport.call(request)
 
-    /** Requires an open SQL transaction and an installed table pseudonym. */
+    /** Requires an open SQL transaction and a numbered node credential. */
     suspend fun nextId(table: String): String = call(request("next_id") { put("table", table) }).getValue("id").jsonPrimitive.content
     suspend fun nextId(table: String, partitionValues: JsonArray): String = call(
         request("next_id") {

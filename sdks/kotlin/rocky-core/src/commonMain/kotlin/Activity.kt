@@ -96,12 +96,6 @@ sealed interface RockyEvent {
     data class DeviceEnrolled(override val sequence: Long, override val atEpochMillis: Long, val node: String, val profile: GrantProfile) : RockyEvent
     data class DeviceRevoked(override val sequence: Long, override val atEpochMillis: Long, val node: String) : RockyEvent
 
-    /** This device can now insert into [collection] as [author]. */
-    data class AuthorInstalled(override val sequence: Long, override val atEpochMillis: Long, val collection: String, val author: Int) : RockyEvent
-
-    /** This issuer assigned [node] an author for [collection]. */
-    data class AuthorAssigned(override val sequence: Long, override val atEpochMillis: Long, val node: String, val collection: String) : RockyEvent
-
     /** A group partition changed here: [action] is `created`, `shared`, `key_installed`, `bootstrap`, `subscribed`, `unsubscribed` or `evicted`. */
     data class PartitionChanged(
         override val sequence: Long,
@@ -195,10 +189,6 @@ sealed interface RockyEvent {
                 "device_enrolled" -> DeviceEnrolled(sequence, at, text("node"), RockySession.profile(event.getValue("profile").jsonObject))
 
                 "device_revoked" -> DeviceRevoked(sequence, at, text("node"))
-
-                "author_installed" -> AuthorInstalled(sequence, at, text("collection"), int("author"))
-
-                "author_assigned" -> AuthorAssigned(sequence, at, text("node"), text("collection"))
 
                 "networking_enabled", "networking_disabled" -> NetworkingControl(sequence, at, kind == "networking_enabled")
 

@@ -49,7 +49,7 @@ enter the descriptor and its fingerprints. Applications read and write
 | Part of an `id` | Bits | Rule |
 | --- | --- | --- |
 | High bit | 1 | Zero |
-| Author number | 31 | Of the table pseudonym; 0 is reserved |
+| Author number | 31 | Of the node credential; 0 is reserved |
 | Sequence | 32 | 1 to 2^32-1 per author and table across its partitions; exhaustion is an error |
 
 There is no timestamp. `RowIdentity` crosses JSON as a canonical decimal
@@ -61,7 +61,7 @@ signs and zero are refused.
   savepoint rollback release reservations; only inserted identities advance
   the author's creation log, and a delete never resets it.
 - An application cannot change `id` or `row_kind`.
-- A secure node registers the externally held table pseudonym
+- A secure node uses its numbered node credential
   ([secure SQL](secure-sql.md#row-identities)); a trusted node binds the
   table's author to its admitted `NodeId` with `TypedApp::with_row_author`,
   the same binding on every replica.

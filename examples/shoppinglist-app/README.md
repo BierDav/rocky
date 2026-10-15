@@ -214,7 +214,7 @@ try {
 ```
 
 The SDK installs authors at create/join, so the application does not carry
-pseudonym requests. `buildOnRocky` builds Room and follows committed table
+node credentials. `buildOnRocky` builds Room and follows committed table
 events; `settledOnRocky` retries transient DAO read failures. Closing the Room
 wrapper leaves Rocky open; `ShoppingNode.close` closes both in order. These
 helpers have no application or Compose dependency; see

@@ -76,19 +76,7 @@ impl Peer {
             Err(format!("{request}: {}", reply["error"]).into())
         }
     }
-    async fn author(&self, issuer: &Peer) -> Result<(), Failure> {
-        for table in TABLES {
-            let request = self
-                .call(json!({"type":"pseudonym_request","collection":table}))
-                .await?;
-            let assigned = issuer
-                .call(json!({"type":"pseudonym_assign","request":request["request"]}))
-                .await?;
-            self.call(json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}))
-                .await?;
-        }
-        Ok(())
-    }
+
     /// Inserts one row in one transaction; `id` reserves the next own id.
     async fn insert(&self, table: &str, list: Option<&str>, sql: &str) -> Result<String, Failure> {
         self.call(json!({"type":"sql","sql":"BEGIN"})).await?;
@@ -144,8 +132,6 @@ async fn an_enrolled_writer_syncs_a_list_shared_with_one_envelope() -> Result<()
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    issuer.author(&issuer).await?;
-    writer.author(&issuer).await?;
 
     let prepared = issuer
         .call(json!({"type":"partition_next","table":"lists"}))
@@ -238,7 +224,7 @@ fn kinds(activity: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arriving()
+async fn a_joined_writer_uses_its_node_number_and_activity_shows_the_list_arriving()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
@@ -252,27 +238,7 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    // The issuer assigns its own authors; the writer asks the issuer over the network.
-    let installed = |reply: Value| reply["installed"].as_array().map_or(0, Vec::len);
-    assert_eq!(installed(issuer.call(json!({"type":"authors"})).await?), 3);
-    // Join bootstrap can install authors before this explicit request.
     writer.call(json!({"type":"sync"})).await?;
-    writer.call(json!({"type":"authors"})).await?;
-    let activity = writer.call(json!({"type":"activity"})).await?;
-    let authors: std::collections::BTreeSet<_> = activity["events"]
-        .as_array()
-        .ok_or("events")?
-        .iter()
-        .filter(|event| event["kind"] == "author_installed")
-        .filter_map(|event| event["collection"].as_str().map(str::to_owned))
-        .collect();
-    assert_eq!(
-        authors,
-        TABLES.into_iter().map(str::to_owned).collect(),
-        "{activity}"
-    );
-    assert_eq!(installed(writer.call(json!({"type":"authors"})).await?), 0);
-
     issuer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
@@ -288,7 +254,7 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
         .call(json!({"type":"partition_share","group":"list","values":values(&list),"recipients":[node]}))
         .await?;
     writer.call(json!({"type":"sync"})).await?;
-    // Its own authors let the writer insert into the shared list.
+    // Its numbered node credential lets the writer insert into the shared list.
     writer
         .insert(
             "items",
@@ -308,8 +274,6 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
     for kind in [
         "invitation_created",
         "device_enrolled",
-        "author_installed",
-        "author_assigned",
         "partition_created",
         "partition_shared",
     ] {
@@ -321,7 +285,6 @@ async fn a_joined_writer_obtains_its_authors_and_activity_shows_the_list_arrivin
     let activity = writer.call(json!({"type":"activity"})).await?;
     let seen = kinds(&activity);
     for kind in [
-        "author_installed",
         "peer_reconciliation_completed",
         "partition_key_installed",
         "partition_bootstrap",
@@ -377,8 +340,6 @@ async fn a_list_received_from_a_checkpoint_keeps_its_rows_after_reopening() -> R
         .to_owned();
     let writer =
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
-    issuer.call(json!({"type":"authors"})).await?;
-    writer.call(json!({"type":"authors"})).await?;
     issuer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
@@ -450,7 +411,6 @@ async fn an_issuer_does_not_bootstrap_its_own_list_when_another_issuer_shares_it
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let a = Peer::new(Database::create(open(&root.path().join("a"), &hub, "a"), None)?.database)?;
-    a.call(json!({"type":"authors"})).await?;
     a.call(json!({"type":"partition_next","table":"lists"}))
         .await?;
     let list = a
@@ -510,7 +470,6 @@ async fn two_issuers_sync_while_each_holds_a_list_the_other_never_saw() -> Resul
         Peer::new(Database::join(open(&root.path().join("b"), &hub, "b"), &invitation)?.database)?;
     let mut lists = Vec::new();
     for (peer, title) in [(&a, "From a"), (&b, "From b")] {
-        peer.call(json!({"type":"authors"})).await?;
         peer.call(json!({"type":"partition_next","table":"lists"}))
             .await?;
         let sql = format!("INSERT INTO lists(id,title) VALUES(?,'{title}')");
@@ -568,8 +527,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
             json!({"type":"partition_role","role":{"role":"Partial","full_nodes":[],"custody":0}}),
         )
         .await?;
-    issuer.author(&issuer).await?;
-    writer.author(&issuer).await?;
     issuer
         .call(json!({"type":"partition_next","table":"lists"}))
         .await?;
@@ -628,9 +585,6 @@ async fn a_cut_orders_items_and_links_categories_for_an_enrolled_writer() -> Res
         ))
         .await?;
     let bread = bread.first().and_then(Value::as_str).ok_or("bread")?;
-    writer
-        .call(json!({"type":"pseudonym_request","collection":"item_categories"}))
-        .await?;
     writer
         .insert(
             "item_categories",

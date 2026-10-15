@@ -139,8 +139,8 @@ impl<A: RowApplication> Inner<A> {
             {
                 let signed = inner.verify_record(scope, record)?;
                 let signer = inner
-                    .row_authors
-                    .get(&scope.table)
+                    .node_author
+                    .as_ref()
                     .map(|author| &author.key)
                     .or(inner.credential_signer.as_ref())
                     .unwrap_or(&inner.config.node)

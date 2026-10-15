@@ -302,11 +302,7 @@ internal class Run(val root: File, val peer: File, val notes: MutableList<String
             val writer = device(name)
             val keys = writer.call("prepare", "directory" to writer.directory.path)
             writer.open("install", "supplied" to a.call("grantWriter", "device" to keys))
-            for (table in listOf("categories", "items", "item_categories")) {
-                val request = writer.call("authorRequest", "table" to table).jsonPrimitive.content
-                val credential = a.call("authorAssign", "request" to request)
-                writer.call("authorInstall", "credential" to credential)
-            }
+
             return writer
         }
         val b = writer("b")

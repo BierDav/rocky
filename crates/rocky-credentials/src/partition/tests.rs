@@ -65,7 +65,6 @@ fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
         nodes: BTreeSet::new(),
         users: [key].into(),
         capabilities: BTreeSet::new(),
-        pseudonyms: BTreeSet::new(),
     };
     RevocationSet::try_from(vec![
         SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
@@ -103,7 +102,7 @@ fn selector_fixture() -> SelectorFixture {
             user.public_key(),
             vec![],
             vec![held.clone()],
-            (2, None),
+            (2, Some(AuthorRange::ALL)),
             VALIDITY,
         )
         .unwrap();
@@ -121,13 +120,13 @@ fn selector_fixture() -> SelectorFixture {
             PrincipalKind::Deployment,
             vec![],
             vec![narrower.clone()],
-            (1, None),
+            (1, Some(AuthorRange::ALL)),
             VALIDITY,
         )
         .unwrap();
     let chain = delegated
         .clone()
-        .complete(&delegate, node.public_key())
+        .complete(&delegate, node.public_key(), 1)
         .unwrap();
     let t = tuple("customer-x", "warehouse-y");
     let scope = t.scope(domain(), [3; 32]).unwrap();
@@ -148,8 +147,8 @@ fn selector_fixture() -> SelectorFixture {
 #[test]
 fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     let SelectorFixture {
-        publisher,
         node,
+        publisher,
         chain,
         t,
         scope,
@@ -190,8 +189,8 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
 #[test]
 fn selector_chain_binds_each_slot_to_its_concrete_scope() {
     let SelectorFixture {
-        publisher,
         node,
+        publisher,
         chain,
         scope,
         ..
@@ -251,7 +250,7 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
                 PrincipalKind::User,
                 vec![],
                 vec![wide.clone()],
-                (1, None),
+                (1, Some(AuthorRange::ALL)),
                 VALIDITY
             )
             .is_err()
@@ -259,6 +258,7 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
     // A malicious holder signs the expanded grant without using issuance APIs.
     let mut leaf = delegated.0[1].capability.clone();
     leaf.extension = Extension::new(Extended {
+        authors: Some(AuthorRange::ALL),
         partitions: vec![wide],
         ..Extended::default()
     })
@@ -267,7 +267,7 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
         prefix.0[0].clone(),
         SignedCapability::sign(leaf, &user).unwrap(),
     ])
-    .complete(&delegate, node.public_key())
+    .complete(&delegate, node.public_key(), 1)
     .unwrap();
     assert!(
         forged
@@ -312,8 +312,8 @@ fn delegated_partition_fields_cannot_expand() {
 #[test]
 fn selector_chain_refuses_expired_credentials() {
     let SelectorFixture {
-        publisher,
         node,
+        publisher,
         chain,
         t,
         scope,
@@ -340,9 +340,9 @@ fn selector_chain_refuses_expired_credentials() {
 #[test]
 fn selector_chain_refuses_a_revoked_delegate() {
     let SelectorFixture {
+        node,
         publisher,
         delegate,
-        node,
         chain,
         t,
         scope,
@@ -388,11 +388,10 @@ fn selector_chain_renewal_preserves_its_partition_terms() {
     );
 }
 
-struct PseudonymFixture {
+struct NodeFixture {
     publisher: PrivateKey,
     holder: PrivateKey,
-    pseudonym: PrivateKey,
-    node: PrivateKey,
+    node_signer: PrivateKey,
     prefix: CredentialChain,
     a: PartitionGrant,
     chain: CredentialChain,
@@ -400,11 +399,10 @@ struct PseudonymFixture {
     scope: ResourceScope,
 }
 
-fn pseudonym_fixture() -> PseudonymFixture {
+fn node_fixture() -> NodeFixture {
     let publisher = PrivateKey::new();
     let holder = PrivateKey::new();
-    let pseudonym = PrivateKey::new();
-    let node = PrivateKey::new();
+    let node_signer = PrivateKey::new();
     let a = grant(Some("x"), None, &[Right::Insert], &[1]);
     let b = grant(Some("x"), None, &[Right::Update], &[2]);
     let root = authority(&publisher)
@@ -418,22 +416,15 @@ fn pseudonym_fixture() -> PseudonymFixture {
         .unwrap();
     let prefix = CredentialChain(vec![root]);
     let chain = prefix
-        .assign_partitions(
-            &holder,
-            pseudonym.public_key(),
-            11,
-            node.public_key(),
-            vec![a.clone(), b],
-            VALIDITY,
-        )
+        .clone()
+        .complete(&holder, node_signer.public_key(), 11)
         .unwrap();
     let t = tuple("x", "w");
     let scope = t.scope(domain(), [3; 32]).unwrap();
-    PseudonymFixture {
+    NodeFixture {
         publisher,
         holder,
-        pseudonym,
-        node,
+        node_signer,
         prefix,
         a,
         chain,
@@ -443,57 +434,61 @@ fn pseudonym_fixture() -> PseudonymFixture {
 }
 
 #[test]
-fn paired_grants_and_partition_pseudonyms_never_expand_authority() {
-    let PseudonymFixture {
+fn paired_grants_and_partition_nodes_never_expand_authority() {
+    let NodeFixture {
         prefix,
         holder,
-        pseudonym,
-        node,
+        node_signer,
         a,
         ..
-    } = pseudonym_fixture();
+    } = node_fixture();
     let cross = grant(Some("x"), None, &[Right::Insert, Right::Update], &[1, 2]);
+    let mut chain = prefix
+        .clone()
+        .complete(&holder, node_signer.public_key(), 11)
+        .unwrap();
+    let mut leaf = chain.0.pop().unwrap().capability;
+    leaf.extension = Extension::new(Extended {
+        authors: Some(AuthorRange::new(11, 11).unwrap()),
+        node: Some(crate::PeerId::of(node_signer.public_key())),
+        partitions: vec![cross],
+    })
+    .unwrap();
+    chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());
     assert!(
-        prefix
-            .assign_partitions(
-                &holder,
-                pseudonym.public_key(),
-                11,
-                node.public_key(),
-                vec![cross],
-                VALIDITY
+        chain
+            .verify_selectors(
+                prefix.0[0].issuer,
+                [9; 32],
+                node_signer.public_key(),
+                &policy(),
+                NOW
             )
             .is_err()
     );
     assert!(
         prefix
-            .assign_partitions(
-                &holder,
-                pseudonym.public_key(),
-                21,
-                node.public_key(),
-                vec![a.clone()],
-                VALIDITY
-            )
+            .complete(&holder, node_signer.public_key(), 21)
             .is_err()
     );
+    assert!(!a.rights.is_empty());
 }
 
 #[test]
-fn partition_pseudonym_rows_keep_their_granted_fields() {
-    let PseudonymFixture {
+fn partition_node_signer_rows_keep_their_granted_fields() {
+    let NodeFixture {
         publisher,
-        pseudonym,
+        node_signer,
         chain,
         t,
         scope,
         ..
-    } = pseudonym_fixture();
+    } = node_fixture();
     let grants = chain
         .verify_partition_author(
             publisher.public_key(),
             [9; 32],
-            pseudonym.public_key(),
+            node_signer.public_key(),
             11,
             scope,
             &t,
@@ -516,22 +511,21 @@ fn partition_pseudonym_rows_keep_their_granted_fields() {
 }
 
 #[test]
-fn partition_pseudonyms_bind_the_author_and_sequence() {
-    let PseudonymFixture {
+fn partition_nodes_bind_the_author_and_sequence() {
+    let NodeFixture {
         publisher,
-        pseudonym,
-        node,
+        node_signer,
         chain,
         t,
         scope,
         ..
-    } = pseudonym_fixture();
+    } = node_fixture();
     assert!(
         chain
             .verify_partition_author(
                 publisher.public_key(),
                 [9; 32],
-                pseudonym.public_key(),
+                node_signer.public_key(),
                 12,
                 scope,
                 &t,
@@ -545,7 +539,7 @@ fn partition_pseudonyms_bind_the_author_and_sequence() {
             .verify_partition_author(
                 publisher.public_key(),
                 [9; 32],
-                node.public_key(),
+                PrivateKey::new().public_key(),
                 11,
                 scope,
                 &t,
@@ -557,20 +551,20 @@ fn partition_pseudonyms_bind_the_author_and_sequence() {
 }
 
 #[test]
-fn partition_pseudonyms_cannot_discard_their_selector() {
-    let PseudonymFixture {
+fn partition_nodes_cannot_discard_their_selector() {
+    let NodeFixture {
         publisher,
-        pseudonym,
+        node_signer,
         chain,
         ..
-    } = pseudonym_fixture();
+    } = node_fixture();
     let other = tuple("other", "w");
     assert!(
         chain
             .verify_partition_author(
                 publisher.public_key(),
                 [9; 32],
-                pseudonym.public_key(),
+                node_signer.public_key(),
                 11,
                 other.scope(domain(), [3; 32]).unwrap(),
                 &other,
@@ -581,10 +575,10 @@ fn partition_pseudonyms_cannot_discard_their_selector() {
     );
     assert!(
         chain
-            .verify_pseudonym(
+            .verify(
                 publisher.public_key(),
                 [9; 32],
-                pseudonym.public_key(),
+                node_signer.public_key(),
                 &policy(),
                 NOW
             )
@@ -593,36 +587,20 @@ fn partition_pseudonyms_cannot_discard_their_selector() {
 }
 
 #[test]
-fn only_the_publisher_resolves_a_partition_pseudonyms_device() {
-    let PseudonymFixture {
+fn partition_node_signer_credentials_verify_after_round_trip() {
+    let NodeFixture {
         publisher,
-        holder,
-        node,
-        chain,
-        ..
-    } = pseudonym_fixture();
-    assert_eq!(
-        chain.pseudonym_device(&publisher, [9; 32]).unwrap(),
-        node.public_key()
-    );
-    assert!(chain.pseudonym_device(&holder, [9; 32]).is_err());
-}
-
-#[test]
-fn partition_pseudonym_credentials_verify_after_round_trip() {
-    let PseudonymFixture {
-        publisher,
-        pseudonym,
+        node_signer,
         chain,
         t,
         scope,
         ..
-    } = pseudonym_fixture();
+    } = node_fixture();
     let grants = chain
         .verify_partition_author(
             publisher.public_key(),
             [9; 32],
-            pseudonym.public_key(),
+            node_signer.public_key(),
             11,
             scope,
             &t,
@@ -637,7 +615,7 @@ fn partition_pseudonym_credentials_verify_after_round_trip() {
             .verify_partition_author(
                 publisher.public_key(),
                 [9; 32],
-                pseudonym.public_key(),
+                node_signer.public_key(),
                 11,
                 scope,
                 &t,
@@ -656,10 +634,16 @@ fn partition_selectors_cannot_be_dropped() {
     let node = PrivateKey::new();
     let partitions = vec![grant(Some("x"), None, &[Right::Read], &[1])];
     let root = authority(&publisher)
-        .issue_partition_terms(user.public_key(), vec![], partitions, (1, None), VALIDITY)
+        .issue_partition_terms(
+            user.public_key(),
+            vec![],
+            partitions,
+            (1, Some(AuthorRange::ALL)),
+            VALIDITY,
+        )
         .unwrap();
     let chain = CredentialChain(vec![root])
-        .complete(&user, node.public_key())
+        .complete(&user, node.public_key(), 1)
         .unwrap();
     let mut leaf = chain.0[1].capability.clone();
     leaf.extension = crate::Extension::new(crate::Extended::default()).unwrap();

@@ -71,6 +71,7 @@ struct Definition<A> {
     permission_fields: HashSet<Commitment>,
     config: SecureConfig,
     chain: Chain,
+    node_author: Option<identity::NodeAuthor>,
     history: Vec<KeyMaterial>,
     manifest: Commitment,
     definition: ApplicationManifest,
@@ -84,6 +85,7 @@ impl<A> Definition<A> {
         std::mem::swap(&mut self.permission_fields, &mut inner.permission_fields);
         std::mem::swap(&mut self.config, &mut inner.config);
         std::mem::swap(&mut self.chain, &mut inner.chain);
+        std::mem::swap(&mut self.node_author, &mut inner.node_author);
         std::mem::swap(&mut self.history, &mut inner.history);
         std::mem::swap(&mut self.manifest, &mut inner.manifest);
         std::mem::swap(&mut self.definition, &mut inner.definition);
@@ -316,7 +318,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
     Error::Incompatible(reason.into())
 }
 /// The one encrypted replica file format; files of another are refused.
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v21";
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v22";
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
     encode(&(FILE_IDENTITY, manifest, node))
@@ -728,8 +730,8 @@ impl<A: RowApplication> Inner<A> {
         };
         if names(&self.config.credentials)
             || self
-                .row_authors
-                .values()
+                .node_author
+                .iter()
                 .any(|author| names(author.chain.credentials()))
         {
             return Ok(true);
@@ -1085,6 +1087,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             permission_fields: app.permission_fields().into_iter().collect(),
             app: Arc::new(app),
             chain: Chain::new(config.credentials.clone())?,
+            node_author: Some(identity::NodeAuthor::new(&config)?),
             config,
             history,
             manifest: manifest.hash(),
@@ -1095,6 +1098,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         definition.swap(&mut inner);
         let activated = transaction!(inner, |inner| {
+            inner.bind_node_author(&inner.config.credentials).await?;
             let stored = inner.stored_identity().await?;
             if !inner.activate(&stored, Some(&upgrade)).await? {
                 return Err(incompatible(

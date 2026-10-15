@@ -119,7 +119,6 @@ class RoomDriverTest {
         val directory = Files.createTempDirectory("room-rocky").toFile()
         val database = RockyDatabase.local(directory.path, schemaFromRoom("shop", exported))
         try {
-            assertEquals(mapOf("items" to 1, "lists" to 2), database.installAuthors().associate { it.collection to it.author }, "the authors Ids assumes")
             block(database)
         } finally {
             database.close()

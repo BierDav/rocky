@@ -11,12 +11,10 @@ const WRITE_LIMIT: Duration = Duration::from_secs(5);
 
 /// The `items` author key a node signs its rows with.
 fn author(node: &PrivateKey) -> PublicKey {
-    PrivateKey::from_bytes(&rocky_core::commitment("items", node.as_bytes())).public_key()
+    node.public_key()
 }
-/// The author number `Typed::open` assigns `node` for `items`.
 fn number(node: &PrivateKey) -> u32 {
-    let material = rocky_core::commitment("items", node.as_bytes());
-    (u32::from_le_bytes(material[..4].try_into().unwrap()) & 0x7fff_ffff).max(1)
+    crate::tests::node_number(node.public_key())
 }
 fn values(key: usize, done: i64, id: i64) -> Vec<SqlValue> {
     vec![

@@ -2,7 +2,7 @@
 
 `rocky-credentials` verifies and issues; `rocky-secure` enforces and keeps key
 epochs; `rocky-sdk` offers [enrollment](sdk-enrollment.md) as optional plumbing.
-Raw grants, delegation and pseudonyms are in
+Raw grants, delegation and author ranges are in
 [credential primitives](credential-primitives.md); per-partition grants and key
 envelopes in [partition credentials](partition-credentials.md). None of this
 has had a cryptographic audit.
@@ -14,7 +14,7 @@ endpoint: everything it does is keys and bytes.
 
 - Signed types: `SignedManifest`, `SignedCapability`, `CredentialChain`,
   `SignedRevocation` and the `RevocationSet` of them a device holds
-  ([revocations](revocations.md)). [Author pseudonyms](credential-primitives.md#author-pseudonyms)
+  ([revocations](revocations.md)). [Node author numbers](credential-primitives.md#principal-ranges-and-node-authors)
   and partition selectors use a versioned capability extension.
   `rocky-secure` re-exports these types.
 - `Credentials { publisher, manifest, revocations, chain }::verify(device, time)`
@@ -47,7 +47,6 @@ in the publisher grants anything.
 | `Publisher` | Domain trust anchor | Signs manifest, revocations and user capabilities |
 | `LoginPrincipal` | Subject of a chain's root | What its capability names |
 | `SigningDevice` | Node key, the chain's leaf | Signs operations, session frames and renewal requests; owns author logs |
-| `Pseudonym` | Separate signing key per device and table | Author number and table grants; issuer alone opens the sealed device binding |
 | `TransportEndpoint` | Route key | Nothing: whoever answers must prove a signing device |
 | `ReaderScope` | Encryption scope at a key epoch | Reveals every row sealed under that key |
 | `CoordinatorControl` | Tenant control key | Registers and controls coordinator domains; no row, key or command right |
@@ -145,7 +144,7 @@ device or one that missed intervening epochs.
 
 An issuer's `revoke(node)` saves the intent in `identity.json` first: the
 [revocation statement](revocations.md) naming the device's node and user keys,
-its capability and its pseudonym keys, and the key epoch each collection and
+its capability , and the key epoch each collection and
 group partition the device could read rotates to, the scope's held maximum
 plus one. Both come from the device's [registry](issuer-registry.md) record;
 a partition-only record rotates only the group partitions its grants select.
@@ -184,7 +183,7 @@ finishes this cleanup before admitting sessions or attaching its network.
 
 Non-issuer delegation stores no recipient relationship. Revoking an
 unrecorded delegate names only its node and rotates broadly; it cannot name
-an unknown user or pseudonym, identify the delegator, or prevent a fresh node
+an unknown user, identify the delegator, or prevent a fresh node
 being delegated to again. A non-issuer that learned the statement refuses
 a new delegation to the named node or user before returning reader keys. Revoking the recorded delegator does not enumerate
 its delegates, although shared chain ancestors can end their credentials.
@@ -238,7 +237,7 @@ revoke at the same time.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` (`rocky_sdk` `VERSION`) | 13 | Profile, `revocations`, held key epochs per collection, group partitions with held secret epochs and the revocation IDs of each epoch, issuer `authority` (invitation and its claim, pending `rotation` with its statement and target epochs, `tombstones`), `issuers` by node key, author range and pseudonyms, and the envelopes this device sends in `deliveries`; device records are in the [registry](issuer-registry.md); 12 is refused |
+| `identity.json` (`rocky_sdk` `VERSION`) | 17 | Profile, `revocations`, held key epochs per collection, group partitions with held secret epochs and the revocation IDs of each epoch, issuer `authority` (invitation and its claim, pending `rotation` with its statement and target epochs, `tombstones`), `issuers` by node key, author range and node number, and the envelopes this device sends in `deliveries`; device records are in the [registry](issuer-registry.md); other versions are refused |
 | `mailbox.json` | 1 | A mailbox's deposits by digest: depositor, recipient node key, arrival, the sealed delivery or the recipient's receipt ([decision 0054](../decisions/0054-envelope-delivery.md)) |
 | Sealed delivery, delivery receipt | 1 | Labels `rocky.envelope-delivery.*.v1` and `rocky.envelope-receipt.v1` ([decision 0054](../decisions/0054-envelope-delivery.md)) |
 | Issuer registry rows | | One row per entry of a device's record ([decision 0048](../decisions/0048-replicated-issuer-registry.md)) |

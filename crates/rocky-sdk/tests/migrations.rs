@@ -163,7 +163,6 @@ const POSITIONED_LISTS: &str = r#"{"format":6,"application":"lists","version":2,
 
 /// Creates a list in its own partition; returns its id.
 async fn list(device: &Device, title: &str) -> Result<String, Failure> {
-    device.ok(json!({"type": "authors"})).await;
     device
         .ok(json!({"type": "partition_next", "table": "lists"}))
         .await;

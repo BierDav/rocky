@@ -43,7 +43,7 @@ impl Db {
         options["transport"] = transport;
         let engine = Engine::open(&options.to_string(), SCHEMA, secrets)?;
         let scope = serde_json::from_str(&engine.scope())?;
-        support::engine(&engine);
+
         Ok(Self { engine, scope })
     }
     #[cfg(feature = "iroh")]
@@ -456,7 +456,7 @@ async fn an_application_transport_carries_enrollment_and_sync() -> Result<(), Fa
         let network = Network::Owned(hub.connector(name));
         let engine = Engine::open_with(&options.to_string(), SCHEMA, None, Some(network))?;
         let scope = serde_json::from_str(&engine.scope())?;
-        support::engine(&engine);
+
         Ok(Db { engine, scope })
     };
     let creator = open("a", json!({"mode": "create"}), "a")?;

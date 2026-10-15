@@ -13,7 +13,6 @@ struct Peer {
     node: [u8; 32],
     credentials: CredentialChain,
     keys: Vec<(ResourceScope, rocky_core::KeyEpoch, [u8; 32])>,
-    authors: Vec<([u8; 32], CredentialChain)>,
 }
 #[derive(Serialize, Deserialize)]
 enum Action {
@@ -46,11 +45,6 @@ impl Peer {
                 .keys
                 .iter()
                 .map(|key| (key.scope, key.generation, key.key))
-                .collect(),
-            authors: inner
-                .move_authors()
-                .into_iter()
-                .map(|(key, credentials)| (*key.as_bytes(), credentials))
                 .collect(),
         }
     }
@@ -112,12 +106,6 @@ async fn peer_worker() {
     let replica = EncryptedReplica::open(&peer.path, f.app(), config)
         .await
         .unwrap();
-    for (key, credentials) in peer.authors {
-        replica
-            .register_row_author(PrivateKey::from_bytes(&key), credentials)
-            .await
-            .unwrap();
-    }
     let mut error = None;
     match action {
         Action::Receive(frames) => send(&frames, &replica).await,

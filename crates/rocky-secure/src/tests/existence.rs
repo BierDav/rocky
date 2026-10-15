@@ -136,7 +136,12 @@ impl Erp {
             })
             .collect()
     }
-    fn credentials(&self, node: &PrivateKey, grants: Vec<ResourceGrant>) -> CredentialChain {
+    fn credentials(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        number: u32,
+    ) -> CredentialChain {
         let user = PrivateKey::new();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
@@ -148,6 +153,11 @@ impl Erp {
             expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                authors: Some(if kind == PrincipalKind::Node {
+                    rocky_credentials::AuthorRange::new(number, number).unwrap()
+                } else {
+                    rocky_credentials::AuthorRange::ALL
+                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 ..Default::default()
             })
@@ -163,8 +173,12 @@ impl Erp {
                 .unwrap(),
         ])
     }
-    /// A table pseudonym `number` with `grants`, all on one table.
-    fn pseudonym(&self, number: u32, grants: Vec<ResourceGrant>) -> (PrivateKey, CredentialChain) {
+    /// A node `number` with `grants`, all on one table.
+    fn certified_node(
+        &self,
+        number: u32,
+        grants: Vec<ResourceGrant>,
+    ) -> (PrivateKey, CredentialChain) {
         let key = PrivateKey::new();
         let assigner = PrivateKey::new();
         let issued = crate::credentials::Authority {
@@ -179,15 +193,7 @@ impl Erp {
         )
         .unwrap();
         let chain = CredentialChain(vec![issued])
-            .assign(
-                &assigner,
-                key.public_key(),
-                number,
-                PrivateKey::new().public_key(),
-                grants,
-                u64::MAX,
-                (0, u64::MAX, 0),
-            )
+            .complete(&assigner, key.public_key(), number)
             .unwrap();
         (key, chain)
     }
@@ -198,7 +204,7 @@ impl Erp {
         number: u32,
         tables: &[&'static str],
     ) -> Device {
-        let credentials = self.credentials(node, self.grants(tables));
+        let credentials = self.credentials(node, self.grants(tables), number);
         let replica = EncryptedReplica::open(
             path,
             TypedRows::new(self.schema.clone(), vec![DomainId([1; 16])]).unwrap(),
@@ -233,34 +239,6 @@ impl Erp {
             )
             .await
             .unwrap();
-        for table in tables {
-            let key = PrivateKey::from_bytes(&rocky_core::commitment(table, node.as_bytes()));
-            let assigner = PrivateKey::new();
-            let grants = self.grants(&[table]);
-            let issued = crate::credentials::Authority {
-                publisher: &self.publisher,
-                manifest: self.manifest_hash(),
-            }
-            .issue_terms(
-                assigner.public_key(),
-                grants.clone(),
-                (1, Some(crate::credentials::AuthorRange::ALL)),
-                crate::tests::validity(),
-            )
-            .unwrap();
-            let chain = CredentialChain(vec![issued])
-                .assign(
-                    &assigner,
-                    key.public_key(),
-                    number,
-                    node.public_key(),
-                    grants,
-                    u64::MAX,
-                    (0, u64::MAX, 0),
-                )
-                .unwrap();
-            replica.register_row_author(key, chain).await.unwrap();
-        }
         Device {
             node: node.clone(),
             tables: tables.to_vec(),
@@ -792,7 +770,7 @@ async fn a_keyless_replica_verifies_signatures_and_author_rights() {
 
     // An author may only state what its grant allows, for its own ids.
     let manifest = erp.manifest_hash();
-    let (inserter, chain) = erp.pseudonym(40, vec![erp.grant("lists", &[Right::Insert])]);
+    let (inserter, chain) = erp.certified_node(40, vec![erp.grant("lists", &[Right::Insert])]);
     let forged = |event, id, sequence, previous| {
         ExistenceRecord::forge(
             &inserter,
@@ -848,7 +826,7 @@ async fn a_keyless_replica_verifies_signatures_and_author_rights() {
         ReceiveStatus::Applied
     );
     // Records of a table without an existence log are refused.
-    let (items_key, items_chain) = erp.pseudonym(41, erp.grants(&["items"]));
+    let (items_key, items_chain) = erp.certified_node(41, erp.grants(&["items"]));
     let outside = ExistenceRecord::forge(
         &items_key,
         items_chain,
@@ -1219,7 +1197,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 11);
+    assert_eq!(before_horizon.statement.format, 12);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1243,7 +1221,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 11);
+    assert_eq!(checkpoint.statement.format, 12);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1350,7 +1328,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v21");
+    assert_eq!(identity, "rocky.encrypted-replica.v22");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1463,7 +1441,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 11);
+    assert_eq!(a.statement.format, 12);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(
@@ -2374,7 +2352,7 @@ async fn horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unkno
     let changes = vec![("INSERT INTO lists(title,id) VALUES('live',?id)", vec![]); 260];
     let ids = commit(&sql, &changes).await.0;
     let scope = erp.scope("lists");
-    let (key, credentials) = erp.pseudonym(
+    let (key, credentials) = erp.certified_node(
         145,
         vec![erp.grant("lists", &[Right::Insert, Right::Delete])],
     );

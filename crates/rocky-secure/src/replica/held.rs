@@ -144,7 +144,7 @@ pub struct CurrentValue {
     pub value: Option<Vec<u8>>,
     /// The stamp of its last change, in microseconds.
     pub time: u64,
-    /// The key that signed it: a node or a table pseudonym.
+    /// The key that signed it: a node.
     pub author: PublicKey,
 }
 
@@ -447,7 +447,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             self.delete_voided(frame.hash).await?;
         }
-        // A table pseudonym registered after open signs its logs' voids then.
+        // A node registered after open signs its logs' voids then.
         self.sign_voids().await?;
         for scope in scopes {
             if !self.names.retired_tables.contains(&scope.table) {
@@ -492,14 +492,14 @@ impl<A: RowApplication> Inner<A> {
         Ok(frames)
     }
     /// The private key of a log this device writes: its node key or a
-    /// table pseudonym.
+    /// node.
     fn log_key(&self, author: PublicKey) -> Result<&PrivateKey, Error> {
         if self.config.node.public_key() == author {
             return Ok(&self.config.node);
         }
-        self.row_authors
-            .values()
-            .map(|row_author| &row_author.key)
+        self.node_author
+            .iter()
+            .map(|node| &node.key)
             .find(|key| key.public_key() == author)
             .ok_or_else(|| denied("a held frame's log key is not registered"))
     }
@@ -564,15 +564,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(defaults)
     }
-    /// Whether a voided position of this device awaits its log's key.
-    pub(super) async fn unsigned_voids(&self) -> Result<bool, Error> {
-        Ok(!rows(
-            &self.conn,
-            "SELECT 1 FROM secure_voids WHERE record IS NULL LIMIT 1",
-        )
-        .await?
-        .is_empty())
-    }
+
     /// Signs void records for this device's voided positions whose log key
     /// is registered, at most `MAX_VOID_HEADERS` positions each.
     pub(super) async fn sign_voids(&self) -> Result<(), Error> {

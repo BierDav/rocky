@@ -148,9 +148,7 @@ impl SignedCut {
                     .iter()
                     .all(|right| rights.contains(right))
         };
-        if leaf.subject != self.signer
-            || matches!(leaf.kind, PrincipalKind::Node | PrincipalKind::Pseudonym)
-            || leaf.delegations == 0
+        if leaf.subject != self.signer || leaf.kind == PrincipalKind::Node || leaf.delegations == 0
         {
             return Err(denied("cut signer is not an issuer of the domain"));
         }
@@ -312,6 +310,7 @@ mod tests {
                 .issue(
                     other.public_key(),
                     vec![grant(scope(1), &all), grant(scope(2), &[Right::Read])],
+                    crate::AuthorRange::ALL,
                     (8, 100, 0),
                 )
                 .unwrap(),

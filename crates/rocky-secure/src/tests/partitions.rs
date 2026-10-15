@@ -132,7 +132,35 @@ impl Fixture {
         )
         .unwrap();
         let prefix = CredentialChain(vec![root]);
-        let credentials = prefix.clone().complete(&user, node.public_key()).unwrap();
+        let recorded = if path.exists() {
+            let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();
+            let mut rows = conn
+                .query(
+                    "SELECT number FROM secure_node_authors WHERE node=?",
+                    [node.public_key().as_bytes().to_vec()],
+                )
+                .await
+                .unwrap();
+            let number = rows
+                .next()
+                .await
+                .unwrap()
+                .map(|row| row.get::<i64>(0).unwrap() as u32);
+            drop(rows);
+            drop(conn);
+            drop(owner);
+            number
+        } else {
+            None
+        };
+        let credentials = prefix
+            .clone()
+            .complete(
+                &user,
+                node.public_key(),
+                recorded.unwrap_or_else(|| signer.as_ref().map_or(999, |(_, number)| *number)),
+            )
+            .unwrap();
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -155,19 +183,6 @@ impl Fixture {
             )
             .await
             .unwrap();
-        if let Some((key, number)) = signer {
-            let credentials = prefix
-                .assign_partitions(
-                    &user,
-                    key.public_key(),
-                    number,
-                    node.public_key(),
-                    vec![grant],
-                    (time, 3600, 5),
-                )
-                .unwrap();
-            replica.register_row_author(key, credentials).await.unwrap();
-        }
         replica
     }
     async fn key(&self, replica: &EncryptedReplica<TypedRows>, name: &str, key: [u8; 32]) {
@@ -274,7 +289,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
         .await
         .unwrap()
         .remove(0);
-    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 8);
+    assert_eq!(fa.operation().unwrap().header.extensions.row_format, 9);
     assert_eq!(
         reader.receive(fa.clone()).await.unwrap(),
         ReceiveStatus::Applied
@@ -539,7 +554,7 @@ async fn partition_frames_keys_custody_sql_and_checkpoints_are_isolated() {
             .await
             .is_err()
     );
-    assert_eq!(cp.statement.format, 11);
+    assert_eq!(cp.statement.format, 12);
     assert_eq!(cp.statement.partition, Some(f.tuple("A")));
     // An authenticated row sealed with B's key still cannot claim B's partition for an A row.
     let mut wrong = f.write("A", 2, 5);

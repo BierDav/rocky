@@ -98,10 +98,6 @@ async fn a_sufficient_local_peer_is_the_only_dial_and_reports_the_skipped_issuer
                 Ok(())
             })
             .await?;
-            let link = b.network.read().await;
-            b.authors(Some(&*link.as_ref().ok_or("link")?.transport))
-                .await?;
-            drop(link);
             let dials = hub.dials_to("a");
             assert_eq!(completed_peers(&pass(&b).await?), 1);
             assert_eq!(hub.dials_to("a"), dials);
@@ -412,7 +408,6 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         let shared = command(&a, json!({"type":"partition_share","table":"items","values":values,"recipients":[b_key]})).await?;
         command(&b, json!({"type":"partition_install","table":"items","values":values,"envelope":shared["envelopes"][0]["envelope"]})).await?;
         command(&d, json!({"type":"partition_register","table":"items","values":values})).await?;
-        Box::pin(install_pseudonym(&a)).await?;
         command(&a, json!({"type":"sql","sql":"BEGIN"})).await?;
         let id = command(&a, json!({"type":"next_id","table":"items","partition_values":values})).await?["id"].clone();
         command(&a, json!({"type":"sql","sql":"INSERT INTO items(list,key,title,id) VALUES('only-custody','k','custody row',?)","values":[{"type":"integer","value":id}]})).await?;

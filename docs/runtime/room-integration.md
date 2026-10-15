@@ -96,15 +96,9 @@ statement or the commit. Whole-entity `@Update` and `@Upsert` of an existing
 row write its unchanged `id`, which is allowed; `REPLACE` of a natural key
 inserts a new `id` and deletes the old row.
 
-Ids are signed under the device's author for the table: a table pseudonym an
-issuer assigns once per device and table (`credentials.pseudonymRequest`,
-`assignPseudonym`, `installPseudonym`, see
-[author pseudonyms](credential-primitives.md#author-pseudonyms));
-reopening restores it. Kotlin `create` and `join` install writable tables'
-authors automatically. An issuer assigns its own; a member asks an issuer
-over the renewal protocol. `installAuthors()` explicitly retries missing or
-expired assignments, and member sync retries them too
-([SDK enrollment](sdk-enrollment.md#author-installation)).
+Ids use the number in the node credential. The node key signs every table;
+opening, joining and reopening need no table-author setup. A DAO allocates rows
+locally without contacting an issuer. See [node authors](credential-primitives.md#principal-ranges-and-node-authors).
 
 An entity whose table the schema marks
 [command-controlled](confirmed-tables.md) is read-only: its DAO reads the

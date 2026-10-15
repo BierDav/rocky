@@ -125,8 +125,18 @@ impl<A: RowApplication> EncryptedReplica<A> {
             &inner.config.revocations,
             now()?,
         )?;
+        if credentials.author_number().map_err(credential)?
+            != inner
+                .config
+                .credentials
+                .author_number()
+                .map_err(credential)?
+        {
+            return Err(denied("a node cannot change its author number"));
+        }
         inner.chain = Chain::new(credentials.clone())?;
         inner.config.credentials = credentials;
+        inner.node_author = Some(identity::NodeAuthor::new(&inner.config)?);
         let readable =
             |key: &KeyMaterial| grants.iter().any(|grant| readable_grant(grant, key.scope));
         inner.config.keys.retain(readable);

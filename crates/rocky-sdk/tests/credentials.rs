@@ -454,7 +454,6 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
                 .as_slice(),
         )?]
         .into(),
-        pseudonyms: Default::default(),
     };
     let statement_id = statement.id()?;
     saved["authority"]["rotation"] = json!({
@@ -545,7 +544,12 @@ fn issued(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    let capability = authority.issue(user, grants, (now, 3600, 300))?;
+    let capability = authority.issue(
+        user,
+        grants,
+        rocky_credentials::AuthorRange::new(4096, 5119)?,
+        (now, 3600, 300),
+    )?;
     Ok(Credentials {
         publisher: publisher_key.public_key(),
         manifest,

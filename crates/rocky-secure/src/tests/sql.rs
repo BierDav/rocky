@@ -185,6 +185,28 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         expires: u64,
     ) -> CredentialChain {
+        self.credentials_number_until(
+            node,
+            grants,
+            crate::tests::node_number(node.public_key()),
+            expires,
+        )
+    }
+    fn credentials_number(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        number: u32,
+    ) -> CredentialChain {
+        self.credentials_number_until(node, grants, number, crate::tests::lifetime().1)
+    }
+    fn credentials_number_until(
+        &self,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        number: u32,
+        expires: u64,
+    ) -> CredentialChain {
         let user = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
             manifest: self
@@ -199,6 +221,11 @@ impl Typed {
             expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                authors: Some(if kind == PrincipalKind::Node {
+                    rocky_credentials::AuthorRange::new(number, number).unwrap()
+                } else {
+                    rocky_credentials::AuthorRange::ALL
+                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 ..Default::default()
             })
@@ -232,7 +259,23 @@ impl Typed {
         grants: Vec<ResourceGrant>,
         keys: &[ResourceScope],
     ) -> EncryptedReplica<TypedRows> {
-        let author_grants = grants.clone();
+        self.open_number(
+            path,
+            node,
+            grants,
+            keys,
+            crate::tests::node_number(node.public_key()),
+        )
+        .await
+    }
+    async fn open_number(
+        &self,
+        path: &std::path::Path,
+        node: &PrivateKey,
+        grants: Vec<ResourceGrant>,
+        keys: &[ResourceScope],
+        number: u32,
+    ) -> EncryptedReplica<TypedRows> {
         let replica = EncryptedReplica::open(
             path,
             self.app(),
@@ -241,7 +284,7 @@ impl Typed {
                 manifest: self.manifest.clone(),
                 revocations: self.policy.clone(),
                 node: node.clone(),
-                credentials: self.credentials(node, grants),
+                credentials: self.credentials_number(node, grants, number),
                 keys: keys.iter().map(|scope| self.key(*scope)).collect(),
             },
         )
@@ -259,33 +302,6 @@ impl Typed {
             )
             .await
             .unwrap();
-        if self.schema.application == "secure-sql" || self.schema.application == "samples" {
-            for table in ["items", "salaries"] {
-                let material = rocky_core::commitment(table, node.as_bytes());
-                let number = u32::from_le_bytes(material[..4].try_into().unwrap()) & 0x7fff_ffff;
-                let number = number.max(1);
-                let scope = if table == "items" {
-                    self.items
-                } else {
-                    self.salaries
-                };
-                let grants: Vec<_> = author_grants
-                    .iter()
-                    .filter(|grant| grant.scope == scope)
-                    .cloned()
-                    .collect();
-                if !grants.iter().any(|grant| {
-                    grant
-                        .rights
-                        .iter()
-                        .any(|right| [Right::Insert, Right::Update, Right::Delete].contains(right))
-                }) {
-                    continue;
-                }
-                let (key, chain) = row_author_with_grants(self, node, table, number, grants);
-                replica.register_row_author(key, chain).await.unwrap();
-            }
-        }
         replica
     }
 }
@@ -1472,85 +1488,28 @@ fn identity_fixture() -> Typed {
         .unwrap();
     Typed::with_schema(publisher, schema)
 }
-fn row_author(
-    fixture: &Typed,
-    node: &PrivateKey,
-    table: &str,
-    number: u32,
-) -> (PrivateKey, CredentialChain) {
-    let grants = vec![fixture.writer(
-        if table == "items" {
-            fixture.items
-        } else {
-            fixture.salaries
-        },
-        table,
-    )];
-    row_author_with_grants(fixture, node, table, number, grants)
-}
-fn row_author_with_grants(
-    fixture: &Typed,
-    node: &PrivateKey,
-    table: &str,
-    number: u32,
-    grants: Vec<ResourceGrant>,
-) -> (PrivateKey, CredentialChain) {
-    let key = PrivateKey::from_bytes(&rocky_core::commitment(table, node.as_bytes()));
-    let assigner = PrivateKey::new();
-    let issued = crate::credentials::Authority {
-        publisher: &fixture.publisher,
-        manifest: fixture
-            .manifest
-            .verify(fixture.publisher.public_key())
-            .unwrap()
-            .hash(),
-    }
-    .issue_terms(
-        assigner.public_key(),
-        grants.clone(),
-        (1, Some(crate::credentials::AuthorRange::ALL)),
-        crate::tests::validity(),
-    )
-    .unwrap();
-    let credentials = CredentialChain(vec![issued])
-        .assign(
-            &assigner,
-            key.public_key(),
-            number,
-            node.public_key(),
-            grants,
-            u64::MAX,
-            (0, u64::MAX, 0),
-        )
-        .unwrap();
-    (key, credentials)
-}
-
 #[tokio::test]
 async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_and_reopen() {
     let fixture = identity_fixture();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("identities.sqlite");
     let node = PrivateKey::new();
-    let (key, credentials) = row_author(&fixture, &node, "items", 17);
+    let key = node.clone();
     let replica = fixture
-        .open(
+        .open_number(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            17,
         )
         .await;
-    replica
-        .register_row_author(key.clone(), credentials.clone())
-        .await
-        .unwrap();
-    // A registered row author keeps its chain stored before any operation
-    // names it.
-    let author_chain = crate::wire::Chain::new(credentials.clone())
-        .unwrap()
-        .digest();
-    assert_eq!(replica.chain_census().await, ([author_chain].into(), 0));
+    // The node chain is stored with its first operation.
+    let author_chain =
+        crate::wire::Chain::new(replica.inner.lock().await.config.credentials.clone())
+            .unwrap()
+            .digest();
+    assert_eq!(replica.chain_census().await, (BTreeSet::new(), 0));
     let session_sql = sql(&replica, &[fixture.items]).await;
     assert!(
         session_sql
@@ -1583,7 +1542,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 8);
+    assert_eq!(operation.header.extensions.row_format, 9);
     assert_eq!(operation.header.extensions.chain, author_chain);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
@@ -1594,14 +1553,14 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     replica.audit(fixture.items).await.unwrap();
     drop(replica);
     let replica = fixture
-        .open(
+        .open_number(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            17,
         )
         .await;
-    replica.register_row_author(key, credentials).await.unwrap();
     let session_sql = sql(&replica, &[fixture.items]).await;
     session_sql.run("BEGIN", vec![]).await.unwrap();
     assert_eq!(session_sql.next_id("items").await.unwrap().sequence(), 2);
@@ -1609,28 +1568,19 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
 }
 
 #[tokio::test]
-async fn identity_reservations_follow_savepoints_and_distinct_table_signers_form_one_bundle() {
+async fn identity_reservations_follow_savepoints_and_one_node_signer_form_one_bundle() {
     let fixture = identity_fixture();
     let directory = tempfile::tempdir().unwrap();
     let node = PrivateKey::new();
     let replica = fixture
-        .open(
+        .open_number(
             &directory.path().join("writer.sqlite"),
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            11,
         )
         .await;
-    let (items_key, items_chain) = row_author(&fixture, &node, "items", 11);
-    let (salaries_key, salaries_chain) = row_author(&fixture, &node, "salaries", 12);
-    replica
-        .register_row_author(items_key.clone(), items_chain)
-        .await
-        .unwrap();
-    replica
-        .register_row_author(salaries_key.clone(), salaries_chain)
-        .await
-        .unwrap();
     let writer = sql(&replica, &[fixture.items, fixture.salaries]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
     let item = writer.next_id("items").await.unwrap();
@@ -1667,10 +1617,7 @@ async fn identity_reservations_follow_savepoints_and_distinct_table_signers_form
         .iter()
         .map(|frame| frame.operation().unwrap().header.public_key)
         .collect();
-    assert_eq!(
-        signers,
-        [items_key.public_key(), salaries_key.public_key()].into()
-    );
+    assert_eq!(signers, [node.public_key()].into());
     let peer = fixture
         .open(
             &directory.path().join("peer.sqlite"),
@@ -1733,18 +1680,15 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     let directory = tempfile::tempdir().unwrap();
     let node = PrivateKey::new();
     let replica = fixture
-        .open(
+        .open_number(
             &directory.path().join("writer.sqlite"),
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            31,
         )
         .await;
-    let (key, chain) = row_author(&fixture, &node, "items", 31);
-    replica
-        .register_row_author(key.clone(), chain)
-        .await
-        .unwrap();
+    let key = node.clone();
     replica.inject_failure(0, 1).await;
     let writer = sql(&replica, &[fixture.items]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
@@ -1858,7 +1802,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 11);
+    assert_eq!(signed.statement.format, 12);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 
@@ -1879,15 +1823,14 @@ async fn natural_key_relink_converges_and_old_identity_edits_never_touch_replace
     let mut replicas = Vec::new();
     for (index, node) in nodes.iter().enumerate() {
         let replica = fixture
-            .open(
+            .open_number(
                 &directory.path().join(format!("{index}.sqlite")),
                 node,
                 fixture.full(),
                 &[fixture.items, fixture.salaries],
+                41 + index as u32,
             )
             .await;
-        let (key, chain) = row_author(&fixture, node, "items", 41 + index as u32);
-        replica.register_row_author(key, chain).await.unwrap();
         replicas.push(replica);
     }
     let a = sql(&replicas[0], &[fixture.items]).await;
@@ -2035,15 +1978,14 @@ async fn multi_frame_relinks_verify_the_final_sql_projection() {
     let directory = tempfile::tempdir().unwrap();
     let node = PrivateKey::new();
     let replica = fixture
-        .open(
+        .open_number(
             &directory.path().join("many.sqlite"),
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            55,
         )
         .await;
-    let (key, chain) = row_author(&fixture, &node, "items", 55);
-    replica.register_row_author(key, chain).await.unwrap();
     let writer = sql(&replica, &[fixture.items]).await;
     writer.run("BEGIN", vec![]).await.unwrap();
     for n in 0..20 {
@@ -2144,15 +2086,14 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
     let path = directory.path().join("indexed.sqlite");
     let node = PrivateKey::new();
     let replica = fixture
-        .open(
+        .open_number(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            71,
         )
         .await;
-    let (key, chain) = row_author(&fixture, &node, "items", 71);
-    replica.register_row_author(key, chain).await.unwrap();
     let writer = sql(&replica, &[fixture.items]).await;
     for title in ["old", "replacement"] {
         writer.run("BEGIN", vec![]).await.unwrap();
@@ -2192,11 +2133,12 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
     drop(writer);
     drop(replica);
     let reopened = fixture
-        .open(
+        .open_number(
             &path,
             &node,
             fixture.full(),
             &[fixture.items, fixture.salaries],
+            71,
         )
         .await;
     reopened.rebuild_projection(fixture.items).await.unwrap();
@@ -2239,5 +2181,165 @@ async fn incarnation_key_index_reopens_and_tracks_rebuild_and_eviction() {
         .await
         .unwrap()
         .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes() {
+    let fixture = identity_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let principal = PrivateKey::new();
+    let nodes = [PrivateKey::new(), PrivateKey::new()];
+    let root = crate::credentials::Authority {
+        publisher: &fixture.publisher,
+        manifest: fixture.app().manifest().hash(),
+    }
+    .issue_terms(
+        principal.public_key(),
+        fixture.full(),
+        (
+            1,
+            Some(crate::credentials::AuthorRange::new(100, 110).unwrap()),
+        ),
+        crate::tests::validity(),
+    )
+    .unwrap();
+    let prefix = CredentialChain(vec![root]);
+    let open = async |name: &str, index: usize, number: u32| {
+        let replica = EncryptedReplica::open(
+            directory.path().join(name),
+            fixture.app(),
+            SecureConfig {
+                publisher: fixture.publisher.public_key(),
+                manifest: fixture.manifest.clone(),
+                revocations: fixture.policy.clone(),
+                node: nodes[index].clone(),
+                credentials: prefix
+                    .clone()
+                    .complete(&principal, nodes[index].public_key(), number)
+                    .unwrap(),
+                keys: [fixture.items, fixture.salaries]
+                    .into_iter()
+                    .map(|scope| fixture.key(scope))
+                    .collect(),
+            },
+        )
+        .await
+        .unwrap();
+        replica
+            .install_tables(
+                fixture.schema.clone(),
+                fixture.domain,
+                [
+                    ("items".into(), fixture.items.encryption),
+                    ("salaries".into(), fixture.salaries.encryption),
+                ]
+                .into(),
+            )
+            .await
+            .unwrap();
+        replica
+    };
+    let first = open("first.sqlite", 0, 100).await;
+    let second = open("second.sqlite", 1, 101).await;
+    let mut ids = Vec::new();
+    for (index, replica) in [&first, &second].into_iter().enumerate() {
+        let writer = sql(replica, &[fixture.items, fixture.salaries]).await;
+        writer.run("BEGIN", vec![]).await.unwrap();
+        let item = writer.next_id("items").await.unwrap();
+        let salary = writer.next_id("salaries").await.unwrap();
+        assert_eq!(item.author(), 100 + index as u32);
+        assert_eq!(salary.author(), item.author());
+        writer
+            .run(
+                "INSERT INTO items(key,title,id) VALUES(?,'item',?)",
+                vec![text(&index.to_string()), SqlValue::Integer(item.integer())],
+            )
+            .await
+            .unwrap();
+        writer
+            .run(
+                "INSERT INTO salaries(amount,id) VALUES(5,?)",
+                vec![SqlValue::Integer(salary.integer())],
+            )
+            .await
+            .unwrap();
+        let committed = writer
+            .commit([200 + index as u8; 32])
+            .await
+            .unwrap()
+            .committed
+            .unwrap();
+        assert_eq!(committed.frames.len(), 2);
+        for frame in committed.frames {
+            let operation = frame.operation().unwrap();
+            assert_eq!(operation.header.public_key, nodes[index].public_key());
+            assert_eq!(operation.header.extensions.author, Some(item.author()));
+            if index == 0 {
+                second.receive(frame).await.unwrap();
+            } else {
+                first.receive(frame).await.unwrap();
+            }
+        }
+        ids.push((item, salary));
+        for scope in [fixture.items, fixture.salaries] {
+            assert_eq!(
+                replica.checkpoint(scope).await.unwrap().signer(),
+                nodes[index].public_key()
+            );
+        }
+    }
+    assert_ne!(ids[0].0, ids[1].0);
+    assert_ne!(ids[0].1, ids[1].1);
+    assert_eq!(
+        select(
+            &sql(&first, &[fixture.items]).await,
+            "SELECT count(*) FROM items"
+        )
+        .await,
+        vec![vec![SqlValue::Integer(2)]]
+    );
+    // A second authentic leaf for the same node cannot change its number.
+    let forged = open("conflicting.sqlite", 0, 102).await;
+    let writer = sql(&forged, &[fixture.items]).await;
+    writer.run("BEGIN", vec![]).await.unwrap();
+    let id = writer.next_id("items").await.unwrap();
+    writer
+        .run(
+            "INSERT INTO items(key,title,id) VALUES('conflict','item',?)",
+            vec![SqlValue::Integer(id.integer())],
+        )
+        .await
+        .unwrap();
+    let committed = writer.commit([202; 32]).await.unwrap().committed.unwrap();
+    let conflicting_checkpoint = forged.checkpoint(fixture.items).await.unwrap();
+    drop(second);
+    let second = open("second.sqlite", 1, 101).await;
+    assert!(
+        second
+            .begin_rebootstrap(conflicting_checkpoint)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different author numbers")
+    );
+    assert!(
+        second
+            .receive(committed.frames[0].clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different author numbers")
+    );
+    let changed = prefix
+        .complete(&principal, nodes[0].public_key(), 102)
+        .unwrap();
+    assert!(
+        first
+            .renew_credentials(changed)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cannot change")
     );
 }

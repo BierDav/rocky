@@ -54,12 +54,8 @@ async fn partition(device: &Device, kind: &str) -> Value {
         .await
 }
 async fn write_group(device: &Device, prefix: &str) {
-    let scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
-    for table in ["parts", "labels", "attachments"] {
-        common::identity::prepare(&scope, table, &|request| device.call(request))
-            .await
-            .unwrap();
-    }
+    let _scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
+
     device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
     for table in ["parts", "labels", "attachments"] {
         let id = device
@@ -190,10 +186,8 @@ async fn two_revoked_list_readers_open_the_opposite_sibling_but_not_the_supersed
 -> Result<(), Failure> {
     const LIST_SCHEMA: &str = r#"{"application":"exposure","version":1,"format":6,"tables":[{"name":"parts","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
     async fn write(device: &Device, key: &str) {
-        let scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
-        common::identity::prepare(&scope, "parts", &|request| device.call(request))
-            .await
-            .unwrap();
+        let _scope: Value = serde_json::from_str(&device.database.scope()).unwrap();
+
         device.ok(json!({"type":"sql","sql":"BEGIN"})).await;
         let id = device
             .ok(json!({"type":"next_id","table":"parts","partition_values":values()}))

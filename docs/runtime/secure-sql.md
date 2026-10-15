@@ -54,11 +54,8 @@ for format and access-change rules.
 The identity contract is in [row identity](logical-schema.md#row-identity).
 Secure specifics:
 
-- After each open a writer registers the externally held table pseudonym with
-  `EncryptedReplica::register_row_author(key, credentials)`. The chain binds
-  the signing key to one table and author number within the device's grants.
-  A reopened SDK installs only pseudonyms valid for its current manifest,
-  policy and period; refresh the pseudonym after a generation or policy change.
+- A numbered node credential is installed with `SecureConfig`. Its node key
+  signs all granted tables; no table key registration is needed after open.
 - `SecureSql::next_id(table)` (`next_id_partition` for partitioned tables)
   reserves a `RowIdentity` inside an active transaction; insert its
   `integer()` in `id`. Local inserts must continue the own creation log
@@ -66,8 +63,8 @@ Secure specifics:
   tables too.
 - Frames bind the author number and row format in the signed extension and
   encryption AAD. A bundle seals each member's signing key with its opening,
-  so one transaction may use a different pseudonym per table.
-- An insert must bind its `id`'s author to the frame's authenticated pseudonym
+  and every member is signed by the node.
+- An insert must bind its `id`'s author to the frame's authenticated node number
   and exceed the permanent sequence mark for that author and scope. Duplicates
   settle first; refused frames and rolled-back transactions never advance the
   mark. Marks survive pruning, eviction, rebuild and reopen, and checkpoints
@@ -215,7 +212,7 @@ SDK commits [migrations](generations.md#migrations) this way
 - Identity: three replicas with reversed delivery, an N:M pair unlinked and
   relinked in one transaction, concurrent deletion, a late edit to the old
   `id` and checkpoint bootstrap agree; a wrong author number and a reused
-  sequence are refused. The SDK consumer regression covers pseudonym
-  assignment, allocation, `RETURNING` and reopen with the next sequence.
+  sequence are refused. The SDK consumer regression covers node credential
+  installation, allocation, `RETURNING` and reopen with the next sequence.
 
 Not qualified: row-level read policies and expiry while a transaction is open.

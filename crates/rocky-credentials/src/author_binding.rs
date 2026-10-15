@@ -1,4 +1,4 @@
-//! Portable author provenance without partition selectors or device bindings.
+//! Portable author provenance without partition selectors or extra signing keys.
 use crate::{
     AuthorRange, Capability, Error, PrivateKey, PublicKey, Signature, denied, signing_bytes,
 };
@@ -29,7 +29,7 @@ impl AuthorBinding {
             .chain(extended.partitions.iter().map(|grant| grant.table))
             .collect();
         let mut binding = Self {
-            version: 1,
+            version: 2,
             manifest: capability.manifest,
             issuer: issuer.public_key(),
             subject: capability.subject,
@@ -43,7 +43,7 @@ impl AuthorBinding {
     }
     fn bytes(&self) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.author-binding.v1",
+            "rocky.credentials.author-binding.v2",
             &(
                 self.version,
                 self.manifest,
@@ -74,14 +74,13 @@ impl AuthorBinding {
                 .authors
                 .ok_or_else(|| denied("author binding lacks range"))?;
             AuthorRange::new(assigned.first, assigned.last)?;
-            if binding.version != 1
+            if binding.version != 2
                 || binding.manifest != manifest
                 || binding.issuer != issuer
                 || !range.includes(&assigned)
                 || !binding.tables.contains(&table)
                 || !issuer.verify(&binding.bytes()?, &binding.signature)
-                || (index + 1 < chain.len()
-                    && matches!(binding.kind, PrincipalKind::Node | PrincipalKind::Pseudonym))
+                || (index + 1 < chain.len() && binding.kind == PrincipalKind::Node)
             {
                 return Err(denied("invalid portable author binding"));
             }
@@ -89,10 +88,7 @@ impl AuthorBinding {
             range = assigned;
         }
         let leaf = &chain[chain.len() - 1];
-        if leaf.kind != PrincipalKind::Pseudonym
-            || issuer != signer
-            || range.single() != Some(author)
-        {
+        if leaf.kind != PrincipalKind::Node || issuer != signer || range.single() != Some(author) {
             return Err(denied("creation proof author does not own identity"));
         }
         Ok(())

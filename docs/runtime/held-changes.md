@@ -43,8 +43,7 @@ In the activation transaction the device:
 ## Void records
 
 For each log, the device signs `rocky.void.v1` over the held frames' signed
-headers, at most 64 per record, with the log's key: the node key or a table
-pseudonym. A pseudonym registered after open signs its logs' records then.
+headers, at most 64 per record, with the node key that authored them.
 
 A receiver admits a record whose headers verify under one author and scope
 and whose signature verifies, for a scope it holds. It refuses the whole

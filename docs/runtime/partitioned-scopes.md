@@ -52,7 +52,7 @@ including NOCASE and RTRIM spellings, independent of their column identities.
 The address binds the domain and group name in slot declaration order.
 [Decision 0037](../decisions/0037-partition-groups.md) pins its encoding.
 
-Table scopes, logs, checkpoints, grants and pseudonyms stay per table; the key
+Table scopes, logs, checkpoints, and grants stay per table; the key
 comes from the [group secret](#group-secrets). Native partition-complete
 `LatestWins` indexes resolve per partition;
 [mergeable constraints](mergeable-constraints.md) describes their identities and
@@ -180,7 +180,7 @@ derived keys and subscriptions.
 
 ## IDs and transactions
 
-Install the table pseudonym through the credential APIs before inserting.
+The numbered node credential signs partitioned inserts under the node key.
 `nextId(table, partitionValues)` and SQL
 `SELECT rocky_next_id('items', ?)` reserve the next ID in the active transaction.
 With multiple partition columns, supply one argument per column. Rollback

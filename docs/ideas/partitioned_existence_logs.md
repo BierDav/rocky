@@ -28,7 +28,7 @@ Some shapes need a reference into a different partitioning:
 
 A partitioned table may declare `existence_log`; each partition has its own
 log. The record already has an optional authenticated tuple
-(`EXISTENCE_FORMAT` 2); puppets, support bookkeeping and resolution need the
+(`EXISTENCE_FORMAT` 3); puppets, support bookkeeping and resolution need the
 partition-aware identities of that scope.
 
 ### Liveness grant
@@ -51,8 +51,8 @@ Unpartitioned logs keep the existing rule.
 
 ### Authors
 
-Once [phase 13](../features_09/13-identities-and-domain-credentials.md)
-removes pseudonyms, each record names the node that wrote it, linking its
+Since [phase 13](../features_09/13-identities-and-domain-credentials.md),
+each record names the node that wrote it, linking its
 activity across partitions for readers of a log. Data that must not be
 linked belongs in a separate domain.
 

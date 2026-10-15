@@ -401,7 +401,7 @@ async fn a_started_connector_is_a_borrowed_network() -> Result<(), Failure> {
 }
 
 #[tokio::test]
-async fn reopened_member_resolves_saved_routes_without_persisting_foreign_node_keys()
+async fn reopened_member_resolves_saved_routes_without_foreign_node_keys_in_metadata()
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
@@ -423,6 +423,13 @@ async fn reopened_member_resolves_saved_routes_without_persisting_foreign_node_k
             let path = entry?.path();
             if path.is_dir() {
                 directories.push(path);
+                continue;
+            }
+            // Signed node chains and durable number bindings belong in the database.
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("rocky.sqlite"))
+            {
                 continue;
             }
             let bytes = std::fs::read(&path)?;

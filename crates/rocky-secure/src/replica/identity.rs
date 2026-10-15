@@ -1,13 +1,14 @@
-//! Table author keys and transaction-local identity reservations.
+//! Node author credentials and transaction-local identity reservations.
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS secure_node_authors(node BLOB PRIMARY KEY,number INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_row_keys(scope BLOB NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_row_keys_key ON secure_row_keys(scope,key,row)",
     "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=OLD.scope AND row=OLD.row; END",
 ];
 
-pub(super) struct RowAuthor {
+pub(super) struct NodeAuthor {
     pub(super) key: PrivateKey,
     pub(super) credentials: CredentialChain,
     /// `credentials` with the digest this author's frames name.
@@ -15,8 +16,19 @@ pub(super) struct RowAuthor {
     pub(super) number: u32,
 }
 
+impl NodeAuthor {
+    pub(super) fn new(config: &SecureConfig) -> Result<Self, Error> {
+        Ok(Self {
+            key: config.node.clone(),
+            credentials: config.credentials.clone(),
+            chain: Chain::new(config.credentials.clone())?,
+            number: config.credentials.author_number().map_err(credential)?,
+        })
+    }
+}
+
 impl<A: RowApplication> EncryptedReplica<A> {
-    /// Registers the key of the local node credential's signing alias.
+    /// Registers the local node key for credential-bound control signatures.
     pub async fn register_credential_signer(&self, key: PrivateKey) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         inner
@@ -32,82 +44,40 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.credential_signer = Some(key);
         Ok(())
     }
-    /// Installs an externally held table pseudonym. Keys are not persisted;
-    /// register them again after open or credential renewal.
-    pub async fn register_row_author(
-        &self,
-        key: PrivateKey,
-        credentials: CredentialChain,
-    ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
-        let (grants, partitions) = credentials
-            .verify_selectors(
-                inner.config.publisher,
-                inner.manifest,
-                key.public_key(),
-                &inner.config.revocations,
-                now()?,
-            )
-            .map_err(credential)?;
-        let leaf = credentials
-            .0
-            .last()
-            .ok_or_else(|| denied("missing pseudonym credential"))?;
-        let number = credentials
-            .authors()
-            .map_err(credential)?
-            .and_then(|range| range.single())
-            .ok_or_else(|| denied("pseudonym requires one author number"))?;
-        let table = grants
-            .first()
-            .map(|grant| grant.scope.table)
-            .or_else(|| partitions.first().map(|grant| grant.table))
-            .ok_or_else(|| denied("pseudonym requires a table"))?;
-        let (local, local_partitions) = inner
-            .config
-            .credentials
-            .verify_selectors(
-                inner.config.publisher,
-                inner.manifest,
-                inner.config.node.public_key(),
-                &inner.config.revocations,
-                now()?,
-            )
-            .map_err(credential)?;
-        if leaf.capability.kind != rocky_core::PrincipalKind::Pseudonym
-            || !inner.tables.contains(&table)
-            || grants.iter().any(|grant| {
-                grant.scope.table != table || !local.iter().any(|held| held.includes(grant))
-            })
-            || partitions.iter().any(|grant| {
-                grant.table != table || !local_partitions.iter().any(|held| held.includes(grant))
-            })
-        {
-            return Err(denied("row author exceeds this device's authority"));
-        }
-        // The stored chain is kept while the author stays registered.
-        let chain = Chain::new(credentials.clone())?;
-        if !inner.chain_kept(chain.digest()).await? {
-            transaction!(inner, |inner| inner.keep_chain(&chain).await)?;
-        }
-        inner.row_authors.insert(
-            table,
-            RowAuthor {
-                key,
-                credentials,
-                chain,
-                number,
-            },
-        );
-        // Held frames of this author's logs are voided once it signs.
-        if inner.unsigned_voids().await? {
-            transaction!(inner, |inner| inner.sign_voids().await)?;
-        }
-        drop(inner);
-        self.settle().await
-    }
 }
 impl<A: RowApplication> Inner<A> {
+    /// A node's number cannot change across renewal, scopes, or restart.
+    pub(super) async fn bind_node_author(&self, chain: &CredentialChain) -> Result<(), Error> {
+        let leaf = chain
+            .0
+            .last()
+            .ok_or_else(|| denied("node credential missing"))?;
+        let node = leaf.capability.subject;
+        let number = chain.author_number().map_err(credential)?;
+        let mut stored = self
+            .conn
+            .query(
+                "SELECT number FROM secure_node_authors WHERE node=?",
+                [node.as_bytes().to_vec()],
+            )
+            .await?;
+        if let Some(row) = stored.next().await? {
+            if row.get::<i64>(0)? != i64::from(number) {
+                return Err(denied("a node cannot claim different author numbers"));
+            }
+        } else {
+            self.conn
+                .execute(
+                    "INSERT INTO secure_node_authors VALUES(?,?)",
+                    vec![
+                        crate::sqlite::Value::Blob(node.as_bytes().to_vec()),
+                        crate::sqlite::Value::Integer(i64::from(number)),
+                    ],
+                )
+                .await?;
+        }
+        Ok(())
+    }
     pub(super) fn storage_row(&self, change: &RowChange) -> Result<Commitment, Error> {
         Ok(
             match self

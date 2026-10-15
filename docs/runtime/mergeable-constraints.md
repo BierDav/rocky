@@ -127,7 +127,7 @@ anything that must never be violated stay [strong commands](typed-commands.md).
 A table declared with an existence log (`existence_log`, Kotlin
 `existenceLog = true`, also in an import overlay) may be referenced from
 another reader scope. Each row creation and deletion is signed by the table
-pseudonym into a log beside the sealed one, and that log alone decides whether
+node key into a log beside the sealed one, and that log alone decides whether
 such a row is alive, on holders too. A device holding only the child keeps a
 local read-only puppet (`row_kind = 1`) and virtual rows (`row_kind = 2`) so
 the real foreign key holds; reads never return them, and a `LEFT JOIN` shows
@@ -136,7 +136,7 @@ NULL for a puppet's columns. Existence-log tables, and parents a puppet's
 
 **Exposure.** Every authenticated device of the domain can read the log
 without the scope key. It reveals the row count, creation and deletion times,
-each `id` and the acting pseudonym; never column values. Do not log a table
+each `id` and the acting node; never column values. Do not log a table
 whose count, timing or authorship is sensitive; keep such parents and children
 in one scope or put outside parties in their own domain. Setup, sync and limits
 are in [existence logs](existence-logs.md).

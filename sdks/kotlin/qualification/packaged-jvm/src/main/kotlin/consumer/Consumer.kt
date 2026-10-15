@@ -33,14 +33,6 @@ private suspend fun credentialPrimitives(root: File) {
             issuer.credentials.grant(keys, all, delegations = 2, authors = 2),
         ).also { executor = it }
         check(!x.isIssuer)
-        val asked = x.credentials.pseudonymRequest("items")
-        val credential = issuer.credentials.assignPseudonym(asked)
-        val author = x.credentials.installPseudonym(credential)
-        // The registry uses author 1; the delegate's range reserves 2 and 3.
-        check(author == AuthorPseudonym("items", 4))
-        check(x.credentials.installPseudonym(issuer.credentials.assignPseudonym(asked)) == author)
-        check(issuer.credentials.pseudonymOwner(credential).node == x.session().node)
-        check(runCatching { x.credentials.pseudonymOwner(credential) }.exceptionOrNull() is RockyException)
         val delegated = Credentials.prepare(File(root, "delegate"))
         val writes = listOf(Grant("items", setOf(Right.Read, Right.Insert, Right.Custody)))
         val d = RockyDatabase.install(
@@ -49,8 +41,12 @@ private suspend fun credentialPrimitives(root: File) {
             x.credentials.delegate(delegated, writes, authors = 1),
         ).also { delegate = it }
         check(!d.isIssuer)
-        // Delegating one author reserves 2; x assigns the next free number, 3.
-        check(d.credentials.installPseudonym(x.credentials.assignPseudonym(d.credentials.pseudonymRequest("items"))) == AuthorPseudonym("items", 3))
+        // The principal keeps 2 for this node and delegates 3.
+        d.write {
+            val id = nextId("items")
+            check(id ushr 32 == 3L)
+            execute("INSERT INTO items(id,title) VALUES(?, 'delegated')", id)
+        }
     } finally {
         delegate?.close()
         executor?.close()
@@ -87,9 +83,6 @@ private suspend fun groupedLists(root: File) {
     }
     val db = RockyDatabase.local(root, shopping)
     try {
-        for (table in listOf("lists", "categories", "items")) {
-            db.credentials.installPseudonym(db.credentials.assignPseudonym(db.credentials.pseudonymRequest(table)))
-        }
         val list = db.partitions.next("lists").getValue("id").jsonPrimitive.content.toLong()
         val category = db.write {
             check(nextId("lists") == list)
@@ -136,7 +129,6 @@ fun main(args: Array<String>) = runBlocking {
         a.observeStatus().first { it.data.revision > revision }
     }
     // The issuer assigns its own author; inserts are signed under it.
-    a.credentials.installPseudonym(a.credentials.assignPseudonym(a.credentials.pseudonymRequest("items")))
     val action = handle(1)
     suspend fun apples() = b.write(action) { execute("INSERT INTO items(id, title) VALUES(?, ?)", nextId("items"), "apples") }
     apples()
@@ -229,7 +221,6 @@ fun main(args: Array<String>) = runBlocking {
     val moving = RockyDatabase.local(File(root, "moves"), moveSchema)
     try {
         for (partition in listOf("A", "B")) moving.partitions.create("rows", JsonArray(listOf(text(partition))))
-        moving.credentials.installPseudonym(moving.credentials.assignPseudonym(moving.credentials.pseudonymRequest("rows")))
         var id = 0L
         moving.write {
             id = nextId("rows", "A")

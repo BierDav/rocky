@@ -57,7 +57,7 @@ Start at `crates/rocky-core/src/lib.rs`.
 Verifies and issues credentials without a database or endpoint: the signed
 manifest, capability chain and the mergeable set of signed revocation
 statements ([revocations](runtime/revocations.md)), the
-distinct identities, raw grants and chain delegation, author pseudonyms and range verification,
+distinct identities, raw grants and chain delegation, node author numbers and principal range verification,
 grant profiles built on
 raw grants with read and write rights,
 `Authority` issuance, the `KeyProvider`
@@ -270,8 +270,8 @@ typed secure tables, enrollment with grant profiles, the replicated
 [issuer registry](runtime/issuer-registry.md), renewal,
 revocation statements with key rotation and issuer tombstones, envelope delivery
 from its outbox in `identity.json` and a mailbox's deposits
-([decision 0054](decisions/0054-envelope-delivery.md)), supplied credentials, durable pseudonym assignment
-and per-table signing keys, the `SecretStore` key
+([decision 0054](decisions/0054-envelope-delivery.md)), supplied credentials, principal author ranges
+and numbered node credentials, the `SecretStore` key
 provider, contact records and bounded live-link sync with any admitted peer
 ([SDK enrollment](runtime/sdk-enrollment.md)). Its transports are TCP, the
 in-process hub and the chunk adapter for transports defined outside Rust;

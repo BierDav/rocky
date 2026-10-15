@@ -283,11 +283,16 @@ async fn a_delegate_never_holds_more_than_its_delegator() -> Result<(), Failure>
     assert!(mutate(&d, 2, delete, json!({"id": eggs})).await.is_err());
     d.sync().await.map_err(|e| e.to_string())?;
     assert_eq!(rows(&a, "SELECT title FROM items").await, [["Eggs"]]);
+    // Reopening the delegator preserves its recipient range for later grants.
+    s.close().await;
+    let s = Device::new(Database::open(open(&root.join("s"), &hub, "s"))?)?;
     // An issuer renews no delegated chain; the delegator delegates again.
     assert!(d.call(json!({"type": "renew"})).await.is_err());
     let narrower = json!([{"scope": "items", "rights": ["read", "custody"]}]);
     let renewed = s.ok(delegate(narrower.clone(), json!({}))).await["supplied"].clone();
-    let status = d.ok(json!({"type": "install", "supplied": renewed})).await;
+    let renewed = d.ok(json!({"type": "install", "supplied": renewed})).await;
+    assert_eq!(renewed["author"], status["author"]);
+    let status = renewed;
     // Raw grants that are exactly a starter profile are shown as one.
     assert_eq!(
         status["profile"],

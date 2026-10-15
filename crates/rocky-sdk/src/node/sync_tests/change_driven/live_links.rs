@@ -1156,7 +1156,6 @@ async fn learn_revocation(node: &Node, peer: PublicKey) -> Result<(), Failure> {
             nodes: [rocky_credentials::PeerId::of(peer)].into(),
             users: Default::default(),
             capabilities: Default::default(),
-            pseudonyms: Default::default(),
         },
         &publisher,
         &issuer,

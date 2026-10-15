@@ -27,8 +27,8 @@ helpers over the same handles, attaching iroh and automatic sync by default.
 
 `RockySession` implements `RuntimePort`: `Row` reads and `write { }` SQL
 transactions without an ORM. Schemas come from `schema { }` or `schemaFromRoom`;
-an insert takes its `id` from `nextId(table)` and needs the device's author
-for that table. `session.commands` is the `CommandPort`; only execution and
+an insert takes its `id` from `nextId(table)` using the number in the node
+credential. `session.commands` is the `CommandPort`; only execution and
 delivery need the coordinator and optional handlers passed as `CommandRuntime`.
 `DevelopmentCoordinator` is an in-memory process fixture;
 `ServiceCoordinator(trustBundle)` pins a provider or self-hosted service

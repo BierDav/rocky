@@ -107,43 +107,51 @@ impl Node {
         let registry = self.registry().await?;
         let settings = self.settings.lock().await.clone();
         let delegations: u8 = request["delegations"].as_u64().unwrap_or(1).try_into()?;
-        let terms = (delegations, None);
         let validity = (now()?, settings.ttl, 300);
         if settings.revoked_device(&device.node, &registry) {
             return Err(refused("the device was revoked"));
         }
-        let chain = if kind == "partition_delegate" {
-            settings.credentials.delegable().delegate_partitions(
-                &PrivateKey::from_bytes(&self.vault.get("user")?),
-                device.user,
-                rocky_core::PrincipalKind::User,
-                vec![],
-                grants.clone(),
-                terms,
-                validity,
-            )?
-        } else {
-            if !settings.issuer() {
-                return Err("partition grant requires an issuer".into());
-            }
-            let issuer = PrivateKey::from_bytes(&self.vault.get("publisher")?);
-            CredentialChain(vec![
-                Authority {
-                    publisher: &issuer,
-                    manifest: self.domain().manifest().hash(),
+        if settings.issuer() {
+            settings.holder_changes(&self.vault, &device, &grants, delegations, &registry)?;
+        }
+        let chain = self
+            .configure(|settings| {
+                if kind != "partition_delegate" && !settings.issuer() {
+                    return Err("partition grant requires an issuer".into());
                 }
-                .issue_partition_terms(
-                    device.user,
-                    vec![],
-                    grants.clone(),
-                    terms,
-                    validity,
-                )?,
-            ])
-        };
+                let authors = settings.reserve_authors(device.user, Some(&registry), None)?;
+                let terms = (delegations, Some(authors));
+                if kind == "partition_delegate" {
+                    Ok(settings.credentials.delegable().delegate_partitions(
+                        &PrivateKey::from_bytes(&self.vault.get("user")?),
+                        device.user,
+                        rocky_core::PrincipalKind::User,
+                        vec![],
+                        grants.clone(),
+                        terms,
+                        validity,
+                    )?)
+                } else {
+                    let issuer = PrivateKey::from_bytes(&self.vault.get("publisher")?);
+                    Ok(CredentialChain(vec![
+                        Authority {
+                            publisher: &issuer,
+                            manifest: self.domain().manifest().hash(),
+                        }
+                        .issue_partition_terms(
+                            device.user,
+                            vec![],
+                            grants.clone(),
+                            terms,
+                            validity,
+                        )?,
+                    ]))
+                }
+            })
+            .await?;
         // An issuer records the holder durably before the chain leaves it.
         if settings.issuer() {
-            Box::pin(self.record_holder(&device, &grants, delegations)).await?;
+            Box::pin(self.record_holder(&device, &grants, delegations, &chain)).await?;
         }
         let supplied = crate::Supplied {
             epoch_statements: BTreeMap::new(),

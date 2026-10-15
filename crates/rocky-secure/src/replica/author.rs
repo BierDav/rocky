@@ -88,13 +88,7 @@ impl<A: RowApplication> Inner<A> {
                     .map_err(|message| denied(&message))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let signer = if identity_aware.iter().any(Option::is_some) {
-            Some(self.row_authors.get(&scope.table).ok_or_else(|| {
-                denied("register a table pseudonym before issuing row identities")
-            })?)
-        } else {
-            None
-        };
+        let signer = self.node_author.as_ref();
         let signing_key = signer.map_or(&self.config.node, |author| &author.key);
         let credentials = signer.map_or(&self.config.credentials, |author| &author.credentials);
         let chain = signer.map_or(&self.chain, |author| &author.chain).clone();
@@ -127,7 +121,9 @@ impl<A: RowApplication> Inner<A> {
             None => self.local_grants(time)?.to_vec(),
         };
         if let Some(author) = signer {
-            if identity_aware.iter().any(Option::is_none) {
+            if identity_aware.iter().any(Option::is_some)
+                && identity_aware.iter().any(Option::is_none)
+            {
                 return Err(denied("mixed row identity formats"));
             }
             let mut inserted: Vec<_> = writes

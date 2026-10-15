@@ -125,11 +125,10 @@ class RockyDatabase private constructor(
             }
         }
 
-        /** A new installation writes at once: its authors are installed before it is returned. */
+        /** A new installation writes at once: its node credential already carries its author number. */
         private suspend fun RockyDatabase.withAuthors(required: Boolean): RockyDatabase {
             try {
                 if (required && status().data.bootstrapPending) syncOnce()
-                installAuthors()
             } catch (error: Throwable) {
                 // A member whose issuer did not answer asks again on its next sync.
                 if (required || error !is RockyException) {
@@ -167,7 +166,7 @@ class RockyDatabase private constructor(
             }
         }
 
-        /** A new domain with this device as its first issuer, with its authors installed. */
+        /** A new domain with this device as its first issuer, with its certified node author number. */
         suspend fun create(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, coordinator: ServiceCoordinator? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.create(directory, schema.json(), secretProvider(secrets), it, coordinator?.trustBundle, null) } }
             .withAuthors(required = true)
 
@@ -204,12 +203,6 @@ class RockyNetworkService internal constructor(private val native: NativeNetwork
     }
 }
 
-/** A verified author number for this device's separate signing key on one table. */
-data class AuthorPseudonym(val collection: String, val author: Int)
-
-/** The issuer's private mapping from an author pseudonym to a device. */
-data class PseudonymOwner(val node: String, val collection: String, val author: Int)
-
 /** Credential lifecycle over managed storage, independently usable from coordination. */
 class Credentials internal constructor(private val session: RockySession) {
     companion object : PlatformCredentialOpeners() {
@@ -235,31 +228,6 @@ class Credentials internal constructor(private val session: RockySession) {
     /** Replaces this device's credentials with a supplied bundle; see `RockySession.install`. */
     suspend fun install(supplied: JsonObject): SessionStatus = session.install(supplied)
 
-    /** Bytes to carry to an assigner. The per-table secret key stays in this device's provider. */
-    suspend fun pseudonymRequest(collection: String): String = session.client.call(request("pseudonym_request") { put("collection", collection) }).getValue("request").jsonPrimitive.content
-
-    /** Assigns a stable author number and table grants; persists allocation before returning. */
-    suspend fun assignPseudonym(requestBytes: String): JsonArray = session.client.call(request("pseudonym_assign") { put("request", requestBytes) }).getValue("pseudonym").jsonArray
-
-    /** Verifies and stores the returned credential for this device's per-table signing key. */
-    suspend fun installPseudonym(credential: JsonArray): AuthorPseudonym = session.client.call(request("pseudonym_install") { put("pseudonym", credential) }).let {
-        AuthorPseudonym(it.getValue("collection").jsonPrimitive.content, it.getValue("author").jsonPrimitive.int)
-    }
-
-    /** Only an issuer can open the device binding sealed in a pseudonym credential. */
-    suspend fun pseudonymOwner(credential: JsonArray): PseudonymOwner = session.client.call(request("pseudonym_owner") { put("pseudonym", credential) }).let {
-        PseudonymOwner(it.getValue("node").jsonPrimitive.content, it.getValue("collection").jsonPrimitive.content, it.getValue("author").jsonPrimitive.int)
-    }
-
-    /** An issuer without a range claims one disjoint from every other issuer's range. */
-    suspend fun claimAuthorRange(first: Int, last: Int) {
-        session.client.call(
-            request("pseudonym_range") {
-                put("first", first)
-                put("last", last)
-            },
-        )
-    }
     suspend fun revoke(node: String) = session.revoke(node)
     suspend fun devices(): List<Device> = session.devices()
     suspend fun setDeviceLabel(node: String, label: ByteArray) = session.setDeviceLabel(node, label)

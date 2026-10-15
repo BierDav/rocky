@@ -30,14 +30,6 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     /** What the database did in the background: the kept events, then each new one. See [RockyEvent]. */
     fun activity(): Flow<RockyEvent> = client.activity()
 
-    /**
-     * Installs an author for every table this device writes and has none for: an issuer assigns its own, a member
-     * asks its issuers over the network. `create` and `join` call it; a sync retries what a member still lacks.
-     */
-    suspend fun installAuthors(): List<AuthorPseudonym> = client.call(request("authors")).getValue("installed").jsonArray.map {
-        it.jsonObject.let { installed -> AuthorPseudonym(installed.text("collection"), installed.getValue("author").jsonPrimitive.int) }
-    }
-
     /** `committed` tells whether a write committed under `handle`. */
     suspend fun reconcile(handle: String): JsonObject = client.recoverMutation(handleBytes(handle))
 
@@ -146,7 +138,7 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
      * Issues `profile` to the device whose public keys `device` names, as `Credentials.prepare` reported them. Returns
      * the bundle that device passes to `RockyDatabase.install`. It carries reader keys: hand it over like a secret.
      * The device is then known like an enrolled one. Only an issuer grants. `delegations` above 1 lets the device
-     * delegate further itself. `authors` reserves that many numbers for the recipient to assign pseudonyms.
+     * delegate further itself. `authors` reserves that many numbers for the recipient's nodes.
      */
     suspend fun grant(device: JsonObject, profile: GrantProfile, ttlSeconds: Long? = null, delegations: Int? = null, authors: Int? = null): JsonObject = issue("grant", device, profile, ttlSeconds, delegations, authors)
 

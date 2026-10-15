@@ -445,8 +445,8 @@ impl<A: RowApplication> Inner<A> {
     /// The key that signed `signed`, when this replica holds it.
     fn checkpoint_key(&self, signed: &SignedCheckpoint) -> Option<PrivateKey> {
         let signer = signed.signer();
-        self.row_authors
-            .get(&signed.statement.scope.table)
+        self.node_author
+            .as_ref()
             .map(|author| &author.key)
             .into_iter()
             .chain(self.credential_signer.as_ref())
@@ -773,8 +773,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .as_ref()
                 .is_some_and(|key| key.public_key() == signer)
             || inner
-                .row_authors
-                .get(&signed.statement.scope.table)
+                .node_author
+                .as_ref()
                 .is_some_and(|author| author.key.public_key() == signer)
     }
     /// One page of the checkpoint's rows after `after`, sealed with the scope
@@ -967,6 +967,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let bytes = signed.to_bytes()?;
         transaction!(inner, |inner| {
             let id = inner.scope_id(scope).await?;
+            inner.bind_node_author(&signed.credentials).await?;
             inner.check_frontier(id, &signed).await?;
             if let Some(finalized) = &signed.statement.finalized {
                 for descriptor in &finalized.statement.bases {
@@ -1159,6 +1160,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // Operations applied again at the switch must not wait on the import.
         inner.direct.remove(&scope);
         let report = transaction!(inner, |inner| {
+            inner.bind_node_author(&signed.credentials).await?;
             inner.check_frontier(id, &signed).await?;
             if let Some(horizon) = &signed.statement.horizon {
                 inner.adopt_checkpoint_horizon(horizon).await?;

@@ -108,7 +108,7 @@ impl NativeDatabaseSession {
     }
 
     /// Versioned SDK calls, including raw grants, delegation, executor
-    /// registration and the `pseudonym_*` credential primitives.
+    /// registration and node credentials.
     pub async fn call(&self, request: String) -> Result<String, NativeError> {
         self.session.call(request).await.map_err(failure)
     }

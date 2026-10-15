@@ -25,6 +25,15 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
         expires,
         delegations,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            authors: Some(if kind == PrincipalKind::Node {
+                rocky_credentials::AuthorRange::new(
+                    crate::tests::node_number(subject),
+                    crate::tests::node_number(subject),
+                )
+                .unwrap()
+            } else {
+                rocky_credentials::AuthorRange::ALL
+            }),
             node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
             ..Default::default()
         })

@@ -39,7 +39,6 @@ struct Client {
 }
 impl Client {
     fn new(database: &Arc<Database>) -> Result<Self, Failure> {
-        support::database(database);
         Ok(Self {
             session: database.session(),
             scope: serde_json::from_str(&database.scope())?,
@@ -178,33 +177,12 @@ async fn a_domain_enrolled_over_a_network_reopens_without_dialing() -> Result<()
         call(&member, json!({"type": "sync"})).await?["status"],
         "ok"
     );
-    for writer in [&creator, &member] {
-        let request = call(
-            writer,
-            json!({"type":"pseudonym_request","collection":"items"}),
-        )
-        .await?["value"]["request"]
-            .clone();
-        let assigned = call(
-            &creator,
-            json!({"type":"pseudonym_assign","request":request}),
-        )
-        .await?["value"]["pseudonym"]
-            .clone();
-        assert_eq!(
-            call(
-                writer,
-                json!({"type":"pseudonym_install","pseudonym":assigned})
-            )
-            .await?["status"],
-            "ok"
-        );
-    }
+
     member.close().await?;
     creator.close().await?;
     let enrolled = hub.counts();
-    // Bootstrap and rows share a link; the writable author uses renewal.
-    assert_eq!(enrolled, [2, 4, 2]);
+    // Bootstrap and rows share a link; enrollment already supplies the node number.
+    assert_eq!(enrolled, [2, 3, 2]);
     assert!(!hub.listens("a"));
 
     // Both devices open, write and reopen with no factory at all.

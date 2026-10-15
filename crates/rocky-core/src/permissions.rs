@@ -15,8 +15,6 @@ pub enum PrincipalKind {
     User,
     Deployment,
     Node,
-    /// An author pseudonym: a signing key and author number for one table.
-    Pseudonym,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

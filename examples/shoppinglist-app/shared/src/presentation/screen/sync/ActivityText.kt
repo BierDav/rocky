@@ -108,10 +108,6 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
 
         is RockyEvent.DeviceRevoked -> ActivityEntry(key, event.atEpochMillis, EntryKind.Device, "Revoked ${device(event.node)}")
 
-        is RockyEvent.AuthorInstalled -> ActivityEntry(key, event.atEpochMillis, EntryKind.Author, "Can write ${event.collection} as author ${event.author}")
-
-        is RockyEvent.AuthorAssigned -> ActivityEntry(key, event.atEpochMillis, EntryKind.Author, "Assigned ${device(event.node)} an author for ${event.collection}")
-
         is RockyEvent.PartitionChanged -> {
             val list = event.values.firstOrNull()?.toLongOrNull()?.let(lists::get)?.let { "“$it”" } ?: "List ${event.values.joinToString()}"
             ActivityEntry(key, event.atEpochMillis, EntryKind.Key, "$list: ${PARTITION_ACTIONS[event.action] ?: event.action.replace('_', ' ')}")

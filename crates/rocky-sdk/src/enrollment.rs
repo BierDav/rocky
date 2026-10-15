@@ -18,8 +18,8 @@ use rand::RngCore;
 use rocky_core::{Commitment, DomainId, MeshId, ResourceGrant, Right, RowSelection, commitment};
 use rocky_credentials::{
     Admission, AuthorRange, Authority, Credentials, Invitation, MAX_LIVE_REVOCATIONS, PairRequest,
-    Profile, PseudonymRequest, REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation,
-    open_enrollment, seal_enrollment,
+    Profile, REVOCATION_SET_FULL, RenewRequest, Renewal, Revocation, open_enrollment,
+    seal_enrollment,
 };
 use rocky_secure::{
     CredentialChain, KeyMaterial, PrivateKey, PublicKey, RevocationSet, SecureConfig,
@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 16;
+pub const VERSION: u32 = 17;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 4;
 const CONTACT_VERSION: u32 = 2;
@@ -55,9 +55,6 @@ const MAX_EPOCHS: usize = 256;
 const MAX_MESSAGE: usize = 3 * rocky_credentials::MAX_REVOCATION_SET_BYTES;
 /// Accepted clock difference between devices.
 const SKEW: u64 = 300;
-/// Prefixes a pseudonym request a member sends an issuer over the renewal
-/// protocol; the answer is the assigned chain.
-pub(crate) const AUTHOR: &[u8] = b"rocky.sdk.author.v1\n";
 type GroupDelivery = (GroupRecord, Vec<Vec<u8>>);
 pub(crate) const EPOCHS: &[u8] = b"rocky.sdk.epochs.v1\n";
 pub(crate) const POLICY: &[u8] = b"rocky.sdk.policy.v1\n";
@@ -144,14 +141,12 @@ pub struct Settings {
     /// The generations the domain left, oldest first. Empty until its
     /// first upgrade; see `docs/runtime/generations.md`.
     pub lineage: Vec<crate::generation::Step>,
-    /// The author numbers this device assigns to pseudonyms, if any.
+    /// The author numbers this principal grants to other principals, if any.
     pub minting: Option<Minting>,
-    /// This device's pseudonym chain for each collection it writes.
-    pub pseudonyms: BTreeMap<String, CredentialChain>,
+    /// Stable outgoing principal ranges, including non-issuer delegations.
+    pub granted_authors: BTreeMap<PublicKey, AuthorRange>,
     /// Retained across removal/replacement of a supplied author range.
     pub author_high_water: u32,
-    /// An issuer's assignment key, separate from every node/user identity.
-    pub author_issuer: Option<PublicKey>,
     /// Envelopes this device sends, by delivery digest, until delivered.
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
 }
@@ -167,7 +162,7 @@ impl Minting {
     fn fresh(range: AuthorRange) -> Self {
         Self {
             range,
-            next: range.first,
+            next: range.first + 1,
         }
     }
     /// The next `count` free numbers, for a recipient that assigns them.
@@ -184,6 +179,11 @@ impl Minting {
         let carved = AuthorRange::new(self.next, last)?;
         self.next = last + 1;
         Ok(carved)
+    }
+    /// Default grants keep half a small free range; explicit counts remain exact.
+    fn grant(&mut self, count: Option<u32>) -> Result<AuthorRange, Failure> {
+        let available = self.range.last.saturating_add(1).saturating_sub(self.next);
+        self.carve(count.unwrap_or(available.div_ceil(2).min(1024)))
     }
     /// The upper half of the free numbers, handed to another issuer; this
     /// device keeps the lower half. None when fewer than two are free.
@@ -219,7 +219,7 @@ pub struct Issuing {
 pub struct Claim {
     pub node: PublicKey,
     pub user: PublicKey,
-    /// The author numbers handed to an issuer profile.
+    /// The range reserved for the recipient principal.
     pub authors: Option<AuthorRange>,
 }
 /// A begun revocation: its statement and the key epoch each collection and
@@ -241,7 +241,6 @@ struct Revoking {
     /// Absent on a device recorded only by partition grants.
     profile: Option<Profile>,
     partitions: Vec<rocky_credentials::PartitionGrant>,
-    pseudonyms: Vec<PublicKey>,
 }
 impl Revoking {
     fn of(record: &registry::Record) -> Self {
@@ -253,11 +252,6 @@ impl Revoking {
                 .grants
                 .iter()
                 .map(|grant| grant.grant.clone())
-                .collect(),
-            pseudonyms: record
-                .pseudonyms
-                .iter()
-                .map(|pseudonym| pseudonym.key)
                 .collect(),
         }
     }
@@ -389,7 +383,7 @@ struct Enrollment {
     /// and peers of earlier ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lineage: Vec<crate::generation::Step>,
-    /// For an issuer profile: the author numbers it assigns.
+    /// The principal range granted by this enrollment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authors: Option<AuthorRange>,
     /// Contacts of the other issuers the enrolling issuer reaches.
@@ -521,7 +515,7 @@ pub struct Terms {
     pub ttl: Option<u64>,
     pub delegations: Option<u8>,
     /// How many of this device's free author numbers the recipient may
-    /// assign to pseudonyms itself.
+    /// certify for its nodes.
     pub authors: Option<u32>,
 }
 impl Terms {
@@ -578,10 +572,6 @@ pub(crate) fn key_role(collection: &str, epoch: rocky_core::KeyEpoch) -> String 
         epoch.generation,
         HEXLOWER.encode(&epoch.secret_hash)
     )
-}
-/// The key provider role of this device's pseudonym key in `collection`.
-fn pseudonym_role(collection: &str) -> String {
-    format!("pseudonym.{collection}")
 }
 /// What a joining device expects to join.
 /// What a joining device's application is: its name, whatever version of
@@ -722,15 +712,6 @@ impl Settings {
             }
         }
         Ok(false)
-    }
-    /// Whether a pseudonym chain of this device is still usable: of this
-    /// definition, unexpired and ended by no held statement.
-    fn current_pseudonym(&self, chain: &CredentialChain, manifest: Commitment, time: u64) -> bool {
-        chain.0.iter().all(|credential| {
-            credential.capability.manifest == manifest
-                && credential.capability.expires > time
-                && self.revocations.ends(credential).is_ok_and(|ended| !ended)
-        })
     }
 
     /// Loads only the current identity format, without changing the file or keys.
@@ -1080,9 +1061,6 @@ impl Settings {
                     .map(|epoch| format!("rotation.reader.{name}.{}", epoch.generation)),
             );
         }
-        if let Ok(domain) = self.domain() {
-            roles.extend(domain.scopes().map(|(name, _)| pseudonym_role(name)));
-        }
         for record in self.groups.values() {
             roles.push(format!(
                 "prepared.partition.{}",
@@ -1220,9 +1198,8 @@ impl Settings {
             logged_out: false,
             lineage: Vec::new(),
             minting: Some(Minting::fresh(AuthorRange::ALL)),
-            pseudonyms: BTreeMap::new(),
+            granted_authors: BTreeMap::new(),
             author_high_water: 0,
-            author_issuer: None,
             deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
@@ -1271,13 +1248,24 @@ impl Settings {
         user: &PrivateKey,
         node: &PrivateKey,
         domain: &Domain,
-        vault: &Vault,
+        _vault: &Vault,
     ) -> Result<CredentialChain, Failure> {
-        let alias = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+        let alias = node.public_key();
+        let author = match self.credentials.author_number() {
+            Ok(author) => author,
+            Err(_) => {
+                capability
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?
+                    .first
+            }
+        };
         let chain = CredentialChain(vec![capability]).complete_with_alias(
             user,
             node.public_key(),
             alias,
+            author,
         )?;
         chain.verify_selectors(
             self.publisher,
@@ -1646,15 +1634,23 @@ impl Settings {
             }
             _ => {}
         }
-        active.claim(&request);
         let profile = active.profile.clone();
         let grants = grants_of(&profile, &domain)?;
         // A retry carves nothing again: the first answer's range is kept.
-        let authors = match (profile.issues(), &claimed) {
-            (true, None) => self.minting.as_mut().and_then(Minting::split),
-            (true, Some(claim)) => claim.authors,
-            _ => None,
+        let authors = match &claimed {
+            Some(claim) => claim.authors,
+            None if profile.issues() => Some(
+                self.minting()?
+                    .split()
+                    .ok_or("not enough free author numbers")?,
+            ),
+            None => Some(self.minting()?.grant(None)?),
         };
+        self.issuing("enrolls devices")?
+            .invitation
+            .as_mut()
+            .ok_or("no active invitation")?
+            .claim(&request);
         self.issuing("enrolls devices")?.claimed = Some(Claim {
             node: request.node,
             user: request.user,
@@ -1678,6 +1674,10 @@ impl Settings {
         changes.capability(
             &request.node,
             registry::Capability {
+                authors: issued
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?,
                 id: issued.id()?,
                 expires: issued.capability.expires,
             },
@@ -1743,10 +1743,7 @@ impl Settings {
             }
             _ => {}
         }
-        let authors = match terms.authors {
-            Some(count) => Some(self.minting()?.carve(count)?),
-            None => None,
-        };
+        let authors = Some(self.reserve_authors(device.user, Some(registry), terms.authors)?);
         let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
         let time = now()?;
         let capability = Authority {
@@ -1787,6 +1784,10 @@ impl Settings {
         changes.capability(
             &device.node,
             registry::Capability {
+                authors: capability
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?,
                 id: capability.id()?,
                 expires: capability.capability.expires,
             },
@@ -1846,10 +1847,7 @@ impl Settings {
             }
         }
         let user = PrivateKey::from_bytes(&vault.get("user")?);
-        let authors = match terms.authors {
-            Some(count) => Some(self.minting()?.carve(count)?),
-            None => None,
-        };
+        let authors = Some(self.reserve_authors(device.user, registry, terms.authors)?);
         let chain = self.credentials.delegable().delegate(
             &user,
             device.user,
@@ -1884,6 +1882,10 @@ impl Settings {
             changes.capability(
                 &device.node,
                 registry::Capability {
+                    authors: leaf
+                        .capability
+                        .authors()?
+                        .ok_or("principal has no author range")?,
                     id: leaf.id()?,
                     expires: chain.expires(),
                 },
@@ -1944,7 +1946,7 @@ impl Settings {
                 now()?,
             )?;
             let mut leaf = chain.0.pop().ok_or("missing node credential")?.capability;
-            leaf.subject = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+            leaf.subject = node.public_key();
             chain.0.push(SignedCapability::sign(leaf, &user)?);
         }
         if chain
@@ -1952,11 +1954,13 @@ impl Settings {
             .last()
             .is_some_and(|last| last.capability.subject == user.public_key())
         {
-            chain = chain.complete_with_alias(
-                &user,
-                node.public_key(),
-                PrivateKey::from_bytes(&vault.get("credential")?).public_key(),
-            )?;
+            let author = self.credentials.author_number().or_else(|_| {
+                chain.authors()?.map(|range| range.first).ok_or_else(|| {
+                    rocky_credentials::Error::Denied("principal has no author range".into())
+                })
+            })?;
+            chain =
+                chain.complete_with_alias(&user, node.public_key(), node.public_key(), author)?;
         }
         let mut revocations = self.revocations.clone();
         revocations.merge(
@@ -2004,110 +2008,35 @@ impl Settings {
             issuers: Vec::new(),
         })
     }
+    pub(crate) fn reserve_authors(
+        &mut self,
+        principal: PublicKey,
+        registry: Option<&Registry>,
+        count: Option<u32>,
+    ) -> Result<AuthorRange, Failure> {
+        if let Some(range) = registry
+            .and_then(|registry| registry.authors(principal))
+            .or_else(|| self.granted_authors.get(&principal).copied())
+        {
+            return Ok(range);
+        }
+        let range = self.minting()?.grant(count)?;
+        self.granted_authors.insert(principal, range);
+        Ok(range)
+    }
     fn minting(&mut self) -> Result<&mut Minting, Failure> {
-        self.minting.as_mut().ok_or_else(|| {
-            "this device assigns no author numbers; claim an author range first".into()
-        })
+        self.minting
+            .as_mut()
+            .ok_or_else(|| "this principal has no author range available for delegation".into())
     }
-    /// The collection a table commitment names, if any.
-    pub fn collection_name(&self, table: Commitment) -> Option<String> {
-        self.collection_of(table).ok()
-    }
-    /// The collection whose table `table` names.
-    fn collection_of(&self, table: Commitment) -> Result<String, Failure> {
-        let domain = self.domain()?;
-        let name = domain
-            .scopes()
-            .find(|(_, scope)| scope.table == table)
-            .map(|(name, _)| name.to_owned())
-            .ok_or("the pseudonym names no collection of this schema")?;
-        Ok(name)
-    }
-    /// This device's request for a pseudonym in `collection`: its key is
-    /// made once and kept, and an earlier pseudonym keeps its number.
-    pub fn pseudonym_request(
-        &self,
-        vault: &Vault,
-        collection: &str,
-    ) -> Result<PseudonymRequest, Failure> {
-        let domain = self.domain()?;
-        let (_, scope) = domain
-            .scopes()
-            .find(|(name, _)| *name == collection)
-            .ok_or("unknown collection")?;
-        let role = self.pseudonym_role(collection);
-        let key = match vault.find(&role)? {
-            Some(key) => key,
-            None => vault.create(&role)?,
-        };
-        Ok(PseudonymRequest::sign(
-            &PrivateKey::from_bytes(&vault.get("node")?),
-            &PrivateKey::from_bytes(&key),
-            self.credentials.clone(),
-            scope.table,
-            self.pseudonyms.get(collection).cloned(),
-            now()?,
-        )?)
-    }
-    /// The collections this device writes but holds no current pseudonym
-    /// for, in name order.
-    pub fn missing_authors(&self, domain: &Domain) -> Result<Vec<String>, Failure> {
-        let grants = self.grants();
-        let partitions = self
-            .credentials
-            .0
-            .last()
-            .ok_or("empty device credential chain")?
-            .capability
-            .extended()?
-            .partitions;
-        let manifest = domain.manifest().hash();
-        let time = now()?;
-        let current = |collection: &str| {
-            self.pseudonyms
-                .get(collection)
-                .is_some_and(|chain| self.current_pseudonym(chain, manifest, time))
-        };
-        // The registry's author is installed when an issuer first writes it.
-        Ok(domain
-            .collections()
-            .filter(|(_, scope)| {
-                grants.iter().any(|grant| {
-                    grant.scope.domain == scope.domain
-                        && grant.scope.table == scope.table
-                        && [Right::Insert, Right::Update, Right::Delete]
-                            .iter()
-                            .any(|right| grant.rights.contains(right))
-                }) || partitions.iter().any(|grant| {
-                    grant.domain == scope.domain
-                        && grant.table == scope.table
-                        && [Right::Insert, Right::Update, Right::Delete]
-                            .iter()
-                            .any(|right| grant.rights.contains(right))
-                })
-            })
-            .map(|(name, _)| name)
-            .filter(|name| !current(name))
-            .map(str::to_owned)
-            .collect())
-    }
-    /// Whether this device holds a current pseudonym for `collection`.
-    pub(crate) fn holds_author(&self, domain: &Domain, collection: &str) -> Result<bool, Failure> {
-        let manifest = domain.manifest().hash();
-        let time = now()?;
-        Ok(self
-            .pseudonyms
-            .get(collection)
-            .is_some_and(|chain| self.current_pseudonym(chain, manifest, time)))
-    }
+
     /// The rows of this issuer's own record: its device entry, current
-    /// capability and pseudonyms. Rows that exist are kept.
+    /// capability. Rows that exist are kept.
     pub(crate) fn own_record(
         &self,
         vault: &Vault,
         registry: &Registry,
     ) -> Result<Changes, Failure> {
-        let domain = self.domain()?;
         let node = PrivateKey::from_bytes(&vault.get("node")?).public_key();
         let known = registry.get(&node);
         let root = self.credentials.0.first().ok_or("missing credentials")?;
@@ -2127,36 +2056,15 @@ impl Settings {
         changes.capability(
             &node,
             registry::Capability {
+                authors: root
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?,
                 id: root.id()?,
                 expires: root.capability.expires,
             },
             known,
         )?;
-        for (collection, chain) in &self.pseudonyms {
-            let Some((_, scope)) = domain.scopes().find(|(name, _)| name == collection) else {
-                continue;
-            };
-            let (Some(leaf), Some(author)) = (
-                chain.0.last(),
-                chain.authors()?.and_then(|range| range.single()),
-            ) else {
-                continue;
-            };
-            let key = leaf.capability.subject;
-            if known.is_some_and(|record| record.pseudonyms.iter().any(|held| held.key == key)) {
-                continue;
-            }
-            changes.pseudonym(
-                &node,
-                &registry::Pseudonym {
-                    table: scope.table,
-                    key,
-                    author,
-                    assigned: now()?,
-                    closed: false,
-                },
-            )?;
-        }
         // A revocation interrupted before its tombstone was written, or one
         // learned from a statement.
         for (other, record) in &registry.records {
@@ -2166,280 +2074,7 @@ impl Settings {
         }
         Ok(changes)
     }
-    /// Asks the issuers this member knows, in turn, to assign the pseudonym
-    /// `request` asks for.
-    pub async fn request_author(
-        &self,
-        transport: &dyn Transport,
-        request: &PseudonymRequest,
-    ) -> Result<CredentialChain, Failure> {
-        let mut failure: Failure = ServiceError::NoRoute {
-            peer: "an issuer",
-            network: transport.kind().into(),
-        }
-        .into();
-        let message = [AUTHOR, &request.to_bytes()?].concat();
-        for issuer in &self.issuers {
-            let addresses = self
-                .enrollment_routes
-                .get(issuer)
-                .or_else(|| self.peers.get(issuer))
-                .map(|contact| contact.addresses(transport.kind()))
-                .unwrap_or_default();
-            if addresses.is_empty() {
-                continue;
-            }
-            match exchange(transport, &addresses, Protocol::Renew, &message).await {
-                Ok(reply) => return Ok(serde_json::from_slice(&reply)?),
-                Err(error) => failure = error,
-            }
-        }
-        Err(failure)
-    }
-    /// Assigns a pseudonym to the device that sent `request`: its write
-    /// grants on the table and the number the registry holds for its key,
-    /// an earlier number it held in this device's range, or the next free
-    /// one. On an issuer the registry row to commit comes with it; save
-    /// the identity and commit the row before answering. Without a
-    /// registry, as on a non-issuer, nothing records the assignment.
-    pub fn assign_pseudonym(
-        &mut self,
-        vault: &Vault,
-        request: &PseudonymRequest,
-        registry: Option<&Registry>,
-    ) -> Result<(CredentialChain, Changes), Failure> {
-        let domain = self.domain()?;
-        let manifest = domain.manifest().hash();
-        let (grants, partitions) = request.verify_selectors(
-            self.publisher,
-            manifest,
-            &self.revocations,
-            (now()?, SKEW),
-        )?;
-        let range = self.minting()?.range;
-        let recorded = registry.and_then(|registry| registry.assignment(&request.key));
-        if recorded.is_some_and(|(node, held)| node != request.node || held.table != request.table)
-        {
-            return Err("a pseudonym key is already assigned to another device or table".into());
-        }
-        let kept = recorded
-            .map(|(_, held)| held.author)
-            .or_else(|| request.previous_author(self.publisher, manifest, range));
-        let author = match kept {
-            Some(author) => {
-                if registry.is_some_and(|registry| {
-                    registry
-                        .holders(author)
-                        .iter()
-                        .any(|key| *key != request.key)
-                }) {
-                    return Err("the author number is assigned to another key".into());
-                }
-                author
-            }
-            None => {
-                let minting = self.minting()?;
-                let author = minting.next;
-                if !minting.range.contains(author) {
-                    return Err("this device's author numbers are used up".into());
-                }
-                minting.next += 1;
-                author
-            }
-        };
-        let (holder, prefix) = if self.issuer() {
-            let key = match self.author_issuer {
-                Some(public) => {
-                    let key = PrivateKey::from_bytes(&vault.get("author-issuer")?);
-                    if key.public_key() != public {
-                        return Err("the author's issuing key differs from its identity".into());
-                    }
-                    key
-                }
-                None => {
-                    let bytes = match vault.find("author-issuer")? {
-                        Some(bytes) => bytes,
-                        None => vault.create("author-issuer")?,
-                    };
-                    let key = PrivateKey::from_bytes(&bytes);
-                    self.author_issuer = Some(key.public_key());
-                    key
-                }
-            };
-            // A number another issuer assigned is authorized alone.
-            let authority = if range.contains(author) {
-                range
-            } else {
-                AuthorRange::new(author, author)?
-            };
-            let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-            let root = self.issue(
-                &publisher,
-                &domain,
-                key.public_key(),
-                self.grants().to_vec(),
-                Some(authority),
-            )?;
-            (key, CredentialChain(vec![root]))
-        } else {
-            let prefix = self.credentials.delegable();
-            let requested_user = request
-                .chain
-                .delegable()
-                .0
-                .last()
-                .map(|leaf| leaf.capability.subject)
-                .ok_or("missing requesting user")?;
-            if prefix
-                .0
-                .iter()
-                .any(|link| link.capability.subject == requested_user)
-            {
-                return Err("request a pseudonym from an independent assigner; this chain would disclose its device".into());
-            }
-            (PrivateKey::from_bytes(&vault.get("user")?), prefix)
-        };
-        let assigned = if partitions.is_empty() {
-            prefix.assign(
-                &holder,
-                request.key,
-                author,
-                request.node,
-                grants,
-                request.chain.expires(),
-                self.validity()?,
-            )?
-        } else {
-            prefix.assign_partitions(
-                &holder,
-                request.key,
-                author,
-                request.node,
-                partitions,
-                self.validity()?,
-            )?
-        };
-        if range.contains(author) {
-            self.minting()?.next = self.minting()?.next.max(author + 1);
-        }
-        let mut changes = Changes::default();
-        if registry.is_some() {
-            changes.pseudonym(
-                &request.node,
-                &registry::Pseudonym {
-                    table: request.table,
-                    key: request.key,
-                    author,
-                    assigned: recorded.map_or(now()?, |(_, held)| held.assigned),
-                    closed: false,
-                },
-            )?;
-        }
-        Ok((assigned, changes))
-    }
-    /// Keeps a pseudonym assigned to this device, after checking that it
-    /// names this device's key for its collection and verifies now.
-    pub fn hold_pseudonym(
-        &mut self,
-        vault: &Vault,
-        chain: CredentialChain,
-    ) -> Result<(String, u32), Failure> {
-        let leaf = chain.0.last().ok_or("empty pseudonym chain")?;
-        let table = leaf
-            .capability
-            .grants
-            .first()
-            .map(|grant| grant.scope.table)
-            .or_else(|| {
-                leaf.capability
-                    .extended()
-                    .ok()?
-                    .partitions
-                    .first()
-                    .map(|grant| grant.table)
-            })
-            .ok_or("empty pseudonym")?;
-        let collection = self.collection_of(table)?;
-        let key = vault
-            .find(&self.pseudonym_role(&collection))?
-            .map(|key| PrivateKey::from_bytes(&key).public_key())
-            .ok_or("this device asked for no pseudonym in that collection")?;
-        let (pseudonym, _) = chain.verify_pseudonym_selectors(
-            self.publisher,
-            self.domain()?.manifest().hash(),
-            key,
-            &self.revocations,
-            now()?,
-        )?;
-        self.pseudonyms.insert(collection.clone(), chain);
-        Ok((collection, pseudonym.author))
-    }
-    /// The key provider role of this device's current pseudonym key in
-    /// `collection`.
-    pub(crate) fn pseudonym_role(&self, collection: &str) -> String {
-        pseudonym_role(collection)
-    }
-    pub(crate) fn row_authors(
-        &self,
-        vault: &Vault,
-    ) -> Result<Vec<(PrivateKey, CredentialChain)>, Failure> {
-        let manifest = self.domain()?.manifest().hash();
-        let time = now()?;
-        self.pseudonyms
-            .iter()
-            // Retain stale chains for renewal, without admitting their writers.
-            .filter(|(_, chain)| self.current_pseudonym(chain, manifest, time))
-            .map(|(collection, chain)| {
-                Ok((
-                    PrivateKey::from_bytes(&vault.get(&self.pseudonym_role(collection))?),
-                    chain.clone(),
-                ))
-            })
-            .collect()
-    }
-    /// The node key of the device a pseudonym names, on an issuer.
-    pub fn pseudonym_owner(
-        &self,
-        vault: &Vault,
-        chain: &CredentialChain,
-    ) -> Result<(PublicKey, String, u32), Failure> {
-        if !self.issuer() {
-            return Err("only an issuer opens a pseudonym's device".into());
-        }
-        let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
-        let manifest = self.domain()?.manifest().hash();
-        let node = chain.pseudonym_device(&publisher, manifest)?;
-        let leaf = chain.0.last().ok_or("empty pseudonym chain")?;
-        let author = leaf
-            .capability
-            .authors()?
-            .and_then(|range| range.single())
-            .ok_or("invalid pseudonym")?;
-        let table = leaf
-            .capability
-            .grants
-            .first()
-            .map(|grant| grant.scope.table)
-            .or_else(|| {
-                leaf.capability
-                    .extended()
-                    .ok()?
-                    .partitions
-                    .first()
-                    .map(|grant| grant.table)
-            })
-            .ok_or("empty pseudonym")?;
-        Ok((node, self.collection_of(table)?, author))
-    }
-    /// Gives an issuer without one the author numbers it assigns. Ranges of issuers must
-    /// not overlap; nothing can check that between them.
-    pub fn claim_authors(&mut self, range: AuthorRange) -> Result<(), Failure> {
-        if !self.issuer() || self.minting.is_some() {
-            return Err("only an issuer without author numbers claims a range".into());
-        }
-        self.minting = Some(Minting::fresh(range));
-        Ok(())
-    }
+
     /// The publisher key an invitation names, before anything is stored.
     pub fn invitation_publisher(invitation: &str) -> Result<PublicKey, Failure> {
         Ok(Invite::parse(invitation)?.publisher)
@@ -2623,9 +2258,8 @@ impl Settings {
             logged_out: false,
             lineage: Vec::new(),
             minting: None,
-            pseudonyms: BTreeMap::new(),
+            granted_authors: BTreeMap::new(),
             author_high_water: 0,
-            author_issuer: None,
             deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
@@ -2660,7 +2294,7 @@ impl Settings {
                 .pop()
                 .ok_or("missing node credential")?
                 .capability;
-            leaf.subject = PrivateKey::from_bytes(&vault.get("credential")?).public_key();
+            leaf.subject = node.public_key();
             settings
                 .credentials
                 .0
@@ -2669,10 +2303,16 @@ impl Settings {
         // A chain that ends at this device's user is completed by the device.
         if let Some(last) = settings.credentials.0.pop() {
             if last.capability.subject == user.public_key() {
+                let author = last
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?
+                    .first;
                 let own = CredentialChain(vec![last]).complete_with_alias(
                     &user,
                     node.public_key(),
-                    PrivateKey::from_bytes(&vault.get("credential")?).public_key(),
+                    node.public_key(),
+                    author,
                 )?;
                 settings.credentials.0.extend(own.0);
             } else {
@@ -2841,9 +2481,8 @@ impl Joining {
             logged_out: false,
             lineage: enrollment.lineage,
             minting: None,
-            pseudonyms: BTreeMap::new(),
+            granted_authors: BTreeMap::new(),
             author_high_water: 0,
-            author_issuer: None,
             deliveries: BTreeMap::new(),
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
@@ -2893,8 +2532,8 @@ impl Joining {
             if settings.credentials.0[0].capability.authors()? != enrollment.authors {
                 return Err("the enrollment's author range differs from its capability".into());
             }
-            settings.minting = enrollment.authors.map(Minting::fresh);
         }
+        settings.minting = enrollment.authors.map(Minting::fresh);
         settings.adopt_groups(&vault, &enrollment.groups)?;
         settings.learn_issuers(&vault, &enrollment.issuers);
         settings.save(path)?;
@@ -3304,7 +2943,7 @@ impl Settings {
                 .max(draft.minting.map_or(0, |minting| minting.next));
             draft.minting = renewed.chain.delegable().authors()?.map(|range| Minting {
                 range,
-                next: range.first.max(draft.author_high_water),
+                next: (range.first + 1).max(draft.author_high_water),
             });
         }
         let changed = !draft.persisted_eq(self);
@@ -3413,6 +3052,11 @@ impl Settings {
         changes.capability(
             &request.node,
             registry::Capability {
+                authors: renewal
+                    .capability
+                    .capability
+                    .authors()?
+                    .ok_or("principal has no author range")?,
                 id: renewal.capability.id()?,
                 expires: renewal.capability.capability.expires,
             },
@@ -3531,7 +3175,7 @@ impl Settings {
         }
         let domain = self.domain()?;
         // A recorded device loses its user too, so a fresh node key under it
-        // cannot renew, and its capability and pseudonyms.
+        // cannot renew, and its capability.
         let record = registry.get(&node).map(Revoking::of);
         let statement = Revocation {
             app: domain.manifest().app,
@@ -3542,10 +3186,6 @@ impl Settings {
             capabilities: record
                 .iter()
                 .filter_map(|record| record.capability)
-                .collect(),
-            pseudonyms: record
-                .iter()
-                .flat_map(|record| record.pseudonyms.iter().copied())
                 .collect(),
         };
         // Only an absent record uses the full-rotation fallback.
@@ -3832,10 +3472,7 @@ impl Settings {
                 publisher: &publisher,
                 manifest: domain.manifest().hash(),
             }
-            .revoke(
-                statement,
-                &PrivateKey::from_bytes(&vault.get("credential")?),
-            )?,
+            .revoke(statement, &PrivateKey::from_bytes(&vault.get("node")?))?,
         };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;
@@ -4178,9 +3815,8 @@ impl Settings {
             logged_out,
             lineage,
             minting,
-            pseudonyms,
+            granted_authors,
             author_high_water,
-            author_issuer,
             deliveries,
         } = self;
         *version == other.version
@@ -4200,10 +3836,9 @@ impl Settings {
             && *authority == other.authority
             && *logged_out == other.logged_out
             && *lineage == other.lineage
+            && *granted_authors == other.granted_authors
             && *minting == other.minting
-            && *pseudonyms == other.pseudonyms
             && *author_high_water == other.author_high_water
-            && *author_issuer == other.author_issuer
             && *deliveries == other.deliveries
             && self.saved_contacts() == other.saved_contacts()
     }

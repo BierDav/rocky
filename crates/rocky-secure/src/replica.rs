@@ -308,7 +308,7 @@ pub(super) struct Inner<A> {
     /// The last checkpoint statement decoded per scope number, newest or
     /// verified, with its bytes.
     decoded_checkpoints: std::sync::Mutex<DecodedCheckpoints>,
-    row_authors: BTreeMap<Commitment, identity::RowAuthor>,
+    node_author: Option<identity::NodeAuthor>,
     pub(crate) credential_signer: Option<PrivateKey>,
     partitions: BTreeMap<ResourceScope, rocky_core::PartitionTuple>,
     /// Earlier key epochs, kept to open retained ciphertext.
@@ -740,8 +740,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             chain: Chain::new(config.credentials.clone())?,
             chains: Default::default(),
             decoded_checkpoints: Default::default(),
+            node_author: Some(identity::NodeAuthor::new(&config)?),
             config,
-            row_authors: BTreeMap::new(),
             credential_signer: None,
             partitions: BTreeMap::new(),
             history,
@@ -856,6 +856,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [identity.clone()],
                 )
                 .await?;
+            inner.bind_node_author(&inner.config.credentials).await?;
             Ok(())
         })?;
         inner.load_generations().await?;
@@ -1396,45 +1397,34 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("wrong app/domain/table/manifest"));
         }
         self.check_authenticated_partition(extension.scope, extension.partition.as_ref())?;
-        let pseudonym = credentials
-            .0
-            .last()
-            .is_some_and(|leaf| leaf.capability.kind == rocky_core::PrincipalKind::Pseudonym);
+        let number = extension
+            .author
+            .ok_or_else(|| denied("node author number missing"))?;
         let grants = match &extension.partition {
             Some(tuple) => credentials
                 .verify_partition_author(
                     self.config.publisher,
                     extension.manifest,
                     operation.header.public_key,
-                    extension
-                        .author
-                        .ok_or_else(|| denied("partition author missing"))?,
+                    number,
                     extension.scope,
                     tuple,
                     self.revocations_for(extension.manifest, &self.config.revocations)?,
                     time,
                 )
                 .map_err(credential)?,
-            None => self.verify_chain(credentials, operation.header.public_key, time)?,
+            None => credentials
+                .verify_author(
+                    self.config.publisher,
+                    extension.manifest,
+                    operation.header.public_key,
+                    number,
+                    extension.scope.table,
+                    self.revocations_for(extension.manifest, &self.config.revocations)?,
+                    time,
+                )
+                .map_err(credential)?,
         };
-        if let Some(number) = extension.author {
-            if !pseudonym
-                || credentials
-                    .authors()
-                    .map_err(credential)?
-                    .and_then(|range| range.single())
-                    != Some(number)
-                || grants
-                    .iter()
-                    .any(|grant| grant.scope.table != extension.scope.table)
-            {
-                return Err(denied(
-                    "the author number does not belong to the signing key and table",
-                ));
-            }
-        } else if pseudonym {
-            return Err(denied("a pseudonym frame requires row identity format 2"));
-        }
         if !grants.iter().any(|grant| {
             grant.scope == extension.scope
                 && grant

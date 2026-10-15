@@ -40,17 +40,8 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
 async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, Failure> {
     let opened = Database::create(open, ttl)?;
     let database = &opened.database;
-    support::database(database);
+
     let scope: Value = serde_json::from_str(&database.scope())?;
-    for table in ["lists", "items"] {
-        support::prepare(&scope, table, &|request| async move {
-            call(database, request)
-                .await
-                .map_err(|error| json!(error.to_string()))
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    }
     // Check the allocator's starting identities, then release the reservations.
     let session = database.session();
     let request = |request: Value| json!({"version":1,"scope":scope,"request":request}).to_string();
@@ -63,15 +54,7 @@ async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, F
                 .call(request(json!({"type":"next_id","table":table})))
                 .await?,
         )?;
-        assert_eq!(
-            allocated["value"]["id"],
-            if table == "lists" {
-                "4294967297"
-            } else {
-                "8589934593"
-            },
-            "{table}"
-        );
+        assert_eq!(allocated["value"]["id"], "4294967297", "{table}");
     }
     session
         .call(request(json!({"type":"sql","sql":"ROLLBACK"})))
@@ -94,52 +77,48 @@ fn expression(sql: &str) -> Expr {
     };
     expr
 }
-// These scenarios insert before deleting; their live maximum is the creation-log maximum.
-fn identity_insert(sql: &str) -> String {
+// The fixture adapter obtains each inserted identity through the public SQL allocator.
+async fn identity_insert(connection: &Connection, sql: &str) -> Result<String, Failure> {
     let Ok(mut statements) = Parser::parse_sql(&SQLiteDialect {}, sql) else {
-        return sql.into();
+        return Ok(sql.into());
     };
     if statements.len() != 1 {
-        return sql.into();
+        return Ok(sql.into());
     }
     let statement = match &mut statements[0] {
         Statement::Query(query) => match query.body.as_mut() {
             SetExpr::Insert(statement) => statement,
-            _ => return sql.into(),
+            _ => return Ok(sql.into()),
         },
         statement => statement,
     };
     let Statement::Insert(insert) = statement else {
-        return sql.into();
+        return Ok(sql.into());
     };
     let table = insert.table.to_string();
     if !["lists", "items"].contains(&table.as_str()) {
-        return sql.into();
+        return Ok(sql.into());
     }
     insert.columns.push(Ident::new("id").into());
     let source = insert.source.as_mut().unwrap();
-    let author_floor = if table == "lists" {
-        4294967296i64
-    } else {
-        8589934592i64
-    };
-    let floor = format!("(SELECT COALESCE(MAX(id),{author_floor}) FROM {table})");
     match source.body.as_mut() {
         SetExpr::Values(values) => {
-            for (offset, row) in values.rows.iter_mut().enumerate() {
-                row.push(expression(&format!("{floor} + {}", offset + 1)));
+            for row in &mut values.rows {
+                let id = allocated_identity(connection, &table).await?;
+                row.push(expression(&id.to_string()));
             }
         }
         SetExpr::Select(select) => {
+            let base = allocated_identity(connection, &table).await? - 1;
             select
                 .projection
                 .push(SelectItem::UnnamedExpr(expression(&format!(
-                    "{author_floor} + row_number() OVER ()"
-                ))))
+                    "{base} + row_number() OVER ()"
+                ))));
         }
         _ => panic!("fixture insert"),
     }
-    statements[0].to_string()
+    Ok(statements[0].to_string())
 }
 fn text(value: &str) -> SqlValue {
     SqlValue::Text(value.into())
@@ -163,7 +142,7 @@ async fn all(
 ) -> Result<Vec<Vec<SqlValue>>, Failure> {
     let statement = connection.statement();
     let mut page: Page = connection
-        .execute(statement, identity_insert(sql), params)
+        .execute(statement, identity_insert(connection, sql).await?, params)
         .await?;
     let mut rows = std::mem::take(&mut page.rows);
     while !page.done {
@@ -171,6 +150,24 @@ async fn all(
         rows.append(&mut page.rows);
     }
     Ok(rows)
+}
+async fn allocated_identity(connection: &Connection, table: &str) -> Result<i64, Failure> {
+    let statement = connection.statement();
+    let mut page = connection
+        .execute(
+            statement,
+            format!("SELECT rocky_next_id('{table}')"),
+            vec![],
+        )
+        .await?;
+    let id = match page.rows.first().and_then(|row| row.first()) {
+        Some(SqlValue::Integer(id)) => *id,
+        _ => return Err("allocator returned no identity".into()),
+    };
+    while !page.done {
+        page = connection.next(statement).await?;
+    }
+    Ok(id)
 }
 async fn run(connection: &Connection, sql: &str) -> Result<(), Failure> {
     all(connection, sql, Vec::new()).await.map(drop)
@@ -350,7 +347,7 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
     let first = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
     let second = id(exact(&writer, "select ROCKY_NEXT_ID(?);", vec![text("items")]).await?)?;
-    assert_eq!((first, second), (8589934593, 8589934594));
+    assert_eq!((first, second), (4294967297, 4294967298));
     for (key, id) in [("i1", first), ("i2", second)] {
         exact(
             &writer,
@@ -374,7 +371,7 @@ async fn a_row_id_is_reserved_before_its_insert_in_the_same_transaction() -> Res
     for _ in 0..2 {
         exact(&writer, "BEGIN IMMEDIATE TRANSACTION", vec![]).await?;
         let third = id(exact(&writer, "SELECT rocky_next_id('items')", vec![]).await?)?;
-        assert_eq!(third, 8589934595);
+        assert_eq!(third, 4294967299);
         exact(&writer, "ROLLBACK", vec![]).await?;
     }
     assert_eq!(published(root.path())?, after);
@@ -646,16 +643,7 @@ async fn peers_apply_a_transaction_as_one_bundle_and_see_only_changed_columns()
     )?
     .database;
     call(&b, json!({"type": "sync"})).await?;
-    let scope: Value = serde_json::from_str(&b.scope())?;
-    for table in ["lists", "items"] {
-        support::prepare(&scope, table, &|request| async {
-            call(&b, request)
-                .await
-                .map_err(|error| json!(error.to_string()))
-        })
-        .await
-        .map_err(|error| error.to_string())?;
-    }
+    let _scope: Value = serde_json::from_str(&b.scope())?;
     let (writer_a, writer_b) = (a.connect(WRITER).await?, b.connect(WRITER).await?);
     let reader_b = b.connect(READER).await?;
     let events = b.observe_tables(None).await?;

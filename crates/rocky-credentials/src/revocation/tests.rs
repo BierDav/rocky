@@ -12,7 +12,6 @@ fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
         nodes: [crate::PeerId::of(node)].into(),
         users: [PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
-        pseudonyms: BTreeSet::new(),
     }
 }
 fn single(signed: &SignedRevocation) -> RevocationSet {
@@ -191,7 +190,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     }
     // Over the size limit: refused when signed and when decoded.
     let mut huge = statement(&issuer, NOW, node);
-    huge.pseudonyms = (0..80).map(|_| PrivateKey::new().public_key()).collect();
+    huge.users = (0..160).map(|_| PrivateKey::new().public_key()).collect();
     assert!(SignedRevocation::sign(huge, &publisher, &issuer).is_err());
     // An issuer can only co-sign with its own key, and a statement names something.
     assert!(SignedRevocation::sign(statement(&issuer, NOW, node), &publisher, &publisher).is_err());

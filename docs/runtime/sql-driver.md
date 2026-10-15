@@ -85,8 +85,8 @@ power loss can drop the last commits that nothing outside the device saw.
 
 Every typed table has Rocky's `id` and `row_kind` columns
 ([row identity](logical-schema.md#row-identity)); an insert
-names the next `id` of its table author, which an issuer assigns the device
-as a table pseudonym. A writer obtains it before the insert, inside the
+names the next `id` of its node's author number, carried in its node
+credential for every granted table. A writer obtains it before the insert, inside the
 transaction that inserts the row:
 
 ```sql
@@ -106,7 +106,7 @@ transaction continue the same author's sequence, so a bulk insert may use the
 ids that follow one reservation; a rollback to a savepoint or of the
 transaction releases what it reserved. It fails with code 8 on a reader, and
 with code 1 outside a write transaction, for an unknown table and without the
-device's table pseudonym or insert grant. The commit refuses an `id` that is not the author's next
+device's numbered node credential or insert grant. The commit refuses an `id` that is not the author's next
 sequence or a `row_kind` other than 0.
 
 ## Readers

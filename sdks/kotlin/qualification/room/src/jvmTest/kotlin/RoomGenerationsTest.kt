@@ -53,7 +53,6 @@ class RoomGenerationsTest {
         try {
             val created = RockyDatabase.create(directory, schema, PeerTransport.Iroh.isolated(), automaticSync = false)
             try {
-                created.installRoomAuthors()
                 val shop = room(directory, created)
                 try {
                     shop.shop().createList(ShopList("l1", "Groceries"), listOf(ShopItem("i1", "l1", "Milk", price = 1.5)))
@@ -65,7 +64,6 @@ class RoomGenerationsTest {
             }
             val database = confirmed(directory)
             try {
-                database.installRoomAuthors()
                 // Never sent and writing the removed price: held whole, its rows rolled back.
                 val held = database.heldChanges()
                 assertEquals(1, held.count)
@@ -95,7 +93,6 @@ class RoomGenerationsTest {
         try {
             val created = RockyDatabase.create(directory, schema, PeerTransport.Iroh.isolated(), automaticSync = false)
             try {
-                created.installRoomAuthors()
                 val shop = room(directory, created)
                 try {
                     // No price: an unsent write of the removed column would be held.
@@ -112,7 +109,6 @@ class RoomGenerationsTest {
             // The version 1 application opens the newer database and Room validates the tables it declares.
             val database = RockyDatabase.open(directory, schema)
             try {
-                database.installRoomAuthors()
                 val shop = room(directory, database)
                 try {
                     // A DAO on an unchanged table reads and writes.

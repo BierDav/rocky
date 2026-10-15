@@ -9,9 +9,9 @@ import kotlin.test.*
 
 /** The credential calls travel through the generated UniFFI session ABI. */
 class CredentialPrimitivesTest {
-    @Test fun `pseudonyms are assigned installed mapped and renewed through native calls`() = runBlocking<Unit> {
-        val root = Files.createTempDirectory("rocky-pseudonyms").toFile()
-        val schema = schema("authors") {
+    @Test fun `numbered nodes write every granted table and continue after reopen`() = runBlocking<Unit> {
+        val root = Files.createTempDirectory("rocky-node-authors").toFile()
+        val definition = schema("authors") {
             table("items") {
                 text("title")
                 primaryKey("id")
@@ -23,64 +23,24 @@ class CredentialPrimitivesTest {
         }
         var issuer: RockyDatabase? = null
         var writer: RockyDatabase? = null
-        var reader: RockyDatabase? = null
-        var other: RockyDatabase? = null
         try {
-            val a = RockyDatabase.local(File(root, "a"), schema).also { issuer = it }
+            val a = RockyDatabase.local(File(root, "a"), definition).also { issuer = it }
             val keys = Credentials.prepare(File(root, "w"))
             val writes = listOf("items", "notes").map { Grant(it, setOf(Right.Read, Right.Insert, Right.Custody)) }
             val supplied = a.credentials.grant(keys, writes, authors = 2)
-            val w = RockyDatabase.install(File(root, "w"), schema, supplied).also { writer = it }
+            val w = RockyDatabase.install(File(root, "w"), definition, supplied).also { writer = it }
             assertFalse(w.isIssuer)
-            assertFailsWith<RockyException> { w.credentials.assignPseudonym(w.credentials.pseudonymRequest("items")) }
-            val asked = w.credentials.pseudonymRequest("items")
-            val credential = a.credentials.assignPseudonym(asked)
-            val item = w.credentials.installPseudonym(credential)
-            // The registry author follows the two delegated numbers.
-            assertEquals(AuthorPseudonym("items", 4), item)
-            assertEquals(item, w.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
-            assertEquals(PseudonymOwner(w.session().node, "items", 4), a.credentials.pseudonymOwner(credential))
-            assertFalse(credential.toString().contains(w.session().node))
-            assertFalse(credential.toString().contains(a.session().principal))
-            assertFailsWith<RockyException> { w.credentials.pseudonymOwner(credential) }
-            assertFailsWith<RockyException> { a.credentials.installPseudonym(credential) }
-            val noteCredential = a.credentials.assignPseudonym(w.credentials.pseudonymRequest("notes"))
-            assertEquals(AuthorPseudonym("notes", 5), w.credentials.installPseudonym(noteCredential))
-            // Each table uses a distinct signing key, bound in its credential leaf.
-            assertNotEquals(
-                credential.last().jsonObject["capability"]!!.jsonObject["subject"],
-                noteCredential.last().jsonObject["capability"]!!.jsonObject["subject"],
-            )
-            val otherKeys = Credentials.prepare(File(root, "other"))
-            val recipient = RockyDatabase.install(
-                File(root, "other"),
-                schema,
-                a.credentials.grant(otherKeys, writes),
-            ).also { other = it }
-            for ((collection, number) in listOf("items" to 2, "notes" to 3)) {
-                val assigned = w.credentials.assignPseudonym(recipient.credentials.pseudonymRequest(collection))
-                assertEquals(AuthorPseudonym(collection, number), recipient.credentials.installPseudonym(assigned))
+            for (table in listOf("items", "notes")) {
+                w.write {
+                    val id = nextId(table)
+                    execute("INSERT INTO $table(id,title) VALUES(?, 'offline')", id)
+                }
             }
+            val originalNode = w.session().node
             w.close()
-            writer = null
-            val reopened = RockyDatabase.open(File(root, "w"), schema).also { writer = it }
-            assertEquals(item, reopened.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
-            // Removing and restoring supplied credentials cannot reset the allocator.
-            reopened.credentials.install(a.credentials.grant(keys, writes))
-            reopened.credentials.install(supplied)
-            assertFailsWith<RockyException> { reopened.credentials.assignPseudonym(a.credentials.pseudonymRequest("items")) }
-            assertEquals(item, reopened.credentials.installPseudonym(a.credentials.assignPseudonym(asked)))
-            val rKeys = Credentials.prepare(File(root, "r"))
-            val r = RockyDatabase.install(
-                File(root, "r"),
-                schema,
-                a.credentials.grant(rKeys, listOf(Grant("items", setOf(Right.Read, Right.Custody)))),
-            ).also { reader = it }
-            assertFailsWith<RockyException> { a.credentials.assignPseudonym(r.credentials.pseudonymRequest("items")) }
-            assertFailsWith<RockyException> { reopened.credentials.claimAuthorRange(1, 10) }
+            writer = RockyDatabase.open(File(root, "w"), definition)
+            assertEquals(originalNode, writer!!.session().node)
         } finally {
-            other?.close()
-            reader?.close()
             writer?.close()
             issuer?.close()
             root.deleteRecursively()

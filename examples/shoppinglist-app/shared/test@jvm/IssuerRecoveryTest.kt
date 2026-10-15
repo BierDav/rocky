@@ -82,7 +82,6 @@ class IssuerRecoveryTest {
             // next sync, and renewal's bootstrap then restarts it from a checkpoint.
             assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             // Its authors ended with the revoked epoch: the second issuer assigns new ones over the network.
-            d.installAuthors()
             d.add("Eggs")
             assertTrue(d.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertTrue(c.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
@@ -102,8 +101,6 @@ class IssuerRecoveryTest {
             val x = join(File(root, "x"), a.pairDevice(issuing = false)).withRoom(File(root, "x")).also { opened += it }.joined()
             assertFalse(x.isIssuer)
             // Joining asked the creator for its authors; a non-issuer cannot assign its own.
-            assertEquals(emptyList(), x.installAuthors())
-            assertFailsWith<RockyException> { x.credentials.assignPseudonym(x.credentials.pseudonymRequest("items")) }
             // The starter opt-out writes every table, the trusted-only ones included.
             assertEquals(GrantProfile.Writer(ShoppingSchema.tables.map { it.name }.toSet()), x.session().profile)
             val keys = Credentials.prepare(File(root, "y"))

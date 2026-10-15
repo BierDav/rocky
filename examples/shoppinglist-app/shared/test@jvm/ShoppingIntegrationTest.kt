@@ -26,7 +26,6 @@ internal val ItemsSchema = schema("shopping") {
 }
 
 /** Installs this device's author for `table`, assigned by [issuer]; inserts need it. */
-internal suspend fun RockyDatabase.author(issuer: RockyDatabase = this, table: String = "items") = credentials.installPseudonym(issuer.credentials.assignPseudonym(credentials.pseudonymRequest(table)))
 internal suspend fun RuntimePort.insertItem(title: String) = write { execute("INSERT INTO items(id, title, completed) VALUES(?, ?, ?)", nextId("items"), title, false) }
 
 class ShoppingIntegrationTest {
@@ -80,7 +79,6 @@ class ShoppingIntegrationTest {
         var b: RockyDatabase? = null
         try {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a!!.pairing(writer).uri, local(), automaticSync = false)
-            a.author()
             a.add("Milk")
             assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(listOf("Milk"), b.titles())
@@ -116,8 +114,6 @@ class ShoppingIntegrationTest {
         try {
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, loopback(), automaticSync = false)
             c = RockyDatabase.join(File(root, "c"), ItemsSchema, a.pairing(writer).uri, loopback(), automaticSync = false)
-            b.author(issuer = a)
-            c.author(issuer = a)
             assertTrue(b.contact().uri.startsWith("rocky://peer/"))
             assertEquals(b.session().node, c.addPeer(b.contact().uri))
             // A device of the domain is served without being a contact: only the dialing side needs one.
@@ -181,9 +177,6 @@ class ShoppingIntegrationTest {
                 left.addPeer(right.contact().uri)
                 right.addPeer(left.contact().uri)
             }
-            a.author()
-            s.author(issuer = a)
-            d.author(issuer = a)
             a.add("Milk")
             s.add("Eggs")
             d.add("Jam")
@@ -284,7 +277,6 @@ class ShoppingIntegrationTest {
             assertTrue(invitation.uri.startsWith("rocky://join/"))
             b = RockyDatabase.join(File(root, "b"), ShoppingSchema, invitation.uri, local(), automaticSync = false)
             // Joining installed the authors its issuer assigned over the network.
-            assertEquals(emptyList(), b.installAuthors())
             db = openShoppingDatabase(File(root, "b"), b)
             val rb = ShoppingRepository(db, b)
             val list = ra.createList("Groceries")
@@ -374,8 +366,6 @@ class ShoppingIntegrationTest {
         val a = RockyDatabase.create(File(root, "a"), schema, local(), automaticSync = false)
         var b: RockyDatabase? = null
         try {
-            a.author(table = "products")
-            a.author(table = "categories")
             a.write { execute("INSERT INTO products(id, name, quantity, note) VALUES(?, ?, ?, ?)", nextId("products"), "Coffee", Long.MAX_VALUE, null) }
             a.category("Drinks")
             val row = Row.decode(a.read(products.query())).single()
@@ -393,7 +383,6 @@ class ShoppingIntegrationTest {
             val invitation = a.pairing(GrantProfile.Writer(setOf("products")))
             assertFailsWith<Exception> { RockyDatabase.join(File(root, "wrong"), ItemsSchema, invitation.uri, local(), automaticSync = false) }
             b = RockyDatabase.join(File(root, "b"), schema, invitation.uri, local(), automaticSync = false)
-            b.author(issuer = a, table = "products")
             assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             // A scoped writer of products cannot write categories.
             assertFailsWith<RockyException> { b.category("Forged") }
@@ -417,7 +406,6 @@ class ShoppingIntegrationTest {
                 runtime.observe(ItemsSchema.table("items").query()).take(1).toList()
             }
             withTimeout(10_000) { observation.await() }
-            runtime.author()
             runtime.add("Persisted")
             val waiting = launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
@@ -472,7 +460,6 @@ class ShoppingIntegrationTest {
 
             a.revoke(c.session().node)
             assertTrue(a.devices().single { it.revoked }.node == c.session().node)
-            a.author()
             a.add("After revocation")
             assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })
             assertEquals(session.revocations.statements + 1uL, b.session().revocations.statements)
@@ -509,7 +496,6 @@ class ShoppingIntegrationTest {
         var b: RockyDatabase? = null
         try {
             val items = ItemsSchema.table("items")
-            a.author()
             repeat(40) { a.add("$it:" + "x".repeat(12_000)) }
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, a.pairing(writer).uri, local(), automaticSync = false)
             assertTrue(b.syncOnce().peers.any { peer -> peer.attempts.any { attempt -> attempt.operation == rocky.AttemptOperation.Reconcile && attempt.outcome == rocky.AttemptOutcome.Completed } })

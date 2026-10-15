@@ -79,7 +79,6 @@ fn statements(f: &Fixture, count: usize, nodes: &[PublicKey]) -> RevocationSet {
                 } else {
                     BTreeSet::new()
                 },
-                pseudonyms: BTreeSet::new(),
             };
             SignedRevocation::sign(statement, &f.publisher, &issuer).unwrap()
         })

@@ -2,8 +2,7 @@
 //! holder of the publisher key signs.
 use crate::{
     AuthorRange, Capability, CredentialChain, Error, Extended, Extension, MAX_CHAIN_LIFETIME,
-    PrivateKey, PublicKey, Revocation, RevocationSet, SealedDevice, SignedCapability,
-    SignedRevocation, denied,
+    PrivateKey, PublicKey, Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
 };
 use rocky_core::{Commitment, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection};
 use serde::{Deserialize, Serialize};
@@ -297,9 +296,10 @@ impl Authority<'_> {
         &self,
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
+        authors: AuthorRange,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        self.issue_delegable(subject, grants, 1, validity)
+        self.issue_delegable(subject, grants, 1, authors, validity)
     }
     /// As `issue`, with `delegations` links allowed below it: 1 reaches
     /// the subject's own node key, 2 one further delegate and its node.
@@ -308,12 +308,13 @@ impl Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         delegations: u8,
+        authors: AuthorRange,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        self.issue_terms(subject, grants, (delegations, None), validity)
+        self.issue_terms(subject, grants, (delegations, Some(authors)), validity)
     }
-    /// As `issue_delegable`, letting the subject assign the author numbers
-    /// `authors` to pseudonyms.
+    /// As `issue_delegable`, granting the subject the author numbers
+    /// `authors` for its nodes.
     pub fn issue_terms(
         &self,
         subject: PublicKey,
@@ -397,32 +398,44 @@ pub fn device_chain(
     root: SignedCapability,
     user: &PrivateKey,
     node: PublicKey,
+    author: u32,
 ) -> Result<CredentialChain, Error> {
-    CredentialChain(vec![root]).complete(user, node)
+    CredentialChain(vec![root]).complete(user, node, author)
 }
 
 impl CredentialChain {
     /// Completes a chain that ends at `holder` with its node key: the same
     /// grants and validity, delegating nothing further.
-    pub fn complete(self, holder: &PrivateKey, node: PublicKey) -> Result<Self, Error> {
-        self.complete_with_alias(holder, node, node)
+    pub fn complete(
+        self,
+        holder: &PrivateKey,
+        node: PublicKey,
+        author: u32,
+    ) -> Result<Self, Error> {
+        self.complete_with_alias(holder, node, node, author)
     }
-    /// Binds a distinct credential signing key to the node without exposing its key.
+    /// Completes a node leaf; the signing key must be the node key.
     pub fn complete_with_alias(
         mut self,
         holder: &PrivateKey,
         node: PublicKey,
         alias: PublicKey,
+        author: u32,
     ) -> Result<Self, Error> {
         let last = self.holder(holder)?;
+        if alias != node || !last.authors()?.is_some_and(|range| range.contains(author)) {
+            return Err(denied(
+                "node number is outside the principal's range or signer differs from node",
+            ));
+        }
         let leaf = Capability {
             subject: alias,
             kind: PrincipalKind::Node,
             delegations: 0,
             extension: Extension::new(Extended {
+                authors: Some(AuthorRange::new(author, author)?),
                 partitions: last.extended()?.partitions,
                 node: Some(crate::PeerId::of(node)),
-                ..Extended::default()
             })?,
             ..last.clone()
         };
@@ -477,63 +490,6 @@ impl CredentialChain {
         }
         let mut chain = self.clone();
         chain.0.push(SignedCapability::sign(link, holder)?);
-        Ok(chain)
-    }
-    /// Assigns `author` to the pseudonym `key` of `device` under the last
-    /// link, which `holder` holds and whose range contains the number. The
-    /// pseudonym gets `grants`, all on one table and held by the holder,
-    /// and seals the device to the publisher. It expires with the holder
-    /// and no later than `until`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn assign(
-        &self,
-        holder: &PrivateKey,
-        key: PublicKey,
-        author: u32,
-        device: PublicKey,
-        grants: Vec<ResourceGrant>,
-        until: u64,
-        (time, ttl, skew): (u64, u64, u64),
-    ) -> Result<Self, Error> {
-        let parent = self.holder(holder)?;
-        let publisher = self
-            .0
-            .first()
-            .map(|root| root.issuer)
-            .ok_or_else(|| denied("credential depth"))?;
-        if !parent
-            .authors()?
-            .is_some_and(|range| range.contains(author))
-        {
-            return Err(denied("the author number is outside the assigner's range"));
-        }
-        if grants.is_empty()
-            || grants
-                .iter()
-                .any(|grant| !parent.grants.iter().any(|held| held.includes(grant)))
-        {
-            return Err(denied("delegation expands authority"));
-        }
-        let leaf = Capability {
-            manifest: parent.manifest,
-            subject: key,
-            kind: PrincipalKind::Pseudonym,
-            grants,
-            not_before: time.saturating_sub(skew).max(parent.not_before),
-            expires: time.saturating_add(ttl).min(parent.expires).min(until),
-            delegations: 0,
-            extension: Extension::new(Extended {
-                partitions: Vec::new(),
-                authors: Some(AuthorRange::new(author, author)?),
-                node: None,
-                device: Some(SealedDevice::seal(publisher, key, author, device)?),
-            })?,
-        };
-        if leaf.not_before >= leaf.expires {
-            return Err(denied("delegation outlives its parent"));
-        }
-        let mut chain = self.clone();
-        chain.0.push(SignedCapability::sign(leaf, holder)?);
         Ok(chain)
     }
     /// The author range of the last link: what its holder assigns.

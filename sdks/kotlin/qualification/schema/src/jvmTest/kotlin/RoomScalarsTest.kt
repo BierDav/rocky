@@ -120,7 +120,6 @@ class RoomScalarsTest {
             val database = RockyDatabase.local(directory, imported)
             try {
                 for (sensor in listOf("A", "B")) database.partitions.create("partition_samples", JsonArray(listOf(rocky.text(sensor))))
-                database.credentials.installPseudonym(database.credentials.assignPseudonym(database.credentials.pseudonymRequest("partition_samples")))
                 val ids = mutableListOf<Long>()
                 for ((sensor, reading) in listOf("A" to 10L, "B" to 20L)) {
                     database.write {

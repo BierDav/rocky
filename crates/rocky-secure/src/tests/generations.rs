@@ -275,6 +275,15 @@ impl Lineage {
             expires,
             delegations,
             extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+                authors: Some(if kind == PrincipalKind::Node {
+                    rocky_credentials::AuthorRange::new(
+                        crate::tests::node_number(subject),
+                        crate::tests::node_number(subject),
+                    )
+                    .unwrap()
+                } else {
+                    rocky_credentials::AuthorRange::ALL
+                }),
                 node: (kind == PrincipalKind::Node).then(|| rocky_credentials::PeerId::of(subject)),
                 ..Default::default()
             })
@@ -352,51 +361,7 @@ impl Lineage {
                 self.readers(generation),
             )
             .await?;
-        self.register_authors(&replica, generation, node).await?;
         Ok(replica)
-    }
-    async fn register_authors(
-        &self,
-        replica: &EncryptedReplica<TypedRows>,
-        generation: u32,
-        node: &PrivateKey,
-    ) -> Result<(), Error> {
-        for table in self.schema(generation).tables {
-            let material = rocky_core::commitment(&table.sql_name, node.as_bytes());
-            let key = PrivateKey::from_bytes(&material);
-            let number =
-                (u32::from_le_bytes(material[..4].try_into().unwrap()) & 0x7fff_ffff).max(1);
-            let grants: Vec<_> = self
-                .grants(generation)
-                .into_iter()
-                .filter(|grant| grant.scope == self.scope(&table.sql_name))
-                .collect();
-            let assigner = PrivateKey::new();
-            let root = crate::credentials::Authority {
-                publisher: &self.publisher,
-                manifest: self.definition(generation).hash(),
-            }
-            .issue_terms(
-                assigner.public_key(),
-                grants.clone(),
-                (1, Some(crate::credentials::AuthorRange::ALL)),
-                crate::tests::validity(),
-            )
-            .unwrap();
-            let chain = CredentialChain(vec![root])
-                .assign(
-                    &assigner,
-                    key.public_key(),
-                    number,
-                    node.public_key(),
-                    grants,
-                    u64::MAX,
-                    (0, u64::MAX, 0),
-                )
-                .unwrap();
-            replica.register_row_author(key, chain).await?;
-        }
-        Ok(())
     }
 }
 pub(super) async fn session(replica: &EncryptedReplica<TypedRows>) -> SecureSql<TypedRows> {
@@ -1061,10 +1026,6 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
         select(&restored, "SELECT count(*) FROM items").await,
         vec![vec![SqlValue::Integer(3)]]
     );
-    lineage
-        .register_authors(&restored, 1, &new_key)
-        .await
-        .unwrap();
     insert(&restored, 3..4).await;
     let items = lineage.scope("items");
     let authors: BTreeSet<_> = frames(&restored, &alice, items)
@@ -1074,13 +1035,7 @@ async fn a_backup_copy_opens_only_under_a_fresh_identity_and_keeps_its_history()
         .collect();
     assert_eq!(
         authors,
-        [
-            PrivateKey::from_bytes(&rocky_core::commitment("items", old_key.as_bytes()))
-                .public_key(),
-            PrivateKey::from_bytes(&rocky_core::commitment("items", new_key.as_bytes()))
-                .public_key()
-        ]
-        .into()
+        [old_key.clone().public_key(), new_key.clone().public_key()].into()
     );
     restored.audit(items).await.unwrap();
     drop(restored);
@@ -1194,10 +1149,6 @@ async fn an_open_replica_adopts_a_newer_generation_in_place() {
             .unwrap()
     );
     // Its writes reach the generation 3 peer, and the file reopens at 3.
-    lineage
-        .register_authors(&alice, 3, &alice_key)
-        .await
-        .unwrap();
     identity_insert(
         &session(&alice).await,
         "INSERT INTO tags VALUES('t','label')",
@@ -1629,7 +1580,6 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
 
     // Alice finalizes a horizon on her own; a replica that missed every
     // frame imports the finalized checkpoint and agrees.
-    lineage.register_authors(alice, 5, alice_key).await.unwrap();
     let cut = rocky_credentials::SignedHorizon::sign(
         alice.horizon_statement(items, &[]).await.unwrap(),
         &lineage.publisher,

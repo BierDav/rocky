@@ -45,24 +45,6 @@ async fn public_partition_schema_keys_sql_identity_and_reopen() {
         )
         .await;
     }
-    let requested = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_request","collection":"items"}),
-    )
-    .await;
-    let assigned = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_assign","request":requested["request"]}),
-    )
-    .await;
-    call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await;
     let mut ids = Vec::new();
     for (name, amount) in [("A", "10"), ("B", "20")] {
         call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
@@ -251,25 +233,7 @@ async fn own_id_partitions_continue_the_table_log() {
     };
     let mut db = Database::create(options(), None).unwrap().database;
     let scope: Value = serde_json::from_str(&db.scope()).unwrap();
-    let session = db.session();
-    let requested = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_request","collection":"lists"}),
-    )
-    .await;
-    let assigned = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_assign","request":requested["request"]}),
-    )
-    .await;
-    call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await;
+    let _session = db.session();
     let mut previous = 0;
     for index in 0..3 {
         if index == 2 {
@@ -313,24 +277,6 @@ async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
         )
         .await;
     }
-    let requested = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_request","collection":"items"}),
-    )
-    .await;
-    let assigned = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_assign","request":requested["request"]}),
-    )
-    .await;
-    call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await;
     call(&session, &scope, json!({"type":"sql","sql":"BEGIN"})).await;
     let id = call(
         &session,
@@ -356,24 +302,6 @@ async fn moves_keep_historical_birth_proofs_after_an_application_generation() {
     .unwrap()
     .database;
     let session = db.session();
-    let requested = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_request","collection":"items"}),
-    )
-    .await;
-    let assigned = call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_assign","request":requested["request"]}),
-    )
-    .await;
-    call(
-        &session,
-        &scope,
-        json!({"type":"pseudonym_install","pseudonym":assigned["pseudonym"]}),
-    )
-    .await;
 
     call(&session, &scope, json!({"type":"move_row","handle":vec![92u8;32],"table":"items","id":id,"from":values("A"),"to":values("B")})).await;
     let rows = call(&session, &scope, json!({"type":"read","query":{"sql":"SELECT id,note FROM items WHERE list='B' AND row_kind=0","values":[],"max_rows":2}})).await;

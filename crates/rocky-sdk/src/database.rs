@@ -716,7 +716,7 @@ async fn identity(
 }
 
 /// Readies an opened replica for this identity: its readable tables,
-/// group keys, credential signer and row authors.
+/// group keys and the node credential.
 pub(crate) async fn attach(
     replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &mut Settings,
@@ -772,12 +772,9 @@ pub(crate) async fn attach(
     }
     replica
         .register_credential_signer(rocky_credentials::PrivateKey::from_bytes(
-            &vault.get("credential")?,
+            &vault.get("node")?,
         ))
         .await?;
-    for (key, chain) in settings.row_authors(vault)? {
-        replica.register_row_author(key, chain).await?;
-    }
     Ok(())
 }
 
@@ -837,16 +834,6 @@ async fn migrate(
     )
     .await?;
     attach(&replica, settings, vault, &domain, path).await?;
-    // Pseudonym chains name a generation: this issuer renews its own.
-    let registry = crate::registry::read(&replica, domain.registry()).await?;
-    for collection in settings.missing_authors(&domain)? {
-        let request = settings.pseudonym_request(vault, &collection)?;
-        let (chain, _) = settings.assign_pseudonym(vault, &request, Some(&registry))?;
-        let (collection, _) = settings.hold_pseudonym(vault, chain.clone())?;
-        settings.save(path)?;
-        let key = PrivateKey::from_bytes(&vault.get(&settings.pseudonym_role(&collection))?);
-        replica.register_row_author(key, chain).await?;
-    }
     let publication = publication(&domain);
     if !replica
         .publications()
@@ -1444,7 +1431,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn populated_numeric_consumer_restores_pseudonym_after_reopen() -> Result<(), Failure> {
+    async fn populated_numeric_consumer_continues_node_author_after_reopen() -> Result<(), Failure>
+    {
         const SCHEMA: &str = r#"{"format":6,"application":"reopen_numeric","version":1,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"]}]}"#;
         async fn call(
             database: &Database,
@@ -1470,24 +1458,6 @@ mod tests {
         };
         let database = Database::create(options(), None)?.database;
         let session = database.session();
-        let request = call(
-            &database,
-            &session,
-            json!({"type":"pseudonym_request","collection":"items"}),
-        )
-        .await?;
-        let assignment = call(
-            &database,
-            &session,
-            json!({"type":"pseudonym_assign","request":request["request"]}),
-        )
-        .await?;
-        call(
-            &database,
-            &session,
-            json!({"type":"pseudonym_install","pseudonym":assignment["pseudonym"]}),
-        )
-        .await?;
         call(&database, &session, json!({"type":"sql","sql":"BEGIN"})).await?;
         let first = call(
             &database,

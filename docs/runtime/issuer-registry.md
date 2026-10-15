@@ -29,11 +29,11 @@ writable counts exclude it.
 A device's record is every row whose `node` is its hexadecimal node key: its
 `device` entry (user key, how it was recorded, profile, enrolling issuer,
 command identity, enrollment time), a `revoked` tombstone, its capabilities
-with expiry, its partition grants with delegation depth, its assigned
-pseudonyms and an opaque label of at most 256 bytes. Each entry is its own row,
+with expiry and principal author range, its partition grants with delegation
+depth and an opaque label of at most 256 bytes. Each entry is its own row,
 so records merge by [row identity](logical-schema.md#row-identity): the
 tombstone only becomes set, the latest-expiring capability is current, and
-grant and pseudonym lists merge by union.
+grant lists merge by union.
 
 ## What commits before an answer
 
@@ -43,17 +43,13 @@ grant and pseudonym lists merge by union.
 | Renewal | Nothing | `device` when absent, capability | Renewal |
 | `grant`, `delegate` on an issuer | Carved author range | `device`, capability | `supplied` |
 | `partition_grant`, `partition_delegate` on an issuer | Nothing | `device` when absent, partition grants | `supplied` |
-| Pseudonym assignment by an issuer | Author counter | Pseudonym | Chain |
 | `revoke` | Intent with the statement and target epochs, then keys, the signed statement and tombstones | Tombstone | Statement ID and revocations |
 
 Each commit also brings the issuer's own record up to date and writes a missing
-tombstone for any device a held statement or tombstone revoked. An issuer writes under its own
-`issuer_registry` pseudonym, assigned from its author range on its first
-write. Its own pseudonyms for application tables join its record with that
-commit. A lost answer leaves a record without a usable chain; the retry is the
-same device: a pairing retry with the same nonce gets the claimed author range
-again, a pseudonym request returns the number the registry holds for its key at
-any issuer, and a renewal or grant records the new capability.
+tombstone for any device a held statement or tombstone revoked. The issuer's
+node key signs registry writes under the same number it uses for application
+tables. A pairing retry receives its original range; capability entries retain
+the range granted to the principal. No table-key mapping is recorded.
 
 ## Reading it
 
@@ -70,7 +66,7 @@ any issuer, and a renewal or grant records the new capability.
 - `revoke(node)` builds its [statement](revocations.md) and target key epochs
   from the record and saves them as its intent. It rotates the
   collections the record's profile reads and the group partitions it reads or
-  holds grants for, revokes its user, capability and pseudonyms, and rotates
+  holds grants for, revokes its user and capability, and rotates
   every held collection key and every known partition secret held here when
   there is no record. A device recorded only by partition grants selects
   only those grants. It needs no previous contact with this issuer.
@@ -81,7 +77,7 @@ any issuer, and a renewal or grant records the new capability.
 
 | Request | Result |
 | --- | --- |
-| `devices` | Every other recorded device: `node`, `user`, `kind`, `issuer`, `enrolled`, `revoked`, `profile`, `capability`, `expires`, `command`, `label` (bytes), `partitions`, `pseudonyms` (issuer) |
+| `devices` | Every other recorded device: `node`, `user`, `kind`, `issuer`, `enrolled`, `revoked`, `profile`, `capability`, `expires`, `command`, `label` (bytes), `partitions` (issuer) |
 | `device_label` with `node` and `label` bytes | Sets the label of a recorded device (issuer) |
 
 Kotlin `RockyDatabase.devices()` returns `Device` with `expiresAtEpochSeconds`,
@@ -95,10 +91,5 @@ issuer.
   `registry_full` and writes nothing; an invitation is not created then.
 - Two issuers recording one device at once keep one `device` entry; both name
   the same user and node.
-- A non-issuer assigning author numbers from a delegated range keeps no record:
-  a retried request keeps its number only by presenting its previous chain.
-- Non-issuer delegations remain unrecorded. Their recipients use full rotation
-  when revoked by node key; no delegator, user or pseudonym is inferred.
-  [Durable provenance](../ideas/delegation_provenance.md) is a future idea.
-- Not covered: rotating pseudonyms (the `closed` field is stored, never set)
-  and showing any registry field to a member.
+- Non-issuer delegations remain unrecorded; revocation of an unknown delegate
+  uses the broad key-rotation fallback described in [revocations](revocations.md).

@@ -92,15 +92,6 @@ private class DeviceProcess {
                 RockyDatabase.install(directory().path, ShoppingSchema, request.getValue("supplied").jsonObject, transport = loopback())
             }
 
-            "authorRequest" -> JsonPrimitive(database.credentials.pseudonymRequest(request.text("table")))
-
-            "authorAssign" -> database.credentials.assignPseudonym(request.text("request"))
-
-            "authorInstall" -> {
-                database.credentials.installPseudonym(request.getValue("credential").jsonArray)
-                JsonNull
-            }
-
             "resume" -> opened(directory()) { RockyDatabase.resume(directory(), ShoppingSchema, loopback(), automaticSync = false) }
 
             "pairing" -> JsonPrimitive(

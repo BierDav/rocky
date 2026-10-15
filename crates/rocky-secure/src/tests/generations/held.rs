@@ -74,7 +74,7 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     // An offered write of the removed field stays sent, field by field.
     write(&carol, "UPDATE items SET note='sent' WHERE key='0001'").await;
     sync(&carol, &alice, &alice_key, &lineage, 3, items).await;
-    let signer = PrivateKey::from_bytes(&rocky_core::commitment("items", carol_key.as_bytes()));
+    let signer = carol_key.clone();
     let offered = frames(&carol, &alice, items)
         .await
         .into_iter()
@@ -108,7 +108,6 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
                 .await
                 .unwrap()
         );
-        lineage.register_authors(replica, 4, key).await.unwrap();
     }
     // Held whole: its kept effect is rolled back at once.
     assert_eq!(title(&carol).await, vec![vec![text("one")]]);

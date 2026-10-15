@@ -13,6 +13,7 @@ use std::pin::Pin;
 pub(super) mod cut;
 pub(super) mod proposal;
 mod recovery;
+mod statements;
 mod terminal;
 pub use cut::{CutEvidence, CutRefusal, MAX_PAGE_CUTS};
 pub use proposal::{BaseReport, CutProposal};
@@ -584,6 +585,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.require_applied(log).await?;
         let me = coordinator.node();
         if !head.member(&me) {
+            self.configure_line(log, &head, coordinator).await?;
             let sequence = {
                 let mut inner = self.inner.lock().await;
                 let sequence = transaction!(inner, |inner| inner.next_sequence(log).await)?;

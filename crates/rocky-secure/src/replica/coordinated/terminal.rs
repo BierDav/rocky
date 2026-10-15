@@ -65,7 +65,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             self.abort_own(log, entry).await?;
             return Err(CoordinatedError::Conflict);
         };
-        match terminal.continuation {
+        let continuation = self.inner.lock().await.continuation(log, terminal)?;
+        match continuation {
             Some(tip) if tip != log.tip => {
                 let next = TipLog {
                     scope: log.scope,
@@ -131,12 +132,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let Some(entry) = carried.into_iter().next() else {
             return Err(denied("no coordinated write is carried into this log").into());
         };
+        // A continuation whose seal lost hands the write to the winner's.
+        let canonical = self.inner.lock().await.canonical(log)?;
+        if canonical != log.tip {
+            let next = TipLog {
+                scope: log.scope,
+                tip: canonical,
+            };
+            self.carry(log, next, &entry).await?;
+            return Err(CoordinatedError::Undecided);
+        }
         if log != self.followed_log(log.scope).await {
             return Err(CoordinatedError::Undecided);
         }
         let mut head = coordinator.log_head(log).await.map_err(coordination)?;
         if let Some(terminal) = head.terminal {
-            match terminal.continuation {
+            let continuation = self.inner.lock().await.continuation(log, terminal)?;
+            match continuation {
                 Some(tip) if tip != log.tip => {
                     let next = TipLog {
                         scope: log.scope,
@@ -163,6 +175,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.inner.lock().await.learn_genesis(log, &head).await?;
         let me = coordinator.node();
         if !head.member(&me) {
+            self.configure_line(log, &head, coordinator).await?;
             let sequence = {
                 let mut inner = self.inner.lock().await;
                 let sequence = transaction!(inner, |inner| inner.next_sequence(log).await)?;

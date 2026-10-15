@@ -34,14 +34,14 @@ impl TipStatement {
             Self::Bookmark(s) => s.statement.scope,
         }
     }
-    fn append(&self, graph: &mut TipGraph) {
+    pub(in crate::replica) fn append(&self, graph: &mut TipGraph) {
         match self {
             Self::Seal(s) => graph.seals.push(s.clone()),
             Self::Opening(s) => graph.openings.push(s.clone()),
             Self::Bookmark(s) => graph.moves.push(s.clone()),
         }
     }
-    fn verify(
+    pub(in crate::replica) fn verify(
         &self,
         publisher: PublicKey,
         graph: &TipGraph,
@@ -97,7 +97,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    fn scope_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
+    pub(in crate::replica) fn scope_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
         if scope.app != self.definition.app || !self.domains.contains(&scope.domain) {
             return Err(denied("tip graph belongs to another domain"));
         }
@@ -795,20 +795,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn tip_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
         self.inner.lock().await.scope_graph(scope)
     }
-    /// Verified union; no row scan is needed for seals or forward bookmark moves.
+    /// Verified union; no row scan is needed for seals or forward bookmark
+    /// moves. On a trusted node a seal or move whose terminal log entry
+    /// lost, or is not confirmed yet, waits outside the graph.
     pub async fn receive_tip_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
-        if self.domain_log().is_some()
-            && statements
-                .iter()
-                .any(|s| matches!(s, TipStatement::Seal(_) | TipStatement::Bookmark(_)))
-        {
-            return Err(denied(
-                "coordinated tip seal or move requires a terminal log entry",
-            ));
-        }
+        let statements = self.coordinate_tip_statements(statements, false).await?;
+        self.admit_tip_statements(&statements).await
+    }
+    async fn admit_tip_statements(&self, statements: &[TipStatement]) -> Result<usize, Error> {
         let mut inner = self.inner.lock().await;
         let mut graphs = inner.graphs.clone();
         let mut new = Vec::new();
@@ -1037,20 +1034,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.node_author = Some(selected);
         inner.flush()
     }
-    /// Local seals/moves of a coordinated tip must enter its terminal log entry.
+    /// Admits this node's own statements. With a composed log, a seal or a
+    /// move off an open tip first commits its digest as the tip's terminal
+    /// log entry, and an opening configures its tip's minimum; a lost entry
+    /// fails with `sealed` and nothing is published.
     pub async fn publish_tip_statements(
         &self,
         statements: &[TipStatement],
     ) -> Result<usize, Error> {
-        if self.domain_log().is_some()
-            && statements
-                .iter()
-                .any(|s| matches!(s, TipStatement::Seal(_) | TipStatement::Bookmark(_)))
-        {
-            return Err(denied(
-                "coordinated tip seal or move requires a terminal log entry",
-            ));
-        }
-        self.receive_tip_statements(statements).await
+        let statements = self.coordinate_tip_statements(statements, true).await?;
+        self.admit_tip_statements(&statements).await
     }
 }

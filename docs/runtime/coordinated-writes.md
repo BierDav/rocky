@@ -77,23 +77,45 @@ effects are held as [held changes](held-changes.md) for the application.
 
 ## Seals and moves
 
-`EncryptedReplica::seal_log(log, LogTerminal { digest, continuation },
-coordinator, peers)` ends a tip's log with the digest of a seal of the tip or
-a bookmark move off it, then decides this node's entries. Entries committed
-before it are the sealed state, and every node catches up through them. A
-pending entry the terminal entry aborted is decided by its proposer:
+On a trusted node with a composed log, a seal of a tip enters the graph only
+after its digest ended that tip's log as its terminal entry, so no entry
+commits on a tip the graph sealed. `publish_tip_statements` and
+`receive_tip_statements` verify each new seal as admission does, then end its
+tip's log with `LogTerminal { digest, continuation }` unless it ended already:
 
-- With a continuation, the write moves unsent into the continuation tip's
-  log. Once the node follows that tip, it is appended there as the first
-  entry, which is the state it was computed on, and commits once. Until then
-  `propose` returns `Undecided`. Another node that stored it discards it.
+- A log ended by this seal, or by a terminal entry whose statement this node
+  does not hold, admits the seal; concurrent seals resolve in the graph by
+  the lower digest, as on devices without a log.
+- When a seal this node already holds ended the log, its own publication
+  fails `sealed` and publishes nothing. A received seal is admitted anyway.
+- When the coordinator does not confirm, publication fails
+  `coordinator_unavailable`; a received seal and the statements depending on
+  it wait outside the graph until a later exchange.
+
+Moves need no entry of their own: a move off an open tip carries the close
+seal that ends its log, and a forward move leaves an already sealed tip.
+Deleting a bookmark leaves its tip and the tip's log open. An opening's
+minimum in-sync size holds for every tip of its line: before a node's join of
+a log nobody joined yet, it relays that minimum with `DomainLog::configure`,
+and it never joins a log with a smaller one.
+
+`EncryptedReplica::seal_log(log, terminal, coordinator, peers)` ends a log
+directly and decides this node's entries. Entries committed before the
+terminal entry are the sealed state, and every node catches up through them;
+their frames beyond the seal's frontier walk on as late frames. A pending
+entry the terminal entry aborted is decided by its proposer:
+
+- With a continuation, the write moves unsent into the log of the
+  continuation of the tip's winning seal in the proposer's graph, else the
+  terminal entry's. Once the node follows that tip, it is appended there as
+  the first entry, which is the state it was computed on, and commits once.
+  Until then `propose` returns `Undecided`; a continuation whose seal lost
+  hands it on to the winner's. Another node that stored it discards it.
 - After a `close`, or when the continuation already took a write, it is
   voided, rolled back and returned as a [held change](held-changes.md):
   `Sealed`.
 
-Slots on an ended log fail `Sealed`. Rocky builds no seal or move statement
-here; the caller submits its digest before publishing the statement and
-treats `Sealed` as having lost.
+Slots on an ended log fail `Sealed`.
 
 ## Recovery
 

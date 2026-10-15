@@ -503,37 +503,45 @@ async fn concurrent_issuer_seals_choose_the_lower_continuation_on_every_device()
 }
 
 #[tokio::test]
-async fn coordinated_seals_and_moves_cannot_bypass_the_terminal_log_via_receipt() {
+async fn a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let key = PrivateKey::new();
     let replica = open(&f, &dir.path().join("coordinated.db"), &key).await;
     main(&f, &replica).await;
+    let tip = replica.followed_tip().await;
+    let log = rocky_core::TipLog {
+        scope: f.public.domain,
+        tip,
+    };
     let signed = seal(&f, &replica).await;
     let records = vec![
         TipStatement::Seal(signed.clone()),
-        bookmark(
-            &f,
-            "main",
-            Some(signed.statement.tip),
-            signed.successor().unwrap(),
-        ),
+        bookmark(&f, "main", Some(tip), signed.successor().unwrap()),
     ];
-    let log = rocky_coordinator::coordinated::MemoryLog::new();
-    replica.set_domain_log(Some(Arc::new(log.client(key.public_key()))));
-    for statement in records {
-        for result in [
-            replica
-                .publish_tip_statements(std::slice::from_ref(&statement))
-                .await,
-            replica
-                .receive_tip_statements(std::slice::from_ref(&statement))
-                .await,
-        ] {
-            let message = result.unwrap_err().to_string();
-            assert!(message.contains("terminal log"), "{message}");
-        }
-    }
+    let coordinator = rocky_coordinator::coordinated::MemoryLog::new();
+    replica.set_domain_log(Some(Arc::new(coordinator.client(key.public_key()))));
+    // A seal admission refuses never ends the log.
+    let mut forged = signed.statement.clone();
+    forged.frontier.clear();
+    let forged = SignedSeal::sign(forged, &PrivateKey::new()).unwrap();
+    assert!(
+        replica
+            .receive_tip_statements(&[TipStatement::Seal(forged)])
+            .await
+            .is_err()
+    );
+    assert_eq!(coordinator.head(log).unwrap().terminal, None);
+    // Unconfirmed, a received seal and the move riding on it wait outside
+    // the graph; this node's own publication fails.
+    coordinator.set_available(false);
+    assert_eq!(replica.receive_tip_statements(&records).await.unwrap(), 0);
+    let message = replica
+        .publish_tip_statements(&records)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("did not confirm"), "{message}");
     assert!(
         replica
             .tip_graph(f.public.domain)
@@ -542,6 +550,47 @@ async fn coordinated_seals_and_moves_cannot_bypass_the_terminal_log_via_receipt(
             .seals
             .is_empty()
     );
+    assert_eq!(replica.followed_tip().await, tip);
+    coordinator.set_available(true);
+    assert_eq!(replica.publish_tip_statements(&records).await.unwrap(), 2);
+    let head = coordinator.head(log).unwrap();
+    let terminal = head.terminal.unwrap();
+    assert_eq!(
+        (terminal.digest, terminal.continuation),
+        (signed.id().unwrap(), signed.successor().unwrap())
+    );
+    assert_eq!(
+        replica.followed_tip().await,
+        signed.successor().unwrap().unwrap()
+    );
+    // The log ended with a seal this node holds: a concurrent one of its
+    // own is not published, but one received is, and the graph decides.
+    let mut late = signed.statement.clone();
+    late.action = SealAction::Close;
+    let late = SignedSeal::sign(late, &f.publisher).unwrap();
+    let message = replica
+        .publish_tip_statements(&[TipStatement::Seal(late.clone())])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("first"), "{message}");
+    assert_eq!(
+        replica
+            .tip_graph(f.public.domain)
+            .await
+            .unwrap()
+            .seals
+            .len(),
+        1
+    );
+    assert_eq!(
+        replica
+            .receive_tip_statements(&[TipStatement::Seal(late)])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(coordinator.head(log).unwrap().terminal, Some(terminal));
 }
 
 async fn identity_replica(

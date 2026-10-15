@@ -25,7 +25,8 @@ domain's default minimum with `Operation::Configure { scope, minimum }` before
 any node joined one of its logs (`NetworkCoordinator::configure`). Default:
 one. A tip's opening names its own minimum: the authority or a trusted node
 relays it as `Action::Configure { minimum }` (`DomainLog::configure`) before
-the log's first join; a log nobody configured takes the domain's. Only a
+the log's first join; a log nobody configured takes the domain's. Trusted
+nodes relay it for every tip of the opened line before they join. Only a
 configuration, a join, a cut or a seal opens a log; a domain holds at most
 8 open logs and refuses more with `Backpressure`. A node is in sync on one
 open tip of its domain: joining another is `Denied`, and a tip no trusted
@@ -86,8 +87,9 @@ statement. It commits at once at `commit+1` with the digest as its entry
 hash, aborting a pending entry, clears the in-sync set and moves the epoch.
 `LogHead::terminal` reports it. A retry of the same terminal returns the same
 commit; any other entry, join, configuration, cut or terminal is refused with
-`CoordinationError::Sealed`, so neither two seals nor two moves diverge at the
-coordinator: the first admitted wins. The sealed state is every entry
+`CoordinationError::Sealed`: the first admitted ends the log, and no entry
+commits after it. Which of concurrent seals wins is the devices' graph's
+decision, by the lower digest. The sealed state is every entry
 committed before it; what happens to an aborted pending write is in
 [coordinated writes](coordinated-writes.md#seals-and-moves).
 

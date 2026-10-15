@@ -194,3 +194,32 @@ a device on `main` receives none of `dev`'s frames while the graph lists both
 bookmarks; the typed `Session` calls match the JSON contract.
 `sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest` passed, including 7
 `TipsTest` cases for request shapes, unsigned values beyond 2^53 and errors.
+
+### Slice 6: guides
+
+[Seals, tips and bookmarks](../runtime/tips-and-bookmarks.md) now starts with
+the developer tasks: the first bookmark, sealing, branches and line nodes,
+bookmark moves, and the status and inspection calls in Kotlin, Rust and JSON,
+followed by the replica boundary and late and held writes. The docs index lists
+it before generations; the checkpoint entry links the
+[horizon](../runtime/mergeable-horizon.md) as the release mechanism until
+phase 15, and the horizon and generation guides say what replaces them. SDK
+enrollment lists the `tips` native call and the `tip-nodes` secret.
+
+### Final wave 2 verification
+
+`./scripts/lint` passed. `./scripts/check` passed Clippy, 167 unit checks and
+952 integration checks: 704 workspace tests plus 248 SDK tests without default
+features, in 143.20 seconds against the 300-second budget. The three tips tests
+slower than 2 seconds under load confirmed alone at 0.22, 0.39 and 0.50
+seconds; no budget exception was added. `sdks/kotlin/gradlew -p sdks/kotlin
+check` passed, running `rocky-core`'s JVM and iOS simulator tests, and
+`./examples/shoppinglist-app/check` passed.
+
+A plain `cargo test -p rocky-sdk`, run alongside other builds, failed the
+e2e-tier `a_migration_of_100000_rows_converges_on_every_member` (no convergence
+within 64 syncs). It uses an explicit generation upgrade without a tip graph,
+which the new calls do not reach, but it was neither rerun alone nor compared
+with the parent. E2E, Android device and packaged iOS qualification were not
+run. Coordinated seals and moves, trusted-identity grants through the SDK and
+the completion gate's coordinated-write items remain open.

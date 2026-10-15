@@ -10,6 +10,7 @@ Select the guide for your task rather than reading every document.
 | --- | --- |
 | Build a Kotlin app on a coordination service, from schema to custody | [Getting started](runtime/getting-started.md) |
 | Inspect phase-9 end-to-end and soak evidence | [End-to-end evidence](runtime/end-to-end-evidence.md) |
+| Seal tips, open branches, follow or move bookmarks and inspect the graph | [Seals, tips and bookmarks](runtime/tips-and-bookmarks.md) |
 | Upgrade schema/handlers or resume a projection plan | [Generations](runtime/generations.md) |
 | Review, re-author or drop local changes held by a removal | [Held changes](runtime/held-changes.md) |
 | Make writes that must not race, such as sequential numbers | [Coordinated writes](runtime/coordinated-writes.md) |
@@ -59,7 +60,7 @@ Select the guide for your task rather than reading every document.
 | Open a secure database without a network, share it between sessions or attach your own transport | [SDK composition](runtime/sdk-composition.md) |
 | Inspect scaling/observer measurements and Kotlin qualification limits | [Phase 6 evidence](runtime/scaling-limits.md#measured-limits) |
 | Run sustained scale qualification and collect hardware evidence | [Scale qualification](runtime/scaling-limits.md#scale-qualification) |
-| Configure retention, sync a peer behind the horizon, rebootstrap or audit a file | [Checkpoints, pruning and rebootstrap](runtime/checkpoints.md) |
+| Configure retention, rebootstrap or audit a file; the [horizon](runtime/mergeable-horizon.md) until lazy compaction at seals | [Checkpoints, pruning and rebootstrap](runtime/checkpoints.md) |
 | Find why pruning stopped and release a strong request or silent peer | [Retention holds](runtime/retention-holds.md) |
 | The same for `EncryptedReplica` | [Encrypted checkpoints](runtime/encrypted-checkpoints.md) |
 | Import a checkpoint page by page and read rows while it runs | [Importing an encrypted checkpoint](runtime/checkpoint-import.md) |

@@ -3,6 +3,9 @@
 Implemented for the encrypted runtime and SDK's single-file placement group.
 [Decision 0028](../decisions/0028-generation-lineage-and-signed-backups.md) fixes the
 formats. The trusted runtime's earlier same-definition APIs remain separate.
+Once a domain has a [tip graph](tips-and-bookmarks.md), explicit generation
+upgrades are refused until
+[schema changes through seals](../features_09/17-schema-changes-through-seals.md).
 
 ## Choose the change
 

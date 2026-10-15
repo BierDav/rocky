@@ -5,6 +5,9 @@ hidden rows and creation stubs forever. A mergeable horizon finalizes a scope's
 rows at an issuer-signed cut so that this evidence, and the
 [existence log](existence-logs.md) records behind it, can be released. This guide
 is for an author who schedules horizons, syncs across one, or changes the format.
+[Phase 15](../features_09/15-lazy-compaction.md) replaces the horizon with lazy
+compaction at [seals](tips-and-bookmarks.md); until then it is the release
+mechanism.
 
 ## Declare, acknowledge, finalize
 

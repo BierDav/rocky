@@ -1,6 +1,8 @@
 # 14. Seals, tips and bookmarks
 
-Status: proposed; not started. Revised 2026-10-15 for tips and branches.
+Status: in progress. Slices 1–4 are implemented, with
+[evidence](14-seals-and-bookmarks-evidence.md); slices 5 and 6 are open.
+Revised 2026-10-15 for tips and branches.
 Owner: `rocky-credentials` seal, tip and bookmark statements; `rocky-secure`
 admission, sync and late frames; `rocky-coordinator` per-tip logs;
 `rocky-sdk`, the JSON API and `sdks/kotlin` API. Depends on

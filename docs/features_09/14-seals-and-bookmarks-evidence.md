@@ -77,11 +77,10 @@ receiver; format 4 is refused. This is independent of row frame format 10.
 
 ### Integration contracts and remaining qualification
 
-Lane L must replace its temporary `followed_tip()` with this implementation,
-key logs by `(Scope, TipId)`, and integrate terminal seal/move entries. Both local
-publication and received seals/moves explicitly refuse a configured coordinated
-log until that integration; graph exchange cannot bypass the refusal. SDK/JSON/
-Kotlin seal/follow/status/inspection surfaces remain wave 2.
+Lane L keys logs by `(Scope, TipId)` on this `followed_tip()`; the
+[integration](#integration-terminal-seals-in-the-graph) replaced the refusal
+of coordinated seals and moves with terminal log entries. SDK/JSON/Kotlin
+seal/follow/status/inspection surfaces remain wave 2.
 
 A switch that requires pruned history refuses instead of inventing a branch
 base; importing a target checkpoint during follow remains integration work.
@@ -154,7 +153,9 @@ Guides: [coordinated log](../runtime/coordinated-log.md),
   authority or a trusted node before the first join, `Action::Seal { terminal }`
   by the authority or a trusted node. `TIP_LOGS = 8` open logs per domain
   (`Backpressure` beyond), `ENDED_LOGS = 8` retained ended ones (earliest
-  dropped). A node is in sync on one open tip per domain (`Denied`).
+  dropped). A node is in sync on one open tip per domain; joining another
+  leaves the first, and waits with `Backpressure` while it has a pending
+  entry.
   `MemoryLog::configure(scope, minimum)` sets the default; `MemoryLog::head`
   takes a `TipLog`.
 - rocky-secure: lane S's `followed_tip()` decides every log;
@@ -210,16 +211,86 @@ Kotlin code.
 
 ### Limits
 
-- Until the lanes merge, a replica follows the tip of its current manifest,
-  and member recovery takes held bundles as the followed tip's; frames do not
-  name their tip yet.
-- A carried write keeps the log position its frames signed in the sealed
-  tip; members cannot rebuild its entry evidence, and a cut of the
-  continuation could misjudge its fence. Cuts go in a later phase.
-- The coordinator admits the first terminal entry of a log; devices resolve
-  concurrent seals by the lower digest. Callers submit the digest to the
-  coordinator before publishing a coordinated tip's seal or move and treat
-  `Sealed` as having lost.
-- A domain retains 8 ended logs; an older ended tip's log reads as unopened
-  again. Devices never write a sealed tip, which their graph records.
-- Kotlin and the JSON API expose no seal call yet (slice 5).
+Lane L's limits before the integration are superseded by the
+[integration's](#limits-after-the-integration).
+
+## Integration: terminal seals in the graph
+
+Wave 2 of lane L, on lane S's `znpwrnrx`: `ssrouqpz` (seals end their
+tip's log), `spynwwxw` (leaving a tip's log), `krqynxux` (continuations by
+the tips frames name) and `vknrxyyx` (gate tests). The rebase bumps the
+replica file (v23) and link (v7) once, and lane L's stand-in `followed_tip`
+is gone. Reviewing the unverified WIP changed four things: it ended a log for
+a received seal before verifying it; it kept a received seal that lost at
+the coordinator out of trusted nodes' graphs while devices without a log
+admitted it, so the two could follow different continuations; it configured
+every opening at receipt, filling the 8 open logs with unused branches; and
+it ended a tip's log on a bookmark deletion, which other bookmarks on that
+tip may still follow.
+
+### Contracts
+
+- A trusted node verifies each new seal, then ends its tip's log with the
+  seal's digest unless the log ended already, before the seal enters its
+  graph. Any seal of an ended log is admitted, and the graph's lower digest
+  decides between concurrent seals everywhere. Publication fails `sealed`
+  only when a seal this node holds ended the log, and
+  `coordinator_unavailable` when unconfirmed; an unconfirmed received seal
+  waits outside the graph with its dependents.
+- Moves have no entry of their own: a move off an open tip carries the
+  close seal that ends its log; deleting a bookmark leaves its tip open.
+- An opening's minimum holds for its whole line; trusted nodes relay it
+  before the first join and never join a log with a smaller one.
+- A write the terminal entry aborted is carried into the continuation of
+  the tip's winning seal in the proposer's graph; a continuation whose seal
+  lost hands it on.
+- Joining a tip's log leaves the node's other one (`Backpressure` while it
+  has a pending entry), so a node that switches bookmarks writes again.
+- Members fence, record and rebuild entry evidence by the tip each frame
+  names, for any log.
+- Before a trusted node takes anything of a continuation's log, it decides
+  and catches up the sealed tip's log through its terminal entry.
+- A node holding committed entries of a dropped ended log refuses its slots
+  `Sealed`.
+
+### Completion-gate tests
+
+| Gate | Tests |
+| --- | --- |
+| A write on `dev` commits through `dev`'s log; `main`'s set sees none | `tests::coordinated::seals::a_dev_write_commits_through_devs_log_while_mains_in_sync_set_sees_no_entry`: a trusted node in sync on `main` switches to `dev` under a line node, leaves `main`'s set, writes through `dev`'s log at the opening's minimum of one; `main`'s writes neither wait for nor include it |
+| Committed before a seal is part of the continuation | the test below (0001 lies beyond the seal's frontier) and `a_trusted_node_joins_a_continuation_holding_what_committed_before_its_seal` (a fresh trusted node catches up the sealed log and numbers on) |
+| A pending write retries there and commits once | `a_write_a_seal_aborted_retries_in_the_continuation_and_commits_once`: the seal is published through `publish_tip_statements`, the write commits as the continuation's entry 1 and appears once on both trusted nodes |
+| Seals enter the graph only after their log ended | `tests::tips::a_coordinated_seal_enters_the_graph_only_after_ending_its_tips_log` |
+| Joining leaves the previous tip's log | `rocky-coordinator machine::tip_tests::a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on` |
+| Dropped ended logs | `tests::coordinated::tips::a_node_holding_entries_of_a_dropped_ended_log_never_rejoins_it` |
+
+### Verification
+
+On 2026-10-15 every commit of the stack passed `cargo check --workspace
+--all-targets`, and `./scripts/lint` and workspace Clippy passed.
+`./scripts/check` ran twice: 167 unit tests (budget 10 s) and 949
+integration tests in 140 s (budget 300 s) passed, but each run failed
+`rocky-sdk::custody devices_never_online_together_converge_via_keyless_custody`
+once, in a different suite, with a retryable `missing_dependencies` read.
+The test passes alone; under 12 parallel copies it failed 7 of 36 times here
+and 3 of 36 times at lane L's `sxumowmo`, before this integration. It
+touches no coordinated path, so it is recorded as an existing load-dependent
+flake, not fixed. The coordinated gate tests met their 2 s budget in
+isolation (163 ms for the `dev` test). Kotlin, the shopping check and E2E
+were not run; no Kotlin or native ABI source changed.
+
+### Limits after the integration
+
+- A carried write keeps its frames' tip and log position, the sealed tip's:
+  members cannot rebuild its entry evidence, and a cut of the continuation
+  could misjudge its fence. Re-signing it for the continuation is not done.
+- Only a continuation's own sealed parent log is caught up, while retained;
+  a branch tip's log checks nothing of its opening seal's log.
+- A trusted node that held nothing of a dropped ended log could join it
+  again until its seal arrives.
+- An own write a crash left undecided on a tip the node left for another
+  line stays unsent, with its effects.
+- Moves are not log entries of their own, unlike the brief's wording; the
+  close seal a move off an open tip requires is.
+- Kotlin and the JSON API expose no seal call yet (slice 5, in progress
+  separately).

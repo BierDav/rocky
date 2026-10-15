@@ -56,6 +56,11 @@ pub struct TipSeal {
     pub schema: Option<String>,
     /// False for a concurrent seal of the same tip that lost.
     pub canonical: bool,
+    /// Who signed it: `owner`, `trusted` or `issuer`; races resolve in
+    /// that order, then by the lower digest.
+    pub authority: String,
+    /// A revocation ended its signer; it takes part in no race.
+    pub revoked: bool,
 }
 /// An opened tip; its id is the tip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,13 +74,26 @@ pub struct BookmarkMove {
     pub id: String,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub authority: String,
+    pub revoked: bool,
 }
-/// A bookmark's resolved tip, none once deleted, and every move of it.
+/// A move that lost a race along its bookmark's path, named in the manner
+/// of jj: `main/1`, `main/2`. Its tip stays a branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LosingMove {
+    pub name: String,
+    #[serde(rename = "move")]
+    pub movement: String,
+    pub tip: Option<String>,
+}
+/// A bookmark's resolved tip, none once deleted, every move of it and the
+/// moves that lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub name: String,
     pub tip: Option<String>,
     pub moves: Vec<BookmarkMove>,
+    pub losers: Vec<LosingMove>,
 }
 /// What a node follows and keeps; null where this device cannot know.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -421,3 +421,49 @@ and E2E were not run on the merge.
   uses an explicit generation upgrade without a tip graph.
 - `devices_never_online_together_converge_via_keyless_custody` remains a
   load-dependent flake.
+
+## Slice 7: resolution by authority
+
+`TipAuthority` (`rocky-credentials`) reads an admitted endorsement's shape: no
+links is the owner, one owner-direct trusted grant for the domain a trusted
+identity, anything else an issuer. `TipGraph::seal` and `bookmark` order
+candidates by authority, then the lower digest; `losing_moves` lists the moves
+that lost along a bookmark's path. `exclude_revoked` leaves out the seals and
+moves of any signer whose chain the revocation set ends; the owner's never
+are. The set is not persisted: the replica recomputes it at open and, when it
+learns revocations, in the same transaction that stores them, then moves the
+followed bookmark to where it now resolves. Writes on a tip that loses this way
+become held changes as for any backward move. The SDK resets peer backoff
+whenever the followed tip changed, however it moved.
+
+Inspection reports each seal's and move's `authority` and `revoked`, and per
+bookmark `losers` named `main/1`, `main/2`; Kotlin decodes them as
+`TipAuthority`, `revoked` and `LosingMove`. A `continue` seal now leaves pruned
+writes out of its frontier, so they walk to the continuation as late frames;
+a `close` still refuses pruned history.
+
+Lane L's contracts hold unchanged: a trusted node ends a coordinated tip's log
+before a seal enters its graph, admits any seal of an ended log, and carries an
+aborted write into the continuation of the seal that wins in its graph, now by
+authority first. An owner seal published after another seal ended the log
+still fails `sealed`; received, it is admitted and wins in the graph. That is
+the README's open question on final seals.
+
+| Gate item | Tests |
+| --- | --- |
+| Seals and moves resolve by authority, then digest, in every receipt order; revocation resolves again | `rocky-credentials --test tips` `seals_resolve_by_authority_before_digest_and_revocation_resolves_again`, `an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed` |
+| An issuer's forward move against the owner's backward move; revoking an issuer whose seal won | `rocky-secure` `tests::tips::the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_resolves_again`: two issuers race, revoking the winner moves both replicas to the other continuation and holds the write on it; then the owner's close and backward move beat the remaining issuer's forward seal and move in both orders, the issuer's is the one loser, its write is held, and the result survives reopening |
+| The same through the SDK | `rocky-sdk --test tips` `races::the_owners_backward_move_beats_a_trusted_forward_move_whatever_their_digests` (inspection lists `main/1`, the forward write is held) and `races::revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner`, with trusted identities, not issuers; see below |
+
+An SDK issuer cannot take part: an issuer device enrolled through
+`invite_as({"kind":"issuer"})`, even before any row, refuses to rebuild its
+workspace at another line's tip ("switching tips needs retained history or a
+target checkpoint", `rebuild_tip_workspace`), and since admission and the
+switch commit together its links fail. It follows forward moves only. A device
+past a retention window has the same limit. Rebuilding at a seal from a
+checkpoint is [phase 15](15-lazy-compaction.md)'s rebootstrap.
+
+`./scripts/lint` and `./scripts/check` passed: 167 unit and 987 integration
+checks in 148.81 s against the 300 s budget. The two SDK race tests take
+1.22 s and 1.81 s alone against the 2 s budget. `sdks/kotlin/gradlew -p
+sdks/kotlin check` passed.

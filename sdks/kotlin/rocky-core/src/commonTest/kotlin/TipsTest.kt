@@ -129,14 +129,17 @@ class TipsTest {
         """{
           "scope":"domain","genesis":"genesis","schema":"schema",
           "seals":[
-            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true},
-            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false},
-            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true}
+            {"id":"continued","tip":"genesis","frontier":[{"author":4294967295,"sequence":18446744073709551615}],"action":"continue","schema":"schema","canonical":true,"authority":"owner","revoked":false},
+            {"id":"loser","tip":"genesis","frontier":[],"action":"continue","schema":"schema","canonical":false,"authority":"issuer","revoked":true},
+            {"id":"closed","tip":"abandoned","frontier":[],"action":"close","schema":null,"canonical":true,"authority":"trusted","revoked":false}
           ],
           "openings":[{"id":"branch","seal":"continued","minimum_in_sync":3}],
           "bookmarks":[{"name":"main","tip":"continued","moves":[
-            {"id":"created","from":null,"to":"genesis"},{"id":"advance","from":"genesis","to":"continued"}
-          ]},{"name":"deleted","tip":null,"moves":[{"id":"deleted-move","from":"branch","to":null}]}],
+            {"id":"created","from":null,"to":"genesis","authority":"owner","revoked":false},
+            {"id":"advance","from":"genesis","to":"continued","authority":"issuer","revoked":false},
+            {"id":"lost","from":"genesis","to":"other","authority":"issuer","revoked":false}
+          ],"losers":[{"name":"main/1","move":"lost","tip":"other"}]},
+          {"name":"deleted","tip":null,"moves":[{"id":"deleted-move","from":"branch","to":null,"authority":"trusted","revoked":false}],"losers":[]}],
           "nodes":[{"node":"local","followed_tip":"continued","kept_tips":["genesis","continued"],"kept_seals":["continued"]},
             {"node":"remote","followed_tip":null,"kept_tips":null,"kept_seals":null}]
         }""",
@@ -148,16 +151,17 @@ class TipsTest {
         assertEquals(Triple("domain", "genesis", "schema"), Triple(value.scope, value.genesis, value.schema))
         assertEquals(
             listOf(
-                TipSeal("continued", "genesis", listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)), TipSealAction.Continue("schema"), true),
-                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false),
-                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true),
+                TipSeal("continued", "genesis", listOf(TipAuthorMark(UInt.MAX_VALUE, ULong.MAX_VALUE)), TipSealAction.Continue("schema"), true, TipAuthority.OWNER, false),
+                TipSeal("loser", "genesis", emptyList(), TipSealAction.Continue("schema"), false, TipAuthority.ISSUER, true),
+                TipSeal("closed", "abandoned", emptyList(), TipSealAction.Close, true, TipAuthority.TRUSTED, false),
             ),
             value.seals,
         )
         assertEquals(TipOpening("branch", "continued", 3u), value.openings.single())
-        assertEquals(BookmarkMove("created", null, "genesis"), value.bookmarks.first().moves.first())
+        assertEquals(BookmarkMove("created", null, "genesis", TipAuthority.OWNER, false), value.bookmarks.first().moves.first())
+        assertEquals(listOf(LosingMove("main/1", "lost", "other")), value.bookmarks.first().losers)
         assertEquals("continued", value.bookmarks.first().tip)
-        assertEquals(TipBookmark("deleted", null, listOf(BookmarkMove("deleted-move", "branch", null))), value.bookmarks.last())
+        assertEquals(TipBookmark("deleted", null, listOf(BookmarkMove("deleted-move", "branch", null, TipAuthority.TRUSTED, false)), emptyList()), value.bookmarks.last())
         assertEquals(TipNode("local", "continued", listOf("genesis", "continued"), listOf("continued")), value.nodes.first())
         assertEquals(TipNode("remote", null, null, null), value.nodes.last())
     }
@@ -171,9 +175,13 @@ class TipsTest {
             put("action", "merge")
             put("schema", JsonNull)
             put("canonical", true)
+            put("authority", "owner")
+            put("revoked", false)
         }
         val unknown = JsonObject(graph + ("seals" to JsonArray(listOf(seal))))
         assertFailsWith<IllegalArgumentException> { recordingTips { unknown }.second.inspect() }
+        val stranger = JsonObject(graph + ("seals" to JsonArray(listOf(JsonObject(seal + ("action" to JsonPrimitive("close")) + ("authority" to JsonPrimitive("stranger")))))))
+        assertFailsWith<IllegalArgumentException> { recordingTips { stranger }.second.inspect() }
         Unit
     }
 

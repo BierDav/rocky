@@ -90,7 +90,8 @@ hash, aborting a pending entry, clears the in-sync set and moves the epoch.
 commit; any other entry, join, configuration, cut or terminal is refused with
 `CoordinationError::Sealed`: the first admitted ends the log, and no entry
 commits after it. Which of concurrent seals wins is the devices' graph's
-decision, by the lower digest. The sealed state is every entry
+decision: by authority, then the lower digest
+([races](tips-and-bookmarks.md#races-and-revocation)). The sealed state is every entry
 committed before it; what happens to an aborted pending write is in
 [coordinated writes](coordinated-writes.md#seals-and-moves).
 

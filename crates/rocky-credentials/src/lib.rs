@@ -61,7 +61,7 @@ pub use signed::{
 pub use tips::{
     AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, MAX_BOOKMARK_NAME, SEAL_FORMAT,
     SealAction, SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening,
-    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, genesis_tip,
+    TIP_OPENING_FORMAT, TipAuthority, TipGraph, TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

@@ -2,8 +2,8 @@
 //! graph. See `docs/runtime/tips-and-bookmarks.md`.
 use super::*;
 use crate::tips::{
-    Bookmark, BookmarkMove, TipAuthorMark, TipDevice, TipFrontierLog, TipInspection, TipNode,
-    TipOpening, TipScopeFrontier, TipSeal, TipStatus,
+    Bookmark, BookmarkMove, LosingMove, TipAuthorMark, TipDevice, TipFrontierLog, TipInspection,
+    TipNode, TipOpening, TipScopeFrontier, TipSeal, TipStatus,
 };
 use rocky_core::{Scope, TipId};
 use rocky_credentials::{
@@ -15,6 +15,14 @@ use rocky_secure::TipStatement;
 
 fn hex(digest: &rocky_core::Commitment) -> String {
     HEXLOWER.encode(digest)
+}
+fn authority(authority: rocky_credentials::TipAuthority) -> String {
+    match authority {
+        rocky_credentials::TipAuthority::Owner => "owner",
+        rocky_credentials::TipAuthority::Trusted => "trusted",
+        rocky_credentials::TipAuthority::Issuer => "issuer",
+    }
+    .into()
 }
 fn digest(request: &Value, name: &str) -> Result<rocky_core::Commitment, Failure> {
     request[name]
@@ -202,6 +210,8 @@ impl Node {
                         SealAction::Close => None,
                     },
                     canonical: graph.seal(statement.tip)? == Some(seal),
+                    authority: authority(graph.authority(seal.endorsement())),
+                    revoked: graph.revoked.contains(&seal.id()?),
                 })
             })
             .collect::<Result<_, Failure>>()?;
@@ -235,6 +245,20 @@ impl Node {
                                 id: hex(&movement.id()?),
                                 from: movement.statement.from.map(|tip| hex(&tip.0)),
                                 to: movement.statement.to.map(|tip| hex(&tip.0)),
+                                authority: authority(graph.authority(movement.endorsement())),
+                                revoked: graph.revoked.contains(&movement.id()?),
+                            })
+                        })
+                        .collect::<Result<_, Failure>>()?,
+                    losers: graph
+                        .losing_moves(&name)?
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, movement)| {
+                            Ok(LosingMove {
+                                name: format!("{name}/{}", index + 1),
+                                movement: hex(&movement.id()?),
+                                tip: movement.statement.to.map(|tip| hex(&tip.0)),
                             })
                         })
                         .collect::<Result<_, Failure>>()?,
@@ -267,11 +291,10 @@ impl Node {
         })
     }
 
-    /// Links refused while peers followed other tips are retried at once
-    /// once this device follows another tip.
+    /// A device on another tip syncs again soon; the next pass retries the
+    /// peers whose links refused the earlier tip.
     async fn followed_tip_changed(&self, before: TipId) {
         if self.replica.followed_tip().await != before {
-            self.reset_retry(None);
             self.wake_sync();
         }
     }
@@ -373,7 +396,11 @@ impl Node {
                 schema: graph.schema(tip)?,
             }
         };
-        let frontier = self.replica.seal_frontier(scope).await.map_err(refused)?;
+        let frontier = self
+            .replica
+            .seal_frontier(scope, close)
+            .await
+            .map_err(refused)?;
         Ok(SignedSeal::endorse(
             SealStatement {
                 format: SEAL_FORMAT,

@@ -1189,7 +1189,19 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(added);
         }
         let bytes = merged.to_bytes().map_err(credential)?;
-        transaction!(inner, |inner| {
+        // Seals and moves of a revoked signer leave resolution with the
+        // set, and the followed bookmark moves in the same commit.
+        let old_graphs = inner.graphs.clone();
+        let old_tip = inner.tip;
+        let old_author = inner.node_author.clone();
+        let old_nodes = inner.line_nodes.clone();
+        let old_followed = inner.followed.clone();
+        let result = transaction!(inner, |inner| {
+            inner.graphs = old_graphs.clone();
+            inner.tip = old_tip;
+            inner.node_author = old_author.clone();
+            inner.line_nodes = old_nodes.clone();
+            inner.followed = old_followed.clone();
             inner
                 .conn
                 .execute(
@@ -1197,8 +1209,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [bytes.clone()],
                 )
                 .await?;
+            inner.resolve_revoked(&merged).await?;
             Ok(())
-        })?;
+        });
+        if let Err(error) = result {
+            inner.graphs = old_graphs;
+            inner.tip = old_tip;
+            inner.node_author = old_author;
+            inner.line_nodes = old_nodes;
+            inner.followed = old_followed;
+            return Err(error);
+        }
         inner.config.revocations = merged;
         inner.bump_authority();
         inner.publish_revision().await?;

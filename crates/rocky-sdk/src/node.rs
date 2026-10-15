@@ -261,6 +261,8 @@ pub(crate) struct Node {
     syncing: Mutex<()>,
     bootstrap: Mutex<()>,
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
+    /// The followed tip the peers' backoff was earned on.
+    backoff_tip: std::sync::Mutex<Option<rocky_core::TipId>>,
     resolution_retries:
         std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
     sync_control: watch::Sender<u64>,
@@ -358,6 +360,7 @@ impl Node {
             syncing: Mutex::new(()),
             bootstrap: Mutex::new(()),
             retries: std::sync::Mutex::new(BTreeMap::new()),
+            backoff_tip: std::sync::Mutex::new(None),
             resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
             sync_control: watch::channel(0).0,
             worker_running: watch::channel(false).0,
@@ -2290,6 +2293,18 @@ impl Node {
             if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
+        }
+        // Links refused while peers followed other tips are retried at once
+        // after this device follows another tip, however it moved.
+        let tip = self.replica.followed_tip().await;
+        if self
+            .backoff_tip
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(tip)
+            .is_some_and(|earlier| earlier != tip)
+        {
+            self.reset_retry(None);
         }
         let targets = self.dialed(&*self.settings.lock().await);
         self.replica.configure_peers(settings.kept()).await;

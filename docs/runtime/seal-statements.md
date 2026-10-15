@@ -59,14 +59,17 @@ never establishes credential authority.
 ## Deterministic graph resolution
 
 `TipGraph` is a pure value containing the scope, genesis schema and verified
-seals, openings and moves. `seal(tip)` picks the lower signed seal digest.
-`bookmark(name)` picks the lower signed move digest for each `(name, from)`
-and walks from creation. Receipt order never decides either conflict.
+seals, openings and moves. `seal(tip)` picks the seal of the highest
+`TipAuthority` (owner, trusted, issuer), then the lower signed digest.
+`bookmark(name)` resolves each `(name, from)` the same way and walks from
+creation; `losing_moves(name)` lists the moves that lost along the path.
+`exclude_revoked` leaves the seals and moves of revoked signers out of both;
+the owner's never are. Receipt order never decides either conflict.
 A move to a losing forward continuation resolves to the winner's
 continuation. A backward pointer revisit ends the walk at that tip.
 
 `schema` resolves only active tips; `schema_any` also resolves retained
-losing histories, so learning a lower seal never makes authentic historical
+losing histories, so learning a winning seal never makes authentic historical
 graph statements unverifiable. `continues` checks the active continue line;
 `continues_any` checks structural history for statement verification.
 `line_root` returns genesis or an explicit opening, allowing runtime nodes

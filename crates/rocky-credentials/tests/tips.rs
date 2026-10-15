@@ -493,3 +493,204 @@ fn node_signatures_never_inherit_trusted_identity_control() {
         .is_err()
     );
 }
+
+/// An issuer's chain, issued by the owner.
+fn issuer_chain(owner: &PrivateKey, issuer: &PrivateKey) -> CredentialChain {
+    CredentialChain(vec![
+        Authority::owner(owner)
+            .issue_issuer(issuer.public_key(), None, (100, 1000, 0))
+            .unwrap(),
+    ])
+}
+fn trusted_chain(graph: &TipGraph, owner: &PrivateKey, trusted: &PrivateKey) -> CredentialChain {
+    CredentialChain(vec![
+        Authority::owner(owner)
+            .issue_trusted(
+                trusted.public_key(),
+                graph.scope,
+                Vec::new(),
+                AuthorRange::new(5, 5).unwrap(),
+                (100, 1000, 0),
+            )
+            .unwrap(),
+    ])
+}
+/// One seal of `tip` per signer, varied by `sequence` so their digests differ.
+fn endorsed(
+    graph: &TipGraph,
+    owner: &PrivateKey,
+    tip: TipId,
+    sequence: u64,
+    signer: &PrivateKey,
+    chain: &CredentialChain,
+) -> SignedSeal {
+    let signed =
+        SignedSeal::endorse(seal(graph, tip, sequence, owner).statement, signer, chain).unwrap();
+    signed
+        .verify_current(owner.public_key(), graph, &RevocationSet::new(), 200)
+        .unwrap();
+    signed
+}
+fn revoking(owner: &PrivateKey, identities: &[rocky_credentials::PublicKey]) -> RevocationSet {
+    let statement = rocky_credentials::Revocation {
+        app: graph().scope.app,
+        issuer: owner.public_key(),
+        time: 200,
+        nodes: Default::default(),
+        identities: identities.iter().copied().collect(),
+        capabilities: Default::default(),
+    };
+    let signed = Authority::owner(owner).revoke(statement).unwrap();
+    RevocationSet::try_from(vec![signed]).unwrap()
+}
+
+#[test]
+fn seals_resolve_by_authority_before_digest_and_revocation_resolves_again() {
+    let owner = PrivateKey::new();
+    let (issuer, other, trusted) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+    let mut graph = graph();
+    let tip = graph.genesis();
+    let issuers: Vec<_> = (0..8)
+        .map(|sequence| {
+            let signer = if sequence % 2 == 0 { &issuer } else { &other };
+            endorsed(
+                &graph,
+                &owner,
+                tip,
+                sequence,
+                signer,
+                &issuer_chain(&owner, signer),
+            )
+        })
+        .collect();
+    let trusted_seal = endorsed(
+        &graph,
+        &owner,
+        tip,
+        20,
+        &trusted,
+        &trusted_chain(&graph, &owner, &trusted),
+    );
+    let owner_seal = seal(&graph, tip, 30, &owner);
+    let authority = |seal: &SignedSeal| graph.authority(seal.endorsement());
+    assert_eq!(
+        authority(&issuers[0]),
+        rocky_credentials::TipAuthority::Issuer
+    );
+    assert_eq!(
+        authority(&trusted_seal),
+        rocky_credentials::TipAuthority::Trusted
+    );
+    assert_eq!(
+        authority(&owner_seal),
+        rocky_credentials::TipAuthority::Owner
+    );
+
+    // Among issuers the lower digest wins; any trusted seal beats them and
+    // the owner's beats all, whatever the digests and in every order.
+    graph.seals = issuers.clone();
+    let lowest = issuers
+        .iter()
+        .min_by_key(|seal| seal.id().unwrap())
+        .unwrap()
+        .clone();
+    assert_eq!(graph.seal(tip).unwrap(), Some(&lowest));
+    graph.seals.push(trusted_seal.clone());
+    assert_eq!(graph.seal(tip).unwrap(), Some(&trusted_seal));
+    graph.seals.insert(0, owner_seal.clone());
+    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+    graph.seals.reverse();
+    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+    assert!(
+        graph
+            .schema(trusted_seal.successor().unwrap().unwrap())
+            .is_err()
+    );
+
+    // Revoking the issuer whose seal won among issuers hands the race to
+    // the other issuer's best seal; the owner's statements are never left out.
+    graph.seals = issuers.clone();
+    let winner_signer = if issuers.iter().position(|seal| *seal == lowest).unwrap() % 2 == 0 {
+        &issuer
+    } else {
+        &other
+    };
+    let revocations = revoking(&owner, &[winner_signer.public_key()]);
+    assert!(graph.exclude_revoked(&revocations).unwrap());
+    assert!(!graph.exclude_revoked(&revocations).unwrap());
+    let next = issuers
+        .iter()
+        .filter(|seal| !graph.revoked.contains(&seal.id().unwrap()))
+        .min_by_key(|seal| seal.id().unwrap())
+        .unwrap();
+    assert_ne!(next, &lowest);
+    assert_eq!(graph.seal(tip).unwrap(), Some(next));
+    assert_eq!(graph.revoked.len(), 4);
+    graph.seals.push(owner_seal.clone());
+    assert!(!graph.exclude_revoked(&revocations).unwrap());
+    assert!(!graph.revoked.contains(&owner_seal.id().unwrap()));
+    assert_eq!(graph.seal(tip).unwrap(), Some(&owner_seal));
+}
+
+#[test]
+fn an_owners_backward_move_beats_an_issuers_forward_move_and_the_loser_is_listed() {
+    let owner = PrivateKey::new();
+    let issuer = PrivateKey::new();
+    let chain = issuer_chain(&owner, &issuer);
+    let mut graph = graph();
+    let first = seal(&graph, graph.genesis(), 1, &owner);
+    let main_tip = first.successor().unwrap().unwrap();
+    graph.seals.push(first);
+    graph.moves = vec![
+        movement(&graph, "main", None, Some(graph.genesis()), &owner),
+        movement(
+            &graph,
+            "main",
+            Some(graph.genesis()),
+            Some(main_tip),
+            &owner,
+        ),
+    ];
+    // Concurrently: an issuer seals main's tip and moves main forward; the
+    // owner closes it and moves main back to genesis.
+    let forward_seal = endorsed(&graph, &owner, main_tip, 2, &issuer, &chain);
+    let forward_tip = forward_seal.successor().unwrap().unwrap();
+    let mut close = seal(&graph, main_tip, 3, &owner);
+    close.statement.action = SealAction::Close;
+    let close = SignedSeal::sign(close.statement, &owner).unwrap();
+    graph.seals.push(forward_seal.clone());
+    let forward = SignedBookmarkMove::endorse(
+        movement(&graph, "main", Some(main_tip), Some(forward_tip), &owner).statement,
+        &issuer,
+        &chain,
+    )
+    .unwrap();
+    graph.seals.push(close.clone());
+    let back = movement(
+        &graph,
+        "main",
+        Some(main_tip),
+        Some(graph.genesis()),
+        &owner,
+    );
+    for order in [false, true] {
+        graph.moves.truncate(2);
+        if order {
+            graph.moves.extend([forward.clone(), back.clone()]);
+        } else {
+            graph.moves.extend([back.clone(), forward.clone()]);
+        }
+        assert_eq!(graph.seal(main_tip).unwrap(), Some(&close));
+        assert_eq!(graph.bookmark("main").unwrap(), Some(graph.genesis()));
+        assert_eq!(graph.losing_moves("main").unwrap(), vec![&forward]);
+    }
+    // Revoking the owner's rival changes nothing here; the loser is no
+    // longer listed once revoked.
+    assert!(
+        graph
+            .exclude_revoked(&revoking(&owner, &[issuer.public_key()]))
+            .unwrap()
+    );
+    assert_eq!(graph.bookmark("main").unwrap(), Some(graph.genesis()));
+    assert!(graph.losing_moves("main").unwrap().is_empty());
+}

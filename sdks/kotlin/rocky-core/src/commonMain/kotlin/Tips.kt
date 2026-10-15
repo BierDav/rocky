@@ -124,11 +124,28 @@ sealed interface TipSealAction {
     data object Close : TipSealAction
 }
 
-/** A seal; [canonical] is false for a concurrent seal of the same tip that lost. */
-data class TipSeal(val id: String, val tip: String, val frontier: List<TipAuthorMark>, val action: TipSealAction, val canonical: Boolean)
+/** Who signed a seal or move; races resolve to the owner, then trusted, then issuer, then the lower digest. */
+enum class TipAuthority { OWNER, TRUSTED, ISSUER }
+
+/**
+ * A seal; [canonical] is false for a concurrent seal of the same tip that lost.
+ * A [revoked] seal's signer was revoked; it takes part in no race.
+ */
+data class TipSeal(
+    val id: String,
+    val tip: String,
+    val frontier: List<TipAuthorMark>,
+    val action: TipSealAction,
+    val canonical: Boolean,
+    val authority: TipAuthority,
+    val revoked: Boolean,
+)
 data class TipOpening(val id: String, val seal: String, val minimumInSync: UInt)
-data class BookmarkMove(val id: String, val from: String?, val to: String?)
-data class TipBookmark(val name: String, val tip: String?, val moves: List<BookmarkMove>)
+data class BookmarkMove(val id: String, val from: String?, val to: String?, val authority: TipAuthority, val revoked: Boolean)
+
+/** A move that lost a race along its bookmark's path, named `main/1`, `main/2`; its tip stays a branch. */
+data class LosingMove(val name: String, val move: String, val tip: String?)
+data class TipBookmark(val name: String, val tip: String?, val moves: List<BookmarkMove>, val losers: List<LosingMove>)
 data class TipNode(val node: String, val followedTip: String?, val keptTips: List<String>?, val keptSeals: List<String>?)
 
 /** The complete verified graph and locally known node holdings, for developer inspection. */
@@ -157,6 +174,8 @@ data class TipInspection(
                         else -> throw IllegalArgumentException("unknown tip seal action $action")
                     },
                     it.getValue("canonical").jsonPrimitive.boolean,
+                    it.authority(),
+                    it.getValue("revoked").jsonPrimitive.boolean,
                 )
             },
             value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },
@@ -164,7 +183,16 @@ data class TipInspection(
                 TipBookmark(
                     it.text("name"),
                     it.nullableText("tip"),
-                    it.objects("moves").map { move -> BookmarkMove(move.text("id"), move.nullableText("from"), move.nullableText("to")) },
+                    it.objects("moves").map { move ->
+                        BookmarkMove(
+                            move.text("id"),
+                            move.nullableText("from"),
+                            move.nullableText("to"),
+                            move.authority(),
+                            move.getValue("revoked").jsonPrimitive.boolean,
+                        )
+                    },
+                    it.objects("losers").map { loser -> LosingMove(loser.text("name"), loser.text("move"), loser.nullableText("tip")) },
                 )
             },
             value.objects("nodes").map { TipNode(it.text("node"), it.nullableText("followed_tip"), it.nullableStrings("kept_tips"), it.nullableStrings("kept_seals")) },
@@ -177,4 +205,10 @@ private fun JsonObject.nullableText(name: String): String? = getValue(name).json
 private fun JsonObject.unsigned(name: String): ULong = text(name).toULong()
 private fun JsonObject.objects(name: String): List<JsonObject> = getValue(name).jsonArray.map { it.jsonObject }
 private fun JsonObject.nullableStrings(name: String): List<String>? = (getValue(name) as? JsonArray)?.map { it.jsonPrimitive.content }
+private fun JsonObject.authority(): TipAuthority = when (val authority = text("authority")) {
+    "owner" -> TipAuthority.OWNER
+    "trusted" -> TipAuthority.TRUSTED
+    "issuer" -> TipAuthority.ISSUER
+    else -> throw IllegalArgumentException("unknown tip authority $authority")
+}
 private fun JsonObject.frontier(): List<TipAuthorMark> = objects("frontier").map { TipAuthorMark(it.text("author").toUInt(), it.unsigned("sequence")) }

@@ -759,3 +759,206 @@ mod trusted {
         Ok(())
     }
 }
+
+/// Races resolve by authority, then digest; revocation resolves again.
+/// Trusted identities race here: an issuer device that imported the
+/// registry from a checkpoint cannot rebuild another tip until phase 15
+/// (`docs/features_09/14-seals-and-bookmarks-evidence.md`); the issuer
+/// variants run in `rocky-secure`.
+mod races {
+    use super::*;
+
+    struct Household {
+        _root: tempfile::TempDir,
+        owner: Device,
+        trusted: [Device; 2],
+        member: Device,
+        grants: [Value; 2],
+    }
+    /// The owner, two trusted identities and a writer, all on `main` after
+    /// one row and a seal. They join before any row.
+    async fn household() -> Result<Household, Failure> {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let owner = Device::create(
+            &root.path().join("owner"),
+            Some(Network::Owned(hub.connector("owner"))),
+        )?;
+        main(&owner).await;
+        let mut joined = Vec::new();
+        for name in ["t0", "t1", "m"] {
+            let device = Device::join(
+                &root.path().join(name),
+                &owner.invite().await,
+                Network::Owned(hub.connector(name)),
+            )?;
+            introduce(&owner, &device).await;
+            for other in &joined {
+                introduce(other, &device).await;
+            }
+            device.sync().await.expect("join sync");
+            ok(&device, "follow", json!({"name": "main"})).await;
+            joined.push(device);
+        }
+        let mut grants = Vec::new();
+        for device in &joined[..2] {
+            let identity = device.ok(json!({"type": "session"})).await["principal"].clone();
+            let granted = ok(&owner, "trust", json!({"identity": identity})).await;
+            ok(device, "install_trust", json!({"grant": granted["grant"]})).await;
+            grants.push(granted);
+        }
+        owner.add(1, "before").await;
+        ok(&owner, "seal", json!({})).await;
+        let mut joined = joined.into_iter();
+        let (t0, t1, member) = (
+            joined.next().ok_or("t0")?,
+            joined.next().ok_or("t1")?,
+            joined.next().ok_or("m")?,
+        );
+        let house = Household {
+            _root: root,
+            owner,
+            trusted: [t0, t1],
+            member,
+            grants: [grants[0].clone(), grants[1].clone()],
+        };
+        settle(&house.all()).await;
+        for device in house.all() {
+            assert_eq!(device.titles().await, ["before"]);
+        }
+        Ok(house)
+    }
+    impl Household {
+        fn all(&self) -> Vec<&Device> {
+            vec![
+                &self.owner,
+                &self.trusted[0],
+                &self.trusted[1],
+                &self.member,
+            ]
+        }
+    }
+    async fn settle(devices: &[&Device]) {
+        for _ in 0..3 {
+            for device in devices {
+                let _ = device.sync().await;
+            }
+        }
+    }
+    fn seal_by_id<'a>(inspection: &'a Value, id: &Value) -> &'a Value {
+        inspection["seals"]
+            .as_array()
+            .and_then(|seals| seals.iter().find(|seal| seal["id"] == *id))
+            .unwrap_or(&Value::Null)
+    }
+    fn bookmark<'a>(inspection: &'a Value, name: &str) -> &'a Value {
+        inspection["bookmarks"]
+            .as_array()
+            .and_then(|bookmarks| bookmarks.iter().find(|bookmark| bookmark["name"] == name))
+            .unwrap_or(&Value::Null)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_owners_backward_move_beats_a_trusted_forward_move_whatever_their_digests()
+    -> Result<(), Failure> {
+        let house = household().await?;
+        let (owner, trusted) = (&house.owner, &house.trusted[0]);
+        let tip = ok(owner, "status", json!({})).await["tip"].clone();
+        let inspection = ok(owner, "inspect", json!({})).await;
+        let earlier = seal_by_id(&inspection, &tip)["id"].clone();
+        // Apart: the trusted identity seals main's tip and moves it
+        // forward; the owner opens a tip on the earlier seal and moves
+        // main back there, closing main's tip.
+        let forward = ok(trusted, "seal", json!({})).await["tip"].clone();
+        trusted.add(2, "forward").await;
+        let back = ok(
+            owner,
+            "open",
+            json!({"seal": earlier, "minimum_in_sync": 1}),
+        )
+        .await["tip"]
+            .clone();
+        ok(owner, "move", json!({"name": "main", "tip": back})).await;
+        settle(&house.all()).await;
+
+        for device in house.all() {
+            let status = ok(device, "status", json!({})).await;
+            assert_eq!(status["tip"], back, "{status}");
+            assert_eq!(device.titles().await, ["before"]);
+            let inspection = ok(device, "inspect", json!({})).await;
+            let main = bookmark(&inspection, "main");
+            assert_eq!(main["tip"], back);
+            assert_eq!(main["losers"].as_array().map(Vec::len), Some(1), "{main}");
+            assert_eq!(main["losers"][0]["name"], "main/1");
+            assert_eq!(main["losers"][0]["tip"], forward);
+            let won = inspection["seals"]
+                .as_array()
+                .and_then(|seals| {
+                    seals
+                        .iter()
+                        .find(|seal| seal["tip"] == tip && seal["canonical"] == true)
+                })
+                .ok_or("winning seal")?;
+            assert_eq!(
+                (won["action"].clone(), won["authority"].clone()),
+                (json!("close"), json!("owner"))
+            );
+            assert_eq!(seal_by_id(&inspection, &forward)["authority"], "trusted");
+        }
+        // The forward write is held on every device that holds it.
+        for device in [trusted, owner] {
+            let held = device.ok(json!({"type": "held_changes"})).await;
+            assert!(held["count"].as_u64() >= Some(1), "{held}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoking_the_identity_whose_seal_won_makes_every_device_follow_the_next_winner()
+    -> Result<(), Failure> {
+        let house = household().await?;
+        let (owner, member) = (&house.owner, &house.member);
+        let tip = ok(owner, "status", json!({})).await["tip"].clone();
+        // Two trusted identities seal main's tip at once; the lower digest wins.
+        let continuations = [
+            ok(&house.trusted[0], "seal", json!({})).await["tip"].clone(),
+            ok(&house.trusted[1], "seal", json!({})).await["tip"].clone(),
+        ];
+        settle(&house.all()).await;
+        let winner = usize::from(continuations[1].as_str() < continuations[0].as_str());
+        let next = continuations[1 - winner].clone();
+        for device in house.all() {
+            assert_eq!(
+                ok(device, "status", json!({})).await["tip"],
+                continuations[winner]
+            );
+        }
+        member.add(2, "on the winner").await;
+        settle(&house.all()).await;
+        assert_eq!(owner.titles().await, ["before", "on the winner"]);
+
+        // Revoking the winner's trusted grant leaves its seal and move out of
+        // resolution: every device follows the other continuation, and the
+        // write on the revoked one returns as a held change.
+        owner
+            .ok(json!({"type": "revoke", "trust": house.grants[winner]["capability"]}))
+            .await;
+        settle(&house.all()).await;
+        for device in house.all() {
+            let status = ok(device, "status", json!({})).await;
+            assert_eq!(status["tip"], next, "{status}");
+            assert_eq!(device.titles().await, ["before"]);
+            let inspection = ok(device, "inspect", json!({})).await;
+            let revoked = seal_by_id(&inspection, &continuations[winner]);
+            assert_eq!(
+                (revoked["revoked"].clone(), revoked["canonical"].clone()),
+                (json!(true), json!(false))
+            );
+            assert_eq!(seal_by_id(&inspection, &next)["canonical"], true);
+            assert_eq!(seal_by_id(&inspection, &next)["tip"], tip);
+        }
+        let held = member.ok(json!({"type": "held_changes"})).await;
+        assert_eq!(held["count"], 1, "{held}");
+        Ok(())
+    }
+}

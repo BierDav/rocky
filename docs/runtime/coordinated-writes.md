@@ -85,7 +85,8 @@ tip's log with `LogTerminal { digest, continuation }` unless it ended already:
 
 - A log ended by this seal, or by a terminal entry whose statement this node
   does not hold, admits the seal; concurrent seals resolve in the graph by
-  the lower digest, as on devices without a log.
+  authority and then the lower digest, as on devices without a log
+  ([races](tips-and-bookmarks.md#races-and-revocation)).
 - When a seal this node already holds ended the log, its own publication
   fails `sealed` and publishes nothing. A received seal is admitted anyway.
 - When the coordinator does not confirm, publication fails

@@ -482,6 +482,11 @@ impl<A: RowApplication> Inner<A> {
         for statement in statements {
             statement.verify(self.config.publisher, &graphs[&statement.scope()], None)?;
         }
+        for graph in graphs.values_mut() {
+            graph
+                .exclude_revoked(&self.config.revocations)
+                .map_err(credential)?;
+        }
         self.graphs = graphs;
         self.followed = None;
         self.tip = rocky_credentials::genesis_tip(self.manifest);
@@ -522,6 +527,26 @@ impl<A: RowApplication> Inner<A> {
             self.select_line(scope, self.tip).await?;
         }
         Ok(())
+    }
+    /// Leaves the statements `revocations` ends out of every graph's
+    /// resolution and, inside the caller's transaction, follows the
+    /// bookmark to where it now resolves. Returns whether a graph changed.
+    pub(in crate::replica) async fn resolve_revoked(
+        &mut self,
+        revocations: &rocky_credentials::RevocationSet,
+    ) -> Result<bool, Error> {
+        let mut changed = false;
+        for graph in self.graphs.values_mut() {
+            changed |= graph.exclude_revoked(revocations).map_err(credential)?;
+        }
+        if changed
+            && let Some((scope, name)) = self.followed.clone()
+            && let Some(target) = self.graph_for(scope)?.bookmark(&name).map_err(credential)?
+            && target != self.tip
+        {
+            self.switch_tip(scope, &name, target).await?;
+        }
+        Ok(changed)
     }
     async fn store_followed(&self, scope: Scope, name: &str, tip: TipId) -> Result<(), Error> {
         self.conn.execute("INSERT INTO secure_followed_tip VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET scope=excluded.scope,bookmark=excluded.bookmark,tip=excluded.tip",bindings(vec![SqlValue::Blob(encode(&scope)?),SqlValue::Text(name.into()),SqlValue::Blob(encode(&tip)?)] )).await?;

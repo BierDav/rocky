@@ -122,19 +122,26 @@ impl<A: RowApplication> Inner<A> {
 
 impl<A: RowApplication> EncryptedReplica<A> {
     /// The global author marks of every locally held write visible in the
-    /// followed tip, at least its parent seal's. Refuses pruned history,
-    /// whose global author positions are no longer known.
-    pub async fn seal_frontier(&self, scope: Scope) -> Result<Vec<AuthorMark>, Error> {
+    /// followed tip, at least its parent seal's. Pruned writes have no
+    /// known position and are left out: like writes the sealer never held,
+    /// they walk a `continue` seal as late frames. A `close` would hold
+    /// them where others applied them, so it refuses pruned history.
+    pub async fn seal_frontier(&self, scope: Scope, close: bool) -> Result<Vec<AuthorMark>, Error> {
         let inner = self.inner.lock().await;
         let graph = inner.scope_graph(scope)?;
-        for record in rows(&inner.conn, "SELECT scope FROM secure_scope_state").await? {
+        let pruned = if close {
+            rows(&inner.conn, "SELECT scope FROM secure_scope_state").await?
+        } else {
+            Vec::new()
+        };
+        for record in pruned {
             let [SqlValue::Blob(bytes)] = record.as_slice() else {
                 return Err(Error::Corrupt("scope".into()));
             };
             let resource: ResourceScope = decode(bytes)?;
             if resource.domain == scope && inner.has_horizon(resource).await? {
                 return Err(denied(
-                    "sealing needs retained history; pruned logs have no author frontier",
+                    "a close seal needs retained history; pruned logs have no author frontier",
                 ));
             }
         }

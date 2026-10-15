@@ -47,8 +47,10 @@ bookmark stays on it and is read-only until moved. Rocky runs no timer.
 The seal's frontier holds the last global author position of every write this
 device holds on the followed tip. Writes beyond it that arrive later walk
 `continue` seals to the open tip; behind a `close` they become
-[held changes](held-changes.md). Sealing refuses pruned history, whose author
-positions are gone, and a tip this device does not follow.
+[held changes](held-changes.md). Pruned writes have no known author position:
+a `continue` seal leaves them out, so they walk to the continuation like
+writes this device never held, and a `close` refuses pruned history. Sealing
+refuses a tip this device does not follow.
 
 ## Branches
 
@@ -111,12 +113,22 @@ Issuers move a bookmark forward along `continue` seals. The owner and trusted
 identities also create and delete bookmarks and move them backwards or
 sideways. Such a move off an open tip closes it in the same batch, so it is
 made on a device following that tip. The line's writes since the common seal
-return as held changes on every device holding them. Two moves of one bookmark
-from the same tip resolve to the lower digest; slice 7 of
-[phase 14](../features_09/14-seals-and-bookmarks.md) ranks the owner, trusted
-identities and issuers before the digest. A call whose statements the
-graph would not resolve to, such as a move losing to a lower digest, is
-refused instead of published.
+return as held changes on every device holding them. A call whose statements
+the graph would not resolve to, such as a move losing a race, is refused
+instead of published.
+
+## Races and revocation
+
+Concurrent seals of one tip, and moves of one bookmark from one tip, resolve
+to the owner's statement, then a trusted identity's, then an issuer's; only
+among equals does the lower digest win. An issuer cannot outbid an owner's
+rollback by varying its statement. Revoking an identity leaves its seals and
+moves in the graph but out of resolution; every device resolves again in the
+commit that learns the revocation, and writes on a tip that loses this way
+return as held changes. `inspect` reports each seal's and move's `authority`
+(`owner`, `trusted` or `issuer`) and `revoked`, and lists a bookmark's
+losing moves and their tips as `losers` named `main/1`, `main/2`, in path
+order; their tips stay branches.
 
 ## Status and inspection
 
@@ -146,8 +158,10 @@ link claims and its last reported per-scope frontiers. `evidence_releasable`
 stays null until lazy compaction exists.
 
 Inspection is for developers: the genesis tip and schema, every seal with its
-frontier, action and whether it won (`canonical`), openings with their minimum
-in-sync size, bookmarks with their tip and moves, and nodes. A `continue`
+frontier, action, whether it won (`canonical`), its signer's `authority` and
+whether a revocation ended it (`revoked`), openings with their minimum in-sync
+size, bookmarks with their tip, moves (with `authority` and `revoked`) and
+`losers` (`name` such as `main/1`, losing `move`, its `tip`), and nodes. A `continue`
 seal's id is its successor tip; an opening's id is its tip. For this device a
 node lists the tips it holds frames of and no kept seals, which arrive with
 [phase 16](../features_09/16-kept-seals-and-views.md); for peers both are null,

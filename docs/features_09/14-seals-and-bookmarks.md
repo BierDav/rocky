@@ -1,9 +1,9 @@
 # 14. Seals, tips and bookmarks
 
-Status: in progress. Slices 1–6 are implemented and merged, with
+Status: in progress. Slices 1–7 are implemented, with
 [evidence](14-seals-and-bookmarks-evidence.md); the
 [merge's open items](14-seals-and-bookmarks-evidence.md#open-after-the-merge)
-remain; slice 7 is open.
+remain.
 Revised 2026-10-15 for tips and branches.
 Owner: `rocky-credentials` seal, tip and bookmark statements; `rocky-secure`
 admission, sync and late frames; `rocky-coordinator` per-tip logs;

@@ -1175,3 +1175,134 @@ async fn two_branch_devices_sync_without_main_and_switching_back_drops_branch_fr
     );
     assert_eq!(c.snapshot(f.public).await.unwrap().rows.len(), 3);
 }
+
+#[tokio::test]
+async fn the_owners_backward_move_beats_an_issuers_forward_move_and_revocation_resolves_again() {
+    let f = Fixture::new();
+    let dir = TempDir::new().unwrap();
+    let a_key = PrivateKey::new();
+    let a = open(&f, &dir.path().join("a.db"), &a_key).await;
+    let b = open(&f, &dir.path().join("b.db"), &PrivateKey::new()).await;
+    main(&f, &a).await;
+    b.receive_tip_statements(&a.tip_statements(None, 32).await.unwrap())
+        .await
+        .unwrap();
+    b.follow_bookmark(f.public.domain, "main").await.unwrap();
+    let common = insert(&f, &a, 1, "Common").await;
+    b.receive(common).await.unwrap();
+    let advanced = advance(&f, &a).await;
+    b.receive_tip_statements(&advanced).await.unwrap();
+    let TipStatement::Seal(earlier) = &advanced[0] else {
+        panic!("seal first")
+    };
+    let tip = a.followed_tip().await;
+    assert_eq!(b.followed_tip().await, tip);
+    let issuers: Vec<_> = (0..2)
+        .map(|_| {
+            let key = PrivateKey::new();
+            let chain = CredentialChain(vec![
+                Authority::owner(&f.publisher)
+                    .issue_issuer(key.public_key(), None, validity())
+                    .unwrap(),
+            ]);
+            (key, chain)
+        })
+        .collect();
+    let endorse_move = |chain: &CredentialChain, key: &PrivateKey, from, to| {
+        let TipStatement::Bookmark(unsigned) = bookmark(&f, "main", from, to) else {
+            unreachable!()
+        };
+        TipStatement::Bookmark(SignedBookmarkMove::endorse(unsigned.statement, key, chain).unwrap())
+    };
+
+    // Two issuers seal main's tip at once; among equals the lower digest wins.
+    let statement = seal(&f, &a).await.statement;
+    let mut variants = Vec::new();
+    for (replica, (key, chain)) in [&a, &b].into_iter().zip(&issuers) {
+        let signed = SignedSeal::endorse(statement.clone(), key, chain).unwrap();
+        let records = vec![
+            TipStatement::Seal(signed.clone()),
+            endorse_move(chain, key, Some(tip), signed.successor().unwrap()),
+        ];
+        replica.receive_tip_statements(&records).await.unwrap();
+        variants.push((signed, records));
+    }
+    a.receive_tip_statements(&variants[1].1).await.unwrap();
+    b.receive_tip_statements(&variants[0].1).await.unwrap();
+    let winner = usize::from(variants[1].0.id().unwrap() < variants[0].0.id().unwrap());
+    let winning = variants[winner].0.successor().unwrap().unwrap();
+    let next = variants[1 - winner].0.successor().unwrap().unwrap();
+    assert_eq!(a.followed_tip().await, winning);
+    assert_eq!(b.followed_tip().await, winning);
+    let on_winner = insert(&f, &a, 2, "On the winner").await;
+    b.receive(on_winner).await.unwrap();
+    assert_eq!(b.snapshot(f.public).await.unwrap().rows.len(), 2);
+
+    // Revoking the winning issuer leaves its seal and move out of
+    // resolution: both follow the next winner, and the write on the
+    // revoked line returns as a held change.
+    let revoked = crate::tests::revoking(
+        &f.publisher,
+        f.public.domain.app,
+        &[issuers[winner].0.public_key()],
+        &[],
+    );
+    for replica in [&a, &b] {
+        replica.learn_revocations(&revoked).await.unwrap();
+        assert_eq!(replica.followed_tip().await, next);
+        let graph = replica.tip_graph(f.public.domain).await.unwrap();
+        assert!(graph.revoked.contains(&variants[winner].0.id().unwrap()));
+        assert_eq!(graph.seal(tip).unwrap(), Some(&variants[1 - winner].0));
+        assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
+        assert_eq!(replica.held_changes().await.unwrap().len(), 1);
+    }
+
+    // Apart: the remaining issuer on b seals main's tip and moves main
+    // forward; the owner on a closes it and moves main back to a tip on
+    // the earlier seal.
+    let (key, chain) = &issuers[1 - winner];
+    let forward = SignedSeal::endorse(seal(&f, &b).await.statement, key, chain).unwrap();
+    let forward_tip = forward.successor().unwrap().unwrap();
+    let forward_records = vec![
+        TipStatement::Seal(forward.clone()),
+        endorse_move(chain, key, Some(next), Some(forward_tip)),
+    ];
+    b.receive_tip_statements(&forward_records).await.unwrap();
+    let forward_write = insert(&f, &b, 3, "Forward").await;
+    let mut close = seal(&f, &a).await.statement;
+    close.action = SealAction::Close;
+    let close = SignedSeal::sign(close, &f.publisher).unwrap();
+    let (back, mut back_records) = branch(&f, earlier);
+    back_records.pop();
+    back_records.insert(0, TipStatement::Seal(close.clone()));
+    back_records.push(bookmark(&f, "main", Some(next), Some(back)));
+    a.receive_tip_statements(&back_records).await.unwrap();
+    assert_eq!(a.followed_tip().await, back);
+
+    // Whatever the digests and order, both end on the owner's move; the
+    // issuer's is listed as a loser and its write is held.
+    a.receive_tip_statements(&forward_records).await.unwrap();
+    b.receive_tip_statements(&back_records).await.unwrap();
+    a.receive(forward_write).await.unwrap();
+    for replica in [&a, &b] {
+        assert_eq!(replica.followed_tip().await, back);
+        let graph = replica.tip_graph(f.public.domain).await.unwrap();
+        assert_eq!(graph.seal(next).unwrap(), Some(&close));
+        let losers = graph.losing_moves("main").unwrap();
+        assert_eq!(losers.len(), 1);
+        assert_eq!(losers[0].statement.to, Some(forward_tip));
+        assert_eq!(replica.snapshot(f.public).await.unwrap().rows.len(), 1);
+        assert_eq!(replica.held_changes().await.unwrap().len(), 2);
+    }
+    // The resolution survives reopening.
+    drop(a);
+    let a = open(&f, &dir.path().join("a.db"), &a_key).await;
+    assert_eq!(a.followed_tip().await, back);
+    assert!(
+        a.tip_graph(f.public.domain)
+            .await
+            .unwrap()
+            .revoked
+            .contains(&variants[winner].0.id().unwrap())
+    );
+}

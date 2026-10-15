@@ -5,6 +5,7 @@ use crate::{
 };
 use rocky_core::{Commitment, Scope, TipId};
 use serde::{Deserialize, Serialize};
+use std::{cmp::Reverse, collections::BTreeSet};
 
 pub const SEAL_FORMAT: u32 = 1;
 pub const TIP_OPENING_FORMAT: u32 = 1;
@@ -263,6 +264,35 @@ impl SignedBookmarkMove {
     }
 }
 
+/// Who signed a tip statement, in the order races resolve by: the owner,
+/// then a trusted identity, then an issuer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TipAuthority {
+    Issuer,
+    Trusted,
+    Owner,
+}
+impl TipAuthority {
+    /// Reads the shape of an endorsement admission already verified: no
+    /// links is the owner, one owner-direct trusted grant for `scope` a
+    /// trusted identity, anything else an issuer.
+    pub fn of(endorsement: &Endorsement, scope: Scope) -> Self {
+        match endorsement.chain.0.as_slice() {
+            [] => Self::Owner,
+            [link]
+                if link
+                    .capability
+                    .extended()
+                    .is_ok_and(|extended| extended.trusted == Some(scope)) =>
+            {
+                Self::Trusted
+            }
+            _ => Self::Issuer,
+        }
+    }
+}
+
 /// Pure graph resolution over already verified statements. Durable admission
 /// verifies statements and their dependencies before adding them to this value.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +302,10 @@ pub struct TipGraph {
     pub seals: Vec<SignedSeal>,
     pub openings: Vec<SignedTipOpening>,
     pub moves: Vec<SignedBookmarkMove>,
+    /// Seals and moves a revocation ended the signer of: kept, inspectable,
+    /// and left out of resolution. See [`Self::exclude_revoked`].
+    #[serde(skip)]
+    pub revoked: BTreeSet<Commitment>,
 }
 impl TipGraph {
     pub fn new(scope: Scope, genesis_schema: Commitment) -> Self {
@@ -281,7 +315,43 @@ impl TipGraph {
             seals: Vec::new(),
             openings: Vec::new(),
             moves: Vec::new(),
+            revoked: BTreeSet::new(),
         }
+    }
+    /// Leaves out of resolution every seal and move whose signer's chain
+    /// `revocations` ends; the owner's never are. Returns whether the set
+    /// changed, so callers resolve again.
+    pub fn exclude_revoked(&mut self, revocations: &RevocationSet) -> Result<bool, Error> {
+        let mut revoked = BTreeSet::new();
+        let signed = self
+            .seals
+            .iter()
+            .map(|seal| (seal.id(), &seal.endorsement().chain))
+            .chain(
+                self.moves
+                    .iter()
+                    .map(|movement| (movement.id(), &movement.endorsement().chain)),
+            );
+        for (id, chain) in signed {
+            for link in &chain.0 {
+                if revocations.ends(link)? {
+                    revoked.insert(id?);
+                    break;
+                }
+            }
+        }
+        let changed = revoked != self.revoked;
+        self.revoked = revoked;
+        Ok(changed)
+    }
+    /// The order races resolve by: higher authority first, then the lower
+    /// digest. Smaller wins.
+    fn precedence(
+        &self,
+        endorsement: &Endorsement,
+        id: Commitment,
+    ) -> (Reverse<TipAuthority>, Commitment) {
+        (Reverse(TipAuthority::of(endorsement, self.scope)), id)
     }
     pub fn genesis(&self) -> TipId {
         genesis_tip(self.genesis_schema)
@@ -292,20 +362,29 @@ impl TipGraph {
         }
         Ok(())
     }
-    /// Concurrent seals have one winner, independent of receipt order.
+    /// Concurrent seals have one winner, independent of receipt order: the
+    /// highest authority, then the lower digest. Revoked seals never win.
     pub fn seal(&self, tip: TipId) -> Result<Option<&SignedSeal>, Error> {
-        let mut winner: Option<(Commitment, &SignedSeal)> = None;
+        let mut winner: Option<((Reverse<TipAuthority>, Commitment), &SignedSeal)> = None;
         for seal in self
             .seals
             .iter()
             .filter(|seal| seal.statement.tip == tip && seal.statement.scope == self.scope)
         {
             let id = seal.id()?;
-            if winner.is_none_or(|(current, _)| id < current) {
-                winner = Some((id, seal));
+            if self.revoked.contains(&id) {
+                continue;
+            }
+            let key = self.precedence(seal.endorsement(), id);
+            if winner.as_ref().is_none_or(|(current, _)| key < *current) {
+                winner = Some((key, seal));
             }
         }
         Ok(winner.map(|(_, seal)| seal))
+    }
+    /// The authority a statement was signed with.
+    pub fn authority(&self, endorsement: &Endorsement) -> TipAuthority {
+        TipAuthority::of(endorsement, self.scope)
     }
     pub fn seal_by_id(&self, id: Commitment) -> Result<&SignedSeal, Error> {
         for seal in &self.seals {
@@ -452,41 +531,62 @@ impl TipGraph {
         }
         Err(denied("cyclic tip graph"))
     }
-    /// Resolve conflicts per `(name, from)` to the lower move digest, then
-    /// walk from creation. A revisit ends the walk at the revisited tip.
+    /// Resolve conflicts per `(name, from)` by authority, then the lower
+    /// move digest, and walk from creation. A revisit ends the walk at the
+    /// revisited tip. Revoked moves never win.
     pub fn bookmark(&self, name: &str) -> Result<Option<TipId>, Error> {
+        Ok(self.bookmark_walk(name)?.0)
+    }
+    /// The moves of `name` that lost a race along its path, in path and
+    /// then resolution order: inspection's `main/1`, `main/2`. They stay
+    /// branches; revoked moves are not listed.
+    pub fn losing_moves(&self, name: &str) -> Result<Vec<&SignedBookmarkMove>, Error> {
+        Ok(self.bookmark_walk(name)?.1)
+    }
+    fn bookmark_walk(
+        &self,
+        name: &str,
+    ) -> Result<(Option<TipId>, Vec<&SignedBookmarkMove>), Error> {
         let mut cursor = None;
+        let mut losers = Vec::new();
         let mut visited = std::collections::BTreeSet::new();
         while visited.insert(cursor) {
-            let mut winner: Option<(Commitment, &SignedBookmarkMove)> = None;
+            let mut candidates = Vec::new();
             for movement in self.moves.iter().filter(|movement| {
                 movement.statement.scope == self.scope
                     && movement.statement.name == name
                     && movement.statement.from == cursor
             }) {
-                if movement
-                    .statement
-                    .to
-                    .is_some_and(|tip| self.canonical_tip(tip).is_err())
-                {
+                let id = movement.id()?;
+                if self.revoked.contains(&id) {
                     continue;
                 }
-                let id = movement.id()?;
-                if winner.is_none_or(|(current, _)| id < current) {
-                    winner = Some((id, movement));
+                candidates.push((self.precedence(movement.endorsement(), id), movement));
+            }
+            candidates.sort_by_key(|candidate| candidate.0);
+            let mut winner = None;
+            for (_, movement) in candidates {
+                let eligible = !movement
+                    .statement
+                    .to
+                    .is_some_and(|tip| self.canonical_tip(tip).is_err());
+                if eligible && winner.is_none() {
+                    winner = Some(movement);
+                } else {
+                    losers.push(movement);
                 }
             }
             match winner {
-                Some((_, movement)) => {
+                Some(movement) => {
                     cursor = movement
                         .statement
                         .to
                         .map(|tip| self.canonical_tip(tip))
                         .transpose()?
                 }
-                None => return Ok(cursor),
+                None => return Ok((cursor, losers)),
             }
         }
-        Ok(cursor)
+        Ok((cursor, losers))
     }
 }

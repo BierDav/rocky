@@ -35,7 +35,7 @@ partition-aware identities of that scope.
 
 Today any authenticated device of the domain may fetch a log, so it learns
 that each row exists, how many there are, when they changed and which
-pseudonym wrote them. For partitions that is not acceptable: a device not
+author wrote them. For partitions that is not acceptable: a device not
 shared on "Birthday surprise" would see that list fill up.
 
 A partitioned log is therefore served only to a device holding, for that
@@ -51,10 +51,10 @@ Unpartitioned logs keep the existing rule.
 
 ### Authors
 
-One pseudonym per device and table links a device's activity across
-partitions. [Rotating pseudonyms](pseudonym_rotation.md), per partition and
-per key epoch, removes that link for readers of a log. It does not hide
-timing in a small group, and the issuer can always open a pseudonym.
+Once [phase 13](../features_09/13-identities-and-domain-credentials.md)
+removes pseudonyms, each record names the node that wrote it, linking its
+activity across partitions for readers of a log. Data that must not be
+linked belongs in a separate domain.
 
 ## Open
 

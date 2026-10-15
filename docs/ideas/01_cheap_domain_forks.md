@@ -1,6 +1,6 @@
 # Cheap domain forks
 
-Status: idea; not planned.
+Status: accepted as [features_09 phases 13–20](../features_09/README.md#generations-as-sealed-forks), which supersede this draft.
 
 A [split schema](../runtime/adopting-generations.md#limits) is undefined
 today: issuers that sign different schemas on one generation fork the

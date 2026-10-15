@@ -1,6 +1,7 @@
 # Rotating author pseudonyms
 
-Status: idea, not designed in detail and not scheduled.
+Status: obsolete; [phase 13](../features_09/13-identities-and-domain-credentials.md)
+removes pseudonyms.
 
 ## Background
 

@@ -18,4 +18,5 @@ sketch of the change, and what it must not break.
 | [Single-copy typed rows](single-copy-typed-rows.md) | The second copy of mergeable values in a typed-table application costs too much storage or write time |
 | [Large command-controlled tables](large-command-tables.md) | A strong invariant covers a table that does not fit one command envelope |
 | [Independent command sequences](independent-command-sequences.md) | Unrelated strong commands of one schema delay each other or depend on one executor |
+| [Cloned node detection](cloned-node-detection.md) | Devices or servers are copied while running, and their copies keep writing |
 | [Coordinated migrations](coordinated-migrations.md) | Issuers often migrate the same generation concurrently and the duplicate work matters |

@@ -6,7 +6,9 @@ implemented, with [accepted limitations](#accepted-limitations); phases 5 and
 [evidence](08-coordinated-log-evidence.md) and phase 9 in its
 [evidence](09-coordinated-writes-evidence.md). Phase 10 has a
 [partial collection slice](10-stuck-recovery-evidence.md); owner-signed cuts
-remain unimplemented. [features_08](../features_08/README.md)
+remain unimplemented. Phases 13–20 replace generations' transitions, the
+mergeable horizon and recovery cuts with
+[sealed forks](#generations-as-sealed-forks). [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
 ## Destination
@@ -107,8 +109,7 @@ versions are tolerated belong to the application, not to Rocky.
   What a device applies of the other branch's writes is not specified.
   Issuers running one application release sign one generation, so a split
   needs a bug, two releases rolled out at once or a malicious issuer.
-  [Cheap domain forks](../ideas/cheap_domain_forks.md) is an idea for making
-  a split explicit.
+  [Phase 17](17-schema-changes-through-seals.md) removes this limitation.
 - **Two migration runs may duplicate rows.** Issuers that migrate apart each
   run the migrations. Updates meet by latest wins and rows keyed by name
   merge, but an `insert` step into a table keyed by `id` adds each row once
@@ -116,6 +117,7 @@ versions are tolerated belong to the application, not to Rocky.
   must prevent them, for example by using the
   [coordinator](../runtime/coordinated-log.md)
   ([decision 0071](../decisions/0071-staged-migration-publication.md)).
+  [Phase 17](17-schema-changes-through-seals.md) removes this limitation.
 
 ## Phases
 
@@ -133,6 +135,14 @@ versions are tolerated belong to the application, not to Rocky.
 | 10 | [Stuck recovery](10-stuck-recovery.md) | 9 | M | A stuck domain recovers what any device holds; the owner signs the rest away |
 | 11 | [Removing strong commands](11-removing-strong-commands.md) | 9 | L | Commands and command-controlled tables are gone; the examples use coordinated writes |
 | 12 | [Qualification](12-qualification.md) | 4, 5, 7, 10, 11 | M | The shopping app removes `items.category` while an older desktop keeps syncing |
+| 13 | [Identities and domain credentials](13-identities-and-domain-credentials.md) | 10, 11 | L | Grants name identities; nodes sign under certificates; pseudonyms are gone; the publisher key stays with the owner; adopting a generation needs no issuer |
+| 14 | [Seals and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal and move `main`; devices follow bookmarks; late frames reach one generation forward |
+| 15 | [Lazy compaction](15-lazy-compaction.md) | 14 | L | Devices compact sealed generations on their own schedule; the horizon is gone |
+| 16 | [Kept seals and views](16-kept-seals-and-views.md) | 15 | L | Nodes keep configured seals; any connection reads a seal or bookmark through read-only views |
+| 17 | [Schema changes through seals](17-schema-changes-through-seals.md) | 16 | L | A schema change is a seal; transitions, baselines and both accepted limitations are gone |
+| 18 | [Drafts and sandboxes](18-drafts-and-sandboxes.md) | 17 | M | An issuer migrates and tests an unpublished seal, then publishes it by moving `main` |
+| 19 | [Recovery as a bookmark move](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck domain recovers with an owner seal and `main` move; cuts are gone |
+| 20 | [Seal qualification](20-seal-qualification.md) | 12, 18, 19 | M | The shopping app compacts, keeps seals, publishes a draft and rolls back on real devices |
 
 ```mermaid
 flowchart LR
@@ -151,7 +161,61 @@ flowchart LR
     P7 --> P12
     P10 --> P12
     P11 --> P12
+    P10 --> P13["13 Identities and domain credentials (L)"]
+    P11 --> P13
+    P13 --> P14["14 Seals and bookmarks (L)"]
+    P14 --> P15["15 Lazy compaction (L)"]
+    P15 --> P16["16 Kept seals and views (L)"]
+    P16 --> P17["17 Schema changes through seals (L)"]
+    P17 --> P18["18 Drafts and sandboxes (M)"]
+    P10 --> P19["19 Recovery as a bookmark move (M)"]
+    P14 --> P19
+    P12 --> P20["20 Seal qualification (M)"]
+    P18 --> P20
+    P19 --> P20
 ```
+
+## Generations as sealed forks
+
+Phases 13–20 reduce schema changes, compaction, drafts and recovery to one
+operation. Their briefs hold the details.
+
+- **A domain** is the owner identity's key and the application. It owns
+  members, credentials, grants by table and field name, reader key epochs
+  and the coordinated log, and never forks.
+- **Identities** hold permissions; an `IdentityProvider` supplies them, a
+  passkey module later. Each node signs under its own key, certified by its
+  identity, with an author number from the identity's range. Revoking an
+  identity stops all its nodes. Pseudonyms are removed.
+- **A generation** is one schema and one stretch of history. **A seal** is
+  an issuer-signed statement that ends one at a per-author frontier and
+  names the successor's schema. It changes no row; devices compact sealed
+  generations whenever they choose. Applications call `seal()`; Rocky runs
+  no timer. Every device holds the complete seal graph.
+- **Bookmarks** are signed pointers to seals. `main` names the only writable
+  generation. Issuers move bookmarks forward; trusted nodes and the owner
+  may also move them backwards or sideways. Other devices follow a
+  bookmark, `main` by default. Divergent moves resolve to the lower digest;
+  the losing seal stays a branch.
+- **Late frames** beyond a frontier apply one generation forward along
+  `main`, unless the seal runs a migration or `main` left their line;
+  otherwise they return to their author as held changes.
+- **One live workspace** per domain holds `main`'s tables under their plain
+  names. The code keeps workspaces behind a boundary so that
+  [more](../ideas/additional_live_workspaces.md) can be added later.
+- **Kept seals** are configured per node and stored as history tables.
+  Unlimited read-only views show any kept seal or bookmark with the live
+  tables' names, for migrations, audits and debugging. A seal not kept is
+  shallow: in the graph, without state.
+- **Drafts** are unpublished seals in the live workspace; a sandbox is a
+  draft never published. Merging branches and rebasing are out of scope.
+- An inspection API shows developers the seal graph, bookmarks and kept
+  seals.
+
+This supersedes, once the phases land, the settled items above on
+transitions, re-add baselines and the horizon's guarantees, the accepted
+limitations and [phase 10](10-stuck-recovery.md)'s cuts. Existence logs
+stay and are compacted at seals.
 
 ## Reserved decision records
 
@@ -165,6 +229,7 @@ flowchart LR
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-strong-commands.md) |
 | 0074 | 10 | [Owner-signed recovery cuts](../decisions/0074-owner-signed-recovery-cuts.md) |
+| 0075 | 13–19 | Generations as sealed forks |
 
 ## Open questions
 

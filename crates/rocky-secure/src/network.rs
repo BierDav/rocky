@@ -79,8 +79,8 @@ struct Hello {
     version: u32,
     node: PublicKey,
     challenge: [u8; 32],
-    /// The generation the sender runs; its chain names none.
-    manifest: Commitment,
+    /// The tip the sender follows; its chain names none.
+    tip: rocky_core::TipId,
     credentials: CredentialChain,
     exchange: [u8; 32],
 }
@@ -311,7 +311,7 @@ impl NativeSession {
             version,
             node: own,
             challenge,
-            manifest: replica.current_manifest().await,
+            tip: replica.followed_tip().await,
             credentials,
             exchange,
         };
@@ -342,7 +342,7 @@ impl NativeSession {
             // An outsider is shown no chain: the acceptor speaks only once
             // the initiator's chain verified.
             replica
-                .admit_peer(peer.node, &peer.credentials, peer.manifest)
+                .admit_peer(peer.node, &peer.credentials, peer.tip)
                 .await?;
             write_frame(&mut stream, &local_bytes).await?;
         }
@@ -357,7 +357,7 @@ impl NativeSession {
         }
         if side == Side::Initiator {
             replica
-                .admit_peer(peer.node, &peer.credentials, peer.manifest)
+                .admit_peer(peer.node, &peer.credentials, peer.tip)
                 .await?;
         }
         let shared = exchange_secret.shared(&peer.exchange).map_err(credential)?;

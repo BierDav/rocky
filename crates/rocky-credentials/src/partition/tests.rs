@@ -437,6 +437,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         node: Some(crate::PeerId::of(node_signer.public_key())),
         partitions: vec![cross],
         issues: false,
+        trusted: None,
     })
     .unwrap();
     chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());

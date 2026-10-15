@@ -25,6 +25,7 @@ fn delegated(
         expires: crate::tests::lifetime().1,
         delegations: 2,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            trusted: None,
             partitions: Vec::new(),
             authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             node: None,
@@ -44,6 +45,7 @@ fn delegated(
         kind: PrincipalKind::Node,
         delegations: 0,
         extension: rocky_credentials::Extension::new(rocky_credentials::Extended {
+            trusted: None,
             authors: Some(rocky_credentials::AuthorRange::new(12, 12).unwrap()),
             node: Some(rocky_credentials::PeerId::of(node.public_key())),
             ..Default::default()
@@ -86,6 +88,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
         &|link, _| link.delegations = 2,
         &|link, _| {
             link.extension = rocky_credentials::Extension::new(rocky_credentials::Extended {
+                trusted: None,
                 partitions: Vec::new(),
                 authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
                 node: None,
@@ -154,9 +157,10 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             &writer,
             Extensions {
                 author: Some(12),
+                author_sequence: 0,
                 row_format: crate::wire::ROW_FORMAT,
                 partition: None,
-                manifest: f.app().definition().hash(),
+                tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
                 scope: f.public,
                 generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
                 chain: crate::wire::Chain::new(chain.clone()).unwrap().digest(),

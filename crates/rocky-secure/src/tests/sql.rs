@@ -1537,7 +1537,7 @@ async fn ids_reserve_inside_a_transaction_and_continue_after_delete_checkpoint_a
     let operation = commit.frames[0].operation().unwrap();
     assert_eq!(operation.header.public_key, key.public_key());
     assert_eq!(operation.header.extensions.author, Some(17));
-    assert_eq!(operation.header.extensions.row_format, 9);
+    assert_eq!(operation.header.extensions.row_format, 10);
     assert_eq!(operation.header.extensions.chain, author_chain);
     session_sql
         .run("DELETE FROM items WHERE key='a'", vec![])
@@ -1797,7 +1797,7 @@ async fn failed_identity_commit_releases_its_sequence_and_forged_frame_author_is
     .unwrap();
     assert_eq!(peer.receive(reused).await.unwrap(), ReceiveStatus::Rejected);
     let signed = peer.checkpoint(fixture.items).await.unwrap();
-    assert_eq!(signed.statement.format, 12);
+    assert_eq!(signed.statement.format, 13);
     assert_eq!(signed.statement.identities[0].sequence, 1);
 }
 

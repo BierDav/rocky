@@ -10,7 +10,8 @@ defines the request lifecycle. Pair, Renew and Command retain their own streams.
 
 `rocky/link/3` reuses credential admission, revocation exchange and
 session-bound holding proofs, with a distinct signed handshake identity.
-Other versions are refused. Every data request retains the native authorization,
+The signed hello uses handshake version 7 and names the sender's followed tip.
+Other handshake versions are refused. Every data request retains the native authorization,
 page, chain, dependency and transaction checks. A changed authority ends the link.
 A handshake that learns authority changes sends a signed authority close and
 restarts; it cannot continue with its old proof context. Reconciliation retains

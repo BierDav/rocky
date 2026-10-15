@@ -318,10 +318,10 @@ fn incompatible(reason: impl Into<String>) -> Error {
     Error::Incompatible(reason.into())
 }
 /// The one encrypted replica file format; files of another are refused.
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v22";
-/// The file identity of `manifest` at `node`.
-pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&(FILE_IDENTITY, manifest, node))
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v23";
+/// The file identity of `tip` at `node`.
+pub(super) fn identity(tip: rocky_core::TipId, node: PublicKey) -> Result<Vec<u8>, Error> {
+    encode(&(FILE_IDENTITY, tip, node))
 }
 /// A newer definition keeps what replicas of the older one agree on: its
 /// operations and domains, and every table and field it still
@@ -538,7 +538,7 @@ impl<A: RowApplication> Inner<A> {
         let mut start = None;
         for (index, step) in upgrade.steps.iter().enumerate() {
             let transition = step.transition.verify(publisher).map_err(credential)?;
-            if identity(transition.from, node)? == stored {
+            if identity(rocky_credentials::genesis_tip(transition.from), node)? == stored {
                 start = Some(index);
                 break;
             }
@@ -784,7 +784,11 @@ impl<A: RowApplication> Inner<A> {
                 };
                 after = hash.clone();
                 let header: p2panda_core::Header<Extensions> = decode(header)?;
-                if self.admits(header.extensions.manifest).is_ok() {
+                if self
+                    .manifest_of_tip(header.extensions.tip)
+                    .and_then(|manifest| self.admits(manifest))
+                    .is_ok()
+                {
                     self.conn
                         .execute(
                             "UPDATE secure_operations SET status='pending' WHERE hash=?",
@@ -1046,7 +1050,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         {
             return Err(denied("a generation keeps the publisher and the node"));
         }
-        let identity = identity(manifest.hash(), config.node.public_key())?;
+        let identity = identity(
+            rocky_credentials::genesis_tip(manifest.hash()),
+            config.node.public_key(),
+        )?;
         let mut definition = Definition {
             permission_fields: app.permission_fields().into_iter().collect(),
             app: Arc::new(app),

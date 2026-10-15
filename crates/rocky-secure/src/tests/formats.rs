@@ -18,7 +18,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         .unwrap();
     drop(replica);
     let source = template.path().join("base.sqlite");
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
         std::fs::copy(&source, &path).unwrap();
@@ -62,7 +62,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     for version in [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24,
     ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -79,7 +79,7 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
                     "UPDATE secure_metadata SET identity=?",
                     [encode(&(
                         format!("rocky.encrypted-replica.v{version}"),
-                        f.app().definition().hash(),
+                        rocky_credentials::genesis_tip(f.app().definition().hash()),
                         node.public_key(),
                     ))
                     .unwrap()],
@@ -133,7 +133,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 10] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
@@ -192,7 +192,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
     let sender = PrivateKey::new();
     let chain = crate::wire::Chain::new(f.credentials(&sender, f.full())).unwrap();
     let extensions = crate::wire::Extensions {
-        manifest: f.app().definition().hash(),
+        tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
         scope: f.public,
         generation: rocky_core::KeyEpoch::new(1, &[11; 32]),
         chain: chain.digest(),
@@ -202,6 +202,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
                 .author_number()
                 .unwrap(),
         ),
+        author_sequence: 0,
         row_format: crate::wire::ROW_FORMAT,
         partition: None,
     };
@@ -254,4 +255,62 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         assert_eq!(snapshot.revision, 0);
         assert!(snapshot.rows.is_empty());
     }
+}
+
+#[tokio::test]
+async fn seal_author_positions_span_resource_logs_and_survive_reopen() {
+    let f = Fixture::new();
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("replica.sqlite");
+    let node = PrivateKey::new();
+    let replica = EncryptedReplica::open(
+        &path,
+        f.app(),
+        f.config(&node, f.full(), &[f.public, f.private]),
+    )
+    .await
+    .unwrap();
+    let first = replica
+        .author(
+            [31; 32],
+            vec![change(f.public, 31, None, Some(f.app().name("first")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let second = replica
+        .author(
+            [32; 32],
+            vec![change(f.private, 32, None, Some(f.app().salary("42")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    let a = first.operation().unwrap().header;
+    let b = second.operation().unwrap().header;
+    assert_eq!((a.seq_num, b.seq_num), (0, 0));
+    assert_eq!(
+        (a.extensions.author_sequence, b.extensions.author_sequence),
+        (0, 1)
+    );
+    drop(replica);
+    let replica = EncryptedReplica::open(
+        &path,
+        f.app(),
+        f.config(&node, f.full(), &[f.public, f.private]),
+    )
+    .await
+    .unwrap();
+    let third = replica
+        .author(
+            [33; 32],
+            vec![change(f.public, 33, None, Some(f.app().name("third")))],
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        third.operation().unwrap().header.extensions.author_sequence,
+        2
+    );
 }

@@ -22,7 +22,7 @@ pub(super) const SCHEMA: &[&str] = &[
 ];
 
 /// The format of existence records this runtime reads and writes.
-pub const EXISTENCE_FORMAT: u8 = 3;
+pub const EXISTENCE_FORMAT: u8 = 4;
 /// Records per existence page.
 pub const MAX_EXISTENCE_PAGE: usize = 256;
 const SIGNATURE: &str = "rocky.existence-record.v2";
@@ -38,7 +38,7 @@ pub enum ExistenceEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Statement {
     version: u8,
-    manifest: Commitment,
+    tip: rocky_core::TipId,
     scope: ResourceScope,
     id: RowIdentity,
     event: ExistenceEvent,
@@ -60,6 +60,10 @@ pub struct ExistenceRecord {
     signature: Signature,
 }
 impl ExistenceRecord {
+    /// The tip this record belongs to.
+    pub fn tip(&self) -> rocky_core::TipId {
+        self.statement.tip
+    }
     pub fn scope(&self) -> ResourceScope {
         self.statement.scope
     }
@@ -102,7 +106,7 @@ impl ExistenceRecord {
     pub(crate) fn forge(
         key: &PrivateKey,
         credentials: CredentialChain,
-        manifest: Commitment,
+        tip: rocky_core::TipId,
         scope: ResourceScope,
         id: i64,
         event: ExistenceEvent,
@@ -112,7 +116,7 @@ impl ExistenceRecord {
     ) -> Self {
         let statement = Statement {
             version: EXISTENCE_FORMAT,
-            manifest,
+            tip,
             scope,
             id: RowIdentity::from_integer(id).expect("test identity"),
             event,
@@ -190,7 +194,7 @@ impl<A: RowApplication> Inner<A> {
                 .map_err(|error| denied(&error))?;
             let statement = Statement {
                 version: EXISTENCE_FORMAT,
-                manifest: self.manifest,
+                tip: self.tip,
                 scope,
                 id,
                 event,
@@ -255,7 +259,7 @@ impl<A: RowApplication> Inner<A> {
                 "unsupported existence record format; upgrade the runtime".into(),
             ));
         }
-        self.admits(statement.manifest)?;
+        self.admits(self.manifest_of_tip(statement.tip)?)?;
         let scope = statement.scope;
         if scope.domain.app != self.definition.app
             || !self.domains.contains(&scope.domain.domain)
@@ -271,7 +275,10 @@ impl<A: RowApplication> Inner<A> {
         if !record.signed()? {
             return Err(denied("invalid existence record signature"));
         }
-        let revocations = self.revocations_for(statement.manifest, &self.config.revocations)?;
+        let revocations = self.revocations_for(
+            self.manifest_of_tip(statement.tip)?,
+            &self.config.revocations,
+        )?;
         self.check_authenticated_partition(scope, statement.partition.as_ref())?;
         let grants = if let Some(tuple) = &statement.partition {
             statement

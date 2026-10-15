@@ -479,7 +479,12 @@ impl<A: RowApplication> Inner<A> {
         // A held frame of a generation this replica does not admit, such as
         // one refused as unknown, was verified as it arrived; any other is
         // verified again.
-        if held && self.admits(operation.header.extensions.manifest).is_err() {
+        if held
+            && self
+                .manifest_of_tip(operation.header.extensions.tip)
+                .and_then(|manifest| self.admits(manifest))
+                .is_err()
+        {
             return Ok(Staged::Duplicate);
         }
         self.verify_frame(frame, time)?;

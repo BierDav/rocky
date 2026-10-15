@@ -3,10 +3,10 @@ use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PrivateKey, PublicKey, Signature,
     decode_bounded, denied, encode, signing_bytes,
 };
-use rocky_core::{Commitment, ResourceScope};
+use rocky_core::{Commitment, ResourceScope, TipId};
 use serde::{Deserialize, Serialize};
 
-pub const HORIZON_FORMAT: u32 = 6;
+pub const HORIZON_FORMAT: u32 = 7;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ impl HorizonPeer {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorizonStatement {
     pub format: u32,
-    pub manifest: Commitment,
+    pub tip: TipId,
     /// The digest of the revocations the declaring issuer held.
     pub revocations: Commitment,
     /// Sorted IDs authenticating the declaring policy, even after further revocations.
@@ -260,7 +260,7 @@ mod tests {
         };
         let statement = HorizonStatement {
             format: HORIZON_FORMAT,
-            manifest: [6; 32],
+            tip: TipId([6; 32]),
             revocations: rocky_core::commitment(
                 "rocky.revocation-set.v1",
                 &encode(&Vec::<Commitment>::new()).unwrap(),
@@ -281,7 +281,7 @@ mod tests {
         let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
         current.verify(issuer.public_key()).unwrap();
         assert_eq!(current.statement, statement);
-        for format in [0, 2, 3, 4, 5, 7, u32::MAX] {
+        for format in [0, 2, 3, 4, 5, 6, 8, u32::MAX] {
             let mut other = signed.clone();
             other.statement.format = format;
             assert_eq!(

@@ -240,15 +240,8 @@ impl<A: RowApplication> Inner<A> {
     async fn verify_horizon(&self, signed: &SignedHorizon) -> Result<(), Error> {
         signed.verify(self.config.publisher).map_err(credential)?;
         let statement = &signed.statement;
-        if statement.manifest != self.manifest {
-            // A newer generation's statement waits until this replica
-            // adopts that generation.
-            if self.known(statement.manifest).is_err() {
-                return Err(Error::Incompatible(
-                    "the horizon names a newer or unknown generation".into(),
-                ));
-            }
-            return Err(denied("horizon manifest is not current"));
+        if statement.tip != self.tip {
+            return Err(denied("horizon tip is not followed"));
         }
         if statement
             .policy
@@ -464,7 +457,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         Ok(HorizonStatement {
             format: rocky_credentials::HORIZON_FORMAT,
-            manifest: inner.manifest,
+            tip: inner.tip,
             revocations: inner.revocation_digest()?,
             policy: inner
                 .config
@@ -755,7 +748,7 @@ impl<A: RowApplication> Inner<A> {
             let horizon = &signed.statement;
             let statement = &checkpoint.statement;
             if horizon.scope != statement.scope
-                || horizon.manifest != statement.definition
+                || horizon.tip != statement.tip
                 || horizon.logs.iter().any(|log| {
                     !statement.frontier.iter().any(|position| {
                         position.author == log.signer

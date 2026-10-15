@@ -168,7 +168,10 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     let signed = replica.checkpoint(f.public).await.unwrap();
     let statement = &signed.statement;
     assert_eq!(signed.signer(), node.public_key());
-    assert_eq!(statement.definition, f.app().definition().hash());
+    assert_eq!(
+        statement.tip,
+        rocky_credentials::genesis_tip(f.app().definition().hash())
+    );
     assert_eq!(statement.schema, 1);
     assert_eq!(statement.revocations, crate::tests::unrevoked());
     assert_eq!(statement.key_epoch.generation, 1);

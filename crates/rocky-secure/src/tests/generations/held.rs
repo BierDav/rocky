@@ -22,7 +22,11 @@ async fn sync(
     // As the target's session hello declares its generation.
     let manifest = target.inner.lock().await.manifest;
     source
-        .admit_peer(target_key.public_key(), &credentials, manifest)
+        .admit_peer(
+            target_key.public_key(),
+            &credentials,
+            rocky_credentials::genesis_tip(manifest),
+        )
         .await
         .unwrap();
     let mut after = None;

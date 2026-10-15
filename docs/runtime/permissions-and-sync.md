@@ -39,6 +39,11 @@ encryption-key fingerprints and generations, never secret keys. The runtime has
 no key distribution or membership protocol; the SDK's
 [enrollment and renewal](sdk-enrollment.md) distribute keys.
 
+Frames use row format 10 and name a `rocky_core::TipId`; the local graph resolves
+that tip to its schema manifest. The encrypted file identity is
+`rocky.encrypted-replica.v23` and binds the followed tip and node key. Earlier
+frame and file formats are refused.
+
 ## Row admission and keys
 
 A `ResourceScope` identifies the mesh/app/domain, encryption reader set and

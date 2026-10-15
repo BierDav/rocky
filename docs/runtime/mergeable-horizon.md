@@ -31,7 +31,7 @@ is for an author who schedules horizons, syncs across one, or changes the format
    in one transaction drops tombstones, hidden primary-key and unique losers and
    cascade orphans, stores substituted SET NULL values, preserves register
    stamps and identity high-water marks per author/partition, installs the
-   format-9 checkpoint and existence attachments, advances log floors and the
+   format-13 checkpoint and existence attachments, advances log floors and the
    revision. Notifications follow commit and flush. Retry is idempotent.
 5. `prune(scope)` then releases evidence only when the ordinary copy gates and
    `HorizonCustody` permit: `max(1, copies)` other holders must acknowledge the
@@ -105,7 +105,7 @@ serves it to read-only participants; see
   winner rules. Reusing a released baseline key needs a signed causal dependency
   on the release and the same finalized basis.
 - Behind devices cannot sync rows or write until native `sync_scope` or SDK sync
-  imports a format-9 checkpoint. Learning the remote cut installs a durable
+  imports a format-13 checkpoint. Learning the remote cut installs a durable
   write/sync guard before pages download; only a covering finalized checkpoint
   clears it. Bootstrap fetches existence attachments, then row pages, then sends
   an authenticated finalized-bootstrap receipt.
@@ -120,18 +120,18 @@ serves it to read-only participants; see
 
 | Boundary | Current |
 | --- | --- |
-| Horizon statement | Format 5 with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v1`; acknowledgments `rocky.horizon-ack.v2` bind statement, node reference and credential alias |
-| Checkpoint | Format 11 carries independent optional admitted and finalized declarations and bases, a required `moves` summary and the [coordinated binding](stuck-recovery.md#checkpoint-binding); an admitted cut is never treated as finalized |
-| Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
-| File identity | `rocky.encrypted-replica.v21` |
-| Live link handshake | `rocky.link.v6` |
+| Horizon statement | Format 7, bound to the followed `TipId`, with sorted policy IDs and the declaring issuer's [revocation](revocations.md) digest, signed `rocky.horizon-statement.v2`; acknowledgments `rocky.horizon-ack.v2` bind statement, node reference and credential alias |
+| Checkpoint | Format 13 carries independent optional admitted and finalized declarations and bases, a required `moves` summary and the [coordinated binding](stuck-recovery.md#checkpoint-binding); an admitted cut is never treated as finalized |
+| Row frame | 10, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
+| File identity | `rocky.encrypted-replica.v23` |
+| Live link handshake | `rocky.link.v7` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
-Horizon statements accept only format 5, with an explicit existence-base list.
-Checkpoint 9, frame 8 and replica identity v19 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
+Horizon statements accept only format 7, with an explicit existence-base list.
+Checkpoint 13, frame 10 and replica identity v23 are the only accepted versions. Unknown formats, noncanonical order, invalid issuer signatures,
 mismatching dependency sets, backward cuts and declaration changes during
-staging are refused at admission and again at the final switch. Schema
-generations must satisfy the checkpoint's manifest/dependency bindings.
+staging are refused at admission and again at the final switch. Horizon and checkpoint tips must match; a horizon on an unfollowed tip is refused.
+Their row and existence dependency bindings still apply.
 
 ## SDK
 

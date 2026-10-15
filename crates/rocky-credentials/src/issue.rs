@@ -393,6 +393,34 @@ impl<'a> Authority<'a> {
             validity,
         )
     }
+    /// Only the owner grants whole-scope tip and bookmark control. It adds
+    /// no issuer authority and cannot be passed to another identity.
+    pub fn issue_trusted(
+        &self,
+        subject: PublicKey,
+        scope: rocky_core::Scope,
+        grants: Vec<ResourceGrant>,
+        authors: AuthorRange,
+        validity: (u64, u64, u64),
+    ) -> Result<SignedCapability, Error> {
+        if !self.chain.0.is_empty() {
+            return Err(denied("only the owner grants trusted identity authority"));
+        }
+        if grants.iter().any(|grant| grant.scope.domain != scope) {
+            return Err(denied("trusted identity grants name another domain"));
+        }
+        self.sign_link(
+            subject,
+            grants,
+            Extended {
+                authors: Some(authors),
+                trusted: Some(scope),
+                ..Extended::default()
+            },
+            1,
+            validity,
+        )
+    }
     /// The delegations this authority's identity holds.
     fn delegations(&self) -> Result<u8, Error> {
         match self.chain.0.last() {
@@ -465,6 +493,9 @@ impl<'a> Authority<'a> {
             return Err(denied("an issuer above this one renews the credential"));
         }
         let extended = prior.extended()?;
+        if extended.trusted.is_some() && !self.chain.0.is_empty() {
+            return Err(denied("only the owner renews trusted identity authority"));
+        }
         self.sign_link(
             prior.subject,
             prior.grants.clone(),
@@ -472,6 +503,7 @@ impl<'a> Authority<'a> {
                 authors: extended.authors,
                 partitions: extended.partitions,
                 issues: extended.issues,
+                trusted: extended.trusted,
                 ..Extended::default()
             },
             prior.delegations,

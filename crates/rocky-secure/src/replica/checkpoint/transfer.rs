@@ -598,7 +598,11 @@ impl<A: RowApplication> Inner<A> {
         }
         // A checkpoint of a generation this replica does not admit is
         // offered again once maintenance seals one of the current generation.
-        if self.admits(signed.statement.definition).is_err() {
+        if self
+            .manifest_of_tip(signed.statement.tip)
+            .and_then(|manifest| self.admits(manifest))
+            .is_err()
+        {
             return Ok(None);
         }
         signed.verify_authority(self, now()?)?;
@@ -713,7 +717,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     .await?
                     .and_then(|record| record.signed)
                 && signed.signer() != peer
-                && inner.admits(signed.statement.definition).is_ok()
+                && inner
+                    .manifest_of_tip(signed.statement.tip)
+                    .and_then(|manifest| inner.admits(manifest))
+                    .is_ok()
                 && signed.statement.key_epoch == key_epoch
                 && signed.statement.horizon == inner.mergeable_horizon(scope).await?
                 && signed.verify_authority(&inner, now()?).is_ok()
@@ -955,7 +962,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.check_binding(&signed.statement)?;
         let statement = &signed.statement;
         let scope = statement.scope;
-        let generation = inner.generation_of(statement.definition, true)?;
+        let generation = inner.generation_of(inner.manifest_of_tip(statement.tip)?, true)?;
         if statement.schema != generation.schema
             || signed.signer() == inner.config.node.public_key()
             || inner.scope_key(scope)?.0 != statement.key_epoch

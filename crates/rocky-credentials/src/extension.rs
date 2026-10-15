@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// The highest author number: the `id` keeps 31 bits for it.
 pub const MAX_AUTHOR: u32 = (1 << 31) - 1;
-const EXTENSION_VERSION: u32 = 4;
+const EXTENSION_VERSION: u32 = 5;
 const MAX_EXTENSION: usize = 64 * 1024;
 
 /// Author numbers `first..=last`. Author 0 is reserved for the virtual row.
@@ -54,6 +54,7 @@ struct Body {
     node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
     issues: bool,
+    trusted: Option<rocky_core::Scope>,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -71,6 +72,8 @@ pub struct Extended {
     /// Issuer authority: the identity grants, renews, revokes and signs the
     /// domain's statements through this link.
     pub issues: bool,
+    /// Owner-granted whole-domain tip and bookmark control; never delegated.
+    pub trusted: Option<rocky_core::Scope>,
 }
 impl Extension {
     pub fn new(extended: Extended) -> Result<Self, Error> {
@@ -80,6 +83,7 @@ impl Extension {
             authors: extended.authors,
             node: extended.node,
             issues: extended.issues,
+            trusted: extended.trusted,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -110,6 +114,7 @@ impl Extension {
             authors: body.authors,
             node: body.node,
             issues: body.issues,
+            trusted: body.trusted,
         })
     }
 }
@@ -124,7 +129,7 @@ mod tests {
         assert_eq!(current.read().unwrap(), Extended::default());
         let body: Body = decode_bounded(&current.0, MAX_EXTENSION).unwrap();
         assert_eq!(body.version, EXTENSION_VERSION);
-        for version in [0, 1, 2, 3, 5, u32::MAX] {
+        for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
             let other = Extension(
                 encode(&Body {
                     node: None,
@@ -132,6 +137,7 @@ mod tests {
                     authors: None,
                     partitions: Vec::new(),
                     issues: false,
+                    trusted: None,
                 })
                 .unwrap(),
             );

@@ -2,12 +2,14 @@
 use super::*;
 
 pub(super) const SCHEMA: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS secure_author_sequences(node BLOB PRIMARY KEY,sequence INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_node_authors(node BLOB PRIMARY KEY,number INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_row_keys(scope BLOB NOT NULL,row BLOB NOT NULL,key BLOB NOT NULL,PRIMARY KEY(scope,row)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS secure_row_keys_key ON secure_row_keys(scope,key,row)",
     "CREATE TRIGGER IF NOT EXISTS secure_row_keys_delete AFTER DELETE ON secure_rows BEGIN DELETE FROM secure_row_keys WHERE scope=OLD.scope AND row=OLD.row; END",
 ];
 
+#[derive(Clone)]
 pub(super) struct NodeAuthor {
     pub(super) key: PrivateKey,
     pub(super) credentials: CredentialChain,
@@ -45,6 +47,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
 }
 impl<A: RowApplication> Inner<A> {
+    pub(super) async fn reserve_author_sequence(&self, node: PublicKey) -> Result<u64, Error> {
+        let mut reserved = self.conn.query(
+            "INSERT INTO secure_author_sequences VALUES(?,0) ON CONFLICT(node) DO UPDATE SET sequence=sequence+1 WHERE sequence<9223372036854775807 RETURNING sequence",
+            [node.as_bytes().to_vec()],
+        ).await?;
+        let row = reserved
+            .next()
+            .await?
+            .ok_or_else(|| denied("author sequence exhausted"))?;
+        Ok(row.get::<i64>(0)? as u64)
+    }
     /// A node's number cannot change across renewal, scopes, or restart.
     pub(super) async fn bind_node_author(&self, chain: &CredentialChain) -> Result<(), Error> {
         let leaf = chain

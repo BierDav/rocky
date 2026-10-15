@@ -9,7 +9,7 @@ use rocky_credentials::PeerId;
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
 /// Session peers whose declared generation a replica remembers; the least
 /// recently served beyond it count as running this replica's generation.
-const MAX_PEER_MANIFESTS: usize = 4 * MAX_UNCONFIGURED_PEERS;
+const MAX_PEER_TIPS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
 impl<A: RowApplication> Inner<A> {
     /// The chain check of a session peer, before any revocation: an
@@ -41,25 +41,25 @@ impl<A: RowApplication> Inner<A> {
         Ok(())
     }
     /// Records the generation `peer` declared when its session opened.
-    fn record_peer_manifest(&mut self, peer: PublicKey, manifest: Commitment) {
-        self.peer_manifests.insert(PeerId::of(peer), manifest);
-        if self.peer_manifests.len() > MAX_PEER_MANIFESTS
+    fn record_peer_tip(&mut self, peer: PublicKey, tip: TipId) {
+        self.peer_tips.insert(PeerId::of(peer), tip);
+        if self.peer_tips.len() > MAX_PEER_TIPS
             && let Some(oldest) = self
-                .peer_manifests
+                .peer_tips
                 .keys()
                 .min_by_key(|peer| self.served.1.get(*peer).copied().unwrap_or(0))
                 .copied()
         {
-            self.peer_manifests.remove(&oldest);
+            self.peer_tips.remove(&oldest);
         }
     }
     /// The generation `peer` declared in its session; this replica's own
     /// for a peer it recorded none of.
-    pub(crate) fn peer_manifest(&self, peer: PublicKey) -> Commitment {
-        self.peer_manifests
+    pub(crate) fn peer_tip(&self, peer: PublicKey) -> TipId {
+        self.peer_tips
             .get(&PeerId::of(peer))
             .copied()
-            .unwrap_or(self.manifest)
+            .unwrap_or(self.tip)
     }
     /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {
@@ -139,16 +139,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         node: PublicKey,
         chain: &CredentialChain,
-        manifest: Commitment,
+        tip: TipId,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         inner.admit_chain(node, chain, now()?)?;
-        inner.record_peer_manifest(node, manifest);
+        inner.record_peer_tip(node, tip);
         Ok(())
-    }
-    /// The generation this replica runs, which its sessions declare.
-    pub(crate) async fn current_manifest(&self) -> Commitment {
-        self.inner.lock().await.manifest
     }
     /// The peers whose credentials and frontiers stay whatever the bound on
     /// unconfigured peers: the contacts this device keeps.

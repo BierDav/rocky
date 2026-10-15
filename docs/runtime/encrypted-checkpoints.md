@@ -146,7 +146,7 @@ key-epoch and transactional import checks remain enforced.
 A checkpoint covers one `ResourceScope`. `SignedCheckpoint` is a
 `CheckpointStatement`, the signer's key and credential chain, signed under
 `rocky.encrypted-checkpoint.v3`; its identity is the
-`rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 9.
+`rocky.encrypted-checkpoint.id.v3` commitment of its bytes. `format` is 13.
 Partition candidates, support rows and hidden marks are derived locally. A
 partition checkpoint carries only its authenticated tuple, materialized rows and
 identity marks; rebootstrap rebuilds its group partition and leaves other
@@ -156,12 +156,11 @@ Partition, admitted horizon and finalized horizon are independent optional
 fields; an admitted cut is never treated as finalized. The required additive
 `moves` field ([decision 0038](../decisions/0038-row-moves.md)) and the signer's
 revocation digest ([decision 0049](../decisions/0049-mergeable-revocation-set.md))
-make format 7. Other formats are
-refused before writes.
+are required. Other formats are refused before writes.
 
 | Field | Binds |
 | --- | --- |
-| `definition`, `schema`, `handler` | Manifest hash and generations |
+| `tip`, `schema` | The checkpoint tip and its schema generation; the local graph resolves its manifest |
 | `revocations`, `key_epoch`, `scope`, `partition` | The signer's [revocation](revocations.md) digest, the scope and its key generation |
 | `sequence`, `previous` | Position in the scope's checkpoint chain and the prior identity |
 | `frontier`, `clock`, `operations` | Per author applied sequence, tip hash and clock, ordered by author; highest clock; applied count |
@@ -199,5 +198,5 @@ one, else the previous checkpoint stays and pruning stops there) and install
   that domains with required custodians can prune?
 
 Every checkpoint uses the node key. Its numbered node credential proves whole-scope
-read and write authority. Checkpoint format 12 is the sole current version;
+read and write authority. Checkpoint format 13 is the sole current version;
 older formats are refused.

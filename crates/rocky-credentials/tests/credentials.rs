@@ -936,6 +936,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         authors: Some(AuthorRange::new(5, 15).expect("range")),
         node: None,
         issues: false,
+        trusted: None,
     })
     .expect("extension");
     let widened = CredentialChain(vec![
@@ -959,7 +960,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         rotation: u64,
     }
     let bytes = rocky_credentials::encode(&Later {
-        version: 5,
+        version: 6,
         authors: range,
         rotation: 9,
     })
@@ -982,7 +983,7 @@ fn horizon_statements_bind_the_cut_and_refuse_unknown_formats_and_noncanonical_o
     let peer = PrivateKey::new();
     let statement = HorizonStatement {
         format: HORIZON_FORMAT,
-        manifest: domain.manifest.hash(),
+        tip: rocky_credentials::genesis_tip(domain.manifest.hash()),
         revocations: rocky_core::commitment(
             "rocky.revocation-set.v1",
             &p2panda_core::cbor::encode_cbor(&Vec::<[u8; 32]>::new()).unwrap(),

@@ -469,7 +469,7 @@ async fn frames(
     };
     // As the target's session hello declares its generation.
     source
-        .admit_peer(node, &credentials, manifest)
+        .admit_peer(node, &credentials, rocky_credentials::genesis_tip(manifest))
         .await
         .unwrap();
     frames_as(source, node, &credentials, scope).await

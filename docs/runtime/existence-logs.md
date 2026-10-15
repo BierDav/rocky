@@ -44,8 +44,8 @@ signs the CBOR statement under `rocky.existence-record.v2`; the commitment is
 
 | Field | Contract |
 | --- | --- |
-| `version` | 3, the sole current format; any other value is refused |
-| `manifest` | The admitted generation manifest the record was written under |
+| `version` | 4, the sole current format; any other value is refused |
+| `tip` | The followed tip the record was written under; its manifest resolves through the local graph |
 | `scope` | Domain, reader commitment and table |
 | `partition` | None for installed unpartitioned logs; partitioned logs remain deferred |
 | `id` | The incarnation identity (`RowIdentity`), never 0 |
@@ -54,7 +54,7 @@ signs the CBOR statement under `rocky.existence-record.v2`; the commitment is
 | `sequence`, `previous` | Position from 1 in the signer's log of this scope; predecessor commitment |
 
 No column value, business key, reference, payload or application timestamp is
-included. Verification needs no scope key: format, admitted manifest, installed
+included. Verification needs no scope key: format, admitted tip, installed
 log, signature, `verify_author` for the table, an `Insert` grant for a creation
 or `Delete` for a deletion, and a creation `id` belonging to the author number.
 A deleting author need not be the creator.
@@ -119,7 +119,7 @@ sync. Any device of the domain may serve and receive, keyless. Records leave
 only after the commit that stored them is durable. Direct callers use
 `existence_page`, `existence_frontier` and `receive_existence`.
 
-A record is refused before any state change when its format, manifest, domain,
+A record is refused before any state change when its format, tip, domain,
 table, signature, node chain, insert/delete right, creation author or log
 position is wrong. A gap returns `PendingDependencies` and is not stored.
 

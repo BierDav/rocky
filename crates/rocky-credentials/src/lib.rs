@@ -19,6 +19,7 @@ mod partition;
 mod peer;
 mod revocation;
 mod signed;
+mod tips;
 
 pub use author_binding::AuthorBinding;
 pub use coordination::{
@@ -55,6 +56,12 @@ pub use revocation::{
 pub use signed::{
     Capability, CredentialChain, Credentials, Endorsement, MAX_ENDORSEMENT_BYTES, SignedCapability,
     SignedManifest, SignedTransition, Verified,
+};
+
+pub use tips::{
+    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, MAX_BOOKMARK_NAME, SEAL_FORMAT,
+    SealAction, SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening,
+    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement, genesis_tip,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

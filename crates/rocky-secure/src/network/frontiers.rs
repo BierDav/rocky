@@ -106,7 +106,10 @@ impl NativeSession {
                 .collect();
             let newer = {
                 let mut inner = replica.inner.lock().await;
-                let newer = inner.known(inner.peer_manifest(self.peer)).is_err();
+                let newer = inner
+                    .manifest_of_tip(inner.peer_tip(self.peer))
+                    .and_then(|manifest| inner.known(manifest))
+                    .is_err();
                 inner
                     .record_frontiers(self.peer, &self.credentials, &remote)
                     .await?;

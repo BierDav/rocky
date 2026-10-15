@@ -84,6 +84,32 @@ impl Endorsement {
         }
         Ok(signer)
     }
+    pub(crate) fn verify_tip_statement<T: Serialize>(
+        &self,
+        publisher: PublicKey,
+        scope: rocky_core::Scope,
+        label: &str,
+        value: &T,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<bool, Error> {
+        let (signer, trusted) = if self.chain.0.is_empty() {
+            (publisher, true)
+        } else {
+            let leaf = self.chain.links(publisher, current)?;
+            if leaf.kind != PrincipalKind::User {
+                return Err(denied("tip statements require an identity"));
+            }
+            let trusted = self.chain.0.len() == 1 && leaf.extended()?.trusted == Some(scope);
+            if !trusted {
+                self.chain.issuer(publisher, current)?;
+            }
+            (leaf.subject, trusted)
+        };
+        if !signer.verify(&signing_bytes(label, value)?, &self.signature) {
+            return Err(denied("invalid tip statement signature"));
+        }
+        Ok(trusted)
+    }
     /// The signing identity, as the endorsement names it, unverified.
     pub fn signer(&self, publisher: PublicKey) -> PublicKey {
         self.chain
@@ -423,7 +449,7 @@ impl CredentialChain {
                 || capability.not_before >= capability.expires
                 || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || (held == 0 && !extended.issues)
+                || (held == 0 && !extended.issues && extended.trusted.is_none())
                 || held > 64
                 || !signed.issuer.verify(
                     &signing_bytes(CAPABILITY_LABEL, capability)?,
@@ -446,6 +472,7 @@ impl CredentialChain {
                     || capability.expires > parent.expires
                     || (parent.kind == PrincipalKind::Deployment
                         && capability.kind == PrincipalKind::User)
+                    || extended.trusted.is_some()
                     || (extended.issues && !authority)
                     || (!authority
                         && capability.grants.iter().any(|grant| {
@@ -488,9 +515,12 @@ impl CredentialChain {
                     .is_some_and(|range| range.single().is_some())
                     && extended.node == Some(crate::PeerId::of(capability.subject))
                     && !extended.issues
+                    && extended.trusted.is_none()
             }
             PrincipalKind::User => extended.node.is_none(),
-            PrincipalKind::Deployment => extended.node.is_none() && !extended.issues,
+            PrincipalKind::Deployment => {
+                extended.node.is_none() && !extended.issues && extended.trusted.is_none()
+            }
         };
         if valid {
             Ok(())

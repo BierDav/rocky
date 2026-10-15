@@ -27,20 +27,22 @@ pub enum PackageKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Extensions {
-    pub manifest: Commitment,
+    pub tip: rocky_core::TipId,
     pub scope: ResourceScope,
     pub generation: rocky_core::KeyEpoch,
     /// The digest of the author's credential chain; see `Chain`.
     pub chain: Commitment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<u32>,
+    /// Domain-wide position of this node, independent of its per-scope log.
+    pub author_sequence: u64,
     pub row_format: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<rocky_core::PartitionTuple>,
 }
 
 /// The current row frame format: the header names its chain by digest.
-pub(crate) const ROW_FORMAT: u8 = 9;
+pub(crate) const ROW_FORMAT: u8 = 10;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 
@@ -207,6 +209,7 @@ impl EncryptedFrame {
         }
         if header.previous.len() > 64
             || header.seq_num > i64::MAX as u64
+            || header.extensions.author_sequence > i64::MAX as u64
             || !header.extensions.generation.valid()
         {
             return Err(denied("invalid operation metadata"));

@@ -93,7 +93,7 @@ pub struct CoordinatedBinding {
     pub highest: u64,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 12;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 13;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -105,7 +105,7 @@ pub struct CheckpointStatement {
     pub identities: Vec<IdentityMark>,
     /// Opaque move links, also committed by the corresponding materialized rows.
     pub moves: SetSummary,
-    pub definition: Commitment,
+    pub tip: rocky_core::TipId,
     pub schema: u32,
     /// The digest of the revocations the signer held.
     pub revocations: Commitment,
@@ -267,14 +267,17 @@ impl SignedCheckpoint {
         {
             return Err(denied("checkpoint horizon issue time is in the future"));
         }
-        inner.admits(self.statement.definition)?;
+        inner.admits(inner.manifest_of_tip(self.statement.tip)?)?;
         inner.check_authenticated_partition(
             self.statement.scope,
             self.statement.partition.as_ref(),
         )?;
         let grants = self.checkpoint_grants(
             inner.config.publisher,
-            inner.revocations_for(self.statement.definition, &inner.config.revocations)?,
+            inner.revocations_for(
+                inner.manifest_of_tip(self.statement.tip)?,
+                &inner.config.revocations,
+            )?,
             time,
         )?;
         if !grants.iter().any(|grant| {
@@ -998,7 +1001,7 @@ impl<A: RowApplication> Inner<A> {
         // A checkpoint made before an upgrade stays valid while its
         // generation is admitted.
         let generation = self
-            .generation_of(statement.definition, false)
+            .generation_of(self.manifest_of_tip(statement.tip)?, false)
             .map_err(|_| unverifiable("names a definition this replica no longer admits"))?;
         if statement.schema != generation.schema
             || statement.scope != scope
@@ -1105,7 +1108,10 @@ impl<A: RowApplication> Inner<A> {
                 last = Some(*position);
                 continue;
             }
-            if self.known(operation.header.extensions.manifest).is_err()
+            if self
+                .manifest_of_tip(operation.header.extensions.tip)
+                .and_then(|manifest| self.known(manifest))
+                .is_err()
                 || !self.dependencies_ready(&frame, &BTreeSet::new()).await?
             {
                 return Err(denied("applied encrypted dependency missing"));

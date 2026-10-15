@@ -103,7 +103,9 @@ async fn rebind(
         return Err(denied("the restored file holds no replica"));
     };
     for manifest in manifests {
-        let matches = |key| -> Result<bool, Error> { Ok(identity(*manifest, key)? == *stored) };
+        let matches = |key| -> Result<bool, Error> {
+            Ok(identity(rocky_credentials::genesis_tip(*manifest), key)? == *stored)
+        };
         if matches(node)? {
             return Ok(());
         }
@@ -122,7 +124,7 @@ async fn rebind(
             .await?;
             conn.execute(
                 "UPDATE secure_metadata SET identity=?,revision=revision+1 WHERE id=1",
-                [identity(*manifest, node)?],
+                [identity(rocky_credentials::genesis_tip(*manifest), node)?],
             )
             .await?;
             Ok(())

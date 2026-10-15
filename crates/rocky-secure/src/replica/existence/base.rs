@@ -60,7 +60,7 @@ impl ExistenceBaseAttachment {
         Ok(rocky_core::commitment(
             "rocky.existence-base.id.v1",
             &encode(&(
-                self.horizon.statement.manifest,
+                self.horizon.statement.tip,
                 self.horizon.statement.revocations,
                 self.cut()?,
                 self.descriptor()?,
@@ -115,7 +115,7 @@ impl<A: RowApplication> Inner<A> {
         base.horizon
             .verify(self.config.publisher)
             .map_err(credential)?;
-        self.admits(base.horizon.statement.manifest)?;
+        self.admits(self.manifest_of_tip(base.horizon.statement.tip)?)?;
         if !self.existence_table(base.scope) {
             return Err(denied("existence base context is not admitted"));
         }

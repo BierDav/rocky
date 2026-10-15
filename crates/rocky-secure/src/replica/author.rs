@@ -289,9 +289,12 @@ impl<A: RowApplication> Inner<A> {
             signing_key,
             Extensions {
                 author: signer.map(|author| author.number),
+                author_sequence: self
+                    .reserve_author_sequence(signing_key.public_key())
+                    .await?,
                 row_format: ROW_FORMAT,
                 partition,
-                manifest: self.manifest,
+                tip: self.tip,
                 scope,
                 generation: key.generation,
                 chain: chain.digest(),

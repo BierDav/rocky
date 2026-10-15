@@ -34,6 +34,7 @@ mod restore;
 pub(super) mod roles;
 mod session;
 mod sql;
+mod tips;
 mod typed;
 use super::store::{SCHEMA, TransactionStore};
 use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
@@ -70,7 +71,7 @@ pub use publication::Publication;
 pub use queries::Describe;
 use rocky_core::{
     Commitment, ResourceScope, Right, RowApplication, RowChange, RowFields, RowSelection, RowWrite,
-    SqlValue,
+    SqlValue, TipId,
 };
 pub use roles::{
     FrontierLog, Holding, PeerLag, RangePage, ReplicaRole, ReplicaStatus, RoleConfig,
@@ -314,6 +315,7 @@ pub(super) struct Inner<A> {
     /// Earlier key epochs, kept to open retained ciphertext.
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
+    pub(super) tip: TipId,
     pub(super) definition: rocky_core::ApplicationManifest,
     pub(super) tables: HashSet<Commitment>,
     pub(super) fields: HashSet<Commitment>,
@@ -386,7 +388,7 @@ pub(super) struct Inner<A> {
     served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
     /// The generation each admitted session peer declared in its hello:
     /// what it can admit. Chains name none.
-    peer_manifests: BTreeMap<rocky_credentials::PeerId, Commitment>,
+    peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
     /// Verified owner-signed cuts of each coordinated log, in order.
     cuts: BTreeMap<rocky_core::Scope, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
@@ -592,7 +594,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
             "unsupported encrypted replica format".into(),
         ));
     };
-    let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
+    let (label, _, _): (String, rocky_core::TipId, PublicKey) = decode(bytes)?;
     if label != generation::FILE_IDENTITY {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
@@ -719,7 +721,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let (owner, raw) = DatabaseOwner::open(path.as_ref()).await?;
         let conn = Arc::new(ScopedConnection::new(raw, None, SCHEMA));
         configure(&conn).await?;
-        let identity = generation::identity(manifest.hash(), config.node.public_key())?;
+        let identity = generation::identity(
+            rocky_credentials::genesis_tip(manifest.hash()),
+            config.node.public_key(),
+        )?;
         let mut wal = path.as_ref().as_os_str().to_owned();
         wal.push("-wal");
         let (notifications, _) = watch::channel(0);
@@ -748,6 +753,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             partitions: BTreeMap::new(),
             history,
             manifest: manifest.hash(),
+            tip: rocky_credentials::genesis_tip(manifest.hash()),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
             domains: manifest.domains.iter().map(|item| item.domain).collect(),
@@ -783,7 +789,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             verified_at: BTreeMap::new(),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
-            peer_manifests: BTreeMap::new(),
+            peer_tips: BTreeMap::new(),
             cuts: BTreeMap::new(),
             #[cfg(test)]
             stage_fault: None,
@@ -1387,7 +1393,8 @@ impl<A: RowApplication> Inner<A> {
         // every frame, against the current revocations.
         let credentials = frame.chain()?.credentials();
         let manifest = &self.definition;
-        self.admits(extension.manifest)?;
+        let frame_manifest = self.manifest_of_tip(extension.tip)?;
+        self.admits(frame_manifest)?;
         if extension.scope.domain.app != manifest.app
             || !self.domains.contains(&extension.scope.domain.domain)
             || !self.tables.contains(&extension.scope.table)
@@ -1406,7 +1413,7 @@ impl<A: RowApplication> Inner<A> {
                     number,
                     extension.scope,
                     tuple,
-                    self.revocations_for(extension.manifest, &self.config.revocations)?,
+                    self.revocations_for(frame_manifest, &self.config.revocations)?,
                     time,
                 )
                 .map_err(credential)?,
@@ -1416,7 +1423,7 @@ impl<A: RowApplication> Inner<A> {
                     operation.header.public_key,
                     number,
                     extension.scope.table,
-                    self.revocations_for(extension.manifest, &self.config.revocations)?,
+                    self.revocations_for(frame_manifest, &self.config.revocations)?,
                     time,
                 )
                 .map_err(credential)?,

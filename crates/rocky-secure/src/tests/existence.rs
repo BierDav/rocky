@@ -771,7 +771,7 @@ async fn a_keyless_replica_verifies_signatures_and_author_rights() {
         ExistenceRecord::forge(
             &inserter,
             chain.clone(),
-            manifest,
+            rocky_credentials::genesis_tip(manifest),
             lists,
             id,
             event,
@@ -826,7 +826,7 @@ async fn a_keyless_replica_verifies_signatures_and_author_rights() {
     let outside = ExistenceRecord::forge(
         &items_key,
         items_chain,
-        manifest,
+        rocky_credentials::genesis_tip(manifest),
         erp.scope("items"),
         rocky_core::RowIdentity::next(41, 0).unwrap().integer(),
         ExistenceEvent::Created,
@@ -1193,7 +1193,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 12);
+    assert_eq!(before_horizon.statement.format, 13);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1217,7 +1217,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 12);
+    assert_eq!(checkpoint.statement.format, 13);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1320,11 +1320,11 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
         let [SqlValue::Blob(bytes)] = rows[0].as_slice() else {
             panic!("identity");
         };
-        crate::decode::<(String, Commitment, PublicKey)>(bytes)
+        crate::decode::<(String, rocky_core::TipId, PublicKey)>(bytes)
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v22");
+    assert_eq!(identity, "rocky.encrypted-replica.v23");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1437,7 +1437,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 12);
+    assert_eq!(a.statement.format, 13);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(
@@ -2356,7 +2356,7 @@ async fn horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unkno
     let deleted = ExistenceRecord::forge(
         &key,
         credentials.clone(),
-        erp.manifest_hash(),
+        rocky_credentials::genesis_tip(erp.manifest_hash()),
         scope,
         unknown,
         ExistenceEvent::Deleted,
@@ -2477,7 +2477,7 @@ async fn horizon_existence_base_pages_resume_refuse_tampering_and_preserve_unkno
     let created = ExistenceRecord::forge(
         &key,
         credentials,
-        erp.manifest_hash(),
+        rocky_credentials::genesis_tip(erp.manifest_hash()),
         scope,
         unknown,
         ExistenceEvent::Created,

@@ -194,7 +194,10 @@ impl<A: RowApplication> Inner<A> {
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
                 let operation = frame.operation()?;
                 if operation.hash.as_bytes().as_slice() != hash
-                    || self.known(operation.header.extensions.manifest).is_err()
+                    || self
+                        .manifest_of_tip(operation.header.extensions.tip)
+                        .and_then(|manifest| self.known(manifest))
+                        .is_err()
                     || operation.header.extensions.scope != scope
                     || !["applied", "pending", "rejected"].contains(&status.as_str())
                     || (status == "applied") != (*positioned == 1)

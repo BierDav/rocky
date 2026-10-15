@@ -207,7 +207,7 @@ impl<A: RowApplication> Inner<A> {
                     .ok_or_else(|| denied("numeric birth requires a creation proof"))?;
                 proof.verify(
                     self.config.publisher,
-                    extension.manifest,
+                    self.manifest_of_tip(extension.tip)?,
                     scope.table,
                     identity,
                     &ceiling,

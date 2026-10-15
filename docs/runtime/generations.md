@@ -86,13 +86,14 @@ new generation, they open the installed one with `application = ahead` and
 needs no further local confirmation. Confirmation governs SDK signing, not
 verification of publisher signatures from peers.
 
-## Adopting newer generations
+## Peer discovery
 
-A device that meets a newer generation adopts it whatever its application
-declares: it verifies the peer's lineage and switches its open replica before
-any frame of it applies. No issuer renews it: credentials name no
-generation. An application older than its
-database opens it unchanged. See [adopting generations](adopting-generations.md).
+Meeting a peer running another generation does not change the installed
+workspace. Incompatible frames, checkpoints and horizon statements return an
+admission error; sync never fetches or adopts another generation to retry them.
+Explicit schema opens retain the existing signed generation verification and
+recoverable switch. Replica-level [tips and bookmarks](tips-and-bookmarks.md) select the live
+workspace; the SDK surface follows in phase 14 integration.
 
 ## Removing tables and fields
 
@@ -192,17 +193,14 @@ horizon statement or an existence base names it; credential chains name
 none. After a horizon finalizes,
 `EncryptedReplica::drop_unreferenced_generations` drops the others, and the
 SDK removes them from the saved lineage. Retained history stays verifiable
-by its transitions. A peer that still writes under a dropped generation
-declares it in its session hello; its first frame is refused as unknown, and the device fetches the manifest from that peer
-again before the frame applies, as for any
-[older generation](adopting-generations.md#older-generations).
+by its transitions. Frames whose schemas the replica no longer holds are
+refused; peer discovery does not fetch schemas or change the workspace.
 
 ## Old devices and pending work
 
-Every generation of the lineage stays admissible; a dropped manifest is
-fetched again when a frame needs it. New admission verifies the
-original generation's signed credentials plus current revocations, never invented
-current authority.
+Retained generations remain subject to the followed tip's admission rules.
+New admission verifies the original authority plus current revocations, never
+invented current authority.
 
 Pending operations preserve exact original bytes and author logs. Retained
 checkpoints keep typed keys/incarnations, tombstones, bundles and signed history;
@@ -220,12 +218,12 @@ in the e2e tier, fills a required field of 100,000 rows
 (`a_migration_of_100000_rows_converges_on_every_member`). `rocky-secure`
 `tests::sql::publication` commits one transaction as consecutive bundles.
 SDK `tests/generations.rs` also requires a field with a migration while an
-older member keeps its unsynced work and a device whose application stays at
-version 1 keeps syncing (`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),
+older member keeps its unsynced work across an explicit target schema open
+(`a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing`),
 reads the default for a NULL an older generation writes
 (`a_null_an_older_generation_writes_to_a_required_field_reads_its_default`),
-drops a manifest nothing retained names and fetches it again
-(`a_manifest_nothing_retained_names_is_dropped_and_fetched_again`), and grants
+keeps a dropped manifest absent when an old peer returns
+(`a_dropped_manifest_stays_dropped_when_an_old_peer_returns`), and grants
 a new table like an existing one. The shopping example's `SchemaUpgradeTest`
 moves a version 6 household to version 7 while a version 6 member keeps syncing.
 `rocky-secure`'s `tests::generations` interrupts shadow creation, backfill, switch
@@ -235,8 +233,8 @@ unreferenced manifest (`an_unreferenced_manifest_is_dropped_and_learned_again_fr
 Core/credentials tests
 verify transition encoding, classification and signing; SDK `tests/generations.rs` exercises issuer/member
 upgrade, an offline member opening at its generation, nullable fields, scope denial
-and ordinary pending writes; [adopting generations](adopting-generations.md#evidence)
-lists its own evidence.
+and ordinary pending writes. Peer discovery tests keep both an idle member
+and an older application on their installed schema.
 See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
 
 This does not implement cross-file atomic switching,

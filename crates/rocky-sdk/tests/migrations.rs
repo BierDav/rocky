@@ -241,7 +241,13 @@ async fn an_issuer_without_a_partitions_key_keeps_the_households_generation() ->
             [text("From b"), text("From b")]
         ])
     );
-    // `b` adopts the generation, then receives the migrated rows.
+    // An explicit schema open installs the signed generation before sync.
+    b.close().await;
+    let b = Device::new(Database::open(open(
+        &b_dir,
+        POSITIONED_LISTS,
+        network("b"),
+    ))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     assert_eq!(
@@ -317,8 +323,9 @@ async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Fa
     let count = |n: usize| json!([[{"type": "integer", "value": n.to_string()}, {"type": "integer", "value": n.to_string()}]]);
     assert_eq!(rows(&a, FILLED_COUNT).await, count(LARGE));
 
-    // The member, whose application stays at version 1, pulls until it
-    // holds every row; each sync resumes where the last stopped.
+    // Explicitly select the signed schema, then pull every retained row.
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, &fill, network("b")))?)?;
     let clock = std::time::Instant::now();
     let mut syncs = 0;
     while rows(&b, "SELECT count(*) FROM items").await

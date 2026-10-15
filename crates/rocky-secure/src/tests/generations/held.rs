@@ -19,14 +19,10 @@ async fn sync(
     scope: ResourceScope,
 ) {
     let credentials = lineage.credentials(generation, target_key);
-    // As the target's session hello declares its generation.
-    let manifest = target.inner.lock().await.manifest;
+    // As the target's session hello declares its followed tip.
+    let tip = target.followed_tip().await;
     source
-        .admit_peer(
-            target_key.public_key(),
-            &credentials,
-            rocky_credentials::genesis_tip(manifest),
-        )
+        .admit_peer(target_key.public_key(), &credentials, tip)
         .await
         .unwrap();
     let mut after = None;
@@ -108,13 +104,13 @@ async fn an_unsent_bundle_a_removal_splits_is_held_voided_and_reauthored() {
     assert_eq!(title(&carol).await, vec![vec![text("mine")]]);
 
     for (replica, key) in [(&carol, &carol_key), (&alice, &alice_key)] {
+        // Schema removal does not revoke the credential needed to inspect
+        // and resolve the bundle's removed scope.
+        let mut config = lineage.config(4, key);
+        config.credentials = lineage.credentials(3, key);
         assert!(
             replica
-                .adopt_generation(
-                    lineage.app(4),
-                    lineage.config(4, key),
-                    lineage.upgrade(1, 4)
-                )
+                .adopt_generation(lineage.app(4), config, lineage.upgrade(1, 4))
                 .await
                 .unwrap()
         );

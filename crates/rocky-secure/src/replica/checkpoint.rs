@@ -1038,6 +1038,9 @@ impl<A: RowApplication> Inner<A> {
         row: Commitment,
     ) -> Result<Option<Vec<u8>>, Error> {
         for table in [overlay.table(), "secure_checkpoint_rows"] {
+            if self.rebuilding_tip && table == "secure_checkpoint_rows" {
+                continue;
+            }
             let mut result = self
                 .conn
                 .query(
@@ -1100,6 +1103,14 @@ impl<A: RowApplication> Inner<A> {
             }
             let frame = EncryptedFrame::bare(header.clone(), body.clone());
             let operation = frame.operation()?;
+            if status == "held" && !self.visible_held_in_workspace(&operation)? {
+                last = Some(*position);
+                continue;
+            }
+            if self.rebuilding_tip && !self.visible_in_workspace(&operation)? {
+                last = Some(*position);
+                continue;
+            }
             // Stamped before its table was added again: nothing applies.
             if self
                 .names

@@ -44,6 +44,7 @@ struct Statement {
     event: ExistenceEvent,
     /// The node's author number.
     author: u32,
+    author_sequence: u64,
     /// Position in the signer's log of this scope, from 1.
     sequence: u64,
     previous: Option<Commitment>,
@@ -121,6 +122,7 @@ impl ExistenceRecord {
             id: RowIdentity::from_integer(id).expect("test identity"),
             event,
             author,
+            author_sequence: sequence,
             sequence,
             previous,
             credentials,
@@ -166,6 +168,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         scope: ResourceScope,
         writes: &[RowWrite],
+        author_sequence: u64,
     ) -> Result<(), Error> {
         if !self.existence_table(scope) {
             return Ok(());
@@ -199,6 +202,7 @@ impl<A: RowApplication> Inner<A> {
                 id,
                 event,
                 author: author.number,
+                author_sequence,
                 sequence,
                 previous,
                 credentials: author.credentials.clone(),
@@ -260,6 +264,20 @@ impl<A: RowApplication> Inner<A> {
             ));
         }
         self.admits(self.manifest_of_tip(statement.tip)?)?;
+        if let Some(graph) = self.graphs.get(&statement.scope.domain) {
+            if !self.visible_frame(
+                graph,
+                statement.tip,
+                statement.author,
+                statement.author_sequence,
+                self.tip,
+            )? {
+                return Err(denied("existence record belongs to an unfollowed tip"));
+            }
+        } else if statement.tip != self.tip {
+            return Err(denied("existence record belongs to an unfollowed tip"));
+        }
+
         let scope = statement.scope;
         if scope.domain.app != self.definition.app
             || !self.domains.contains(&scope.domain.domain)
@@ -269,7 +287,10 @@ impl<A: RowApplication> Inner<A> {
                 "existence record outside an installed existence log",
             ));
         }
-        if statement.sequence == 0 || statement.sequence > i64::MAX as u64 {
+        if statement.sequence == 0
+            || statement.sequence > i64::MAX as u64
+            || statement.author_sequence > i64::MAX as u64
+        {
             return Err(denied("invalid existence log position"));
         }
         if !record.signed()? {
@@ -456,6 +477,37 @@ impl<A: RowApplication> Inner<A> {
         Box::pin(self.seed_existence(statement.scope, statement.id.integer())).await?;
         Ok(ReceiveStatus::Applied)
     }
+    pub(super) async fn rebuild_tip_existence(&self, scope: ResourceScope) -> Result<(), Error> {
+        let blob = encode(&scope)?;
+        let records=collect_rows(self.conn.query("SELECT record FROM secure_existence_log WHERE scope=? ORDER BY signer,sequence",[blob.clone()]).await?).await?;
+        self.conn
+            .execute("DELETE FROM secure_existence WHERE scope=?", [blob.clone()])
+            .await?;
+        for row in records {
+            let [SqlValue::Blob(bytes)] = row.as_slice() else {
+                return Err(corrupt());
+            };
+            let record = ExistenceRecord::from_bytes(bytes)?;
+            let statement = &record.statement;
+            if let Some(graph) = self.graphs.get(&scope.domain)
+                && !self.visible_frame(
+                    graph,
+                    statement.tip,
+                    statement.author,
+                    statement.author_sequence,
+                    self.tip,
+                )?
+            {
+                continue;
+            }
+            let column = match statement.event {
+                ExistenceEvent::Created => "created",
+                ExistenceEvent::Deleted => "deleted",
+            };
+            self.conn.execute(format!("INSERT INTO secure_existence(scope,id,{column}) VALUES(?,?,?) ON CONFLICT(scope,id) DO UPDATE SET {column}=CASE WHEN {column} IS NULL OR excluded.{column}<{column} THEN excluded.{column} ELSE {column} END"),bindings(vec![SqlValue::Blob(blob.clone()),SqlValue::Integer(statement.id.integer()),SqlValue::Blob(record.hash()?.to_vec())])).await?;
+        }
+        Ok(())
+    }
     /// Whether the existence log of `scope` holds a creation of `id` and no
     /// deletion. Missing evidence is not alive.
     pub(super) async fn alive(&self, scope: ResourceScope, id: i64) -> Result<bool, Error> {
@@ -503,6 +555,7 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<(), Error> {
+        self.same_tip_peer(peer)?;
         let grants = self.verify_chain(credentials, peer, now()?)?;
         if !self.existence_table(scope)
             || !grants
@@ -531,6 +584,34 @@ impl<A: RowApplication> Inner<A> {
             })
             .transpose()?
             .unwrap_or_default();
+        if let Some(graph) = self.graphs.get(&scope.domain) {
+            for row in rows_with(
+                &self.conn,
+                "SELECT record FROM secure_existence_log WHERE scope=?",
+                vec![SqlValue::Blob(encode(&scope)?)],
+            )
+            .await?
+            {
+                let [SqlValue::Blob(bytes)] = row.as_slice() else {
+                    return Err(corrupt());
+                };
+                let record = ExistenceRecord::from_bytes(bytes)?;
+                let statement = &record.statement;
+                if self.visible_frame(
+                    graph,
+                    statement.tip,
+                    statement.author,
+                    statement.author_sequence,
+                    self.tip,
+                )? {
+                    frontier
+                        .entry(record.signer)
+                        .and_modify(|sequence| *sequence = (*sequence).max(record.sequence()))
+                        .or_insert(record.sequence());
+                }
+            }
+            return Ok(frontier);
+        }
         for row in rows_with(
             &self.conn,
             "SELECT signer,max(sequence) FROM secure_existence_log WHERE scope=? GROUP BY signer",
@@ -562,6 +643,17 @@ impl<A: RowApplication> Inner<A> {
             let page = self.existence_scan(scope, after, limit).await?;
             after = page.next;
             for record in page.records {
+                if let Some(graph) = self.graphs.get(&scope.domain)
+                    && !self.visible_frame(
+                        graph,
+                        record.statement.tip,
+                        record.statement.author,
+                        record.statement.author_sequence,
+                        self.tip,
+                    )?
+                {
+                    continue;
+                }
                 if known
                     .get(&record.signer)
                     .is_none_or(|held| record.sequence() > *held)

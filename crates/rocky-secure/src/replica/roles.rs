@@ -360,6 +360,9 @@ impl<A: RowApplication> Inner<A> {
     }
     /// The contiguous held and applied prefix of every log of a scope.
     pub(crate) async fn frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
+        if self.graphs.contains_key(&scope.domain) {
+            return self.tip_frontier(scope).await;
+        }
         let mut logs = BTreeMap::<PublicKey, (u64, u64)>::new();
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, _) in self.logs(id, None, false, MAX_CHECKPOINT_LOGS + 1).await? {
@@ -462,11 +465,7 @@ impl<A: RowApplication> Inner<A> {
         if peer == self.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        if self
-            .manifest_of_tip(self.peer_tip(peer))
-            .and_then(|manifest| self.known(manifest))
-            .is_err()
-        {
+        if self.peer_tip(peer) != Some(self.tip) {
             return Ok(());
         }
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
@@ -617,9 +616,7 @@ impl<A: RowApplication> Inner<A> {
         request.validate()?;
         let scope = request.scope;
         self.authorize_peer(peer, credentials, scope)?;
-        // A peer of an earlier generation is sent nothing it cannot admit:
-        // a log stops at its first newer frame.
-        let reach = self.generation_of(self.manifest_of_tip(self.peer_tip(peer))?, true)?;
+        self.same_tip_peer(peer)?;
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }
@@ -726,12 +723,10 @@ impl<A: RowApplication> Inner<A> {
                 if staged.contains(&frame.id()?) {
                     break;
                 }
-                let manifest = self.manifest_of_tip(frame.operation()?.header.extensions.tip)?;
+
                 // Every frame of a revoked author is refused, so none is
                 // sent.
-                if self
-                    .generation_of(manifest, false)
-                    .is_ok_and(|made| made > reach)
+                if !self.visible_in_workspace(&frame.operation()?)?
                     || self
                         .config
                         .revocations
@@ -1178,12 +1173,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock().await;
-        if inner
-            .manifest_of_tip(inner.peer_tip(peer))
-            .and_then(|manifest| inner.known(manifest))
-            .is_err()
-        {
-            return Ok(scopes.to_vec());
+        if inner.peer_tip(peer) != Some(inner.tip) {
+            return Ok(Vec::new());
         }
         let grants = inner.verify_chain_scopes(credentials, peer, now()?, scopes)?;
         Ok(scopes

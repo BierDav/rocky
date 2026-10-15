@@ -509,7 +509,15 @@ impl<A: RowApplication> Inner<A> {
         // A late frame from before the horizon is part of the checkpoint: it
         // is not stored and cannot be applied a second time.
         let scope = operation.header.extensions.scope;
-        if let Some(id) = self.find_scope_id(scope).await?
+        if self.frame_reach(
+            scope.domain,
+            extension.tip,
+            extension
+                .author
+                .ok_or_else(|| denied("node author missing"))?,
+            extension.author_sequence,
+        )? != tips::FrameReach::Held
+            && let Some(id) = self.find_scope_id(scope).await?
             && let Some(log) = self.log(id, operation.header.public_key).await?
             && operation.header.seq_num as i64 <= log.horizon
         {

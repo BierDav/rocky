@@ -113,7 +113,7 @@ reader scope another table shares is refused by the projection plan.
   and `a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones`,
   which also learns an earlier baseline and imports a finalized checkpoint.
 - `rocky-sdk` `tests/removal.rs`: `a_generation_removes_a_field_its_unique_index_and_a_referenced_table`
-  and `devices_that_reach_a_readded_field_by_different_steps_agree_on_it`.
+  and `devices_that_explicitly_open_a_readded_field_agree_on_it`.
 - `rocky-sdk` `tests/generations.rs` `issuers_that_sign_one_schema_apart_end_on_one_generation`
   (derived reader keys).
 - Kotlin `RoomGenerationsTest`.

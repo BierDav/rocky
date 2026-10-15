@@ -353,7 +353,7 @@ impl Node {
     pub(super) fn peer_reconciliation(
         &self,
         peer: PublicKey,
-        result: &Result<(bool, bool, sync::Transfer), Failure>,
+        result: &Result<(bool, sync::Transfer), Failure>,
         first_attempt_id: u64,
     ) -> PeerReconciliation {
         let node = peer.to_hex();
@@ -374,8 +374,7 @@ impl Node {
         };
         let partial = self.observations.partial_transfer(&node);
         let transfer = match result {
-            Ok((upgrade, retry, transfer)) => {
-                report.upgrade_required = *upgrade;
+            Ok((retry, transfer)) => {
                 report.retry_pending = *retry;
                 Some(transfer)
             }
@@ -484,7 +483,6 @@ impl Node {
             prior.transfers.extend(next.transfers);
             prior.refused = next.refused;
             prior.waiting = next.waiting;
-            prior.upgrade_required |= next.upgrade_required;
             prior.retry_pending = next.retry_pending;
         } else {
             reports.push(next);

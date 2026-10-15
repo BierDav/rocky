@@ -7,7 +7,7 @@ use rocky_credentials::PeerId;
 /// Unconfigured peers whose horizon credentials and frontiers a replica
 /// keeps; the least recently served beyond it lose theirs.
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
-/// Session peers whose declared generation a replica remembers; the least
+/// Session peers whose declared tip a replica remembers; the least
 /// recently served beyond it count as running this replica's generation.
 const MAX_PEER_TIPS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
@@ -40,7 +40,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    /// Records the generation `peer` declared when its session opened.
+    /// Records the tip `peer` declared when its session opened.
     fn record_peer_tip(&mut self, peer: PublicKey, tip: TipId) {
         self.peer_tips.insert(PeerId::of(peer), tip);
         if self.peer_tips.len() > MAX_PEER_TIPS
@@ -53,13 +53,13 @@ impl<A: RowApplication> Inner<A> {
             self.peer_tips.remove(&oldest);
         }
     }
-    /// The generation `peer` declared in its session; this replica's own
-    /// for a peer it recorded none of.
-    pub(crate) fn peer_tip(&self, peer: PublicKey) -> TipId {
+    /// The declared session tip. Without a graph, direct callers use genesis;
+    /// once tips exist a missing or evicted declaration fails closed.
+    pub(crate) fn peer_tip(&self, peer: PublicKey) -> Option<TipId> {
         self.peer_tips
             .get(&PeerId::of(peer))
             .copied()
-            .unwrap_or(self.tip)
+            .or_else(|| self.graphs.is_empty().then_some(self.tip))
     }
     /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {
@@ -133,7 +133,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<(), Error> {
         self.inner.lock().await.admit_chain(node, chain, now()?)
     }
-    /// `admit_chain` for a session that opens, remembering the generation
+    /// `admit_chain` for a session that opens, remembering the tip
     /// `manifest` the peer declared, which decides what it is sent.
     pub(crate) async fn admit_peer(
         &self,

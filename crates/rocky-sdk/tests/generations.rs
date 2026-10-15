@@ -47,7 +47,8 @@ fn text(value: &str) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_idle_old_member_adopts_a_newer_peer_generation() -> Result<(), Failure> {
+async fn an_idle_old_member_keeps_its_generation_when_it_meets_a_newer_peer() -> Result<(), Failure>
+{
     let root = tempfile::tempdir()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -70,14 +71,23 @@ async fn an_idle_old_member_adopts_a_newer_peer_generation() -> Result<(), Failu
             .iter()
             .all(|peer| peer["upgrade_required"] != true)
     );
-    assert_eq!(generation(&b).await["current"]["schema"], 2);
+    assert_eq!(generation(&b).await["current"]["schema"], 1);
+    assert!(report.get("upgrade").is_none());
+    let activity = b.ok(json!({"type": "activity"})).await;
+    assert!(
+        activity["events"]
+            .as_array()
+            .ok_or("events")?
+            .iter()
+            .all(|event| event["kind"] != "generation_adopted")
+    );
     b.close().await;
     a.close().await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> Result<(), Failure> {
+async fn an_explicit_schema_open_preserves_pending_work_locally() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -126,10 +136,9 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
     assert_eq!(ahead.titles().await, ["apples", "bread"]);
     ahead.close().await;
 
-    // With its version 1 application it meets the issuer and adopts
-    // generation 2 before it applies its frames; bread then leaves with
-    // its original generation 1 bytes.
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
+    // An explicit target schema open verifies and installs generation 2.
+    // Bread retains its original tip and stays local after the switch.
+    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     assert_eq!(generation(&b).await["application"], "current");
     let synced = b.sync().await.expect("sync");
     assert!(
@@ -141,9 +150,10 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
     );
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2);
-    assert_eq!(status["application"], "behind");
+    assert_eq!(status["application"], "current");
     b.sync().await.expect("sync");
-    assert_eq!(a.titles().await, ["apples", "bread"]);
+    assert_eq!(a.titles().await, ["apples"]);
+    assert_eq!(b.titles().await, ["apples", "bread"]);
     assert_eq!(
         rows(&b, "SELECT note FROM items WHERE title='apples'").await,
         json!([[text("fresh")]])
@@ -163,23 +173,6 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
             .unwrap()
             .contains("no such table")
     );
-    // A device joining now admits the domain's whole history.
-    let invitation = a
-        .invite_as(json!({"kind": "reader", "scopes": ["items", "tags"]}))
-        .await;
-    let c_dir = root.path().join("c");
-    let c = Device::new(Database::join(
-        open(&c_dir, SECOND, network("c")),
-        &invitation,
-    )?)?;
-    introduce(&a, &c).await;
-    c.sync().await.expect("sync");
-    assert_eq!(c.titles().await, ["apples", "bread"]);
-    assert_eq!(
-        rows(&c, "SELECT label FROM tags").await,
-        json!([[text("fruit")]])
-    );
-    c.close().await;
     b.close().await;
 
     // A change no transition can make is refused before anything changes.
@@ -246,7 +239,7 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing()
+async fn a_required_field_migrates_and_explicitly_upgraded_devices_keep_syncing()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -270,8 +263,6 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
     b.add(3, "bread").await;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
-    // Never reaches the issuer before it migrates.
-    b.add(4, "late").await;
     b.close().await;
     a.close().await;
 
@@ -294,12 +285,13 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
         positions
     );
 
-    // A device whose application stays at version 1 keeps syncing: it
-    // adopts the generation, and its new item reads the default position.
+    // Explicitly install the signed generation before exchanging its frames.
+    c.close().await;
+    let c = Device::new(Database::open(open(&dirs("c"), REQUIRED, network("c")))?)?;
     c.add(6, "stale").await;
     c.sync().await.expect("sync");
     c.sync().await.expect("sync");
-    assert_eq!(generation(&c).await["application"], "behind");
+    assert_eq!(generation(&c).await["application"], "current");
     // A peer holds the migration's bundle: nothing is left to publish.
     assert_eq!(generation(&a).await["migration"], Value::Null);
     assert_eq!(a.titles().await, ["apples", "bread", "cherries", "stale"]);
@@ -309,8 +301,9 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
     );
     c.close().await;
 
-    // The member's unsynced work of generation 1 is not dropped.
+    // A member explicitly switches before writing to the current tip.
     let b = Device::new(Database::open(open(&dirs("b"), REQUIRED, network("b")))?)?;
+    b.add(4, "late").await;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     assert_eq!(
@@ -346,7 +339,7 @@ async fn a_required_field_migrates_on_the_issuer_and_older_devices_keep_syncing(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_null_an_older_generation_writes_to_a_required_field_reads_its_default()
+async fn requiring_a_nullable_field_converts_retained_nulls_on_every_explicit_upgrade()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -369,6 +362,9 @@ async fn a_null_an_older_generation_writes_to_a_required_field_reads_its_default
     a.add(1, "apples").await;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
+    b.add(2, "bread").await;
+    b.sync().await.expect("sync");
+    c.sync().await.expect("sync");
     a.close().await;
 
     // Requiring a field that was nullable rewrites its stored NULLs as the
@@ -376,18 +372,20 @@ async fn a_null_an_older_generation_writes_to_a_required_field_reads_its_default
     let a = Device::new(Database::open(open(&dirs("a"), BARE, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(
-        rows(&a, "SELECT title, position FROM items").await,
-        json!([[text("apples"), text("")]])
+        rows(&a, "SELECT title, position FROM items ORDER BY title").await,
+        json!([[text("apples"), text("")], [text("bread"), text("")]])
     );
 
-    // A device of generation 1 writes NULL to it before it meets the
-    // issuer; every device of generation 2 reads the default.
-    b.add(2, "bread").await;
+    // The retained generation 1 NULL reads as the default after each
+    // explicit schema switch.
     assert_eq!(
         rows(&b, "SELECT position FROM items WHERE title='bread'").await,
         json!([[{"type": "null"}]])
     );
-    b.sync().await.expect("sync");
+    b.close().await;
+    c.close().await;
+    let b = Device::new(Database::open(open(&dirs("b"), BARE, network("b")))?)?;
+    let c = Device::new(Database::open(open(&dirs("c"), BARE, network("c")))?)?;
     b.sync().await.expect("sync");
     c.sync().await.expect("sync");
     for device in [&a, &b, &c] {
@@ -494,7 +492,8 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_older_application_adopts_the_newer_generation_it_meets() -> Result<(), Failure> {
+async fn an_older_application_keeps_its_workspace_when_it_meets_a_newer_generation()
+-> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -518,31 +517,26 @@ async fn an_older_application_adopts_the_newer_generation_it_meets() -> Result<(
     assert_eq!(generation(&a).await["current"]["schema"], 3);
     a.set(2, &apples, "rank", json!(7)).await;
 
-    // One sync moves the member's database to generation 3 in one switch.
+    // Peer discovery must leave the local schema and unsent rows alone.
     b.add(3, "bread").await;
-    b.sync().await.expect("sync");
+    let _ = b.sync().await;
     let status = generation(&b).await;
-    assert_eq!(status["current"], json!({"schema": 3}));
+    assert_eq!(status["current"], json!({"schema": 1}));
     assert_eq!(status["rebuilding"], Value::Null);
-    assert_eq!(status["application"], "behind");
-    // Both ways: the issuer's rank arrives, the member's bread leaves.
-    b.sync().await.expect("sync");
-    assert_eq!(a.titles().await, ["apples", "bread"]);
-    assert_eq!(
-        rows(&b, "SELECT title, rank FROM items WHERE title='apples'").await,
-        json!([[text("apples"), {"type": "integer", "value": "7"}]])
+    assert_eq!(status["application"], "current");
+    assert_eq!(b.titles().await, ["apples", "bread"]);
+    assert_eq!(a.titles().await, ["apples"]);
+    let error = b.call(json!({"type": "read", "query": {"sql": "SELECT rank FROM items", "values": [], "max_rows": 16}})).await.expect_err("peer schema was not installed");
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no such column")),
+        "{error}"
     );
-    b.add(4, "cheese").await;
-    b.sync().await.expect("sync");
-    assert_eq!(a.titles().await, ["apples", "bread", "cheese"]);
     b.close().await;
-
-    // The version 1 application opens the generation 3 database unchanged.
     let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
-    let status = generation(&b).await;
-    assert_eq!(status["current"]["schema"], 3);
-    assert_eq!(status["application"], "behind");
-    assert_eq!(b.titles().await, ["apples", "bread", "cheese"]);
+    assert_eq!(generation(&b).await["current"]["schema"], 1);
+    assert_eq!(b.titles().await, ["apples", "bread"]);
     b.close().await;
     a.close().await;
     Ok(())
@@ -575,7 +569,7 @@ async fn a_crash_before_the_switch_resumes_at_the_newer_generation() -> Result<(
             std::fs::copy(b_dir.join(name), saved.join(name))?;
         }
     }
-    let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
+    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.close().await;
@@ -605,7 +599,7 @@ async fn a_crash_before_the_switch_resumes_at_the_newer_generation() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_newer_horizon_is_acknowledged_after_adopting_its_generation() -> Result<(), Failure> {
+async fn a_newer_horizon_is_acknowledged_after_an_explicit_schema_open() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -626,7 +620,9 @@ async fn a_newer_horizon_is_acknowledged_after_adopting_its_generation() -> Resu
     let declared = a.ok(horizon("declare")).await;
     let waiting = declared["waiting"].clone();
     assert_eq!(waiting.as_array().ok_or("waiting")?.len(), 1, "{declared}");
-    // The member, at generation 1, meets the generation 2 statement.
+    // The member explicitly opens the signed schema before acknowledging it.
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.sync().await.expect("sync");
@@ -688,7 +684,7 @@ fn chain(directory: &Path) -> Result<Value, Failure> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_member_adopts_a_generation_from_another_member_with_no_issuer_reachable()
+async fn an_explicit_schema_open_fetches_from_a_member_with_no_issuer_reachable()
 -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
@@ -719,7 +715,8 @@ async fn a_member_adopts_a_generation_from_another_member_with_no_issuer_reachab
     // The issuer signs generation 2 and meets only `b` before it leaves.
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
     a.set(2, &apples, "note", json!("fresh")).await;
-    // The first sync adopts generation 2, the second pulls its frames.
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     b.sync().await.expect("sync");
     assert_eq!(generation(&b).await["current"]["schema"], 2);
     b.sync().await.expect("sync");
@@ -729,25 +726,18 @@ async fn a_member_adopts_a_generation_from_another_member_with_no_issuer_reachab
     );
     a.close().await;
 
-    // `c`, its application at version 1, meets generation 2 through `b`
-    // alone and adopts it on its own: its chain stays as it was.
+    // A peer alone never changes c's installed schema.
     let before = chain(&c_dir)?;
     let _ = c.sync().await;
-    let status = generation(&c).await;
-    assert_eq!(status["current"]["schema"], 2);
-    assert_eq!(status["application"], "behind");
-    assert_eq!(chain(&c_dir)?, before, "adopting renews nothing");
+    assert_eq!(generation(&c).await["current"]["schema"], 1);
+    assert_eq!(chain(&c_dir)?, before);
+    c.close().await;
+    // An explicit schema open can fetch its signed definition from b.
+    let c = Device::new(Database::open(open(&c_dir, SECOND, network("c")))?)?;
+    assert_eq!(generation(&c).await["application"], "current");
     let bread = c.add(3, "bread").await;
     let _ = c.sync().await;
     assert_eq!(b.titles().await, ["apples", "bread"]);
-    assert_eq!(
-        rows(&c, "SELECT note FROM items WHERE title='apples'").await,
-        json!([[text("fresh")]])
-    );
-    // Updated, it writes the field generation 2 added under the same chain.
-    c.close().await;
-    let c = Device::new(Database::open(open(&c_dir, SECOND, network("c")))?)?;
-    assert_eq!(generation(&c).await["application"], "current");
     c.set(4, &bread, "note", json!("rye")).await;
     let _ = c.sync().await;
     assert_eq!(
@@ -870,8 +860,7 @@ async fn issuers_that_sign_one_schema_apart_end_on_one_generation() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_older_generation_the_database_lacks_is_fetched_before_its_frames_apply()
--> Result<(), Failure> {
+async fn an_unknown_older_generation_is_not_fetched_on_peer_discovery() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -917,25 +906,21 @@ async fn an_older_generation_the_database_lacks_is_fetched_before_its_frames_app
     drop(file);
     let b = Device::new(Database::open(open(&b_dir, SECOND, network("b")))?)?;
     assert_eq!(generation(&b).await["previous"], json!([]));
-    // The generation 1 frame reaches the issuer, which relays it to the
-    // member: the member fetches its manifest from the issuer first.
-    c.sync().await.expect("sync");
-    c.sync().await.expect("sync");
-    assert!(a.titles().await.contains(&"carrots".to_string()));
-    b.sync().await.expect("sync");
-    b.sync().await.expect("sync");
+    // Neither peer discovery nor a refused frame restores a dropped schema.
+    let _ = c.sync().await;
+    let _ = b.sync().await;
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2);
-    assert_eq!(status["previous"], json!([{"schema": 1}]));
+    assert_eq!(status["previous"], json!([]));
     let activity = b.ok(json!({"type": "activity"})).await;
     assert!(
         activity["events"]
             .as_array()
             .ok_or("events")?
             .iter()
-            .any(|event| event["kind"] == "generation_learned")
+            .all(|event| event["kind"] != "generation_learned")
     );
-    assert!(b.titles().await.contains(&"carrots".to_string()));
+    assert_eq!(b.titles().await, ["apples"]);
     c.close().await;
     b.close().await;
     a.close().await;
@@ -943,7 +928,7 @@ async fn an_older_generation_the_database_lacks_is_fetched_before_its_frames_app
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Result<(), Failure> {
+async fn a_dropped_manifest_stays_dropped_when_an_old_peer_returns() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -971,6 +956,8 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     a.close().await;
 
     let a = Device::new(Database::open(open(&dirs("a"), SECOND, network("a")))?)?;
+    b.close().await;
+    let b = Device::new(Database::open(open(&dirs("b"), SECOND, network("b")))?)?;
     b.sync().await.expect("sync");
     for device in [&a, &b] {
         assert_eq!(generation(device).await["previous"], json!([{"schema": 1}]));
@@ -1008,8 +995,8 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     a.close().await;
 
     // `c` edits a surviving row under generation 1 while still away, then
-    // returns and reaches `b`: its frame makes `b` fetch the manifest again,
-    // and the edit applies.
+    // returns and reaches `b`: discovery must not fetch the manifest or
+    // apply a frame whose schema the replica dropped.
     let c = Device::new(Database::open(open(&dirs("c"), SCHEMA, None))?)?;
     c.set(2, &apples, "title", json!("late apples")).await;
     c.close().await;
@@ -1019,7 +1006,7 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
         let _ = c.sync().await;
         let _ = b.sync().await;
     }
-    assert_eq!(generation(&b).await["previous"], json!([{"schema": 1}]));
+    assert_eq!(generation(&b).await["previous"], json!([]));
     let activity = b.ok(json!({"type": "activity"})).await;
     let events = activity["events"].as_array().ok_or("events")?;
     assert!(
@@ -1030,11 +1017,11 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     assert!(
         events
             .iter()
-            .any(|event| event["kind"] == "generation_learned")
+            .all(|event| event["kind"] != "generation_learned")
     );
     let identity: Value = serde_json::from_slice(&std::fs::read(dirs("b").join("identity.json"))?)?;
-    assert!(identity["lineage"][0]["manifest"].is_string(), "{identity}");
-    assert_eq!(b.titles().await, vec!["late apples".to_string()]);
+    assert_eq!(identity["lineage"][0].get("manifest"), None, "{identity}");
+    assert_eq!(b.titles().await, ["apples"]);
     c.close().await;
     b.close().await;
     Ok(())

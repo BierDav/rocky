@@ -1356,6 +1356,9 @@ mod revocations;
 mod roles;
 mod rotation;
 mod sql;
+mod tip_drop;
+mod tip_network;
+mod tips;
 
 mod partition_foreign_keys;
 

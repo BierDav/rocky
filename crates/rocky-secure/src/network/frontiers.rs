@@ -104,22 +104,16 @@ impl NativeSession {
                 .iter()
                 .map(|(_, state)| state.frontier.clone())
                 .collect();
-            let newer = {
-                let mut inner = replica.inner.lock().await;
-                let newer = inner
-                    .manifest_of_tip(inner.peer_tip(self.peer))
-                    .and_then(|manifest| inner.known(manifest))
-                    .is_err();
-                inner
-                    .record_frontiers(self.peer, &self.credentials, &remote)
-                    .await?;
-                newer
-            };
+            replica
+                .inner
+                .lock()
+                .await
+                .record_frontiers(self.peer, &self.credentials, &remote)
+                .await?;
             for (local, state) in held {
                 if state.importing {
                     importing.push(local.scope);
-                } else if newer
-                    || local != &state.frontier
+                } else if local != &state.frontier
                     || local.logs.iter().any(|log| log.held != log.applied)
                     || state.behind
                     || replica.horizon_rebootstrap_required(local.scope).await?

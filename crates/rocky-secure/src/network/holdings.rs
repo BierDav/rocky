@@ -156,6 +156,23 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scopes: &[ResourceScope],
     ) -> Result<(), Error> {
+        self.ensure_scoped_holding(replica, scopes, false).await
+    }
+
+    pub(super) async fn ensure_held_holding<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scope: ResourceScope,
+    ) -> Result<(), Error> {
+        self.ensure_scoped_holding(replica, &[scope], true).await
+    }
+
+    async fn ensure_scoped_holding<A: RowApplication>(
+        &mut self,
+        replica: &EncryptedReplica<A>,
+        scopes: &[ResourceScope],
+        held: bool,
+    ) -> Result<(), Error> {
         let mut missing = Vec::new();
         for scope in scopes {
             if !self.offered.contains(scope) && replica.holding_required(*scope).await {
@@ -164,9 +181,18 @@ impl NativeSession {
         }
         for batch in missing.chunks(64) {
             // Retain the existing rule against disclosing metadata to an ungranted server.
-            let allowed = replica
-                .peer_holds(self.peer, &self.credentials, batch)
-                .await?;
+            let allowed = if held {
+                for scope in batch {
+                    replica
+                        .authorize_held_reader(self.peer, &self.credentials, *scope)
+                        .await?;
+                }
+                batch.to_vec()
+            } else {
+                replica
+                    .peer_holds(self.peer, &self.credentials, batch)
+                    .await?
+            };
             if allowed.len() != batch.len() {
                 return Err(denied(HOLDING_DENIED));
             }
@@ -244,6 +270,9 @@ impl NativeSession {
                 | RowMessage::Read { scope, .. } => vec![*scope],
                 _ => Vec::new(),
             },
+            Message::HeldChanges(
+                held::HeldMessage::Pull { scope, .. } | held::HeldMessage::Push { scope, .. },
+            ) => vec![*scope],
             Message::Checkpoints(
                 CheckpointMessage::CheckpointOffer { scope }
                 | CheckpointMessage::CheckpointPull { scope, .. },

@@ -74,6 +74,7 @@ struct Definition<A> {
     node_author: Option<identity::NodeAuthor>,
     history: Vec<KeyMaterial>,
     manifest: Commitment,
+    tip: TipId,
     definition: ApplicationManifest,
     tables: HashSet<Commitment>,
     fields: HashSet<Commitment>,
@@ -88,6 +89,7 @@ impl<A> Definition<A> {
         std::mem::swap(&mut self.node_author, &mut inner.node_author);
         std::mem::swap(&mut self.history, &mut inner.history);
         std::mem::swap(&mut self.manifest, &mut inner.manifest);
+        std::mem::swap(&mut self.tip, &mut inner.tip);
         std::mem::swap(&mut self.definition, &mut inner.definition);
         std::mem::swap(&mut self.tables, &mut inner.tables);
         std::mem::swap(&mut self.fields, &mut inner.fields);
@@ -1045,6 +1047,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
         if inner.manifest == manifest.hash() {
             return Ok(false);
         }
+        if !inner.graphs.is_empty() {
+            return Err(incompatible(
+                "schema changes of bookmark tips require phase 17 seals",
+            ));
+        }
         if inner.config.publisher != config.publisher
             || inner.config.node.public_key() != config.node.public_key()
         {
@@ -1062,6 +1069,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             config,
             history,
             manifest: manifest.hash(),
+            tip: rocky_credentials::genesis_tip(manifest.hash()),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
             domains: manifest.domains.iter().map(|item| item.domain).collect(),

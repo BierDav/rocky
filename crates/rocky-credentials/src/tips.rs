@@ -424,10 +424,10 @@ impl TipGraph {
             path.push(());
         }
         for () in path {
-            if let Some(seal) = self.seal(cursor)? {
-                if let Some(next) = seal.successor()? {
-                    cursor = next;
-                }
+            if let Some(seal) = self.seal(cursor)?
+                && let Some(next) = seal.successor()?
+            {
+                cursor = next;
             }
         }
         Ok(cursor)

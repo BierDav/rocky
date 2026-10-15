@@ -3,6 +3,7 @@
 //! them whole, voids their frames with a signed record so their author logs
 //! continue, and rolls their effects back; the application re-authors or
 //! drops them. See `docs/runtime/held-changes.md` and decision 0069.
+mod late;
 use super::checkpoint::hash_of;
 use super::generation::Names;
 use super::*;
@@ -17,6 +18,9 @@ pub(super) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_voids(scope BLOB NOT NULL,author BLOB NOT NULL,sequence INTEGER NOT NULL,hash BLOB NOT NULL UNIQUE,header BLOB NOT NULL,record BLOB,PRIMARY KEY(scope,author,sequence)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_void_records(digest BLOB PRIMARY KEY,record BLOB NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_held(id BLOB PRIMARY KEY,change BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_held_frames(hash BLOB PRIMARY KEY,id BLOB NOT NULL,scope BLOB NOT NULL,frame BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE INDEX IF NOT EXISTS secure_held_frames_scope ON secure_held_frames(scope,hash)",
+    "CREATE TABLE IF NOT EXISTS secure_held_resolved(id BLOB PRIMARY KEY,authority BLOB NOT NULL) WITHOUT ROWID",
 ];
 /// Headers one void record covers.
 const MAX_VOID_HEADERS: usize = 64;
@@ -957,10 +961,8 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("no such held change"));
         }
         drop(found);
-        self.conn
-            .execute("DELETE FROM secure_held WHERE id=?", [id.to_vec()])
-            .await?;
-        Ok(())
+        self.record_held_resolution(id, &self.local_grants(now()?)?)
+            .await
     }
     async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
         let mut changes = Vec::new();
@@ -1080,7 +1082,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// Local changes held because a newer generation removed what they
     /// write, each with the current values of the fields it writes.
     pub async fn held_changes(&self) -> Result<Vec<HeldChange>, Error> {
-        self.inner.lock().await.held_changes().await
+        let mut inner = self.inner.lock().await;
+        transaction!(inner, |inner| inner.refresh_closed_held(now()?).await)?;
+        inner.flush()?;
+        inner.held_changes().await
     }
     /// Drops a held change; fails when it is not held.
     pub async fn drop_held(&self, id: Commitment) -> Result<(), Error> {

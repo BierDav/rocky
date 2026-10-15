@@ -635,19 +635,6 @@ impl Node {
                 service.live.events.send_replace(());
                 node.activity.record("link_closed", json!({"peer":peer.to_hex(),"reason":result.as_ref().copied().unwrap_or("error"),"error":result.as_ref().err().map(ToString::to_string)}));
                 node.link_status_changed();
-                // A frame under a generation this replica lacks or dropped:
-                // fetch it from the peer, as a sync would.
-                if let Err(error) = &result
-                    && matches!(
-                        error.downcast_ref(),
-                        Some(rocky_secure::Error::Incompatible(_))
-                    )
-                {
-                    let contact = node.settings.lock().await.peers.get(&peer).cloned();
-                    if let Some(contact) = contact {
-                        let _ = node.learn_older(&*service.transport, peer, &contact).await;
-                    }
-                }
                 if result.is_ok() && !persistent && !dialed && node.automatic.load(Ordering::SeqCst)
                 {
                     node.link_pending(peer);

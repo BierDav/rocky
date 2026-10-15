@@ -204,6 +204,9 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         scope: ResourceScope,
     ) -> Result<(usize, usize), Error> {
+        if replica.inner.lock().await.same_tip_peer(self.peer).is_err() {
+            return Ok((0, 0));
+        }
         if !self.pull_existence_base(replica, scope, None).await? {
             return Err(denied(
                 "existence base session exhausted; resume on the next session",
@@ -282,6 +285,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: ExistenceMessage,
     ) -> Result<(), Error> {
+        replica.inner.lock().await.same_tip_peer(self.peer)?;
         match message {
             ExistenceMessage::BaseOffer { scope, expected } => {
                 let attachment = replica

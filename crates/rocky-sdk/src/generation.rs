@@ -419,29 +419,6 @@ impl Settings {
         }
         Err(failure)
     }
-    /// Moves this identity to the newer generation `peer` runs, whatever
-    /// schema the application declares. Its offer is verified against
-    /// endorsements rooted at the publisher alone, so any device may supply
-    /// it and no issuer is contacted. Everything is saved before the replica
-    /// switches, which resumes after a crash. Returns whether the
-    /// generation was newer.
-    pub(crate) async fn discover(
-        &mut self,
-        path: &Path,
-        vault: &Vault,
-        transport: &dyn Transport,
-        addresses: &[String],
-    ) -> Result<bool, Failure> {
-        let offer = ask(transport, addresses).await?;
-        // Endorsers differ in bytes; the manifest is the generation.
-        if manifest_hash(&offer.manifest, self.publisher)?
-            == manifest_hash(&self.manifest, self.publisher)?
-        {
-            return Ok(false);
-        }
-        *self = self.adopt_offer(offer, None)?.settle(path, vault)?;
-        Ok(true)
-    }
     /// This verified draft generation, with what an issuer derives for it,
     /// saved.
     fn settle(mut self, path: &Path, vault: &Vault) -> Result<Self, Failure> {
@@ -468,43 +445,8 @@ impl Settings {
             .filter(|addresses| !addresses.is_empty())
             .collect()
     }
-    /// The signed steps a device's `reply` to [`OFFER`] and this identity
-    /// hold: what a replica that lacks an older generation learns it from.
-    /// The replica verifies each and keeps those that lead to a generation
-    /// it knows.
-    pub(crate) fn older_steps(&self, reply: &[u8]) -> Result<Vec<GenerationStep>, Failure> {
-        let offer: Offer = serde_json::from_slice(reply)?;
-        if offer.lineage.len() > MAX_LINEAGE {
-            return Err("the offered lineage is too long".into());
-        }
-        // The peer's own manifest and those either side holds, by hash.
-        let mut manifests = std::collections::BTreeMap::new();
-        for manifest in [&offer.manifest].into_iter().chain(
-            offer
-                .lineage
-                .iter()
-                .chain(&self.lineage)
-                .filter_map(|step| step.manifest.as_ref()),
-        ) {
-            let signed = SignedManifest::from_bytes(&HEXLOWER.decode(manifest.as_bytes())?)?;
-            manifests.insert(signed.verify(self.publisher)?.hash(), signed);
-        }
-        offer
-            .lineage
-            .iter()
-            .chain(&self.lineage)
-            .map(|step| {
-                let transition = step.signed_transition()?;
-                let from = transition.verify(self.publisher)?.from;
-                Ok(GenerationStep {
-                    manifest: manifests.get(&from).cloned(),
-                    transition,
-                })
-            })
-            .collect()
-    }
     /// The identity at the generation a device's `reply` to [`OFFER`]
-    /// names, verified as [`Self::discover`] verifies it; nothing is saved.
+    /// names; its signatures and lineage are verified and nothing is saved.
     #[cfg(test)]
     pub(crate) fn verify_offer(&self, reply: &[u8]) -> Result<Self, Failure> {
         self.adopt_offer(serde_json::from_slice(reply)?, None)
@@ -659,29 +601,6 @@ impl Settings {
             return Err(forged());
         }
         Ok(())
-    }
-    /// Holds the manifests among `steps` of the generations `held` names,
-    /// which the replica now holds. Returns whether any changed.
-    pub(crate) fn hold_manifests(
-        &mut self,
-        steps: &[GenerationStep],
-        held: &BTreeSet<Commitment>,
-    ) -> Result<bool, Failure> {
-        let mut changed = false;
-        for step in &mut self.lineage {
-            let from = step.verified(self.publisher)?.from;
-            if step.manifest.is_some() || !held.contains(&from) {
-                continue;
-            }
-            for candidate in steps.iter().filter_map(|step| step.manifest.as_ref()) {
-                if candidate.verify(self.publisher)?.hash() == from {
-                    step.manifest = Some(HEXLOWER.encode(&candidate.to_bytes()?));
-                    changed = true;
-                    break;
-                }
-            }
-        }
-        Ok(changed)
     }
     /// Forgets the manifests of the generations `dropped` names, which the
     /// replica dropped; their transitions stay. Returns whether any changed.

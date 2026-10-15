@@ -1130,16 +1130,28 @@ impl<A: RowApplication> SecureSql<A> {
             }
             None => {}
         }
+        if let Kind::Reauthors(held) = commit {
+            inner.resolve_held(held).await?;
+        }
         inner.strict_projection = true;
         let entry = match commit {
             Kind::Coordinated(slot) => Some(slot.expected + 1),
             _ => None,
         };
-        let frames = inner
-            .author_bundle(handle, input, &writes, &[], now()?, entry)
-            .await?;
+        let frames = match commit {
+            Kind::Reauthors(held) => {
+                inner
+                    .author_bundle_reauthoring(handle, input, &writes, now()?, held)
+                    .await?
+            }
+            _ => {
+                inner
+                    .author_bundle(handle, input, &writes, &[], now()?, entry)
+                    .await?
+            }
+        };
         match commit {
-            Kind::Reauthors(held) => inner.resolve_held(held).await?,
+            Kind::Reauthors(_) => {}
             Kind::Coordinated(slot) => {
                 let transaction =
                     super::bundle::transaction_id(inner.config.node.public_key(), &handle);

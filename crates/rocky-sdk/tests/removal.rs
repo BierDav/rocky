@@ -167,8 +167,9 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
     let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
     assert_eq!(generation(&a).await["current"]["schema"], 2);
     assert_eq!(a.titles().await, ["bread", "green apples"]);
-    // The member adopts the generation; its frame was sent, so it is not
-    // held and applies the kept field on both.
+    // Explicitly open the signed schema; its sent frame keeps its authority.
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     for device in [&a, &b] {
@@ -213,8 +214,7 @@ async fn a_generation_removes_a_field_its_unique_index_and_a_referenced_table()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> Result<(), Failure>
-{
+async fn devices_that_explicitly_open_a_readded_field_agree_on_it() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -229,8 +229,7 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
             invitation,
         )?)
     };
-    // c is a second issuer; d writes; f takes d's frame; e only ever
-    // meets a.
+    // c is a second issuer; d writes; f takes d's frame.
     let c = join("c", &a.invite_as(json!({"kind": "issuer"})).await)?;
     let d = join("d", &a.invite().await)?;
     let e = join("e", &a.invite().await)?;
@@ -253,19 +252,31 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
         json!({"title": "bread", "completed": false, "note": "stale"}),
     )
     .await;
-    // e stays at the first generation, unsynced, until it meets a at the
-    // third.
+    // e keeps its original rows while the issuer signs the removal.
     c.sync().await.expect("sync");
     d.sync().await.expect("sync");
-    // a removes the note; c adopts that generation.
+    e.sync().await.expect("sync retained base");
+    // a removes the note; c explicitly opens the signed schema.
     a.close().await;
     let a = Device::new(common::confirmed(open(
         &directory("a"),
         &version(common::SCHEMA, 2),
         network("a"),
     ))?)?;
+    c.close().await;
+    let c = Device::new(common::confirmed(open(
+        &directory("c"),
+        &version(common::SCHEMA, 2),
+        network("c"),
+    ))?)?;
     c.sync().await.expect("sync");
     assert_eq!(generation(&c).await["current"]["schema"], 2);
+    e.close().await;
+    let e = Device::new(Database::open(open(
+        &directory("e"),
+        &version(common::SCHEMA, 2),
+        network("e"),
+    ))?)?;
     // Offline, a adds the note again, then stays away.
     a.close().await;
     Device::new(Database::open(open(
@@ -276,32 +287,59 @@ async fn devices_that_reach_a_readded_field_by_different_steps_agree_on_it() -> 
     .close()
     .await;
     // d, at the first generation, writes the note after that baseline and
-    // sends it to f. It meets c, adopts the second generation and hands c
-    // its frame as signed: sent, so not held. c ignores the note.
+    // sends it to f. It then opens the signed second schema from c.
+    // Its offered first-tip frame stays local; c refuses that tip.
     d.set(3, &apples, "note", json!("late")).await;
     introduce(&d, &f).await;
     let _ = f.sync().await;
+    d.close().await;
+    let d = Device::new(Database::open(open(
+        &directory("d"),
+        &version(common::SCHEMA, 2),
+        network("d"),
+    ))?)?;
     let _ = d.sync().await;
     assert_eq!(generation(&d).await["current"]["schema"], 2);
     assert_eq!(generation(&d).await["held"], 0);
     assert_eq!(generation(&c).await["current"]["schema"], 2);
 
-    // c meets a at the third generation and pulls the frame again.
+    // c explicitly opens the third schema. The unfollowed first-tip write
+    // cannot be fetched on this tip; a current-tip edit re-authors its value.
     let a = Device::new(Database::open(open(
         &directory("a"),
         &version(NOTED, 3),
         network("a"),
     ))?)?;
-    // Reachable again: the backoff of the failed passes ends.
-    c.ok(json!({"type": "networking_control", "enabled": true}))
-        .await;
+    c.close().await;
+    let c = Device::new(Database::open(open(
+        &directory("c"),
+        &version(NOTED, 3),
+        network("c"),
+    ))?)?;
     c.sync().await.expect("sync");
     assert_eq!(generation(&c).await["current"]["schema"], 3);
     let notes = "SELECT title, note FROM items ORDER BY title";
-    let expected = json!([[text("apples"), text("late")], [text("bread"), {"type": "null"}]]);
+    let empty = json!([[text("apples"), {"type": "null"}], [text("bread"), {"type": "null"}]]);
+    assert_eq!(rows(&c, notes).await, empty);
+    // Two fresh edits also order after d's single old edit when wall clocks tie.
+    a.set(4, &apples, "note", json!("reauthoring")).await;
+    a.set(5, &apples, "note", json!("current")).await;
+    c.sync().await.expect("sync current tip");
+    let expected = json!([[text("apples"), text("current")], [text("bread"), {"type": "null"}]]);
     assert_eq!(rows(&c, notes).await, expected);
-    // The others converge: d by the same steps, e from the first
-    // generation directly.
+    // Explicit target opens verify the same definition through their lineage.
+    d.close().await;
+    e.close().await;
+    let d = Device::new(Database::open(open(
+        &directory("d"),
+        &version(NOTED, 3),
+        network("d"),
+    ))?)?;
+    let e = Device::new(Database::open(open(
+        &directory("e"),
+        &version(NOTED, 3),
+        network("e"),
+    ))?)?;
     for device in [&c, &d, &e] {
         device
             .ok(json!({"type": "networking_control", "enabled": true}))
@@ -394,6 +432,8 @@ async fn an_unsent_change_a_removal_splits_is_held_and_reauthored_after_the_upda
 
     a.close().await;
     let a = Device::new(common::confirmed(open(&a_dir, UNSHELVED, network("a")))?)?;
+    b.close().await;
+    let b = Device::new(Database::open(open(&b_dir, UNSHELVED, network("b")))?)?;
     b.sync().await.expect("sync");
     b.sync().await.expect("sync");
     // Held whole: its kept edit is rolled back at once, on both.

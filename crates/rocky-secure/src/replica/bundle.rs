@@ -132,6 +132,43 @@ impl<A: RowApplication> Inner<A> {
         carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
         entry: Option<u64>,
     ) -> Result<Vec<EncryptedFrame>, Error> {
+        Box::pin(self.author_bundle_resolving(
+            (handle, input),
+            writes,
+            dependencies,
+            time,
+            carried,
+            (entry, None),
+        ))
+        .await
+    }
+    pub(crate) async fn author_bundle_reauthoring(
+        &mut self,
+        handle: Commitment,
+        input: Commitment,
+        writes: &[RowWrite],
+        time: u64,
+        held: Commitment,
+    ) -> Result<Vec<EncryptedFrame>, Error> {
+        Box::pin(self.author_bundle_resolving(
+            (handle, input),
+            writes,
+            &[],
+            time,
+            &BTreeMap::new(),
+            (None, Some(held)),
+        ))
+        .await
+    }
+    async fn author_bundle_resolving(
+        &mut self,
+        (handle, input): (Commitment, Commitment),
+        writes: &[RowWrite],
+        dependencies: &[Hash],
+        time: u64,
+        carried: &BTreeMap<(ResourceScope, Commitment), moves::Carried>,
+        (entry, reauthors): (Option<u64>, Option<Commitment>),
+    ) -> Result<Vec<EncryptedFrame>, Error> {
         let mut births = BTreeMap::<Commitment, Vec<rocky_core::RowIdentity>>::new();
         for write in writes.iter().filter(|write| {
             write.change.before.is_none()
@@ -194,7 +231,12 @@ impl<A: RowApplication> Inner<A> {
         self.app
             .validate_changes(&apply::exact(&writes))
             .map_err(|message| denied(&message))?;
-        let node = self.config.node.public_key();
+        let node = self
+            .node_author
+            .as_ref()
+            .ok_or_else(|| denied("node author credential missing"))?
+            .key
+            .public_key();
         let transaction = transaction_id(node, &handle);
         let mut plan = Vec::with_capacity(frames.len());
         let mut next = BTreeMap::new();
@@ -262,7 +304,10 @@ impl<A: RowApplication> Inner<A> {
                     if sequence != opening.sequence {
                         return Err(Error::Corrupt("bundle sequence plan".into()));
                     }
-                    RowPayload::bundle(membership, writes.clone())
+                    RowPayload::reauthor_body(
+                        RowPayload::bundle(membership, writes.clone())?,
+                        reauthors,
+                    )
                 },
             ))
             .await?;
@@ -494,6 +539,18 @@ impl<A: RowApplication> Inner<A> {
                 Err(error) => return self.reject_members(&hashes, &error.to_string()).await,
             }
         }
+        let resolution = members
+            .first()
+            .map(|(frame, _, _)| self.row_payload(frame).map(|payload| payload.reauthors()))
+            .transpose()?
+            .flatten();
+        for (frame, _, _) in &members {
+            if self.row_payload(frame)?.reauthors() != resolution {
+                return self
+                    .reject_members(&hashes, "bundle members disagree on held resolution")
+                    .await;
+            }
+        }
         self.conn.execute("SAVEPOINT bundle", ()).await?;
         let result = async {
             let mut actual = Vec::new();
@@ -534,6 +591,50 @@ impl<A: RowApplication> Inner<A> {
                 self.reject_members(&hashes, &error.to_string()).await
             }
         }
+    }
+    pub(super) async fn hold_closed_bundle(
+        &self,
+        trigger: &EncryptedFrame,
+        membership: &Membership,
+        time: u64,
+    ) -> Result<Outcome, Error> {
+        let operation = trigger.operation()?;
+        let required = self
+            .required_members(membership, operation.header.extensions.scope, time)
+            .await?;
+        if !required.iter().any(|(index, opening)| {
+            *index == usize::from(membership.index)
+                && opening.scope == operation.header.extensions.scope
+                && opening.sequence == operation.header.seq_num
+                && opening.author.unwrap_or(operation.header.public_key)
+                    == operation.header.public_key
+        }) {
+            return Err(denied("held frame is not its bundle member"));
+        }
+        let mut members = Vec::with_capacity(required.len());
+        for (index, opening) in required {
+            let frame = match self
+                .member(
+                    opening.author.unwrap_or(operation.header.public_key),
+                    &opening,
+                )
+                .await?
+            {
+                Member::Missing => return Ok(Outcome::Waiting),
+                Member::Rejected => return Err(denied("a held bundle member was rejected")),
+                Member::Settled(None) => {
+                    return Err(denied("held bundle member history was pruned"));
+                }
+                Member::Settled(Some(frame)) | Member::Pending(frame) => frame,
+            };
+            if frame.operation()?.header.public_key != operation.header.public_key {
+                return Err(denied("held bundle members have different authors"));
+            }
+            let payload = self.membership_of(&frame, index, membership)?;
+            members.push((frame, payload));
+        }
+        self.hold_members(&members, time).await?;
+        Ok(Outcome::Applied)
     }
     /// Member entries this replica opens with a readable key of a held scope,
     /// in scope and sequence order.

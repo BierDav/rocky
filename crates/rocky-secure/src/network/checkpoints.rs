@@ -385,7 +385,13 @@ impl NativeSession {
         scope: ResourceScope,
         quota: usize,
     ) -> Result<ScopeSync, Error> {
+        let held_exhausted = if replica.tip_statements(None, 1).await?.is_empty() {
+            false
+        } else {
+            self.sync_held_changes(replica, scope, quota).await?
+        };
         let mut catch_up = self.catch_up(replica, scope, quota).await?;
+        catch_up.exhausted |= held_exhausted;
         let mut rebootstrap = None;
         if catch_up.behind && self.low(MAX_SECURE_FRAME) {
             catch_up.exhausted = true;

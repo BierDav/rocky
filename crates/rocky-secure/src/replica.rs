@@ -34,7 +34,9 @@ mod restore;
 pub(super) mod roles;
 mod session;
 mod sql;
-mod tips;
+mod tip_drop;
+pub(crate) mod tips;
+pub use tips::{LineNode, TipStatement};
 mod typed;
 use super::store::{SCHEMA, TransactionStore};
 use super::wire::{Chain, Extensions, Membership, ROW_FORMAT, RowPayload, author, decrypt};
@@ -129,6 +131,8 @@ pub enum ReceiveStatus {
     PendingDependencies,
     MissingKey,
     Applied,
+    /// The original signed writes are held for application-directed re-authoring.
+    Held,
     Duplicate,
     Rejected,
     /// At or before this replica's horizon: already part of its checkpoint.
@@ -316,6 +320,9 @@ pub(super) struct Inner<A> {
     pub(super) history: Vec<KeyMaterial>,
     pub(super) manifest: Commitment,
     pub(super) tip: TipId,
+    pub(super) graphs: BTreeMap<rocky_core::Scope, rocky_credentials::TipGraph>,
+    followed: Option<(rocky_core::Scope, String)>,
+    line_nodes: BTreeMap<TipId, identity::NodeAuthor>,
     pub(super) definition: rocky_core::ApplicationManifest,
     pub(super) tables: HashSet<Commitment>,
     pub(super) fields: HashSet<Commitment>,
@@ -337,6 +344,7 @@ pub(super) struct Inner<A> {
     names: generation::Names,
     /// Set while a SQL session commits: a projection must find its rows.
     strict_projection: bool,
+    rebuilding_tip: bool,
     /// Set while a staged publication authors its bundles: one atomic
     /// transaction of any size, so the retained-history bound cannot hold
     /// it back; later writes wait until it is delivered and pruned.
@@ -388,7 +396,7 @@ pub(super) struct Inner<A> {
     served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
     /// The generation each admitted session peer declared in its hello:
     /// what it can admit. Chains name none.
-    peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
+    pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
     /// Verified owner-signed cuts of each coordinated log, in order.
     cuts: BTreeMap<rocky_core::Scope, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
@@ -540,6 +548,8 @@ impl<A> EncryptedReplica<A> {
 fn protocol_schema() -> impl Iterator<Item = &'static str> {
     [
         generation::SCHEMA,
+        tips::SCHEMA,
+        tip_drop::SCHEMA,
         migrate::SCHEMA,
         backup::SCHEMA,
         rebuild::SCHEMA,
@@ -721,7 +731,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let (owner, raw) = DatabaseOwner::open(path.as_ref()).await?;
         let conn = Arc::new(ScopedConnection::new(raw, None, SCHEMA));
         configure(&conn).await?;
-        let identity = generation::identity(
+        let mut identity = generation::identity(
             rocky_credentials::genesis_tip(manifest.hash()),
             config.node.public_key(),
         )?;
@@ -754,6 +764,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             history,
             manifest: manifest.hash(),
             tip: rocky_credentials::genesis_tip(manifest.hash()),
+            graphs: BTreeMap::new(),
+            followed: None,
+            line_nodes: BTreeMap::new(),
             tables: manifest.entities.iter().map(|item| item.id).collect(),
             fields: manifest.fields.iter().map(|item| item.id).collect(),
             domains: manifest.domains.iter().map(|item| item.domain).collect(),
@@ -766,6 +779,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             previous: Vec::new(),
             names: generation::Names::default(),
             strict_projection: false,
+            rebuilding_tip: false,
             publishing: false,
             settling: Default::default(),
             local: Default::default(),
@@ -852,8 +866,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 inner.seed(upgrade.as_ref()).await?;
             } else {
                 inner.load_generations().await?;
+                inner.load_tip_graphs().await?;
                 let stored = inner.stored_identity().await?;
-                let activated = inner.activate(&stored, upgrade.as_ref()).await?;
+                if inner.followed.is_some() {
+                    identity = generation::identity(inner.tip, inner.config.node.public_key())?;
+                }
+                let activated = if inner.followed.is_some() {
+                    false
+                } else {
+                    inner.activate(&stored, upgrade.as_ref()).await?
+                };
                 inner
                     .load_revocations((!activated).then_some(identity.as_slice()))
                     .await?;
@@ -869,6 +891,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Ok(())
         })?;
         inner.load_generations().await?;
+        inner.load_tip_graphs().await?;
         inner.finish_plan().await?;
         inner.load_typed().await?;
         inner.load_partitions().await?;
@@ -1389,6 +1412,28 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let operation = frame.operation()?;
         let extension = &operation.header.extensions;
+        let reach = self.frame_reach(
+            extension.scope.domain,
+            extension.tip,
+            extension
+                .author
+                .ok_or_else(|| denied("node author missing"))?,
+            extension.author_sequence,
+        )?;
+        if matches!(reach, tips::FrameReach::Unfollowed) {
+            return Err(denied(
+                "frame belongs to a tip this replica does not follow",
+            ));
+        }
+        self.verify_frame_authority(frame, time)
+    }
+    pub(super) fn verify_frame_authority(
+        &self,
+        frame: &EncryptedFrame,
+        time: u64,
+    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
+        let operation = frame.operation()?;
+        let extension = &operation.header.extensions;
         // Only bytes are shared by digest: the chain is verified here, for
         // every frame, against the current revocations.
         let credentials = frame.chain()?.credentials();
@@ -1483,6 +1528,7 @@ impl<A: RowApplication> Inner<A> {
         };
         match row.get::<String>(0)?.as_str() {
             "applied" => Ok(ReceiveStatus::Applied),
+            "held" => Ok(ReceiveStatus::Held),
             "abandoned" => Ok(ReceiveStatus::Abandoned),
             "rejected" => Ok(ReceiveStatus::Rejected),
             "pending" => {

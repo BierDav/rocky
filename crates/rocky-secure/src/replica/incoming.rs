@@ -102,11 +102,25 @@ impl<A: RowApplication> Inner<A> {
         let operation = frame.operation()?;
         // A bundle applies its members together; a later scan finds them settled.
         match self.stored_status(operation.hash).await?.as_deref() {
-            Some("applied" | "abandoned") => return Ok(Outcome::Applied),
+            Some("applied" | "abandoned" | "held") => return Ok(Outcome::Applied),
             Some("rejected") => return Ok(Outcome::Rejected("rejected earlier".into())),
             _ => {}
         }
-        let grants = match self.verify_frame(frame, time) {
+        let reach = self.frame_reach(
+            operation.header.extensions.scope.domain,
+            operation.header.extensions.tip,
+            operation
+                .header
+                .extensions
+                .author
+                .ok_or_else(|| denied("node author number missing"))?,
+            operation.header.extensions.author_sequence,
+        )?;
+        let grants = match if reach == tips::FrameReach::Held {
+            self.verify_frame_authority(frame, time)
+        } else {
+            self.verify_frame(frame, time)
+        } {
             Ok(grants) => grants,
             Err(error) => {
                 self.reject(operation.hash).await?;
@@ -119,14 +133,15 @@ impl<A: RowApplication> Inner<A> {
         if self.direct.contains(&extension.scope) {
             return Ok(Outcome::Waiting);
         }
-        if !self
-            .horizon_allows_position(
-                extension.scope,
-                operation.header.public_key,
-                operation.header.seq_num,
-                false,
-            )
-            .await?
+        if reach != tips::FrameReach::Held
+            && !self
+                .horizon_allows_position(
+                    extension.scope,
+                    operation.header.public_key,
+                    operation.header.seq_num,
+                    false,
+                )
+                .await?
         {
             return Ok(Outcome::Waiting);
         }
@@ -137,6 +152,9 @@ impl<A: RowApplication> Inner<A> {
         // Current reader authorization is required even if a revoked key is still in memory.
         if !self.can_read_key(key.scope, &self.local_grants(time).unwrap_or_default()) {
             return Ok(Outcome::Waiting);
+        }
+        if reach == tips::FrameReach::Held {
+            return self.hold_closed_frame(frame, time).await;
         }
         match self.dependencies_ready(frame, &BTreeSet::new()).await {
             Ok(true) => {}
@@ -319,13 +337,12 @@ impl<A: RowApplication> Inner<A> {
                 validate_backlink(&predecessor.header, &operation.header)
                     .map_err(|_| denied("invalid log predecessor"))?;
             }
-            if !bundle.contains(id)
-                && !matches!(
-                    self.status(*id).await?,
-                    ReceiveStatus::Applied | ReceiveStatus::Abandoned
-                )
-            {
-                return Ok(false);
+            if !bundle.contains(id) {
+                match self.status(*id).await? {
+                    ReceiveStatus::Applied | ReceiveStatus::Abandoned => {}
+                    ReceiveStatus::Held if self.visible_held_in_workspace(&predecessor)? => {}
+                    _ => return Ok(false),
+                }
             }
         }
         Ok(true)

@@ -43,7 +43,12 @@ impl<A: RowApplication> Inner<A> {
     /// them, in application order. Nothing but one batch is held in memory.
     pub(super) async fn rebuild_rows(&self, scope: ResourceScope) -> Result<(), Error> {
         let id = self.scope_id(scope).await?;
-        let (mut cursor, mut sets) = match self.checkpoint_record(id, true).await? {
+        let base = if self.rebuilding_tip {
+            None
+        } else {
+            self.checkpoint_record(id, true).await?
+        };
+        let (mut cursor, mut sets) = match base {
             Some(record) => {
                 self.verify_record(scope, &record)?;
                 (record.position, record.sets)
@@ -71,6 +76,9 @@ impl<A: RowApplication> Inner<A> {
             .execute("DELETE FROM secure_rows WHERE scope=?", [blob.clone()])
             .await?;
         for table in ["secure_checkpoint_rows", "secure_checkpoint_scratch"] {
+            if self.rebuilding_tip && table == "secure_checkpoint_rows" {
+                continue;
+            }
             self.conn
                 .execute(
                     format!("INSERT OR REPLACE INTO secure_rows SELECT ?,row,fields,X'' FROM {table} WHERE scope=?"),

@@ -190,7 +190,7 @@ pub enum MigrationStatus {
 /// How the schema the application declares stands to the installed
 /// generation's. An application behind or ahead of its database still
 /// opens it; its statements on what differs fail. See
-/// `docs/runtime/generations.md#adopting-newer-generations`.
+/// `docs/runtime/generations.md#peer-discovery`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredSchema {
@@ -374,6 +374,7 @@ pub struct PeerReconciliation {
     pub transfers: Vec<ScopeReconciliationTransfer>,
     pub refused: Vec<ScopeStatus>,
     pub waiting: Vec<ScopeStatus>,
+    /// Always false: peer discovery never upgrades the installed workspace.
     pub upgrade_required: bool,
     pub retry_pending: bool,
 }

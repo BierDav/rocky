@@ -114,10 +114,8 @@ impl Transfer {
 
 /// Pushes what the peer lacks and pulls what this device lacks, for every
 /// scope, until both hold the same frames.
-/// Returns whether another generation requires an upgrade, whether another
-/// pass is needed and what moved. A peer may run a newer definition
-/// generation, whose credentials this device cannot verify: it pulls, and
-/// its own changes wait until it upgrades. See `docs/runtime/generations.md`.
+/// Returns whether another pass is needed and what moved. Frames outside
+/// the followed tip return an admission error and never trigger adoption.
 /// `first` is a session already open with the peer, which rows use first.
 pub(crate) async fn reconcile(
     replica: &EncryptedReplica<TypedRows>,
@@ -125,7 +123,7 @@ pub(crate) async fn reconcile(
     scopes: &[ResourceScope],
     progress: impl Fn(bool),
     first: Option<NativeSession>,
-) -> Result<(bool, bool, Transfer), Failure> {
+) -> Result<(bool, Transfer), Failure> {
     let mut transfer = Transfer::default();
     let rows_result = Box::pin(rows(
         replica,
@@ -136,16 +134,13 @@ pub(crate) async fn reconcile(
         first,
     ))
     .await;
-    let newer = match rows_result {
-        Ok(newer) => newer,
-        Err(error) => {
-            upstream
-                .observations
-                .record_partial(upstream.peer.to_hex(), transfer);
-            return Err(error);
-        }
-    };
-    Ok((newer, false, transfer))
+    if let Err(error) = rows_result {
+        upstream
+            .observations
+            .record_partial(upstream.peer.to_hex(), transfer);
+        return Err(error);
+    }
+    Ok((false, transfer))
 }
 /// One scope of a bootstrap: the checkpoint its peer offered and the
 /// stored rows it holds, which progress counts.
@@ -347,14 +342,22 @@ async fn rows(
     progress: impl Fn(bool),
     transfer: &mut Transfer,
     mut first: Option<NativeSession>,
-) -> Result<bool, Failure> {
-    let mut newer = false;
+) -> Result<(), Failure> {
     for _ in 0..SESSIONS {
         let mut session = match first.take() {
             Some(session) => session,
             None => session(replica, upstream).await?,
         };
+        session.sync_tip_graph(replica).await?;
         let mut exhausted = false;
+        if !replica.tip_statements(None, 1).await?.is_empty() {
+            for scope in scopes {
+                if session.sync_held_changes(replica, *scope, QUOTA).await? {
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
         let exchange = session.changed_scopes(replica, scopes).await?;
         transfer.refuse(&exchange.refused);
         // An importing peer takes the checkpoint, not this device's history.
@@ -402,14 +405,7 @@ async fn rows(
                 exhausted = true;
                 break;
             }
-            // Refused locally before anything is sent: the session goes on.
-            let pushed = match session.push(replica, *scope, QUOTA).await {
-                Err(rocky_secure::Error::Incompatible(_)) => {
-                    newer = true;
-                    Default::default()
-                }
-                other => other?,
-            };
+            let pushed = session.push(replica, *scope, QUOTA).await?;
             // The peer restores this scope from a checkpoint; others go on.
             if pushed.behind {
                 transfer.wait(&[*scope]);
@@ -428,15 +424,10 @@ async fn rows(
             }
             for scope in scopes {
                 // A refused scope is not exchanged with this peer at all.
-                // A statement of a newer generation is acknowledged after
-                // this device adopts it.
                 if !exchange.refused.contains(scope) {
-                    match session.acknowledge_mergeable_horizon(replica, *scope).await {
-                        Err(rocky_secure::Error::Incompatible(_)) => newer = true,
-                        other => {
-                            other?;
-                        }
-                    }
+                    session
+                        .acknowledge_mergeable_horizon(replica, *scope)
+                        .await?;
                 }
                 if replica.can_finalize_horizon(*scope).await?
                     && let Some(signed) = replica.admitted_horizon(*scope).await?
@@ -459,7 +450,7 @@ async fn rows(
         }
         session.close().await?;
         if !exhausted {
-            return Ok(newer);
+            return Ok(());
         }
     }
     Err("sync exceeded its session budget; it continues on the next sync".into())

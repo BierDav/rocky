@@ -8,6 +8,11 @@ adopts the generation, the change is held whole, its frames are voided and
 its effects rolled back; a newer application version re-authors or drops it.
 [Decision 0069](../decisions/0069-held-changes-and-void-records.md) records why.
 
+Sealed-tip late writes and abandoned bookmark lines also produce held changes.
+Their original signed frames are syncable by every readable holder; see
+[tips and bookmarks](tips-and-bookmarks.md#late-and-held-writes). The void rules
+below apply to never-offered local removal changes.
+
 ## What is held
 
 A frame counts as *offered* once it may have left the device: a range or
@@ -58,7 +63,7 @@ backlink and clock.
 
 Range pages, pushes on sessions and live links, and transfer pages carry the
 records their frames continue after. The file identity is
-`rocky.encrypted-replica.v21` and link handshake `rocky.link.v6`, as
+`rocky.encrypted-replica.v23` and link handshake `rocky.link.v7`, as
 [coordinated writes](coordinated-writes.md) set them; other versions are
 refused.
 

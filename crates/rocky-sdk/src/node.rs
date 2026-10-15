@@ -1874,7 +1874,7 @@ impl Node {
         &self,
         peer: PublicKey,
         before: Option<Reached>,
-        result: &Result<(bool, bool, sync::Transfer), Failure>,
+        result: &Result<(bool, sync::Transfer), Failure>,
     ) {
         let peer_hex = peer.to_hex();
         let (before, refused_before, waiting_before) = match before {
@@ -1891,7 +1891,7 @@ impl Node {
                     );
                 }
             }
-            Ok((_, _, transfer)) => {
+            Ok((_, transfer)) => {
                 if !matches!(before, Some(None)) {
                     self.activity
                         .record("peer_reconciliation_completed", json!({"peer": peer_hex}));
@@ -2402,9 +2402,7 @@ impl Node {
                     );
                     let error = result.as_ref().err().map(ToString::to_string);
                     let (refused, waiting) = match &result {
-                        Ok((_, _, transfer)) => {
-                            (transfer.refused.clone(), transfer.waiting.clone())
-                        }
+                        Ok((_, transfer)) => (transfer.refused.clone(), transfer.waiting.clone()),
                         Err(_) => (Vec::new(), Vec::new()),
                     };
                     let before = self.reached()?.insert(
@@ -2416,16 +2414,16 @@ impl Node {
                             waiting,
                             held: result
                                 .as_ref()
-                                .map(|(_, _, transfer)| transfer.held.clone())
+                                .map(|(_, transfer)| transfer.held.clone())
                                 .unwrap_or_default(),
                         },
                     );
-                    if let Ok((_, _, transfer)) = &result {
+                    if let Ok((_, transfer)) = &result {
                         covered.extend(transfer.held.iter().copied());
                     }
                     self.record_reach(peer, before, &result);
                     // A finalized horizon may leave an earlier manifest unnamed.
-                    if result.as_ref().is_ok_and(|(_, _, transfer)| {
+                    if result.as_ref().is_ok_and(|(_, transfer)| {
                         transfer.scopes.iter().any(|(_, moved)| moved.finalized)
                     }) {
                         self.forget_generations().await?;
@@ -2437,7 +2435,7 @@ impl Node {
             if let Some(statement) = self.settings.lock().await.revocation(&self.path)? {
                 return Err(Box::new(crate::enrollment::Revoked(statement)));
             }
-            let failed = |result: &Result<(bool, bool, sync::Transfer), Failure>| {
+            let failed = |result: &Result<(bool, sync::Transfer), Failure>| {
                 result
                     .as_ref()
                     .is_err_and(|error| !error.is::<ServiceError>())
@@ -2470,7 +2468,7 @@ impl Node {
                 }
                 // Without a renewal, a sync that stopped for learned
                 // statements still moves its rows; new keys wait.
-                let learned = |result: &Result<(bool, bool, sync::Transfer), Failure>| {
+                let learned = |result: &Result<(bool, sync::Transfer), Failure>| {
                     result
                         .as_ref()
                         .is_err_and(|error| error.is::<sync::Learned>())
@@ -2502,7 +2500,7 @@ impl Node {
             }
             break;
         }
-        let (mut connected, mut first, mut newer, mut retry) = (0, None, false, false);
+        let (mut connected, mut first, mut retry) = (0, None, false);
         for (peer, _, generation, result) in results {
             {
                 let mut retries = self.retries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2510,11 +2508,11 @@ impl Node {
                     && state.generation == generation
                 {
                     match &result {
-                        Ok((_, false, _)) => {
+                        Ok((false, _)) => {
                             state.retry.reset();
                             state.pending = false;
                         }
-                        Ok((_, true, _)) => {
+                        Ok((true, _)) => {
                             state.pending = true;
                             state.retry.failed();
                         }
@@ -2527,9 +2525,8 @@ impl Node {
                 }
             }
             match result {
-                Ok((behind, pending, _)) => {
+                Ok((pending, _)) => {
                     connected += 1;
-                    newer |= behind;
                     retry |= pending;
                 }
                 Err(error) => {
@@ -2542,11 +2539,6 @@ impl Node {
             Some(error) if connected == 0 => Ok((
                 json!({"state":"unavailable", "error":error.to_string()}),
                 true,
-            )),
-            // A peer runs a newer generation: local changes wait for an upgrade.
-            _ if newer => Ok((
-                json!({"state": "connected", "peers": connected, "upgrade": true}),
-                retry,
             )),
             _ => Ok((json!({"state": "connected", "peers": connected}), retry)),
         }
@@ -2731,10 +2723,10 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+    ) -> Result<(bool, sync::Transfer), Failure> {
         let _ = self.observations.partial_transfer(&peer.to_hex());
         let mut result = self.reconcile_observed(transport, peer, contact).await;
-        if let Ok((_, _, transfer)) = &mut result
+        if let Ok((_, transfer)) = &mut result
             && let Some(partial) = self.observations.partial_transfer(&peer.to_hex())
         {
             transfer.extend(partial);
@@ -2746,7 +2738,7 @@ impl Node {
         transport: &dyn Transport,
         peer: PublicKey,
         contact: &Contact,
-    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+    ) -> Result<(bool, sync::Transfer), Failure> {
         let mut result = Err("link authority kept changing during reconciliation".into());
         for _ in 0..4 {
             let revocations = self.replica.revocation_digest().await?;
@@ -2911,30 +2903,12 @@ impl Node {
         peer: PublicKey,
         contact: &Contact,
         attempt: &mut crate::status::Attempt,
-    ) -> Result<(bool, bool, sync::Transfer), Failure> {
+    ) -> Result<(bool, sync::Transfer), Failure> {
         let service = self
             .current()
             .ok_or(ServiceError::NetworkRequired("sync"))?;
         let revocations = self.replica.revocation_digest().await?;
-        let link = match self.request_link(transport, peer, contact).await {
-            Ok(link) => link,
-            // The peer's credentials name a generation this replica lacks:
-            // adopt or learn it first, then sync again.
-            Err(error)
-                if matches!(
-                    error.downcast_ref(),
-                    Some(rocky_secure::Error::Incompatible(_))
-                ) =>
-            {
-                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
-                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
-                {
-                    return Ok((false, true, sync::Transfer::default()));
-                }
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        };
+        let link = self.request_link(transport, peer, contact).await?;
         attempt.stage(crate::AttemptStage::Reconciliation);
         let _short = service.live.short(peer);
         let renewable = {
@@ -2959,24 +2933,11 @@ impl Node {
         // hold the shared checkpoint import slot.
         let mut first = match self.deliver(&upstream).await {
             Ok(delivered) => Some(delivered),
-            // An envelope of a generation this replica lacks ends the
-            // exchange as a frame of it does: adopt or learn it first.
-            Err(error)
-                if matches!(
-                    error.downcast_ref(),
-                    Some(rocky_secure::Error::Incompatible(_))
-                ) =>
-            {
+            Err(error) => {
                 let _ = reconcile.close().await;
                 let _ = upstream.link.drain().await;
-                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
-                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
-                {
-                    return Ok((false, true, sync::Transfer::default()));
-                }
                 return Err(error);
             }
-            Err(error) => return Err(error),
         };
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
@@ -3009,24 +2970,12 @@ impl Node {
                 self.observations
                     .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
                 let completed = match completed {
-                    // A checkpoint of a generation this replica lacks: adopt
-                    // or learn it first, as for a frame of it.
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref(),
-                            Some(rocky_secure::Error::Incompatible(_))
-                        ) =>
-                    {
+                    Err(error) => {
                         let _ = reconcile.close().await;
                         let _ = upstream.link.drain().await;
-                        if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
-                            || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
-                        {
-                            return Ok((false, true, sync::Transfer::default()));
-                        }
                         return Err(error);
                     }
-                    other => other?,
+                    Ok(completed) => completed,
                 };
                 if let Some(completed) = completed {
                     self.replica.flush().await?;
@@ -3072,49 +3021,26 @@ impl Node {
             first,
         )
         .await;
-        // Something of a newer generation, such as its horizon statement,
-        // ends the exchange: this device adopts the generation first.
-        let (newer, retry, transfer) = match reconciled {
-            Err(error)
-                if matches!(
-                    error.downcast_ref(),
-                    Some(rocky_secure::Error::Incompatible(_))
-                ) =>
-            {
+        let (retry, transfer) = match reconciled {
+            Err(error) => {
                 let _ = reconcile.close().await;
                 let _ = upstream.link.drain().await;
-                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
-                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
-                {
-                    return Ok((false, true, sync::Transfer::default()));
-                }
                 return Err(error);
             }
-            other => other?,
+            Ok(reconciled) => reconciled,
         };
         bootstrapped.extend(transfer);
         self.observations
             .record_partial(peer.to_hex(), bootstrapped);
         reconcile.close().await?;
         upstream.link.drain().await?;
-        // A peer on a newer generation: this database moves to it, and the
-        // next pass syncs at it.
-        if newer {
-            let adopted = self.adopt_newer(transport, peer, contact).await;
-            // A peer under an older generation this replica lacks.
-            if matches!(adopted, Ok(true))
-                || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
-            {
-                return Ok((false, true, sync::Transfer::default()));
-            }
-            adopted?;
-        } else if let Err(error) = self.compare_baselines(transport, peer, contact).await {
+        if let Err(error) = self.compare_baselines(transport, peer, contact).await {
             self.activity.record(
                 "baseline_unknown",
                 json!({"peer": peer.to_hex(), "error": error.to_string()}),
             );
         }
-        Ok((newer, retry, sync::Transfer::default()))
+        Ok((retry, sync::Transfer::default()))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
     /// and enrollment. Synchronization runs on live links.

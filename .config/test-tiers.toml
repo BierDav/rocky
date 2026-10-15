@@ -177,7 +177,7 @@ expires = 2026-11-30
 # Accepted over-budget test (features_09 phases 10 and 11 merged). Measured alone
 # on the reference host (2026-10-15); it was 1.98s before the merge.
 [[exception]]
-test = "rocky-sdk::removal devices_that_reach_a_readded_field_by_different_steps_agree_on_it"
+test = "rocky-sdk::removal devices_that_explicitly_open_a_readded_field_agree_on_it"
 limit = "3s"
 measured = "2.04s"
 cause = "Six devices cross three generations, each joining and syncing; device setup and adoption are the cost."

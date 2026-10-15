@@ -47,6 +47,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             });
         }
         let inner = self.inner.lock().await;
+        inner.same_tip_peer(peer)?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         if !inner.can_read_key(scope, &grants) {
             return Err(denied("remote read needs whole-scope read authority"));

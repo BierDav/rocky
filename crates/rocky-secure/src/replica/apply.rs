@@ -339,6 +339,17 @@ impl<A: RowApplication> Inner<A> {
         self.store_scope_state(id, sets.rows, sets.tombstones, &sets.digest, applied + 1)
             .await?;
         self.note_applied(id, &operation).await?;
+        if let Some(held) = payload.reauthors() {
+            if payload.membership().is_none() {
+                return Err(denied("held re-authoring requires a transaction bundle"));
+            }
+            let authority = self.verify_chain(
+                frame.chain()?.credentials(),
+                operation.header.public_key,
+                now()?,
+            )?;
+            self.record_held_resolution(held, &authority).await?;
+        }
         self.conn
             .execute(
                 "UPDATE secure_operations SET status='applied' WHERE hash=?",

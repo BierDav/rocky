@@ -69,6 +69,8 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| denied("empty mutation"))?
             .change
             .scope;
+        self.ensure_tip_writable(scope.domain)?;
+        self.ensure_tip_restored().await?;
         self.ensure_horizon_writable(scope).await?;
         let partition = self
             .app
@@ -334,7 +336,12 @@ impl<A: RowApplication> Inner<A> {
             })
             .cloned()
             .collect();
-        Box::pin(self.author_existence(scope, &effective)).await?;
+        Box::pin(self.author_existence(
+            scope,
+            &effective,
+            frame.operation()?.header.extensions.author_sequence,
+        ))
+        .await?;
         self.write_materialized(&frame, materialized).await?;
         self.conn
             .execute(
@@ -343,6 +350,7 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         self.record_unoffered(operation.hash, writes).await?;
+        self.conn.execute("INSERT INTO secure_node_tips VALUES(?,?,?) ON CONFLICT(scope,node) DO UPDATE SET tip=excluded.tip", [encode(&scope.domain)?, signing_key.public_key().as_bytes().to_vec(), encode(&self.tip)?]).await?;
         self.record_key(key).await?;
         Ok(frame)
     }

@@ -532,6 +532,7 @@ impl Handle {
             offered: admission.offered.clone(),
             served_frames: Default::default(),
             entry: None,
+            tip_incoming: Vec::new(),
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,

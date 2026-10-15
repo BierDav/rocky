@@ -11,6 +11,12 @@ defines the request lifecycle. Pair, Renew and Command retain their own streams.
 `rocky/link/3` reuses credential admission, revocation exchange and
 session-bound holding proofs, with a distinct signed handshake identity.
 The signed hello uses handshake version 7 and names the sender's followed tip.
+After revocation admission, every peer exchanges the complete
+[tip graph](seal-statements.md), regardless of its followed tip. Equal graph
+digests skip transfer; differing graphs travel in pages of at most 32 statements.
+The receiver verifies the complete union before accepting it, so dependencies
+may occur in later pages. Both sides then declare their updated followed tips
+before row requests begin.
 Other handshake versions are refused. Every data request retains the native authorization,
 page, chain, dependency and transaction checks. A changed authority ends the link.
 A handshake that learns authority changes sends a signed authority close and

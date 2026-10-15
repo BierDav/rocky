@@ -63,8 +63,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let mut inner = self.inner.lock().await;
         inner.flush()?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
-        // A peer of an earlier generation is sent nothing it cannot admit.
-        let reach = inner.generation_of(inner.manifest_of_tip(inner.peer_tip(peer))?, true)?;
+        inner.same_tip_peer(peer)?;
         if scopes.is_empty()
             || scopes.len() > 64
             || byte_quota == 0
@@ -126,11 +125,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 last = Some(id);
                 continue;
             }
-            let manifest = inner.manifest_of_tip(frame.operation()?.header.extensions.tip)?;
-            if inner
-                .generation_of(manifest, false)
-                .is_ok_and(|made| made > reach)
-            {
+            if !inner.visible_in_workspace(&frame.operation()?)? {
                 last = Some(id);
                 continue;
             }

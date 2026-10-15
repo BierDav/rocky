@@ -306,6 +306,7 @@ struct BundleBody {
     proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
     carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
+    reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
 }
 #[derive(Serialize, Deserialize)]
@@ -323,6 +324,7 @@ pub(crate) struct RowPayload {
     proofs: BTreeMap<Commitment, crate::replica::moves::CreationProof>,
     carried: BTreeMap<Commitment, crate::replica::moves::Carried>,
     membership: Option<Membership>,
+    reauthors: Option<Commitment>,
     writes: Vec<RowWrite>,
     creations: Vec<(Commitment, Commitment)>,
     basis: Option<(u64, Commitment)>,
@@ -347,7 +349,7 @@ impl RowPayload {
         }
         let body: Version = p2panda_core::cbor::decode_cbor(envelope.body.as_slice())
             .map_err(|_| denied("unsupported bundle version"))?;
-        if body.version != 4 {
+        if body.version != 5 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(())
@@ -370,13 +372,14 @@ impl RowPayload {
             return Err(denied("invalid creation witness envelope"));
         }
         let body: BundleBody = decode(&envelope.body)?;
-        if body.version != 4 {
+        if body.version != 5 {
             return Err(denied("unsupported bundle version"));
         }
         Ok(Self {
             proofs: body.proofs,
             carried: body.carried,
             membership: body.membership,
+            reauthors: body.reauthors,
             writes: body.writes,
             creations: envelope.creations,
             basis: envelope.basis,
@@ -385,21 +388,34 @@ impl RowPayload {
     }
     pub(crate) fn rows(changes: &[RowChange]) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 4,
+            version: 5,
             proofs: BTreeMap::new(),
             carried: BTreeMap::new(),
             membership: None,
+            reauthors: None,
             writes: changes.iter().cloned().map(RowWrite::changed).collect(),
         })
     }
     pub(crate) fn bundle(membership: Membership, writes: Vec<RowWrite>) -> Result<Vec<u8>, Error> {
         encode(&BundleBody {
-            version: 4,
+            version: 5,
             proofs: BTreeMap::new(),
             carried: BTreeMap::new(),
             membership: Some(membership),
+            reauthors: None,
             writes,
         })
+    }
+    pub(crate) fn reauthor_body(
+        bytes: Vec<u8>,
+        held: Option<Commitment>,
+    ) -> Result<Vec<u8>, Error> {
+        let mut body: BundleBody = decode(&bytes)?;
+        body.reauthors = held;
+        encode(&body)
+    }
+    pub(crate) fn reauthors(&self) -> Option<Commitment> {
+        self.reauthors
     }
     pub(crate) fn witness(
         body: Vec<u8>,

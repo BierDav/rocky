@@ -207,13 +207,14 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         partition: None,
     };
     for (envelope_version, body_version, message) in [
-        (0, 4, "unsupported creation witness format"),
-        (2, 4, "unsupported creation witness format"),
+        (0, 5, "unsupported creation witness format"),
+        (2, 5, "unsupported creation witness format"),
         (1, 0, "unsupported bundle version"),
         (1, 1, "unsupported bundle version"),
         (1, 2, "unsupported bundle version"),
         (1, 3, "unsupported bundle version"),
-        (1, 5, "unsupported bundle version"),
+        (1, 4, "unsupported bundle version"),
+        (1, 6, "unsupported bundle version"),
     ] {
         let plaintext = encode(&Envelope {
             version: envelope_version,

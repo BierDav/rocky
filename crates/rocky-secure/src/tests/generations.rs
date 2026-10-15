@@ -459,19 +459,16 @@ async fn frames(
     target: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
 ) -> Vec<EncryptedFrame> {
-    let (node, credentials, manifest) = {
+    let (node, credentials, tip) = {
         let inner = target.inner.lock().await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
-            inner.manifest,
+            inner.tip,
         )
     };
-    // As the target's session hello declares its generation.
-    source
-        .admit_peer(node, &credentials, rocky_credentials::genesis_tip(manifest))
-        .await
-        .unwrap();
+    // As the target's session hello declares its followed tip.
+    source.admit_peer(node, &credentials, tip).await.unwrap();
     frames_as(source, node, &credentials, scope).await
 }
 /// Every frame a node presenting `credentials` may receive from `source`.
@@ -628,7 +625,7 @@ async fn an_uninterrupted_local_plan_switches_while_reads_continue() {
 }
 
 #[tokio::test]
-async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
+async fn a_signed_upgrade_keeps_local_work_and_refuses_another_tip() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let (alice_key, bob_key) = (PrivateKey::new(), PrivateKey::new());
@@ -713,129 +710,35 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
         .unwrap();
     drop(writer);
 
-    // Bob, still at generation 1, receives Alice's pending generation 1
-    // row with its original bytes, and nothing of generation 2.
-    let sent = frames(&alice, &bob, items).await;
-    assert_eq!(sent.len(), 2);
-    let mut statuses = Vec::new();
-    for frame in sent {
-        statuses.push(bob.receive(frame).await.unwrap());
-    }
-    assert!(statuses.contains(&ReceiveStatus::Applied));
-    assert_eq!(
-        select(&bob, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(3)]]
-    );
-    // Bob's own generation 1 write is admitted by Alice. Bob cannot verify
-    // generation 2 credentials; Alice pulls with the ones she had before.
-    identity_insert(
-        &session(&bob).await,
-        "INSERT INTO items VALUES('0200','from bob')",
-        vec![],
-    )
-    .await
-    .unwrap();
-    let earlier = lineage.credentials(1, &alice_key);
-    for frame in frames_as(&bob, alice_key.public_key(), &earlier, items).await {
-        alice.receive(frame).await.unwrap();
-    }
-    assert_eq!(
-        select(&alice, "SELECT title,note FROM items WHERE key='0200'").await,
-        vec![vec![text("from bob"), SqlValue::Null]]
-    );
-    // A generation 2 frame forced on Bob is refused, and admitted once he
-    // upgrades.
-    let newer: Vec<_> = {
-        let inner = alice.inner.lock().await;
-        let (node, credentials) = (
-            inner.config.node.public_key(),
-            inner.config.credentials.clone(),
-        );
-        drop(inner);
-        alice
-            .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
-            .await
-            .unwrap()
-            .frames
-    };
-    let mut refused = 0;
-    for frame in newer {
-        if bob.receive(frame).await.is_err() {
-            refused += 1;
-        }
-    }
-    assert_eq!(refused, 1, "only the generation 2 frame is refused");
-    assert_eq!(
-        select(&bob, "SELECT count(*) FROM items").await,
-        vec![vec![SqlValue::Integer(4)]]
-    );
-    bob.audit(items).await.unwrap();
-    let bob_path = dir.path().join("bob.db");
-    drop(bob);
-    let bob = lineage
-        .open(&bob_path, &bob_key, 2, Some(lineage.upgrade(1, 2)))
+    // A peer's older schema does not move its followed tip. No frame is
+    // offered across these tips, including Alice's unsent earlier writes.
+    let credentials = lineage.credentials(1, &bob_key);
+    alice
+        .admit_peer(bob_key.public_key(), &credentials, bob.followed_tip().await)
         .await
         .unwrap();
-    bob.audit(items).await.unwrap();
-    for frame in frames(&alice, &bob, items).await {
-        bob.receive(frame).await.unwrap();
-    }
-    bob.audit(items).await.unwrap();
+    assert!(matches!(
+        alice
+            .transfer_page(
+                bob_key.public_key(),
+                &credentials,
+                &[items],
+                None,
+                MAX_SECURE_FRAME
+            )
+            .await,
+        Err(Error::Rejected(_))
+    ));
     assert_eq!(
-        select(&bob, "SELECT note FROM items WHERE key='0100'").await,
+        select(&bob, "SELECT count(*) FROM items").await,
+        vec![vec![SqlValue::Integer(2)]]
+    );
+    assert_eq!(
+        select(&alice, "SELECT note FROM items WHERE key='0100'").await,
         vec![vec![text("with a note")]]
     );
-    // Reopening at generation 2 needs no upgrade; the audit replays the
-    // mixed history.
-    drop(bob);
-    let bob = lineage.open(&bob_path, &bob_key, 2, None).await.unwrap();
-    bob.audit(items).await.unwrap();
-
-    // Generation 3 has no admission horizon: a device two generations
-    // behind keeps syncing with its generation 1 credentials.
-    let carol_key = PrivateKey::new();
-    let carol = lineage
-        .open(&dir.path().join("carol.db"), &carol_key, 1, None)
-        .await
-        .unwrap();
-    identity_insert(
-        &session(&carol).await,
-        "INSERT INTO items VALUES('0300','older')",
-        vec![],
-    )
-    .await
-    .unwrap();
-    drop(alice);
-    let alice = lineage
-        .open(&alice_path, &alice_key, 3, Some(lineage.upgrade(2, 3)))
-        .await
-        .unwrap();
-    assert_eq!(alice.generations().await.unwrap().previous.len(), 2);
-    let older = frames_as(&carol, alice_key.public_key(), &earlier, items).await;
-    assert_eq!(older.len(), 1);
-    for frame in older {
-        assert_eq!(alice.receive(frame).await.unwrap(), ReceiveStatus::Applied);
-    }
-    let (node, credentials) = {
-        let inner = carol.inner.lock().await;
-        (
-            inner.config.node.public_key(),
-            inner.config.credentials.clone(),
-        )
-    };
-    alice
-        .transfer_page(node, &credentials, &[items], None, MAX_SECURE_FRAME)
-        .await
-        .unwrap();
-    let second = lineage.credentials(2, &alice_key);
-    for frame in frames_as(&bob, alice_key.public_key(), &second, items).await {
-        alice.receive(frame).await.unwrap();
-    }
     alice.audit(items).await.unwrap();
-    assert_eq!(
-        select(&alice, "SELECT count(*), max(rank) FROM items").await,
-        vec![vec![SqlValue::Integer(6), SqlValue::Null]]
-    );
+    bob.audit(items).await.unwrap();
 }
 
 #[tokio::test]
@@ -1086,7 +989,7 @@ async fn an_open_replica_adopts_a_newer_generation_in_place() {
     for frame in newer {
         assert!(matches!(
             alice.receive(frame).await,
-            Err(Error::Incompatible(_))
+            Err(Error::Rejected(message)) if message.contains("does not follow")
         ));
     }
     let mut observer = alice.observe_tables(None).await.unwrap();
@@ -1230,7 +1133,7 @@ async fn one_schema_signed_apart_is_one_generation_with_the_earliest_baseline() 
 }
 
 #[tokio::test]
-async fn an_older_generation_the_replica_lacks_is_learned_before_its_frames_apply() {
+async fn learning_an_older_generation_does_not_admit_its_tip() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
@@ -1261,7 +1164,7 @@ async fn an_older_generation_the_replica_lacks_is_learned_before_its_frames_appl
     for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
         assert!(matches!(
             alice.receive(frame).await,
-            Err(Error::Incompatible(_))
+            Err(Error::Rejected(message)) if message.contains("does not follow")
         ));
     }
     // Another publisher's steps, or none that lead to a known generation,
@@ -1290,15 +1193,15 @@ async fn an_older_generation_the_replica_lacks_is_learned_before_its_frames_appl
     assert_eq!(status.current.schema, 3);
     assert_eq!(status.previous.len(), 2);
     for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
-        alice.receive(frame).await.unwrap();
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Rejected(message)) if message.contains("does not follow")
+        ));
     }
-    assert_eq!(
-        select(&alice, "SELECT title, note, rank FROM items").await,
-        vec![vec![
-            text("from generation 1"),
-            SqlValue::Null,
-            SqlValue::Null
-        ]]
+    assert!(
+        select(&alice, "SELECT title, note, rank FROM items")
+            .await
+            .is_empty()
     );
 }
 
@@ -1427,23 +1330,30 @@ async fn a_generation_removes_a_field_and_a_table_on_every_replica_that_adopts_i
     alice.checkpoint(items).await.unwrap();
     assert!(!holds(&alice, "secure_checkpoint_rows", note).await);
 
-    // A device still at generation 3 writes a kept and a removed field:
-    // the kept one applies, the removed one is ignored.
+    // A device still at generation 3 follows another tip. Neither its
+    // kept fields nor its removed fields are admitted.
     write(
         &carol,
         "UPDATE items SET title='uno', note='carol' WHERE key='0001'",
     )
     .await;
     write(&carol, "UPDATE tags SET label='other'").await;
-    deliver(&carol, &alice, &alice_key, &lineage, 3, items).await;
-    deliver(&carol, &alice, &alice_key, &lineage, 3, tags).await;
+    let credentials = lineage.credentials(3, &alice_key);
+    for scope in [items, tags] {
+        for frame in frames_as(&carol, alice_key.public_key(), &credentials, scope).await {
+            assert!(matches!(
+                alice.receive(frame).await,
+                Err(Error::Rejected(message)) if message.contains("does not follow")
+            ));
+        }
+    }
     assert_eq!(
         select(&alice, "SELECT title FROM items WHERE key='0001'").await,
-        vec![vec![text("uno")]]
+        vec![vec![text("one")]]
     );
     assert!(!holds(&alice, "secure_rows", note).await);
     alice.audit(items).await.unwrap();
-    // The frame stays as signed; reopening replays it the same way.
+    // Refusal survives reopening without changing the upgraded rows.
     drop(alice);
     let alice = lineage
         .open(&alice_path, &alice_key, 4, Some(lineage.upgrade(1, 4)))
@@ -1453,7 +1363,7 @@ async fn a_generation_removes_a_field_and_a_table_on_every_replica_that_adopts_i
     assert_eq!(
         select(&alice, "SELECT key,title FROM items ORDER BY key").await,
         vec![
-            vec![text("0001"), text("uno")],
+            vec![text("0001"), text("one")],
             vec![text("0002"), text("two")]
         ]
     );
@@ -1516,12 +1426,21 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
     for (target, key) in [(bob, bob_key), (carol, carol_key), (dave, dave_key)] {
         deliver(alice, target, key, &lineage, 3, items).await;
     }
-    // Dave writes before the field is added again; his frame travels late.
+    // Dave writes before the field is added again.
     write(dave, "UPDATE items SET note='early' WHERE key='0002'").await;
     let started = crate::micros().unwrap();
     let readded = started + 100_000_000;
 
-    // Alice goes 3 -> 4 -> 5; Bob goes 3 -> 5.
+    // Retain the signed writes while all devices still follow the same tip.
+    crate::CLOCK_SKEW.with(|skew| skew.set(200));
+    write(carol, "UPDATE items SET note='late' WHERE key='0001'").await;
+    crate::CLOCK_SKEW.with(|skew| skew.set(0));
+    for source in [carol, dave] {
+        deliver(source, alice, alice_key, &lineage, 3, items).await;
+        deliver(source, bob, bob_key, &lineage, 3, items).await;
+    }
+    // Alice goes 3 -> 4 -> 5; Bob goes 3 -> 5. The explicit local
+    // schema upgrade replays retained writes against the re-add baseline.
     alice
         .adopt_generation(
             lineage.app(4),
@@ -1531,13 +1450,6 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
         .await
         .unwrap();
     assert!(!holds(alice, "secure_rows", lineage.note()).await);
-    // Carol, still at 3, writes after the baseline.
-    crate::CLOCK_SKEW.with(|skew| skew.set(200));
-    write(carol, "UPDATE items SET note='late' WHERE key='0001'").await;
-    crate::CLOCK_SKEW.with(|skew| skew.set(0));
-    // Alice, at 4, ignores the field and relays the frame as signed.
-    deliver(carol, alice, alice_key, &lineage, 3, items).await;
-    deliver(alice, bob, bob_key, &lineage, 3, items).await;
     for (replica, key) in [(alice, alice_key), (bob, bob_key)] {
         replica
             .adopt_generation(
@@ -1557,7 +1469,7 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
     ];
     assert_eq!(select(alice, notes).await, expected);
     assert_eq!(select(bob, notes).await, expected);
-    // Dave's earlier write arrives now and is ignored everywhere.
+    // A repeated earlier-tip write is refused and changes no row.
     deliver(dave, alice, alice_key, &lineage, 3, items).await;
     deliver(dave, bob, bob_key, &lineage, 3, items).await;
     assert_eq!(select(alice, notes).await, expected);
@@ -1635,7 +1547,7 @@ async fn a_readded_field_ignores_earlier_writes_and_pulls_again_the_later_ones()
 }
 
 #[tokio::test]
-async fn an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame() {
+async fn a_dropped_manifest_can_be_learned_without_admitting_its_tip() {
     let lineage = Lineage::new();
     let dir = TempDir::new().unwrap();
     let (alice_key, carol_key) = (PrivateKey::new(), PrivateKey::new());
@@ -1686,7 +1598,7 @@ async fn an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame() {
     for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
         assert!(matches!(
             alice.receive(frame).await,
-            Err(Error::Incompatible(_))
+            Err(Error::Rejected(message)) if message.contains("does not follow")
         ));
     }
     let carols = GenerationStep {
@@ -1703,25 +1615,22 @@ async fn an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame() {
     let status = alice.generations().await.unwrap();
     assert_eq!(status.previous.len(), 1);
     for frame in frames_as(&carol, alice_key.public_key(), &earlier, items).await {
-        alice.receive(frame).await.unwrap();
+        assert!(matches!(
+            alice.receive(frame).await,
+            Err(Error::Rejected(message)) if message.contains("does not follow")
+        ));
     }
-    assert_eq!(
-        select(&alice, "SELECT title, note, rank FROM items").await,
-        vec![vec![
-            text("from generation 1"),
-            SqlValue::Null,
-            SqlValue::Null
-        ]]
-    );
-    // A retained frame names generation 1 now: its manifest stays.
     assert!(
-        alice
-            .drop_unreferenced_generations()
+        select(&alice, "SELECT title, note, rank FROM items")
             .await
-            .unwrap()
             .is_empty()
     );
-    assert_eq!(alice.generations().await.unwrap().previous.len(), 1);
+    // A refused frame retains no reference to the learned manifest.
+    assert_eq!(
+        alice.drop_unreferenced_generations().await.unwrap(),
+        vec![lineage.definition(1).hash()]
+    );
+    assert!(alice.generations().await.unwrap().previous.is_empty());
 }
 
 #[tokio::test]

@@ -26,12 +26,15 @@ mod delivery;
 mod entries;
 mod existence;
 mod frontiers;
+mod held;
+use held::HeldMessage;
 pub(crate) mod holdings;
 mod horizon;
 mod horizon_relay;
 use horizon_relay::HorizonRelayMessage;
 mod revocations;
 mod rows;
+mod tips;
 use chains::{ChainMessage, ChainTable};
 use checkpoints::CheckpointMessage;
 use contacts::ContactMessage;
@@ -46,6 +49,7 @@ use horizon::HorizonMessage;
 use revocations::RevocationMessage;
 use rows::RowMessage;
 pub use rows::{CatchUp, Pulled, Pushed, ScopeSync};
+use tips::TipMessage;
 
 /// The stream a session runs over. The transport adds no security the
 /// session relies on; see `docs/runtime/permissions-and-sync.md`.
@@ -134,6 +138,8 @@ enum Message {
     Chains(ChainMessage),
     LinkState(Vec<(ResourceScope, Commitment)>),
     Entries(EntryMessage),
+    HeldChanges(HeldMessage),
+    Tips(TipMessage),
 }
 macro_rules! families {
     ($($variant:ident($family:ident)),* $(,)?) => {$(
@@ -166,6 +172,8 @@ families!(
     Delivery(DeliveryMessage),
     Chains(ChainMessage),
     Entries(EntryMessage),
+    HeldChanges(HeldMessage),
+    Tips(TipMessage),
 );
 
 /// Which side of the handshake this is: the dialer sends its hello first.
@@ -197,6 +205,7 @@ pub struct NativeSession {
     served_frames: std::collections::BTreeMap<Hash, ResourceScope>,
     /// A coordinated entry the peer is sending page by page.
     entry: Option<entries::Receiving>,
+    tip_incoming: Vec<crate::TipStatement>,
     contact_requests: usize,
     contact_handed: usize,
     contact_received: usize,
@@ -378,6 +387,7 @@ impl NativeSession {
             offered: Default::default(),
             served_frames: Default::default(),
             entry: None,
+            tip_incoming: Vec::new(),
             contact_requests: 0,
             contact_handed: 0,
             contact_received: 0,
@@ -407,6 +417,9 @@ impl NativeSession {
         {
             return Err(denied(PEER_REVOKED));
         }
+        session
+            .exchange_tips(replica, side == Side::Initiator)
+            .await?;
         Ok(Some(session))
     }
     pub fn peer(&self) -> PublicKey {
@@ -558,6 +571,8 @@ impl NativeSession {
             Message::Frontiers(message) => self.answer_frontiers(replica, message).await,
             Message::Existence(message) => self.answer_existence(replica, message).await,
             Message::Entries(message) => self.answer_entries(replica, message).await,
+            Message::HeldChanges(message) => self.answer_held(replica, message).await,
+            Message::Tips(message) => self.answer_tips(replica, message).await,
             Message::Delivery(_) => Err(denied("this peer serves no envelope delivery")),
             _ => Err(denied("unexpected native request")),
         }

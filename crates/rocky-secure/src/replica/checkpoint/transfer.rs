@@ -197,6 +197,7 @@ impl<A: RowApplication> Inner<A> {
         credentials: &CredentialChain,
         scope: ResourceScope,
     ) -> Result<(), Error> {
+        self.same_tip_peer(peer)?;
         let grants = self.verify_chain_scopes(credentials, peer, now()?, &[scope])?;
         if !crate::replica::roles::holds_whole(&grants, scope) {
             return Err(denied("ciphertext custody denied"));

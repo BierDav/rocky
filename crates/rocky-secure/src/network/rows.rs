@@ -460,6 +460,7 @@ impl NativeSession {
         replica: &EncryptedReplica<A>,
         message: RowMessage,
     ) -> Result<(), Error> {
+        replica.inner.lock().await.same_tip_peer(self.peer)?;
         match message {
             RowMessage::Pull {
                 scopes,

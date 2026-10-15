@@ -11,6 +11,8 @@ WORKDIR /src
 # The workspace resolves every member manifest, so the whole repository is the
 # build context; `.dockerignore` drops everything the build does not read.
 COPY . .
+# The image has no sccache; the repository config names it as rustc-wrapper.
+ENV RUSTC_WRAPPER=
 RUN cargo build --release --locked -p rocky-coordinator --bin rocky-voter
 
 FROM debian:bookworm-slim AS runtime

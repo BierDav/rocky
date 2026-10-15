@@ -92,6 +92,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: ./source/.github/actions/setup-sccache
+        if: steps.passed.outputs.cache-hit != 'true'
+
       - name: Install the pinned lint tools
         if: steps.passed.outputs.cache-hit != 'true'
         working-directory: source
@@ -174,6 +177,9 @@ jobs:
         if: steps.passed.outputs.cache-hit != 'true'
         with:
           components: rustfmt, clippy
+
+      - uses: ./source/.github/actions/setup-sccache
+        if: steps.passed.outputs.cache-hit != 'true'
 
       - name: Configure the test profile and source cache key
         if: steps.passed.outputs.cache-hit != 'true'
@@ -592,6 +598,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: ./source/.github/actions/setup-sccache
+
       - name: Build the Android runtime and libraries
         working-directory: source
         run: |
@@ -666,6 +674,8 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
           rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
           xcrun --sdk iphonesimulator --show-sdk-path
+
+      - uses: ./source/.github/actions/setup-sccache
 
       - uses: ./source/.github/actions/setup-java
 

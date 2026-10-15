@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install the pinned sccache that `.cargo/config.toml` names as rustc-wrapper.
+version=0.18.0
+case "$(uname -s)-$(uname -m)" in
+Linux-x86_64)
+    target=x86_64-unknown-linux-musl
+    sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
+    ;;
+Linux-aarch64 | Linux-arm64)
+    target=aarch64-unknown-linux-musl
+    sha256=2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a
+    ;;
+Linux-riscv64)
+    target=riscv64gc-unknown-linux-musl
+    sha256=ee204961bae9c7033971a7a65e93e66431c8e2ca4af9123330ac3e94afacd4de
+    ;;
+Darwin-arm64)
+    target=aarch64-apple-darwin
+    sha256=308184519b646f5125289e8515b36f6ca65a13a041923994aebe702348674e8e
+    ;;
+Darwin-x86_64)
+    target=x86_64-apple-darwin
+    sha256=1dade83cc49eeb42337565eccd534b05982820a8e44b851bd7937467a18c7aef
+    ;;
+*)
+    echo "install-sccache: unsupported platform: $(uname -s) $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+destination="${RUNNER_TEMP:?}/sccache"
+mkdir -p "$destination"
+if [[ ! -x "$destination/sccache" ]]; then
+    archive="$destination/sccache.tar.gz"
+    name="sccache-v$version-$target"
+    curl --fail --silent --show-error --location \
+        --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 120 \
+        --output "$archive" "https://github.com/mozilla/sccache/releases/download/v$version/$name.tar.gz"
+    # Compare digests directly; the Gitea runner's `sha256sum -c` is unreliable.
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$archive" | cut -d' ' -f1)
+    else
+        actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+    fi
+    if [[ "$actual" != "$sha256" ]]; then
+        echo "install-sccache: checksum mismatch for $name: $actual" >&2
+        exit 1
+    fi
+    tar -xzf "$archive" -C "$destination" --strip-components=1 "$name/sccache"
+    rm -f "$archive"
+fi
+"$destination/sccache" --version
+echo "$destination" >> "${GITHUB_PATH:?GITHUB_PATH must be set by the CI runner}"

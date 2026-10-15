@@ -13,6 +13,8 @@ COPY . .
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends libclang-dev \
     && rm -rf /var/lib/apt/lists/*
+# The image has no sccache; the repository config names it as rustc-wrapper.
+ENV RUSTC_WRAPPER=
 RUN cargo build --release --locked -p rocky-sdk --bin rocky-peer
 
 FROM debian:bookworm-slim AS runtime

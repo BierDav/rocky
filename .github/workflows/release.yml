@@ -389,6 +389,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: ./source/.github/actions/setup-sccache
+
       - name: Package and qualify the SDK
         working-directory: source
         run: sdks/kotlin/gradlew -p sdks/kotlin :qualification:packaged-jvm:check
@@ -498,6 +500,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: ./source/.github/actions/setup-sccache
+
       # The Android variants of the libraries and their native runtime; the iOS
       # job publishes the modules that name them.
       - name: Publish the Android SDK to the staging repository
@@ -562,6 +566,8 @@ jobs:
           toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           rustup toolchain install "$toolchain" --profile minimal
           rustup target add --toolchain "$toolchain" aarch64-apple-ios aarch64-apple-ios-sim
+
+      - uses: ./source/.github/actions/setup-sccache
 
       - uses: Swatinem/rust-cache@v2
         with:

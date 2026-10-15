@@ -2,7 +2,7 @@
 
 ## Tooling
 
-Use rustup, Jujutsu (`jj`) and ripgrep (`rg`). `rust-toolchain.toml` pins Rust
+Use rustup, sccache, Jujutsu (`jj`) and ripgrep (`rg`). `rust-toolchain.toml` pins Rust
 1.99.0 with rustfmt and Clippy. Invoking Cargo in the repository selects it.
 Workspace crates inherit shared dependency and lint configuration.
 
@@ -15,9 +15,10 @@ Each Jujutsu workspace builds into its own `target` directories, so a full
 build costs the same space in every worktree. The `dev` profile keeps only
 line-table debug info and no incremental state (see the profile comment in
 `Cargo.toml`); restore full debug or incremental with `CARGO_PROFILE_DEV_DEBUG=2`
-or `CARGO_INCREMENTAL=1`. `sccache` is configured as the user's `rustc-wrapper`
-in `~/.cargo/config.toml`, so dependency crates compile once and are reused
-across worktrees. `scripts/clean` removes one checkout's Cargo and Kotlin/Gradle
+or `CARGO_INCREMENTAL=1`. The repository's `.cargo/config.toml` names `sccache`
+as `rustc-wrapper`, so dependency crates compile once and are reused across
+worktrees; `sccache` must be on `PATH`, and `RUSTC_WRAPPER=` (empty) builds
+without it, as the container images do. `SCCACHE_DIR` selects the cache. `scripts/clean` removes one checkout's Cargo and Kotlin/Gradle
 output, and `scripts/clean --evidence` also removes generated benchmark
 databases; run it in each worktree to reclaim space.
 
@@ -456,6 +457,9 @@ then uses two actions in `.github/actions`:
   the artifacts the job asks for (`workspace-archive`, `sdk-archive`, `peer`)
   to `$RUNNER_TEMP/build` and restores the Rust cache; `dependencies: fallback`
   restores it only when a requested artifact is missing.
+- Every job that runs Cargo uses `setup-sccache` after the toolchain: it
+  installs the pinned `sccache` (`scripts/ci/install-sccache`) and, on GitHub,
+  keeps its cache in the Actions cache; Gitea runners cache on their own disk.
 - The job's own steps run only when `steps.<id>.outputs.passed` is not `true`.
   They run the artifacts that arrived, such as
   `scripts/check --from "$RUNNER_TEMP/build"`, and build the rest.

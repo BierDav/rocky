@@ -72,6 +72,9 @@ runs:
       with:
         components: rustfmt, clippy
 
+    - uses: ./source/.github/actions/setup-sccache
+      if: steps.passed.outputs.cache-hit != 'true'
+
     - name: Download the test runner used by the build
       id: tools
       if: >-

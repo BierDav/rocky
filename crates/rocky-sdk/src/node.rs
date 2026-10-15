@@ -3654,6 +3654,14 @@ fn revoked_by(error: &Failure) -> Option<rocky_credentials::SignedRevocation> {
         _ => None,
     }
 }
+/// A replica refusal that names its own code: `sealed`,
+/// `coordinator_unavailable` and the cut refusals.
+fn cut_refusal(error: &Failure) -> Option<&rocky_secure::CutRefusal> {
+    match error.downcast_ref::<Error>()? {
+        Error::Application(error) => error.downcast_ref(),
+        _ => None,
+    }
+}
 fn horizon_pending(error: &Failure) -> Option<&rocky_secure::HorizonPending> {
     match error.downcast_ref::<Error>()? {
         Error::Application(error) => error.downcast_ref(),
@@ -3675,6 +3683,8 @@ pub fn error(error: &Failure) -> Value {
         ("revocation_set_full", false)
     } else if error.is::<Refused>() {
         ("rejected", false)
+    } else if let Some(refusal) = cut_refusal(error) {
+        (refusal.code, refusal.code == "coordinator_unavailable")
     } else if let Some(pending) = horizon_pending(error) {
         return json!({"code": "horizon_pending", "retryable": true, "message": pending.to_string()});
     } else if let Some(coordinated) = error.downcast_ref::<coordinated::Coordinated>() {
@@ -3713,15 +3723,48 @@ pub fn error(error: &Failure) -> Value {
 }
 /// A coordination service's refusal as a call's error code.
 fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {
-    use rocky_core::CoordinationError::{Backpressure, Denied, Unavailable};
+    use rocky_core::CoordinationError::{Backpressure, Denied, Sealed, Unavailable};
     match error {
         Unavailable => ("coordinator_unavailable", true),
         Backpressure => ("quota", true),
         Denied => ("denied", false),
+        Sealed => ("sealed", false),
         _ => ("rejected", false),
     }
 }
 
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+
+    fn code(failure: Failure) -> (String, bool) {
+        let value = error(&failure);
+        (
+            value["code"].as_str().unwrap_or_default().to_owned(),
+            value["retryable"].as_bool().unwrap_or_default(),
+        )
+    }
+    fn refusal(code: &'static str) -> Failure {
+        Box::new(Error::Application(Box::new(rocky_secure::CutRefusal {
+            code,
+            message: "refused".into(),
+        })))
+    }
+
+    #[test]
+    fn replica_refusals_keep_their_codes() {
+        assert_eq!(code(refusal("sealed")), ("sealed".into(), false));
+        assert_eq!(
+            code(refusal("coordinator_unavailable")),
+            ("coordinator_unavailable".into(), true)
+        );
+        for cut in ["abandoned", "cut_conflict", "cut_base_missing"] {
+            assert_eq!(code(refusal(cut)), (cut.into(), false));
+        }
+        let sealed: Failure = Box::new(rocky_core::CoordinationError::Sealed);
+        assert_eq!(code(sealed), ("sealed".into(), false));
+    }
+}
 #[cfg(test)]
 mod delivery_tests;
 #[cfg(test)]

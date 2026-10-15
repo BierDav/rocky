@@ -10,8 +10,10 @@ only devices following their tip. The design is
 
 With a [coordinated log](coordinated-log.md) configured, a seal or a move
 off an open tip first ends that tip's log
-([seals and moves](coordinated-writes.md#seals-and-moves)); a seal another node
-ended first, or one the coordinator did not confirm, is refused. Until
+([seals and moves](coordinated-writes.md#seals-and-moves)). A call whose seal
+lost to one this device already holds fails `sealed` (not retryable); one the
+coordinator did not confirm fails `coordinator_unavailable` (retryable) and
+publishes nothing. Until
 [phase 15](../features_09/15-lazy-compaction.md) a seal compacts nothing and
 the [mergeable horizon](mergeable-horizon.md) still releases evidence; until
 [phase 17](../features_09/17-schema-changes-through-seals.md) schema changes are

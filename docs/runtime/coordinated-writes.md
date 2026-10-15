@@ -92,6 +92,9 @@ tip's log with `LogTerminal { digest, continuation }` unless it ended already:
   `coordinator_unavailable`; a received seal and the statements depending on
   it wait outside the graph until a later exchange.
 
+The SDK's `tips` calls report both with these JSON codes: `sealed` is not
+retryable, `coordinator_unavailable` is.
+
 Moves need no entry of their own: a move off an open tip carries the close
 seal that ends its log, and a forward move leaves an already sealed tip.
 Deleting a bookmark leaves its tip and the tip's log open. An opening's

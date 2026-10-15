@@ -269,10 +269,8 @@ impl Node {
             }
         }
         expected(&graph)?;
-        self.replica
-            .publish_tip_statements(&statements)
-            .await
-            .map_err(refused)?;
+        // The replica's codes stay: `sealed`, `coordinator_unavailable`.
+        self.replica.publish_tip_statements(&statements).await?;
         // A move of the followed bookmark may have switched lines.
         self.ensure_tip_node().await?;
         self.observations.touch();

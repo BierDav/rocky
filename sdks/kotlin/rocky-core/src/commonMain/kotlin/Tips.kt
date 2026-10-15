@@ -14,7 +14,11 @@ class Tips internal constructor(private val client: RockyClient) {
     suspend fun status(): TipStatus = TipStatus.decode(call("status"))
     suspend fun inspect(): TipInspection = TipInspection.decode(call("inspect"))
 
-    /** Continues the followed tip and advances its bookmark, or closes it when [close] is true. */
+    /**
+     * Continues the followed tip and advances its bookmark, or closes it when [close] is true. With a coordinated
+     * log it fails [RockyException] `sealed` when another seal ended the log first and `coordinator_unavailable`
+     * (retryable) when the coordinator did not confirm; nothing is published then.
+     */
     suspend fun seal(close: Boolean = false): TipStatus = TipStatus.decode(call("seal") { put("close", close) })
 
     /** Opens a separate line on [seal]; [minimumInSync] is the domain's coordinated-log minimum, which a device cannot infer. */

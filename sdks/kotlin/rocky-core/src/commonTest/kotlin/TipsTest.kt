@@ -178,6 +178,17 @@ class TipsTest {
     }
 
     @Test
+    fun coordinatedRefusalsKeepTheirCodes() = runBlocking {
+        for ((code, retryable) in listOf("sealed" to false, "coordinator_unavailable" to true)) {
+            val tips = recordingTips { throw RockyException(code, retryable, "refused") }.second
+            val failure = assertFailsWith<RockyException> { tips.seal() }
+            assertEquals(code, failure.code)
+            assertEquals(retryable, failure.retryable)
+            assertFailsWith<RockyException> { tips.moveBookmark("main", "tip-old") }
+        }
+    }
+
+    @Test
     fun expectedReplicaFailuresStayTyped() = runBlocking {
         val tips = recordingTips { throw RockyException("unavailable", false, "tip is still followed") }.second
         val failure = assertFailsWith<RockyException> { tips.drop("tip-main") }

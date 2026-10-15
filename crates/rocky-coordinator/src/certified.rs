@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 pub const MAX_FRAME: usize = 256 * 1024;
 pub const MAX_RECORDS: usize = 4096;
 pub const MAX_STORE: usize = 32 * 1024 * 1024;
+/// The one domain control format; a control signed under another is refused.
+const CONTROL_LABEL: &str = "rocky.control.v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Voter {
@@ -24,11 +26,8 @@ pub struct DomainControl {
     pub scope: Scope,
     pub configuration: Configuration,
     pub revision: u64,
-    pub owner: PrincipalId,
-    pub executors: Vec<PublicKey>,
-    pub invokers: Vec<(PublicKey, PrincipalId)>,
-    pub schema: u32,
-    pub handler: u32,
+    /// The trusted nodes that may join the domain's coordinated log.
+    pub trusted: Vec<PublicKey>,
     pub not_before: u64,
     pub expires: u64,
 }
@@ -41,7 +40,7 @@ pub struct ControlCertificate {
 impl ControlCertificate {
     pub fn sign(control: DomainControl, issuer: &PrivateKey) -> Result<Self, CoordinationError> {
         Ok(Self {
-            signature: issuer.sign(&bytes("rocky.control.v1", &control)?),
+            signature: issuer.sign(&bytes(CONTROL_LABEL, &control)?),
             control,
             issuer: issuer.public_key(),
         })
@@ -64,25 +63,15 @@ impl ControlCertificate {
         let c = &self.control;
         if c.configuration != genesis.configuration
             || c.revision == 0
-            || c.executors.is_empty()
-            || c.executors.len() > 32
-            || c.invokers.is_empty()
-            || c.invokers.len() > 64
-            || c.schema == 0
-            || c.handler == 0
+            || c.trusted.is_empty()
+            || c.trusted.len() > crate::coordinated::TRUSTED_NODES
             || c.not_before > time
             || c.expires <= time
             || c.expires - c.not_before > genesis.max_control_lifetime
-            || c.executors.iter().collect::<BTreeSet<_>>().len() != c.executors.len()
-            || c.invokers
-                .iter()
-                .map(|(key, _)| key)
-                .collect::<BTreeSet<_>>()
-                .len()
-                != c.invokers.len()
+            || c.trusted.iter().collect::<BTreeSet<_>>().len() != c.trusted.len()
             || !self
                 .issuer
-                .verify(&bytes("rocky.control.v1", c)?, &self.signature)
+                .verify(&bytes(CONTROL_LABEL, c)?, &self.signature)
         {
             return Err(CoordinationError::Denied);
         }
@@ -181,7 +170,7 @@ pub struct CertifiedGenesis {
 impl CertifiedGenesis {
     pub fn sign(genesis: Genesis, root: &PrivateKey) -> Result<Self, CoordinationError> {
         let result = Self {
-            signature: root.sign(&bytes("rocky.genesis.v1", &genesis)?),
+            signature: root.sign(&bytes("rocky.genesis.v2", &genesis)?),
             genesis,
             root: root.public_key(),
         };
@@ -222,7 +211,7 @@ impl CertifiedGenesis {
                 .collect::<BTreeSet<_>>()
                 .len()
                 != g.authorities.len()
-            || !root.verify(&bytes("rocky.genesis.v1", g)?, &self.signature)
+            || !root.verify(&bytes("rocky.genesis.v2", g)?, &self.signature)
         {
             return Err(CoordinationError::Denied);
         }
@@ -296,7 +285,7 @@ pub struct TrustBundle {
     /// The certified genesis, as lowercase hexadecimal CBOR.
     pub genesis: String,
 }
-pub const BUNDLE_FORMAT: u32 = 1;
+pub const BUNDLE_FORMAT: u32 = 2;
 impl TrustBundle {
     pub fn new(genesis: &CertifiedGenesis) -> Result<Self, CoordinationError> {
         Ok(Self {

@@ -10,6 +10,7 @@ import org.example.examples.shopping.util.epochMillis
 import org.example.examples.shopping.util.moveDirectory
 import org.example.examples.shopping.util.removeDirectory
 import rocky.RockyDatabase
+import rocky.RolloutConfirmationRequired
 
 /** Where the app stands: setting up, opening, open, revoked, resetting, or failed. */
 sealed interface SessionState {
@@ -77,6 +78,13 @@ class ShoppingSession(private val platform: ShoppingPlatform) {
     fun retry() {
         if (state.value !is SessionState.Failed) return
         if (RockyDatabase.exists(platform.directory)) start { ShoppingNode.resume(platform) } else start(lastOpen)
+    }
+
+    /** Called only after the application showed the current report and the user agreed. */
+    fun confirmRollout(digest: String) {
+        val required = (state.value as? SessionState.Failed)?.error as? RolloutConfirmationRequired ?: return
+        if (required.report.digest != digest) return
+        start { ShoppingNode.resume(platform, digest) }
     }
 
     /** After a failed setup: removes what it left, so another code can be used. */

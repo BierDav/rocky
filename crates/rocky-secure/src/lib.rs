@@ -2,24 +2,11 @@
 //! See `docs/runtime/permissions-and-sync.md` for the supported security boundary.
 #[macro_use]
 mod transaction;
-mod admitted_command;
-pub use admitted_command::SignedCommandRequest;
 use rocky_storage::{
     capture, cursor, database, observe, scoped_connection, sql, sqlite, statement, storage,
 };
-mod command;
-pub use command::{
-    ConfirmedCommand, Custody, Delivery, EncryptedCommand, MAX_OPEN_TICKETS, Ticket, TicketResult,
-    TicketState, secure_node_id, secure_principal_id,
-};
-mod effects;
 pub mod network;
-mod recovery;
 mod replica;
-pub use effects::{EffectAttempt, EffectJob, EffectObservation, EffectOutcome, EffectState};
-pub use recovery::{
-    CustodyAck, DurabilityPolicy, RecoveryBlock, RecoveryInventory, RecoveryPackage, RecoveryReport,
-};
 mod store;
 mod wire;
 pub use replica::{
@@ -37,7 +24,7 @@ pub use replica::{
     ReceiveStatus, RemotePage, ReplicaRole, ReplicaStatus, RetentionLimits, RetentionPolicy,
     RoleConfig, ScopeFrontier, ScopeStatus, SecureCommit, SecureConfig, SecurePage, SecureRows,
     SecureSession, SecureSnapshot, SecureSql, SecureTransaction, SessionStatus, SetSummary,
-    SignedCheckpoint, SignedVoid, Slot, StrongSummary, UpdateMode, Upgrade, entry_hash,
+    SignedCheckpoint, SignedVoid, Slot, UpdateMode, Upgrade, entry_hash,
 };
 /// The credential types live in `rocky-credentials`; these are the same types.
 pub use rocky_credentials as credentials;
@@ -49,20 +36,23 @@ pub use rocky_storage::sql::{
     AbortReason, Certainty, MAX_SAVEPOINTS, MAX_TRANSACTION_TIMEOUT, SqlError, SqlOptions,
     SqlState, Unavailable,
 };
-pub use rocky_storage::{
-    CommitClass, Error, FailureReason, MAX_FRAME_BYTES, PendingReason, StorageFailure,
-};
+pub use rocky_storage::{CommitClass, Error, FailureReason, MAX_FRAME_BYTES, StorageFailure};
 use serde::{Serialize, de::DeserializeOwned};
-pub use wire::{EncryptedFrame, EncryptedPackage, PackageKind, PackageSet};
+pub use wire::{EncryptedFrame, EncryptedPackage, PackageKind};
 
 pub const MAX_SECURE_FRAME: usize = 256 * 1024;
-/// Retained command, effect and recovery artifacts. Strong payloads behind the
-/// result window are pruned; the rest are not.
-/// Row operations are bounded by `RetentionLimits` instead.
+/// Retained protocol artifacts, such as stored coordinated entries. Row
+/// operations are bounded by `RetentionLimits` instead.
 pub const MAX_SECURE_RECORDS: usize = 4096;
-/// One recovery package, the custody archives, one native session, and the
-/// default soft bound on retained row operations.
+/// One native session, and the default soft bound on retained row operations.
 pub const MAX_SECURE_BYTES: usize = 32 * 1024 * 1024;
+/// The short node identity of a device key: contacts are requested by it.
+pub fn secure_node_id(key: PublicKey) -> rocky_core::NodeId {
+    let hash = rocky_core::commitment("rocky.secure-node.v1", key.as_bytes());
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash[..16]);
+    rocky_core::NodeId(id)
+}
 fn denied(message: &str) -> Error {
     Error::Rejected(message.into())
 }
@@ -141,7 +131,7 @@ fn apply_allowed() -> bool {
 #[cfg(test)]
 mod tests;
 
-pub use replica::check_replica_format;
+pub use replica::{check_replica_format, local_row_counts};
 
 /// One-way reference used by durable peer metadata.
 pub use rocky_credentials::PeerId;

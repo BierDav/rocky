@@ -8,8 +8,8 @@ registration and tenant isolation.
 
 ## Configure and join
 
-The control certificate's executor keys currently name trusted log nodes. An
-invoker or ordinary member cannot read or mutate this log. The control authority
+The control certificate lists trusted node keys. An ordinary member cannot
+read or mutate this metadata log. The control authority
 may configure `Action::Configure { minimum }` before the first node joins. Default
 minimum: one. A control revision cannot remove an in-sync key or occur while an
 entry is pending; renew it before expiry. Removing a key that already missed a
@@ -93,7 +93,7 @@ RSS or actual encoded size. Commits cannot need more accounted capacity after an
 append. The newest 1,024 hashes occupy a 32,768-byte string; their positions are
 `commit - hashes.len() + 1` through `commit`. The running hash persists after
 older entry hashes are dropped. A retained cut adds its record and authority
-bytes plus 256. Store and snapshot format 5 holds the cut; every other format is
+bytes plus 256. Store and snapshot format 6 holds the cut; every other format is
 refused before writes. See [retention](coordinator-retention.md).
 
 ## Evidence

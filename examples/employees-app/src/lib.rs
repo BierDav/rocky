@@ -19,10 +19,8 @@ impl Employees {
             app: ApplicationManifest::app_id(self.publisher, "employees"),
             schema: 1,
             projection: 1,
-            handler: 1,
             entities: vec![],
             fields: vec![],
-            methods: vec![],
             operations: vec![],
             domains: vec![DomainRule {
                 domain: DomainId([1; 16]),
@@ -47,11 +45,6 @@ impl Employees {
                 }
             }
         }
-        manifest.methods.push(DefinitionItem {
-            id: manifest.item_id("method", "SetEmployee"),
-            name: "SetEmployee".into(),
-            shape: "employee ID, name and salary, separated by newlines".into(),
-        });
         manifest
     }
     pub fn field(&self, name: &str) -> Commitment {
@@ -123,66 +116,5 @@ impl RowApplication for Employees {
             }
         }
         Ok(())
-    }
-}
-
-impl rocky_core::RowCommandApplication for Employees {
-    fn command_resources(&self, scope: Scope, method: &str) -> Result<Vec<ResourceScope>, String> {
-        if method != "SetEmployee" || scope != self.scope(scope.mesh, false).domain {
-            return Err("unknown employee command/domain".into());
-        }
-        Ok(vec![
-            self.scope(scope.mesh, false),
-            self.scope(scope.mesh, true),
-        ])
-    }
-    fn command_invocation_scope(
-        &self,
-        scope: Scope,
-        method: &str,
-    ) -> Result<ResourceScope, String> {
-        self.command_resources(scope, method)?;
-        Ok(self.scope(scope.mesh, true))
-    }
-    fn execute_command(
-        &self,
-        method: &str,
-        arguments: &[u8],
-        state: &rocky_core::CommandRows,
-    ) -> Result<rocky_core::RowCommandOutput, String> {
-        if method != "SetEmployee" {
-            return Err("unknown employee command".into());
-        }
-        let text = std::str::from_utf8(arguments).map_err(|_| "invalid command UTF-8")?;
-        let parts: Vec<_> = text.split('\n').collect();
-        if parts.len() != 3 && parts.len() != 4 {
-            return Err("expected employee ID, name and salary".into());
-        }
-        let row = rocky_core::commitment("employees.id.v1", parts[0].as_bytes());
-        let changes = state
-            .iter()
-            .map(|(scope, rows)| RowChange {
-                scope: *scope,
-                row,
-                before: rows.get(&row).cloned(),
-                after: Some({
-                    let mut fields =
-                        if scope.table == self.definition().item_id("entity", "employees") {
-                            self.name(parts[1])
-                        } else {
-                            self.salary(parts[2])
-                        };
-                    if let Some(owner) = parts.get(3) {
-                        fields.insert(self.field("owner"), owner.as_bytes().to_vec());
-                    }
-                    fields
-                }),
-            })
-            .filter(|change| change.before != change.after)
-            .collect();
-        Ok(rocky_core::RowCommandOutput {
-            changes,
-            outputs: vec![],
-        })
     }
 }

@@ -6,6 +6,8 @@ pub const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 32_768;
 /// Maximum declared domains in one manifest.
 pub const MAX_MANIFEST_DOMAINS: usize = 4096;
+/// The one manifest body format; other bodies are refused.
+const MANIFEST_FORMAT: &[u8] = b"rocky.manifest.v2";
 
 /// Unsigned definition data. Installing this body never installs executable code.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,10 +17,8 @@ pub struct ApplicationManifest {
     pub app: AppId,
     pub schema: u32,
     pub projection: u32,
-    pub handler: u32,
     pub entities: Vec<DefinitionItem>,
     pub fields: Vec<DefinitionItem>,
-    pub methods: Vec<DefinitionItem>,
     pub operations: Vec<DefinitionItem>,
     pub domains: Vec<DomainRule>,
 }
@@ -78,7 +78,6 @@ impl ApplicationManifest {
             || self.name.is_empty()
             || self.schema == 0
             || self.projection == 0
-            || self.handler == 0
             || self.domains.is_empty()
             || self.domains.len() > MAX_MANIFEST_DOMAINS
         {
@@ -88,7 +87,6 @@ impl ApplicationManifest {
         for (kind, items) in [
             ("entity", &self.entities),
             ("field", &self.fields),
-            ("method", &self.methods),
             ("operation", &self.operations),
         ] {
             if items.len() > MAX_MANIFEST_ITEMS {
@@ -119,19 +117,14 @@ impl ApplicationManifest {
     }
     /// Little-endian counts/versions and length-prefixed UTF-8; IDs sorted by bytes.
     pub fn canonical_body(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.manifest.v1".to_vec();
+        let mut bytes = MANIFEST_FORMAT.to_vec();
         bytes.extend(self.publisher);
         put(&mut bytes, &self.name);
         bytes.extend(self.app.0);
-        for version in [self.schema, self.projection, self.handler] {
+        for version in [self.schema, self.projection] {
             bytes.extend(version.to_le_bytes());
         }
-        for items in [
-            &self.entities,
-            &self.fields,
-            &self.methods,
-            &self.operations,
-        ] {
+        for items in [&self.entities, &self.fields, &self.operations] {
             let mut items: Vec<_> = items.iter().collect();
             items.sort_by_key(|item| item.id);
             bytes.extend((items.len() as u32).to_le_bytes());
@@ -158,7 +151,7 @@ impl ApplicationManifest {
             return Err(invalid());
         }
         let mut body = Body(bytes);
-        if body.take(b"rocky.manifest.v1".len())? != b"rocky.manifest.v1" {
+        if body.take(MANIFEST_FORMAT.len())? != MANIFEST_FORMAT {
             return Err(invalid());
         }
         let publisher = body.array()?;
@@ -166,9 +159,8 @@ impl ApplicationManifest {
         let app = AppId(body.array()?);
         let schema = body.number()?;
         let projection = body.number()?;
-        let handler = body.number()?;
         let mut groups = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             let count = body.number()?;
             if count as usize > MAX_MANIFEST_ITEMS {
                 return Err(invalid());
@@ -206,10 +198,8 @@ impl ApplicationManifest {
             app,
             schema,
             projection,
-            handler,
             entities: groups.next().ok_or_else(invalid)?,
             fields: groups.next().ok_or_else(invalid)?,
-            methods: groups.next().ok_or_else(invalid)?,
             operations: groups.next().ok_or_else(invalid)?,
             domains,
         };

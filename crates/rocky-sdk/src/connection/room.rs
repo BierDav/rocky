@@ -4,7 +4,7 @@
 //! 2.8.4 writes them; anything else goes to the session, which denies
 //! pragmas and schema changes. See `docs/runtime/sql-driver.md#room-284`.
 use super::{Failure, Pending, code, failure};
-use rocky_core::{SqlValue, TypedCommands};
+use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::TableObserver;
 use rocky_secure::{Describe, SecureSql};
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ const TRIGGER: &str = "room_table_modification_trigger_";
 
 /// What an answer may consult.
 pub(super) struct Context<'a> {
-    pub sql: &'a SecureSql<TypedCommands>,
+    pub sql: &'a SecureSql<TypedRows>,
     /// The version the application declares, which is Room's database
     /// version whatever generation the database is at.
     pub version: u32,

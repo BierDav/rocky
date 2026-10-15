@@ -8,9 +8,7 @@ import kotlinx.serialization.json.*
 import rocky.internal.native.NativeDatabaseSession
 
 /** One enrolled device's secure database: the native engine, its enrollment and background sync. */
-open class RockySession internal constructor(private val nativeSession: NativeDatabaseSession, internal val client: RockyClient, override val domain: String, val isIssuer: Boolean) :
-    RuntimePort,
-    CommandPort {
+open class RockySession internal constructor(private val nativeSession: NativeDatabaseSession, internal val client: RockyClient, override val domain: String, val isIssuer: Boolean) : RuntimePort {
     private val closing = Mutex()
 
     // One SQL transaction at a time on this session.
@@ -19,7 +17,6 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     val credentials: Credentials get() = Credentials(this)
     val partitions: Partitions get() = client.partitions
     val horizons: Horizons get() = client.horizons
-    val commands: CommandPort get() = this
     suspend fun status(): DatabaseStatus = nativeCall { nativeSession.status() }
     suspend fun statusAfter(token: String): DatabaseStatus = nativeCall { nativeSession.statusAfter(token) }
     fun observeStatus(): Flow<DatabaseStatus> = client.observation {
@@ -181,7 +178,6 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
             it.getValue("revoked").jsonPrimitive.boolean,
             (it["profile"] as? JsonObject)?.let(::profile) ?: GrantProfile.Grants(emptyList()),
             it["expires"]?.jsonPrimitive?.contentOrNull?.toLong(),
-            it["command"]?.jsonPrimitive?.contentOrNull,
             (it["label"] as? JsonArray)?.map { byte -> byte.jsonPrimitive.int.toByte() }?.toByteArray(),
         )
     }
@@ -250,45 +246,6 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     /** The owner's control of this domain on its coordination service, with the tenant's control key. */
     fun service(tenant: ByteArray): ServiceOwner = ServiceOwner(this, tenant)
 
-    /** This device as a coordinator names it, to register it as an executor or a caller. */
-    suspend fun commandIdentity(): CommandIdentity = commandIdentity(client.call(request("command_identity")))
-    override suspend fun <I, A, R> submit(command: Command<I, A, R>, arguments: I, handle: String): Ticket<A, R> = command.ticket(client.call(command.submission(arguments, handle)))
-    override suspend fun <I, A, R> ticket(command: Command<I, A, R>, handle: String): Ticket<A, R>? = client.call(request("command_ticket") { put("handle", handleBytes(handle)) })
-        .takeIf { it.getValue("state").jsonPrimitive.content != "unresolved" }?.let { command.ticket(it) }
-    override suspend fun <I, A, R> cancel(command: Command<I, A, R>, handle: String): Ticket<A, R> = command.ticket(client.call(request("command_cancel") { put("handle", handleBytes(handle)) }))
-    override suspend fun <I, A, R> run(command: Command<I, A, R>, handle: String): Ticket<A, R> = command.ticket(client.call(request("command_run") { put("handle", handleBytes(handle)) }).getValue("tickets").jsonArray.single().jsonObject)
-
-    /**
-     * Tells the coordinator that this device's settled tickets reached whoever needs their results, so it
-     * retires those identities and frees their response slots. Without it, at most 32 identities per device
-     * stay outstanding until their admission window passes, and further runs fail with `quota`.
-     */
-    suspend fun acknowledgeCommands() {
-        client.call(request("command_acknowledge"))
-    }
-
-    /** One pass over every unresolved ticket; returns how many remain unresolved. */
-    suspend fun runCommands(): Int = client.call(request("command_run")).getValue("tickets").jsonArray
-        .count { it.jsonObject.getValue("state").jsonPrimitive.content !in setOf("confirmed", "applied", "cancelled", "retired", "expired") }
-
-    /** The confirmed rows of a command's table, separate from the mergeable table of the same name. */
-    suspend fun confirmedRows(table: String): ConfirmedRows = confirmedRows(client.call(request("command_rows") { put("table", table) }))
-
-    /**
-     * For an application that forwards commands itself: the signed invocation of a ticket, an executor's answer
-     * to one, and settling the ticket with that answer. Whoever forwards the bytes gains no authority over them.
-     */
-    suspend fun envelope(handle: String): ByteArray = client.call(request("command_envelope") { put("handle", handleBytes(handle)) }).blob("envelope")
-    suspend fun execute(envelope: ByteArray): ByteArray = client.call(request("command_execute") { put("envelope", bytes(envelope)) }).blob("answer")
-    suspend fun <I, A, R> settle(command: Command<I, A, R>, handle: String, answer: ByteArray): Ticket<A, R> = command.ticket(
-        client.call(
-            request("command_settle") {
-                put("handle", handleBytes(handle))
-                put("answer", bytes(answer))
-            },
-        ),
-    )
-    private fun JsonObject.blob(name: String): ByteArray = getValue(name).jsonArray.let { array -> ByteArray(array.size) { array[it].jsonPrimitive.int.toByte() } }
     open suspend fun close() = withContext(NonCancellable) {
         closing.withLock {
             if (!closed) {

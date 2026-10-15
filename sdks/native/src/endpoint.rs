@@ -282,10 +282,10 @@ impl NativeSession {
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
         endpoint: Arc<NativeEndpoint>,
-        commands: Option<crate::NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let transport = endpoint.attachment.transport();
-        Self::open_on(options, schema, secrets, transport, commands)
+        Self::open_on(options, schema, secrets, transport, coordinator)
     }
 }
 

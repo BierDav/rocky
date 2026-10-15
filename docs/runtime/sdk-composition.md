@@ -12,7 +12,7 @@ no endpoint, no reachable issuer and no coordinator.
 ```rust
 use rocky_sdk::{Database, Open, Opened};
 
-let open = Open { directory, schema, secrets: None, network: None, commands: None };
+let open = Open { directory, schema, secrets: None, network: None, coordination: None };
 let Opened { database, .. } = Database::create(open, None)?;
 ```
 
@@ -23,12 +23,8 @@ let Opened { database, .. } = Database::create(open, None)?;
 | `Database::join` | Enrolls with the issuer an invitation names, as its profile | Required |
 | `Database::device`, then `Database::install` | This device's keys; then [supplied credentials](sdk-enrollment.md#supplied-credentials) | Optional |
 
-`commands` composes a coordinator and, on an executing device, a handler for
-the schema's [typed commands](typed-commands.md); both stay the application's.
-`Coordination::Service` instead names a [coordination service](public-coordination.md)
-by trust bundle; the database signs with its node key over its iroh network
-and keeps receipt evidence in its directory. Without either, a database still
-stores command tickets; nothing runs or settles.
+`coordination` composes an application-owned `DomainLog` or a service trust
+bundle. It is optional and grants no row rights. See [coordinated writes](coordinated-writes.md).
 
 Credentials and keys are never optional. `open` fails when keys are missing,
 the schema differs or the device logged out; no key is invented. A local
@@ -112,7 +108,7 @@ unknown observations and generated Kotlin parity.
 `create`, `join` or `resume` and compose one database, one session and one
 owned network, adding no behaviour. `Engine::open_with` takes a `Network`
 instead; a borrowed one stays open. A `coordinator` option holding a trust
-bundle composes that service; it cannot be combined with composed `commands`.
+bundle composes that service; it cannot be combined with composed `coordination`.
 
 ## Native handles
 

@@ -89,17 +89,6 @@ async fn crash_child() {
         let _ = replica.receive_page(page).await;
         panic!("the page did not end the process");
     }
-    if case == "result" {
-        let coordinator = crate::write_concurrency_tests::coordinator();
-        let (package, receipt) =
-            crate::write_concurrency_tests::confirmed(&replica, &coordinator).await;
-        // Dies applying the result, after it was stored and marked verified.
-        crate::tests::fault(&replica, worker::Fault::AbortAfterWrites(1)).await;
-        let _ = replica
-            .receive_result(package.encode().unwrap(), receipt.encode(), &coordinator)
-            .await;
-        panic!("the result did not end the process");
-    }
     let other = runtime.domain(scope(2)).unwrap();
     if case == "checkpoint" {
         for index in 0..GROUP {
@@ -334,31 +323,6 @@ async fn death_inside_an_incoming_page_leaves_none_of_its_records() {
     assert_eq!(snapshot.rows.len(), usize::from(GROUP));
     runtime.close().await.unwrap();
     source.close().await.unwrap();
-}
-
-/// A result dies between being stored, verified and applied: none of the
-/// three survives, as if the process had died before the result arrived.
-#[tokio::test]
-async fn death_between_the_merged_steps_of_a_result_leaves_none_of_them() {
-    let dir = TempDir::new().unwrap();
-    let status = child("result", &dir).wait().unwrap();
-    assert_eq!(status.signal(), Some(6), "child must abort: {status:?}");
-    let (runtime, _) = recovered(&dir, &[]).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let strong = replica.strong_status().await.unwrap();
-    assert!(strong.received.is_empty() && strong.verification.is_empty());
-    assert_eq!(strong.sequence, 0);
-    assert_eq!(strong.commands[0].state, CommandState::OutcomeUnknown);
-    // The coordinator died with the child; a new one at the same
-    // configuration confirms the retained attempt again.
-    let coordinator = crate::write_concurrency_tests::coordinator();
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(replica.confirmed_publications().await.unwrap().len(), 1);
-    runtime.close().await.unwrap();
-    let runtime = open_node(&dir.path().join("crash.db"), NODE, grouped()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    assert_eq!(replica.strong_status().await.unwrap().sequence, 1);
-    runtime.close().await.unwrap();
 }
 
 #[tokio::test]

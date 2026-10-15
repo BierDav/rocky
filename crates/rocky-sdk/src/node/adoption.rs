@@ -27,7 +27,7 @@ impl Node {
         // Until the replica switched, this node keeps the settings it ran
         // with; the saved ones reopen at the new generation after a crash,
         // and the next sync tries again after a failure.
-        let domain = draft.domain()?.hosted(self.domain().app.host());
+        let domain = draft.domain()?;
         let config = draft.config(&self.vault, &domain)?;
         let upgrade = draft
             .upgrade(&domain)?
@@ -45,7 +45,7 @@ impl Node {
         drop(settings);
         self.activity.record(
             "generation_adopted",
-            json!({"peer": peer.to_hex(), "schema": generation.schema, "handler": generation.handler}),
+            json!({"peer": peer.to_hex(), "schema": generation.schema}),
         );
         self.observations.touch();
         // Failures the unknown generation caused no longer hold this peer back.

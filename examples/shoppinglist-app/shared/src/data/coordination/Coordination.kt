@@ -2,16 +2,13 @@ package org.example.examples.shopping.data.coordination
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.*
 import org.example.examples.shopping.data.db.CoordinationRow
 import org.example.examples.shopping.data.db.ShoppingDatabase
 import org.example.examples.shopping.data.db.TrustedRows
 import org.example.examples.shopping.data.household.Household
-import org.example.examples.shopping.data.household.commandIdentity
 import org.example.examples.shopping.util.epochMillis
 import org.example.examples.shopping.util.randomBytes
 import rocky.*
@@ -22,24 +19,19 @@ data class Approval(val key: String, val title: String, val note: String, val re
 
 /** Where this device stands with the coordination service. */
 sealed interface Coordinated {
-    /** Opened without a coordinator, such as over direct TCP: requests cannot be ordered. */
+    /** Opened without a coordinator, such as over direct TCP: decisions are unavailable. */
     data object Unavailable : Coordinated
 
     /** A trusted device waits for the household's tenant, or another device's identity, to sync. */
     data class Waiting(val reason: String) : Coordinated
-    data class Registered(val revision: Long, val executors: Int, val invokers: Int, val expiresAtEpochSeconds: Long) : Coordinated
+    data class Registered(val revision: Long, val trusted: Int, val expiresAtEpochSeconds: Long) : Coordinated
 
-    /** A member: it asks, and a trusted device executes. */
+    /** A member writes requests and reads committed decisions. */
     data object Member : Coordinated
     data class Failed(val message: String) : Coordinated
 }
 
-/**
- * Approvals as strong commands: any device asks with [AskApproval]; trusted devices decide with [DecideApproval], and
- * the coordination service orders both, so the first decision on a request stands everywhere. Trusted devices keep
- * the household's domain registered: every live device may invoke, every trusted one may execute.
- * See `examples/shoppinglist-app/README.md#approvals`.
- */
+/** Ordinary request rows and coordinated decisions; the first committed decision stands. */
 class Approvals internal constructor(
     private val database: ShoppingDatabase,
     private val rocky: RockyDatabase,
@@ -57,27 +49,14 @@ class Approvals internal constructor(
         },
     )
     val status: StateFlow<Coordinated> = mutableStatus.asStateFlow()
-    private val wake = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     /** Revisions moved on after refusals in a row; bounded, so a refusing service is not asked forever. */
     private var refusals = 0
 
     fun requests(): Flow<List<Approval>> {
-        val names = if (rocky.isIssuer) {
-            household.registry().map { devices ->
-                devices.mapNotNull { device -> device.command?.let { it to device.node } }.toMap()
-            }
-        } else {
-            flowOf(emptyMap())
-        }
         val devices = if (rocky.isIssuer) household.devices() else flowOf(emptyList())
-        return combine(database.approvals().requests(), database.approvals().decisions(), names, devices) { requests, decisions, keys, rows ->
-            val own = rocky.commandIdentity().node
-            fun name(commandNode: String): String {
-                if (!rocky.isIssuer) return if (commandNode == own) "This device" else "Another device"
-                val node = if (commandNode == own) self else keys[commandNode]
-                return rows.firstOrNull { it.node == node }?.name ?: "Another device"
-            }
+        return combine(database.approvals().requests(), database.approvals().decisions(), devices) { requests, decisions, rows ->
+            fun name(node: String): String = if (node == self) "This device" else rows.firstOrNull { it.node == node }?.name ?: "Another device"
             requests.map { request ->
                 val decision = decisions.firstOrNull { it.key == request.key }
                 Approval(request.key, request.title, request.note, name(request.requester), decision?.approved, decision?.let { name(it.decider) })
@@ -85,53 +64,45 @@ class Approvals internal constructor(
         }.settledOnRocky()
     }
 
-    /** Asks the household to approve [title]; null once confirmed, else why it was not. */
+    /** Asking is an ordinary write, including while offline. */
     suspend fun ask(title: String, note: String): String? {
         require(title.isNotBlank())
-        return settle(AskApproval, Ask(RockyDatabase.newHandle(), title.trim(), note.trim()))
+        rocky.write {
+            execute("INSERT INTO requests(key,title,note,requester,id) VALUES(?,?,?,?,?)", RockyDatabase.newHandle(), title.trim(), note.trim(), self, nextId("requests"))
+        }
+        return null
     }
 
-    /** On a trusted device: approves or declines; null once this decision stands, else why it does not. */
-    suspend fun decide(key: String, approve: Boolean): String? = settle(DecideApproval, Decide(key, approve))
+    private class Unchanged(val reason: String) : Exception(reason)
 
-    private suspend fun <I> settle(command: Command<I, Unit, Refusal>, arguments: I): String? {
-        check(coordinated) { "This device has no coordination service" }
-        val handle = RockyDatabase.newHandle()
-        rocky.submit(command, arguments, handle)
-        val ticket = rocky.run(command, handle)
-        // A ticket that did not settle stays stored; the background pass runs it again.
-        wake.tryEmit(Unit)
-        return when (val outcome = ticket.outcome) {
-            is Outcome.Accepted -> null
-
-            is Outcome.Rejected -> when (outcome.value.reason) {
-                "approved" -> "Another device already approved it"
-                "declined" -> "Another device already declined it"
-                "missing" -> "The request has not reached the executor yet"
-                else -> "Refused: ${outcome.value.reason}"
+    /** Decides once at the committed log head; a competing writer retries after catching up. */
+    suspend fun decide(key: String, approve: Boolean): String? {
+        check(coordinated && rocky.isIssuer) { "Only a trusted device with coordination may decide" }
+        repeat(16) {
+            try {
+                rocky.coordinated {
+                    if (query("SELECT key FROM requests WHERE key=?", key).isEmpty()) throw Unchanged("The request has not reached this device yet")
+                    val previous = query("SELECT approved FROM decisions WHERE key=?", key).singleOrNull()
+                    if (previous != null) {
+                        val approved = previous.jsonArray[0].jsonObject.getValue("value").jsonPrimitive.content.toLong() != 0L
+                        throw Unchanged(if (approved) "Another device already approved it" else "Another device already declined it")
+                    }
+                    execute("INSERT INTO decisions(key,approved,decider,id) VALUES(?,?,?,?)", key, approve, self, nextId("decisions"))
+                }
+                return null
+            } catch (unchanged: Unchanged) {
+                return unchanged.reason
+            } catch (failure: RockyException) {
+                if (failure.code !in setOf("conflict", "behind", "aborted", "below_minimum")) throw failure
+                delay(20)
             }
-
-            null -> ticket.error?.let { "Not settled yet (${it.code}): ${it.message}; it is retried in the background" }
-                ?: "Sent; the result arrives with the next sync"
         }
+        throw RockyException("conflict", true, "Another decision is still committing; try again")
     }
 
-    /** Runs until cancelled: keeps the domain registered and retries tickets. */
+    /** Keeps the domain's trusted-node control registered until cancelled. */
     suspend fun run() {
-        if (!coordinated) return
-        coroutineScope {
-            launch { retryTickets() }
-            if (rocky.isIssuer) launch { register() }
-        }
-    }
-
-    private suspend fun retryTickets() {
-        while (true) {
-            val unresolved = attempt { rocky.runCommands() } ?: 1
-            // Settled identities free this device's response slots; the runtime retires only those still verifiable.
-            if (unresolved == 0) attempt { rocky.acknowledgeCommands() }
-            withTimeoutOrNull(if (unresolved > 0) 10_000L else 60_000L) { wake.first() }
-        }
+        if (coordinated && rocky.isIssuer) register()
     }
 
     @OptIn(FlowPreview::class)
@@ -149,10 +120,7 @@ class Approvals internal constructor(
                 mutableStatus.value = Coordinated.Waiting("Waiting for the household's coordination key to sync")
                 return@collectLatest
             }
-            val own = rocky.commandIdentity()
-            val live = devices.filter { it.command != null }.associate { it.node to it.commandIdentity(own).encoded } + (self to own.encoded)
-            val executors = devices.filter { it.profile == GrantProfile.Issuer }.map { it.node }.toSet() + self
-            val members = Members(live.keys.filter { it in executors }.sorted().toSet(), live.keys.sorted().toSet())
+            val members = Members((devices.filter { it.profile == GrantProfile.Issuer }.map { it.node } + self).sorted().toSet())
             val now = epochMillis() / 1000
             when {
                 // The founder's first revision names its members once there are any; nothing was sent yet.
@@ -160,27 +128,26 @@ class Approvals internal constructor(
                     household.trusted.updateCoordination(1, row.control, members.toString(), 0, false)
                 }
 
-                !row.applied -> apply(row, Members.parse(row.members), live)
+                !row.applied -> apply(row, Members.parse(row.members))
 
                 row.members != members.toString() || row.expires - now < RENEW_SECONDS -> attempt {
                     household.trusted.updateCoordination(row.revision + 1, RockyDatabase.newHandle(), members.toString(), 0, false)
                 }
 
-                else -> mutableStatus.value = Coordinated.Registered(row.revision, members.executors.size, members.invokers.size, row.expires)
+                else -> mutableStatus.value = Coordinated.Registered(row.revision, members.trusted.size, row.expires)
             }
         }
     }
 
     /** Sends the stored revision until the service answers; a refused control moves on to the next revision. */
-    private suspend fun apply(row: CoordinationRow, members: Members, identities: Map<String, String>) {
-        fun of(nodes: Set<String>) = identities.filterKeys { it in nodes }.values.map(CommandIdentity::decode)
+    private suspend fun apply(row: CoordinationRow, members: Members) {
         val owner = rocky.service(row.tenant)
         while (true) {
             try {
                 if (row.revision == 1L) {
-                    owner.register(row.registration, of(members.executors), of(members.invokers), LIFETIME_SECONDS)
+                    owner.register(row.registration, members.trusted.toList(), LIFETIME_SECONDS)
                 } else {
-                    owner.control(row.revision, row.control, of(members.executors), of(members.invokers), LIFETIME_SECONDS)
+                    owner.control(row.revision, row.control, members.trusted.toList(), LIFETIME_SECONDS)
                 }
                 refusals = 0
                 household.trusted.updateCoordination(row.revision, row.control, row.members, kotlin.time.Clock.System.now().toEpochMilliseconds() / 1000 + LIFETIME_SECONDS, true)
@@ -199,13 +166,11 @@ class Approvals internal constructor(
         }
     }
 
-    /** Who may execute and who may invoke, as stored in the `coordination` row: `executors;invokers`. */
-    private data class Members(val executors: Set<String>, val invokers: Set<String>) {
-        override fun toString() = executors.joinToString(",") + ";" + invokers.joinToString(",")
+    /** Trusted node keys, stored in canonical sorted order. */
+    private data class Members(val trusted: Set<String>) {
+        override fun toString() = trusted.sorted().joinToString(",")
         companion object {
-            fun parse(text: String) = text.split(";").let { parts ->
-                Members(parts[0].split(",").filter { it.isNotEmpty() }.toSet(), parts.getOrElse(1) { "" }.split(",").filter { it.isNotEmpty() }.toSet())
-            }
+            fun parse(text: String) = Members(text.split(",").filter { it.isNotEmpty() }.toSet())
         }
     }
 

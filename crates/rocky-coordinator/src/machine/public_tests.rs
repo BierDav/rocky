@@ -1,6 +1,7 @@
 //! Tenant registration, isolation and quotas of a public service, driven
 //! deterministically at the state machine.
 use super::*;
+use crate::coordinated::Action;
 use crate::transport::nonce;
 use p2panda_core::PrivateKey;
 use rocky_credentials::{
@@ -15,7 +16,6 @@ struct Tenant {
     publisher: PrivateKey,
     executor: PrivateKey,
     alternate: PrivateKey,
-    phone: PrivateKey,
 }
 impl Tenant {
     fn new() -> Self {
@@ -24,7 +24,6 @@ impl Tenant {
             publisher: PrivateKey::new(),
             executor: PrivateKey::new(),
             alternate: PrivateKey::new(),
-            phone: PrivateKey::new(),
         }
     }
     fn app(&self) -> AppId {
@@ -50,19 +49,14 @@ impl Tenant {
         )
         .unwrap()
     }
-    fn control(
-        &self,
-        scope: Scope,
-        revision: u64,
-        executors: &[&PrivateKey],
-    ) -> ControlCertificate {
-        self.signed_control(scope, revision, executors, &self.key)
+    fn control(&self, scope: Scope, revision: u64, trusted: &[&PrivateKey]) -> ControlCertificate {
+        self.signed_control(scope, revision, trusted, &self.key)
     }
     fn signed_control(
         &self,
         scope: Scope,
         revision: u64,
-        executors: &[&PrivateKey],
+        trusted: &[&PrivateKey],
         signer: &PrivateKey,
     ) -> ControlCertificate {
         ControlCertificate::sign(
@@ -70,14 +64,7 @@ impl Tenant {
                 scope,
                 configuration: [5; 16],
                 revision,
-                owner: PrincipalId([9; 16]),
-                executors: executors.iter().map(|k| k.public_key()).collect(),
-                invokers: vec![
-                    (self.executor.public_key(), PrincipalId([9; 16])),
-                    (self.phone.public_key(), PrincipalId([9; 16])),
-                ],
-                schema: 1,
-                handler: 1,
+                trusted: trusted.iter().map(|k| k.public_key()).collect(),
                 not_before: T - DAY,
                 expires: T + 300 * DAY,
             },
@@ -98,8 +85,19 @@ fn limits() -> Limits {
         ..Limits::default()
     }
 }
+/// Budgets with room for joined logs, whose retry records are accounted.
+fn log_limits() -> Limits {
+    Limits {
+        tenant_bytes: 128 * 1024,
+        total_bytes: 256 * 1024,
+        ..limits()
+    }
+}
 impl Service {
     fn new(admission: bool) -> Self {
+        Self::with(admission, limits())
+    }
+    fn with(admission: bool, limits: Limits) -> Self {
         let root = PrivateKey::new();
         let provider = PrivateKey::new();
         let voters: Vec<_> = (1..=3)
@@ -129,7 +127,7 @@ impl Service {
                         })
                         .collect(),
                     admission: admission.then(|| provider.public_key()),
-                    limits: limits(),
+                    limits,
                     tenants: 2,
                     registrations_per_day: 3,
                     tenant_lanes: 4,
@@ -209,48 +207,50 @@ impl Service {
             time,
         )
     }
-    fn head(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope) -> StrongHead {
-        match self.read(metadata, key, Operation::Head { scope }) {
-            Ok(Outcome::Head(head)) => head,
+    fn log(
+        &self,
+        metadata: &mut Metadata,
+        key: &PrivateKey,
+        scope: Scope,
+        action: Action,
+        time: u64,
+    ) -> Result<Outcome, CoordinationError> {
+        self.apply(
+            metadata,
+            key,
+            Operation::Coordinated { scope, action },
+            time,
+        )
+    }
+    fn head(
+        &self,
+        metadata: &Metadata,
+        key: &PrivateKey,
+        scope: Scope,
+    ) -> crate::coordinated::Head {
+        let head = Operation::Coordinated {
+            scope,
+            action: Action::Head,
+        };
+        match self.read(metadata, key, head) {
+            Ok(Outcome::CoordinatedHead(head)) => *head,
             other => panic!("head: {other:?}"),
         }
     }
-    fn confirm(
-        &self,
-        metadata: &mut Metadata,
-        tenant: &Tenant,
-        executor: &PrivateKey,
-        scope: Scope,
-        n: u64,
-        time: u64,
-    ) -> Result<Outcome, CoordinationError> {
-        let head = self.head(metadata, executor, scope);
-        let mut p = Confirmation {
-            caller: PrincipalId([9; 16]),
-            scope,
-            configuration: head.configuration,
-            executor: head.executor,
-            epoch: head.epoch,
-            request: RequestId {
-                node: node_id(tenant.phone.public_key()),
-                sequence: AuthorSequence::new((T << ISSUE_SHIFT) + n).unwrap(),
-            },
-            request_hash: [n as u8; 32],
-            expected_sequence: head.sequence,
-            expected_head: head.head,
-            schema: 1,
-            handler: 1,
-            result: [3; 32],
-            new_head: [0; 32],
+    fn join(&self, metadata: &mut Metadata, key: &PrivateKey, scope: Scope, sequence: u64) {
+        let head = self.head(metadata, key, scope);
+        let join = Action::Join {
+            position: head.commit,
+            running_hash: head.running_hash,
+            sequence,
         };
-        p.new_head = successor(p.expected_head, head.sequence + 1, p.request_hash, p.result);
-        self.apply(metadata, executor, Operation::Confirm(p), time)
+        self.log(metadata, key, scope, join, T).unwrap();
     }
 }
 
 #[test]
 fn tenants_register_isolated_domains_without_reaching_each_other() {
-    let service = Service::new(false);
+    let service = Service::with(false, log_limits());
     let mut m = service.open();
     let (a, b) = (Tenant::new(), Tenant::new());
     let (sa, sb) = (a.scope(1), b.scope(2));
@@ -266,49 +266,43 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
         .register(&mut m, &b, b.control(sb, 1, &[&b.executor]), T)
         .unwrap();
     for (tenant, scope) in [(&a, sa), (&b, sb)] {
-        service
-            .apply(&mut m, &tenant.executor, Operation::Acquire { scope }, T)
-            .unwrap();
-        service
-            .confirm(&mut m, tenant, &tenant.executor, scope, 1, T)
-            .unwrap();
+        service.join(&mut m, &tenant.executor, scope, 1);
     }
 
-    // Nobody acts on another tenant's domain: acquire, head, lookup, control,
-    // closure, retirement or registration of its application.
-    let lookup = Operation::Lookup {
+    // Nobody acts on another tenant's domain: its log, control, closure or
+    // registration of its application.
+    let head = service.head(&m, &a.executor, sa);
+    let log_head = Operation::Coordinated {
         scope: sa,
-        request: RequestId {
-            node: node_id(a.phone.public_key()),
-            sequence: AuthorSequence::new((T << ISSUE_SHIFT) + 1).unwrap(),
-        },
+        action: Action::Head,
     };
-    let head = service.head(&mut m, &a.executor, sa);
     for (key, operation) in [
-        (&b.executor, Operation::Acquire { scope: sa }),
-        (&b.phone, Operation::Head { scope: sa }),
-        (&b.key, Operation::Head { scope: sa }),
-        (&b.phone, lookup.clone()),
+        (
+            &b.executor,
+            Operation::Coordinated {
+                scope: sa,
+                action: Action::Join {
+                    position: head.commit,
+                    running_hash: head.running_hash,
+                    sequence: 1,
+                },
+            },
+        ),
+        (&b.executor, log_head.clone()),
+        (&b.key, log_head.clone()),
         (&b.key, Operation::Control(b.control(sa, 2, &[&b.executor]))),
         (
             &b.key,
             Operation::Control(a.signed_control(sa, 2, &[&b.executor], &b.key)),
         ),
-        (&b.key, Operation::Close { head: head.clone() }),
-        (
-            &b.executor,
-            Operation::Retire {
-                scope: sa,
-                through: 1,
-            },
-        ),
+        (&b.key, Operation::Close { scope: sa }),
     ] {
         assert_eq!(
             service.apply(&mut m, key, operation.clone(), T),
             Err(CoordinationError::Denied),
             "{operation:?}"
         );
-        if matches!(operation, Operation::Head { .. } | Operation::Lookup { .. }) {
+        if operation == log_head {
             assert_eq!(
                 service.read(&m, key, operation),
                 Err(CoordinationError::Denied)
@@ -352,8 +346,8 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     ));
     // Linearizable reads answer as the log would.
     assert_eq!(
-        service.read(&m, &a.phone, lookup.clone()).unwrap(),
-        service.apply(&mut m, &a.phone, lookup, T).unwrap()
+        service.read(&m, &a.executor, log_head.clone()).unwrap(),
+        service.apply(&mut m, &a.executor, log_head, T).unwrap()
     );
     assert_eq!(
         service.read(&m, &a.key, Operation::Usage).unwrap(),
@@ -371,50 +365,42 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
 }
 
 #[test]
-fn owners_change_executors_with_fencing_and_keep_the_head() {
-    let service = Service::new(false);
+fn owners_change_trusted_nodes_and_keep_the_log() {
+    let service = Service::with(false, log_limits());
     let mut m = service.open();
     let a = Tenant::new();
     let scope = a.scope(1);
     service
         .register(&mut m, &a, a.control(scope, 1, &[&a.executor]), T)
         .unwrap();
-    service
-        .apply(&mut m, &a.executor, Operation::Acquire { scope }, T)
-        .unwrap();
-    service
-        .confirm(&mut m, &a, &a.executor, scope, 1, T)
-        .unwrap();
-    let before = service.head(&mut m, &a.executor, scope);
-    service
-        .apply(
+    service.join(&mut m, &a.executor, scope, 1);
+    let before = service.head(&m, &a.executor, scope);
+    // A node of the in-sync set cannot be dropped; one can be added.
+    assert_eq!(
+        service.apply(
             &mut m,
             &a.key,
             Operation::Control(a.control(scope, 2, &[&a.alternate])),
             T,
+        ),
+        Err(CoordinationError::Backpressure)
+    );
+    service
+        .apply(
+            &mut m,
+            &a.key,
+            Operation::Control(a.control(scope, 2, &[&a.executor, &a.alternate])),
+            T,
         )
         .unwrap();
-    // The old executor is fenced; the new one acquires the same head.
+    service.join(&mut m, &a.alternate, scope, 1);
+    let after = service.head(&m, &a.alternate, scope);
     assert_eq!(
-        service.confirm(&mut m, &a, &a.executor, scope, 2, T),
-        Err(CoordinationError::Denied)
+        (after.commit, after.running_hash),
+        (before.commit, before.running_hash)
     );
-    let acquired = match service
-        .apply(&mut m, &a.alternate, Operation::Acquire { scope }, T)
-        .unwrap()
-    {
-        Outcome::Head(head) => head,
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(
-        (acquired.sequence, acquired.head),
-        (before.sequence, before.head)
-    );
-    assert_eq!(acquired.epoch, before.epoch + 1);
-    service
-        .confirm(&mut m, &a, &a.alternate, scope, 2, T)
-        .unwrap();
-    // A revision signed by another key, even an executor, is refused.
+    assert_eq!(after.members.len(), 2);
+    // A revision signed by another key, even a trusted node, is refused.
     assert_eq!(
         service.apply(
             &mut m,
@@ -479,9 +465,8 @@ fn admission_quotas_and_churn_bound_every_tenant() {
     let mut outcome = Ok(());
     for n in 3..=40u8 {
         let open = a.scope(n - 2);
-        let head = service.head(&mut m, &a.executor, open);
         service
-            .apply(&mut m, &a.key, Operation::Close { head }, time)
+            .apply(&mut m, &a.key, Operation::Close { scope: open }, time)
             .unwrap();
         outcome = match service.register(&mut m, &a, a.control(a.scope(n), 1, &[&a.executor]), time)
         {
@@ -540,24 +525,11 @@ fn retained_outcomes_are_bounded_per_tenant() {
             T,
         )
         .unwrap();
-    // Takeovers by two executor keys share their tenant's retry budget.
+    // Control revisions keep their outcome within the tenant's retry budget.
     let mut accepted = 0;
-    for n in 0..limits().retry_records * 2 {
-        let key = if n % 2 == 0 {
-            &a.executor
-        } else {
-            &a.alternate
-        };
-        let epoch = service.head(&mut m, key, scope).epoch;
-        let operation = if epoch == 0 {
-            Operation::Acquire { scope }
-        } else {
-            Operation::Takeover {
-                scope,
-                expected_epoch: epoch,
-            }
-        };
-        match service.apply(&mut m, key, operation, T) {
+    for revision in 2..limits().retry_records as u64 * 2 {
+        let control = a.control(scope, revision, &[&a.executor, &a.alternate]);
+        match service.apply(&mut m, &a.key, Operation::Control(control), T) {
             Ok(_) => accepted += 1,
             Err(CoordinationError::Backpressure) => break,
             Err(error) => panic!("{error:?}"),
@@ -612,56 +584,21 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
             .unwrap();
     }
     assert_eq!(m.tenant_lane(&pending), Some(a.key.public_key()));
-    // Registration holds one retry record. The shared device fills A's remainder.
-    for epoch in 0..limits().retry_records - 1 {
-        let operation = if epoch == 0 {
-            Operation::Acquire { scope: sa }
-        } else {
-            Operation::Takeover {
-                scope: sa,
-                expected_epoch: epoch as u64,
-            }
-        };
+    // The shared trusted node's calls count against the tenant of the domain
+    // it names.
+    for (scope, tenant) in [(sa, &a), (sb, &b)] {
         let request = Request::sign_at(
             service.genesis.id().unwrap(),
             nonce(),
-            operation.clone(),
+            Operation::Coordinated {
+                scope,
+                action: Action::Head,
+            },
             &b.executor,
             T,
         )
         .unwrap();
-        assert_eq!(m.retry_tenant(&request), Some(a.key.public_key()));
-        assert_eq!(m.tenant_lane(&request), Some(a.key.public_key()));
-        service.apply(&mut m, &b.executor, operation, T).unwrap();
+        assert_eq!(m.retry_tenant(&request), Some(tenant.key.public_key()));
+        assert_eq!(m.tenant_lane(&request), Some(tenant.key.public_key()));
     }
-    assert_eq!(
-        service.apply(&mut m, &b.executor, Operation::Acquire { scope: sa }, T),
-        Err(CoordinationError::Backpressure)
-    );
-    let request = Request::sign_at(
-        service.genesis.id().unwrap(),
-        nonce(),
-        Operation::Acquire { scope: sb },
-        &b.executor,
-        T,
-    )
-    .unwrap();
-    assert_eq!(m.retry_tenant(&request), Some(b.key.public_key()));
-    assert_eq!(m.tenant_lane(&request), Some(b.key.public_key()));
-    assert!(matches!(
-        service.apply(&mut m, &b.executor, Operation::Acquire { scope: sb }, T),
-        Ok(Outcome::Head(_))
-    ));
-    assert!(matches!(
-        service.apply(
-            &mut m,
-            &b.executor,
-            Operation::Takeover {
-                scope: sb,
-                expected_epoch: 1
-            },
-            T,
-        ),
-        Ok(Outcome::Head(_))
-    ));
 }

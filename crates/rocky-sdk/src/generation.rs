@@ -1,4 +1,4 @@
-//! Schema and handler generations of an SDK domain. A changed application
+//! Schema generations of an SDK domain. A changed application
 //! schema either rebuilds local tables, or moves the domain to the next
 //! signed generation: an issuer signs it, a member fetches it from an
 //! issuer with credentials for it. The lineage keeps every signed
@@ -145,13 +145,6 @@ impl Settings {
             tables: Some((domain.logical().clone(), domain.scope, domain.readers())),
         }))
     }
-    /// The id of the transition into the current generation.
-    pub(crate) fn transition(&self) -> Result<Option<GenerationTransition>, Failure> {
-        self.lineage
-            .last()
-            .map(|step| step.verified(self.publisher))
-            .transpose()
-    }
     /// This issuer's answer to a member asking for the domain's generations.
     pub(crate) fn offer(&self) -> Result<Vec<u8>, Failure> {
         Ok(serde_json::to_vec(&Offer {
@@ -162,7 +155,7 @@ impl Settings {
         })?)
     }
     /// Moves the identity to `schema`. A local change only records it; the
-    /// replica rebuilds its tables. A replicated or handler change makes
+    /// replica rebuilds its tables. A replicated change makes
     /// the next generation: signed here on an issuer, fetched from an
     /// issuer over `transport` on a member. Everything is saved before the
     /// replica opens, which activates it. Refused changes leave nothing.
@@ -196,15 +189,7 @@ impl Settings {
             )
             .into());
         }
-        let commands = match &schema.commands {
-            Some(definitions) => definitions.build()?,
-            None => Default::default(),
-        };
-        let handled =
-            rocky_core::classify_commands(old.app.commands(), &commands).map_err(|refusal| {
-                format!("the application's commands cannot replace the installed ones: {refusal}")
-            })?;
-        if !change.replicated() && !handled {
+        if !change.replicated() {
             let mut draft = self.clone();
             draft.schema = schema.clone();
             if draft.domain()?.manifest().hash() != old.manifest().hash() {
@@ -332,11 +317,9 @@ impl Settings {
             to: after.hash(),
             before: Generation {
                 schema: before.schema,
-                handler: before.handler,
             },
             after: Generation {
                 schema: after.schema,
-                handler: after.handler,
             },
             added,
             tables: ItemChanges::between(&before.entities, &after.entities),
@@ -643,9 +626,7 @@ impl Settings {
                 None => None,
             };
             if held.as_ref().is_some_and(|manifest| {
-                manifest.hash() != transition.from
-                    || manifest.schema != transition.before.schema
-                    || manifest.handler != transition.before.handler
+                manifest.hash() != transition.from || manifest.schema != transition.before.schema
             }) {
                 return Err(forged());
             }
@@ -667,11 +648,9 @@ impl Settings {
         if manifest.hash() != self.domain()?.manifest().hash() {
             return Err(forged());
         }
-        let ends = transitions.last().is_none_or(|last| {
-            last.to == manifest.hash()
-                && last.after.schema == manifest.schema
-                && last.after.handler == manifest.handler
-        });
+        let ends = transitions
+            .last()
+            .is_none_or(|last| last.to == manifest.hash() && last.after.schema == manifest.schema);
         if !ends
             || transitions
                 .windows(2)

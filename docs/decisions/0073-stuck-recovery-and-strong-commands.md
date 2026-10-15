@@ -1,7 +1,10 @@
 # 0073: Stuck recovery and the end of strong commands
 
-Status: partially implemented; collection only. Recovery cuts and phase 11 remain pending.
-Date: 2026-10-14.
+Status: accepted. Collection is implemented; cuts are designed in
+[0074](0074-owner-signed-recovery-cuts.md). Command removal is implemented,
+with acceptance gaps recorded in the
+[phase 11 evidence](../features_09/11-removing-strong-commands-evidence.md).
+Date: 2026-10-14; command removal 2026-10-15.
 
 ## Context
 
@@ -10,7 +13,11 @@ node stored an entry. Permanent loss of that set can strand a domain even when
 a member still holds its original encrypted bundles. The coordinator retains
 only metadata and must never manufacture missing application state.
 
-## Decision
+Coordinated writes order ordinary encrypted row bundles. Keeping a second
+command system would retain immutable handler versions, special tables,
+executor fencing and result histories for the same application decisions.
+
+## Decision: stuck recovery
 
 Collect complete retained bundles from reachable devices before considering
 acknowledged loss. A member derives candidate entry hashes from original frame
@@ -25,27 +32,36 @@ An owner-signed recovery record must bind an exact old head and the retained
 prefix's position/hash, fence the abandoned history, and remain enforceable on
 members that never call the coordinator. It cannot reuse a position without an
 authenticated history identity. Abandoned contributions must also be removed
-from checkpoints, not just retained frames. These cut requirements are pending;
-this record does not claim an implemented recovery operation.
+from checkpoints, not just retained frames.
+[Decision 0074](0074-owner-signed-recovery-cuts.md) designs the cut and rollback.
+
+## Decision: removing strong commands
+
+Phase 11 removes command descriptors, handler generations, command-controlled
+and confirmed-read-only tables, preparations, results, tickets, receipt evidence
+and forwarding. The coordinator retains its coordinated log and tenant control;
+its control certificate lists trusted node keys, with no executor or invoker
+roles. Native and Kotlin consumers use coordinated SQL. Shopping requests are
+ordinary rows; trusted devices decide them in coordinated transactions, where
+the first committed decision stands. Market restocking reads and updates stock
+in one coordinated transaction.
 
 ## Consequences
 
-Raft store and snapshot format 4 stores the genesis anchor. Earlier and later
-formats are refused without writes or migration. Client receipt evidence stays
-format 3; encrypted replica and link identities stay v18 and v3.
+The Raft store and snapshot keep the genesis anchor. Every changed format has
+one current encoding: removed table classes, command schema fields, old
+manifest/transition bytes, coordinator storage and link/file identities are
+refused without writes or migration. Bootstrap signatures use
+`rocky.genesis.v2` and trust bundles format 2; receipt-retention settings are
+removed.
 
 Collection uses bounded scan/reply pages and requires a complete retained bundle
 on the serving device. Partial copies must first assemble the missing frames;
-this slice adds no multi-device fragment collector. SDK live-link catch-up
-already queries members as well as trusted nodes and uses the same verifier.
+there is no multi-device fragment collector. SDK live-link catch-up queries
+members as well as trusted nodes and uses the same verifier.
 
-The existing checkpoint has no coordinated prefix or history binding. Its replay
-base may contain abandoned effects after the original frames were pruned. A cut
-requires a verified canonical replacement base, preservation/reconciliation of
-ordinary writes, and propagation of signed fencing evidence. Merely marking
-retained suffix frames rejected and rewinding the log would not converge.
-No cut is admitted or acknowledged as success in this slice.
-[Decision 0074](0074-owner-signed-recovery-cuts.md) designs the cut and rollback.
-
-[Phase 11](../features_09/11-removing-strong-commands.md) owns removal of strong
-commands. This change removes none of them and does not depend on phase 7.
+Applications own their business rules and coordination discipline on ordinary
+rows. Being a trusted node grants no row access. Network/coordinator calls stay
+outside storage transactions, and publication follows durable coordinated
+commit. Development logs are process-local fixtures and lose their ledger at
+process end; they are not durable services.

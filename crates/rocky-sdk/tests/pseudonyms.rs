@@ -42,7 +42,7 @@ fn open<'a>(path: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: common::SCHEMA,
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 

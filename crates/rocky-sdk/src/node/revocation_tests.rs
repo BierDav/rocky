@@ -64,7 +64,7 @@ async fn issuer(
         .await?;
     let path = directory.join("identity.json");
     settings.save(&path)?;
-    let node = Node::new(replica, domain, vault, settings, path, None, None);
+    let node = Node::new(replica, domain, vault, settings, path);
     node.record_self().await?;
     Ok(node)
 }
@@ -83,9 +83,7 @@ async fn reload(
         settings.config(&vault, &domain)?,
     )
     .await?;
-    Ok(Node::new(
-        replica, domain, vault, settings, path, None, None,
-    ))
+    Ok(Node::new(replica, domain, vault, settings, path))
 }
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<(), Failure> {
     std::fs::create_dir_all(to)?;
@@ -242,7 +240,7 @@ async fn stop_at(
         schema: SCHEMA,
         secrets: Some(store.clone()),
         network: None,
-        commands: None,
+        coordination: None,
     };
     let reopened = crate::Database::open(open())?.database;
     let completed = Settings::load(&root.path().join("identity.json"))?;
@@ -357,7 +355,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
             schema: SCHEMA,
             secrets: Some(store),
             network: None,
-            commands: None,
+            coordination: None,
         })?
         .database;
         let settings = Settings::load(&root.path().join("identity.json"))?;

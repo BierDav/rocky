@@ -5,8 +5,6 @@ import kotlinx.serialization.json.*
 enum class TableClass(internal val wire: String) {
     Mergeable("mergeable"),
     LocalOnly("local_only"),
-    ConfirmedReadOnly("confirmed_read_only"),
-    CommandControlled("command_controlled"),
 }
 enum class UpdatePolicy(internal val wire: String) { Changed("changed"), Assigned("assigned") }
 enum class Collation(internal val wire: String) { Binary("binary"), Nocase("nocase"), Rtrim("rtrim") }
@@ -84,7 +82,6 @@ class SchemaBuilder internal constructor(private val application: String, privat
         views[name] = select
     }
     var updatePolicy: UpdatePolicy = UpdatePolicy.Changed
-    var commands: CommandSet? = null
     private val migrations = mutableListOf<Migration>()
 
     /** Steps computing values schema [version] needs in existing rows; see [Migration]. */
@@ -108,7 +105,7 @@ class SchemaBuilder internal constructor(private val application: String, privat
             }
         }
     }
-    internal fun build(): Schema = Schema(application, version, tables.values.map { it.build() }, commands, updatePolicy, views, migrations.toList())
+    internal fun build(): Schema = Schema(application, version, tables.values.map { it.build() }, updatePolicy, views, migrations.toList())
 }
 
 class TableBuilder internal constructor(val name: String) {
@@ -207,7 +204,7 @@ class TableBuilder internal constructor(val name: String) {
             for (index in indexes.values.filter { it.unique && it.onConflict != null }) {
                 require(tableClass == TableClass.Mergeable && index.columns.all { it.name in columns }) { "$name: conflict policy needs mergeable application columns" }
                 if (index.onConflict == Conflict.SetNull) require(index.columns.all { columns[it.name]?.nullable == true && it.name !in key }) { "$name: SetNull index columns must be nullable and outside the key" }
-                // Rows clash only within one partition; uniqueness across partitions needs a strong command.
+                // Rows clash only within one partition; uniqueness across partitions needs a coordinated write.
                 if (partitions.isNotEmpty()) {
                     require(index.onConflict == Conflict.LatestWins) { "$name: unique index ${index.name} on a partitioned table takes Conflict.LatestWins; Conflict.SetNull is refused" }
                     require(partitions.all { column -> index.columns.any { it.name == column } }) { "$name: unique index ${index.name} must include every partition column (${partitions.joinToString()}); uniqueness across partitions is refused" }
@@ -227,8 +224,6 @@ class TableBuilder internal constructor(val name: String) {
         }
         require(foreignKeys.all { key -> key.columns.all { it in columns } }) { "$name: a foreign key names an absent column" }
         require(partitions.all { it in key && (it == "id" || columns[it]?.let { column -> !column.nullable && !column.localOnly && column.derived == null } == true) }) { "$name: partition columns must be non-null primary-key columns" }
-        require(partitions.isEmpty() || tableClass != TableClass.CommandControlled) { "$name: a partitioned table cannot be command-controlled" }
-        require(partitions.isEmpty() || tableClass != TableClass.ConfirmedReadOnly) { "$name: a partitioned table cannot hold confirmed rows" }
         // Puppets copy only the id of a referenced row.
         require(!existenceLog || (tableClass == TableClass.Mergeable && partitions.isEmpty() && key == listOf("id"))) { "$name: an existence log needs an unpartitioned mergeable table keyed by id" }
         val identity = partitions + listOf("id").filterNot { it in partitions }

@@ -2,10 +2,7 @@ package rocky
 
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
-import rocky.internal.native.NativeCommandHandler
-import rocky.internal.native.NativeCommands
 import rocky.internal.native.NativeException
-import rocky.internal.native.NativeHandlerReads
 import rocky.internal.native.NativeSecretStore
 import rocky.internal.native.ByteStream as NativeByteStream
 
@@ -28,65 +25,18 @@ internal class NativeStream(private val stream: NativeByteStream) : ByteStream {
     }
 }
 
-/**
- * An in-process coordinator for development and tests. Its ledger is in memory: every database that shares it
- * lives in this process, and a domain it confirmed for makes no strong progress after the process ends.
- * It sees identities and commitments, never commands, arguments or rows.
- */
-class DevelopmentCoordinator : CommandCoordinator {
+/** In-process coordinated log for development. A restart loses its ledger. */
+class DevelopmentLog {
+    internal val native = rocky.internal.native.NativeDevelopmentLog()
+    fun configure(database: RockyDatabase, minimum: Int = 1) {
+        require(minimum > 0)
+        native.configure(database.domain, minimum.toUInt())
+    }
     fun close() = native.destroy()
-    internal val native = rocky.internal.native.DevelopmentCoordinator()
-
-    /** Registers `owner`'s domain with that device as first executor. `executors` may take over; `callers` may invoke. */
-    fun register(owner: CommandIdentity, executors: List<CommandIdentity> = emptyList(), callers: List<CommandIdentity> = emptyList()) = guarded { native.register(owner.json, executors.map { it.json }, callers.map { it.json }) }
-
-    /** Fences the current executor and assigns `executor`. */
-    fun takeover(owner: CommandIdentity, executor: CommandIdentity) = guarded { native.takeover(owner.json, executor.json) }
-
-    /** Activates verified local generation evidence at the exact coordinator head. */
-    fun activate(owner: CommandIdentity, activation: JsonObject): JsonObject = guarded {
-        Json.parseToJsonElement(native.activate(owner.json, activation.toString())).jsonObject
-    }
-
-    /** The number of confirmed transitions of `identity`'s domain. */
-    fun sequence(identity: CommandIdentity): Long = guarded { native.sequence(identity.json).toLong() }
-
-    /** Fault controls: an unreachable coordinator, and one that accepts and loses its answer. */
-    fun setAvailable(available: Boolean) = guarded { native.setAvailable(available) }
-    fun dropNextReply() = guarded { native.dropNextReply() }
-    private fun <T> guarded(call: () -> T): T = try {
-        call()
-    } catch (error: NativeException.Failure) {
-        throw RockyException("rejected", false, error.detail)
-    }
 }
 
-/** A provider-operated or self-hosted coordinator pinned by its serialized trust bundle. */
-class ServiceCoordinator(val trustBundle: String) : CommandCoordinator
-
-internal fun composeCommands(commands: CommandRuntime?): NativeCommands? = commands?.let { runtime ->
-    val coordinator = runtime.coordinator
-    require(coordinator is DevelopmentCoordinator || coordinator is ServiceCoordinator)
-    val dispatcher = runtime.handlers.takeIf { it.isNotEmpty() }?.let(::CommandDispatcher)
-    val handler = dispatcher?.let { dispatcher ->
-        object : NativeCommandHandler {
-            override fun handle(input: String, reads: NativeHandlerReads): String = try {
-                dispatcher.handle(
-                    input,
-                    JsonCommandReads(reads::get) { table, lower, upper, limit -> reads.scan(table, lower, upper, limit.toUInt()) },
-                )
-            } finally {
-                reads.destroy()
-            }
-        }
-    }
-    NativeCommands(
-        (coordinator as? DevelopmentCoordinator)?.native,
-        (coordinator as? ServiceCoordinator)?.trustBundle,
-        handler,
-        runtime.handlerDeadlineMillis?.toULong(),
-    )
-}
+/** A metadata coordination service pinned by its serialized current trust bundle. */
+class ServiceCoordinator(val trustBundle: String)
 
 /** A store's failure reaches the runtime as an error with its message; it is never read as an absent secret. */
 internal fun secretProvider(secrets: SecretStore?): NativeSecretStore? = secrets?.let { foreign ->

@@ -679,6 +679,5 @@ pub async fn run(total: usize, behind: usize) -> Result<(), Failure> {
             "partials converge with the replacement",
         )?;
     }
-    println!("roles strong: covered by secure::tests::roles::a_full_node_alone_confirms_nothing");
     Ok(())
 }

@@ -11,6 +11,10 @@ mergeable horizon and recovery cuts with
 [sealed forks](#generations-as-sealed-forks). [features_08](../features_08/README.md)
 is history, not a competing next-work authority.
 
+[Phase 5 confirmed rollouts](05-confirmed-rollouts.md) are implemented and
+pass their rollout gates and full workspace verification after isolating the
+Phase 9 invoice repair. See [Phase 5 evidence](05-confirmed-rollouts-evidence.md).
+
 ## Destination
 
 A Rocky schema evolves over decades. A new app version may add or remove

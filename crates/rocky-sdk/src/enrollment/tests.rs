@@ -550,7 +550,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                         scopes: ["lists".into()].into(),
                     }),
                     issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
-                    command: command_identity(node),
+
                     enrolled: now()?,
                 }),
                 ..Default::default()
@@ -669,7 +669,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
                     scopes: ["lists".into()].into(),
                 }),
                 issuer: a.credentials.0.last().ok_or("issuer")?.capability.subject,
-                command: command_identity(nonreader),
+
                 enrolled: now()?,
             }),
             ..Default::default()

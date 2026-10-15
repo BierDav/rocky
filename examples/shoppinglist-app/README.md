@@ -112,31 +112,25 @@ Credential dates use kotlinx-datetime in the device's time zone, displayed as
 
 ## Approvals
 
-The **Approvals** tab shows strong commands. Any device asks to buy something
-with `AskApproval`; a trusted device approves or declines it with
-`DecideApproval`. The [public coordination service](../../docs/runtime/public-coordination.md)
-orders both, so the first decision stands everywhere: when two trusted devices
-decide at once, the second gets a typed rejection naming the standing decision.
-Members hold `Invoke` on `requests` only, so they cannot decide. The
-command-controlled `requests` and `decisions` tables change only through
-confirmed results; see [Approvals](shared/src/data/coordination/ApprovalCommands.kt) and
-[Coordination](shared/src/data/coordination/Coordination.kt).
+The **Approvals** tab stores requests as ordinary rows, so any member can ask
+while offline. Trusted devices approve or decline using a
+[coordinated write](../../docs/runtime/coordinated-writes.md). Two trusted
+devices deciding concurrently end with the first committed decision everywhere;
+a later attempt reports the decision that already stands. Members hold insert
+rights on requests and read rights on decisions, with no decision-write right.
+See [the approval flow](shared/src/data/coordination/Coordination.kt).
 
-The founding device creates the household's coordination tenant key in the
-`coordination` table, which only trusted devices read. Trusted devices keep the
-domain registered: every live device may invoke and every trusted device may
-execute, and the control is renewed before its 29 days end. Command identities come from Kotlin `devices()` on trusted nodes; members never
-query the registry. Requests and decisions retain command identities, which members
-label **This device** or **Another device**. Trusted nodes show the registry name. The service learns request
-identities and commitments, never titles or decisions. A device opened over
-isolated loopback iroh, as in qualification, has no coordinator and shows the tab as
-unavailable. A member's request discovers the assigned executor through contacts, or is forwarded
-once by an admitted peer; a request
-that cannot be delivered stays stored and is retried in the background.
-Once its requests settle, a device lets the service retire their identities.
-The runtime retires only identities whose results other devices can still
-verify, so the app acknowledges unconditionally; see
-[coordinator retention](../../docs/runtime/coordinator-retention.md).
+A deployment supplies a current format-2 coordinator bundle in `coordinator.json`
+in the household directory. The retired provider certificate is refused, and
+an absent configuration leaves decisions unavailable.
+The founder creates a household coordination key in a table only trusted devices
+read. Trusted devices register their node keys and renew the domain control
+before it expires. Requester and decider fields contain node keys; members label
+them **This device** or **Another device**, while trusted devices can display
+registry names. The service sees generic log metadata, never titles or decisions.
+A request is never a command or a forwarded ticket: ordinary replication carries
+it, and a trusted device decides from the committed rows. A failed coordinated
+write is reported as a failure, with unknown outcomes resolved by the runtime.
 
 Only trusted devices create, rename and delete lists. Each list, its items
 and categories form the `list` partition group with one secret. Trusted

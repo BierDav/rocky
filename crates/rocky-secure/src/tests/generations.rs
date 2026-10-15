@@ -180,10 +180,7 @@ impl Lineage {
     }
     /// The transition out of `from`, signed at `time`.
     fn transition_at(&self, from: u32, time: u64) -> SignedTransition {
-        let at = |generation| Generation {
-            schema: generation,
-            handler: 1,
-        };
+        let at = |generation| Generation { schema: generation };
         SignedTransition::sign(
             &GenerationTransition {
                 app: self.domain.app,
@@ -614,13 +611,7 @@ async fn a_local_plan_survives_an_interruption_at_every_step() {
             vec![vec![text("items_identity")], vec![text("items_title")]]
         );
         let status = replica.generations().await.unwrap();
-        assert_eq!(
-            status.current,
-            Generation {
-                schema: 1,
-                handler: 1
-            }
-        );
+        assert_eq!(status.current, Generation { schema: 1 });
         assert!(status.previous.is_empty());
     }
 }
@@ -727,13 +718,7 @@ async fn a_signed_upgrade_keeps_identities_pending_work_and_every_older_peer() {
         .await
         .unwrap();
     let status = alice.generations().await.unwrap();
-    assert_eq!(
-        status.current,
-        Generation {
-            schema: 2,
-            handler: 1
-        }
-    );
+    assert_eq!(status.current, Generation { schema: 2 });
     assert_eq!(status.previous.len(), 1);
     // Existing rows gained the new column, empty; the new table exists.
     assert_eq!(

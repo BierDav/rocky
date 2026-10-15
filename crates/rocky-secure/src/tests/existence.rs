@@ -1219,7 +1219,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
     drop(sql);
     let scope = erp.scope("lists");
     let before_horizon = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(before_horizon.statement.format, 10);
+    assert_eq!(before_horizon.statement.format, 11);
     let horizon = SignedHorizon::sign(
         source.replica.horizon_statement(scope, &[]).await.unwrap(),
         &erp.publisher,
@@ -1243,7 +1243,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .is_err()
     );
     let checkpoint = source.replica.checkpoint(scope).await.unwrap();
-    assert_eq!(checkpoint.statement.format, 10);
+    assert_eq!(checkpoint.statement.format, 11);
     assert_eq!(checkpoint.statement.horizon.as_deref(), Some(&horizon));
     let offered = source
         .replica
@@ -1350,7 +1350,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v20");
+    assert_eq!(identity, "rocky.encrypted-replica.v21");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -1363,139 +1363,6 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .await
             .unwrap(),
         Some(Box::new(horizon))
-    );
-}
-
-#[tokio::test]
-async fn horizon_recovery_refuses_packages_that_cannot_preserve_the_declaration() {
-    use rocky_core::{CommandSet, TypedCommands};
-    let erp = Erp::new();
-    let tmp = TempDir::new().unwrap();
-    let source_node = PrivateKey::new();
-    let target_node = PrivateKey::new();
-    let configs = [&source_node, &target_node].map(|node| SecureConfig {
-        publisher: erp.publisher.public_key(),
-        manifest: erp.manifest.clone(),
-        revocations: erp.policy.clone(),
-        node: node.clone(),
-        credentials: erp.credentials(node, erp.grants(&TABLES)),
-        keys: TABLES
-            .iter()
-            .map(|table| {
-                KeyMaterial::new(
-                    erp.scope(table),
-                    1,
-                    rocky_core::commitment("erp.key", table.as_bytes()),
-                )
-            })
-            .collect(),
-    });
-    let target_credentials = configs[1].credentials.clone();
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    let owner = crate::secure_principal_id(configs[0].credentials.0[0].capability.subject);
-    coordinator
-        .register(
-            erp.domain,
-            owner,
-            [1; 16],
-            vec![
-                crate::secure_node_id(source_node.public_key()),
-                crate::secure_node_id(target_node.public_key()),
-            ],
-            1,
-            1,
-        )
-        .unwrap();
-    coordinator
-        .acquire(
-            erp.domain,
-            owner,
-            crate::secure_node_id(source_node.public_key()),
-        )
-        .unwrap();
-    let app = || {
-        TypedCommands::new(
-            TypedRows::new(erp.schema.clone(), vec![erp.domain.domain]).unwrap(),
-            CommandSet::default(),
-            TABLES
-                .iter()
-                .map(|table| (table.to_string(), erp.scope(table)))
-                .collect(),
-            None,
-        )
-        .unwrap()
-    };
-    let [source_config, target_config] = configs;
-    let source = EncryptedReplica::open(tmp.path().join("source.db"), app(), source_config)
-        .await
-        .unwrap();
-    let target = EncryptedReplica::open(tmp.path().join("target.db"), app(), target_config)
-        .await
-        .unwrap();
-    for replica in [&source, &target] {
-        replica
-            .install_tables(
-                erp.schema.clone(),
-                erp.domain,
-                TABLES
-                    .iter()
-                    .map(|table| (table.to_string(), erp.scope(table).encryption))
-                    .collect(),
-            )
-            .await
-            .unwrap();
-    }
-    let scope = erp.scope("lists");
-    let package = source
-        .export_recovery(
-            target_node.public_key(),
-            &target_credentials,
-            vec![scope],
-            &[7; 32],
-            &coordinator,
-        )
-        .await
-        .unwrap();
-    target
-        .import_recovery(&package, &[7; 32], &coordinator)
-        .await
-        .unwrap();
-    let signed = crate::credentials::SignedHorizon::sign(
-        source.horizon_statement(scope, &[]).await.unwrap(),
-        &erp.publisher,
-    )
-    .unwrap();
-    source.receive_horizon(signed.clone()).await.unwrap();
-    target.receive_horizon(signed.clone()).await.unwrap();
-    let before = target.snapshot(scope).await.unwrap().revision;
-    assert!(
-        source
-            .export_recovery(
-                target_node.public_key(),
-                &target_credentials,
-                vec![scope],
-                &[7; 32],
-                &coordinator
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        target
-            .import_recovery(&package, &[7; 32], &coordinator)
-            .await
-            .is_err()
-    );
-    assert_eq!(target.snapshot(scope).await.unwrap().revision, before);
-    assert_eq!(
-        target
-            .inner
-            .lock()
-            .await
-            .mergeable_horizon(scope)
-            .await
-            .unwrap(),
-        Some(Box::new(signed))
     );
 }
 
@@ -1596,7 +1463,7 @@ async fn horizon_finalizes_child_only_orphans_and_stored_null_atomically() {
     assert_eq!(a.statement.rows.count, 1);
     assert_eq!(a.statement.tombstones, 0);
     assert_eq!(a.statement.identities, b.statement.identities);
-    assert_eq!(a.statement.format, 10);
+    assert_eq!(a.statement.format, 11);
     assert_eq!(a.statement.finalized.as_deref(), Some(&horizon));
     let child_sql = erp.sql(&child).await;
     assert_eq!(

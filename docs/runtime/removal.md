@@ -58,7 +58,7 @@ The [projection plan](generations.md#plan-backfill-and-switch) then
 recreates the tables, indexes and constraints of the new schema from the
 stored rows. Stored rows stay a replay of the checkpoint base and the frames
 after it, which the open-time audit checks. File identity
-`rocky.encrypted-replica.v20` (including [held changes](held-changes.md) and
+`rocky.encrypted-replica.v21` (including [held changes](held-changes.md) and
 [coordinated writes](coordinated-writes.md)).
 
 ## Frames and checkpoint pages
@@ -100,7 +100,7 @@ issuers that sign the same schema apart hold the same key.
 
 ## Limits
 
-Signing a removal waits for [confirmed rollouts](../features_09/05-confirmed-rollouts.md);
+SDK signing requires [application confirmation](generations.md#confirmed-removals);
 held changes are implemented in [phase 4](../features_09/04-held-changes.md). A remaining
 table's reader scope must stay as it was: a removal that would split a
 reader scope another table shares is refused by the projection plan.

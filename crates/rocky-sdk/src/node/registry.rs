@@ -261,7 +261,6 @@ impl Node {
                     "profile": record.profile(),
                     "capability": capability.map(|capability| data_encoding::HEXLOWER.encode(&capability.id)),
                     "expires": capability.map(|capability| capability.expires.to_string()),
-                    "command": device.map(|device| device.command.clone()),
                     "label": record.label,
                     "partitions": record.grants.iter().map(|grant| json!({
                         "grant": grant.grant, "delegations": grant.delegations,

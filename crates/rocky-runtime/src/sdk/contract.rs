@@ -3,7 +3,7 @@ use rocky_core::{AuthorSequence, Commitment, SqlValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum BoundValue {
@@ -112,9 +112,6 @@ pub enum Request {
     Read {
         query: Query,
     },
-    ReadStrong {
-        query: Query,
-    },
     Subscribe {
         query: Query,
     },
@@ -131,16 +128,6 @@ pub enum Request {
         baseline: Option<String>,
     },
     MutationProgress {
-        handle: Commitment,
-    },
-    Invoke {
-        handle: Commitment,
-        method: String,
-        version: u32,
-        arguments: Vec<u8>,
-        policy: Commitment,
-    },
-    CommandProgress {
         handle: Commitment,
     },
 }
@@ -163,12 +150,10 @@ impl From<Error> for SdkError {
             FailureReason::Denial => "denied",
             FailureReason::UnsupportedGeneration => "unsupported_generation",
             FailureReason::MissingDependencies => "missing_dependencies",
-            FailureReason::MissingHead => "missing_head",
             FailureReason::Quota => "quota",
             FailureReason::Corruption => "corruption",
             FailureReason::Conflict => "conflict",
             FailureReason::Closed => "closed",
-            FailureReason::UnknownConfirmation => "unknown_confirmation",
             FailureReason::Storage => "storage",
         };
         Self {

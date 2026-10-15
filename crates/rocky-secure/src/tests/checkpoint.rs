@@ -169,7 +169,7 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     let statement = &signed.statement;
     assert_eq!(signed.signer(), node.public_key());
     assert_eq!(statement.definition, f.app().definition().hash());
-    assert_eq!((statement.schema, statement.handler), (1, 1));
+    assert_eq!(statement.schema, 1);
     assert_eq!(statement.revocations, crate::tests::unrevoked());
     assert_eq!(statement.key_epoch.generation, 1);
     assert_eq!((statement.sequence, statement.previous), (1, None));
@@ -182,7 +182,6 @@ async fn checkpoint_binds_the_scope_and_survives_a_failure_at_every_step() {
     assert_eq!((statement.rows.count, statement.tombstones), (40, 1));
     assert_eq!(statement.creations.count, 40);
     assert_eq!(statement.handles.count, 42);
-    assert_eq!(statement.strong.head, None);
     // Nobody acknowledged anything: every covered operation is a sole copy.
     assert_eq!(statement.custody.superseded, 0);
     assert_eq!(statement.custody.sole.count, 42);
@@ -283,33 +282,6 @@ async fn pruning_needs_a_verified_checkpoint_acknowledgments_and_custody() {
         Some(PruneBlock::Unacknowledged { peer, .. }) if peer == rocky_credentials::PeerId::of(b_key.public_key())
     ));
     assert!(sync(&f, &a, (&b, &b_key, &b_credentials)).await.is_empty());
-    // A domain that requires recovery custodians keeps complete history.
-    let durability = [
-        encode(&f.public.domain).unwrap(),
-        encode(&DurabilityPolicy::RequiredCustodians {
-            nodes: [b_key.public_key()].into(),
-            minimum: 1,
-        })
-        .unwrap(),
-    ];
-    a.inner
-        .lock()
-        .await
-        .conn
-        .execute("INSERT INTO secure_durability VALUES(?,?)", durability)
-        .await
-        .unwrap();
-    assert_eq!(
-        a.prune(f.public).await.unwrap(),
-        blocked(PruneBlock::RecoveryCustody)
-    );
-    a.inner
-        .lock()
-        .await
-        .conn
-        .execute("DELETE FROM secure_durability", ())
-        .await
-        .unwrap();
     // A checkpoint that no longer verifies blocks pruning.
     let signed = {
         let inner = a.inner.lock().await;
@@ -949,66 +921,6 @@ async fn retained_bytes_trigger_checkpoints_and_pruning_then_backpressure() {
     assert_eq!(all_rows(&f, &a).await.len(), index as usize + 1);
     a.audit(f.public).await.unwrap();
     b.audit(f.public).await.unwrap();
-}
-
-#[tokio::test]
-async fn retried_command_from_before_the_horizon_keeps_its_one_result() {
-    let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
-    let (a_key, b_key) = (PrivateKey::new(), PrivateKey::new());
-    let config = f.config(&a_key, commands::command_grants(&f), &[f.public, f.private]);
-    let coordinator = commands::coordinator(&f, &config);
-    let a = EncryptedReplica::open(dir.path().join("a.db"), f.app(), config)
-        .await
-        .unwrap();
-    let (b, b_credentials) = open(&f, &dir.path().join("b.db"), &b_key).await;
-    a.author(handle(1), insert(&f, 1, "merged"), vec![])
-        .await
-        .unwrap();
-    let arguments = b"employee-1\nAlice\n731994";
-    let command = a
-        .invoke_encrypted([1; 32], f.private, "SetEmployee", arguments)
-        .await
-        .unwrap();
-    let result = a
-        .execute_encrypted(command.clone(), &coordinator)
-        .await
-        .unwrap();
-    let before = a.command_snapshot(f.public).await.unwrap().rows;
-    assert!(!before.is_empty());
-    sync(&f, &a, (&b, &b_key, &b_credentials)).await;
-    a.set_retention_policy(f.public, policy(&[&b_key], &[]))
-        .await
-        .unwrap();
-    // The checkpoint binds the strong head and every retained strong artifact.
-    let strong = a.checkpoint(f.public).await.unwrap().statement.strong;
-    let head = coordinator.head(f.public.domain).unwrap();
-    assert_eq!(strong.head, Some((head.sequence, head.head)));
-    assert_eq!((strong.commands.count, strong.results.count), (0, 0));
-    assert_eq!(strong.base, strong.head);
-    assert_eq!(a.prune(f.public).await.unwrap().pruned, 1);
-    // Strong artifacts are not pruned: the retried invocation is the same
-    // signed command and executing it again returns the one result.
-    assert_eq!(
-        a.invoke_encrypted([1; 32], f.private, "SetEmployee", arguments)
-            .await
-            .unwrap()
-            .to_bytes()
-            .unwrap(),
-        command.to_bytes().unwrap()
-    );
-    assert_eq!(
-        a.execute_encrypted(command, &coordinator)
-            .await
-            .unwrap()
-            .to_bytes()
-            .unwrap(),
-        result.to_bytes().unwrap()
-    );
-    assert_eq!(coordinator.head(f.public.domain).unwrap(), head);
-    assert_eq!(count(&a, "SELECT COUNT(*) FROM secure_results").await, 1);
-    assert_eq!(a.command_snapshot(f.public).await.unwrap().rows, before);
-    a.audit(f.public).await.unwrap();
 }
 
 #[tokio::test]

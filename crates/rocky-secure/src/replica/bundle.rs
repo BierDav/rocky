@@ -222,7 +222,7 @@ impl<A: RowApplication> Inner<A> {
                 Some(sequence) => *sequence,
                 None => {
                     let id = self.scope_id(scope).await?;
-                    self.log(id, author.unwrap_or(node))
+                    self.author_tip(scope, id, author.unwrap_or(node))
                         .await?
                         .map_or(0, |log| log.sequence as u64 + 1)
                 }

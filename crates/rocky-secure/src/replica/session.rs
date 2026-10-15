@@ -426,7 +426,7 @@ impl<A: RowApplication> SecureTransaction<A> {
                     .any(|field| inner.permission_fields.contains(field))
         }) {
             return Err(denied(
-                "row/field transition denied; ACL changes require strong execution",
+                "row/field transition denied; permission fields never change by row writes",
             ));
         }
         *staged = next;

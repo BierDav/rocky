@@ -46,16 +46,6 @@ async fn flushed_operations(snapshot: &Path, file: &str) -> Vec<Vec<u8>> {
     })
     .collect()
 }
-fn coordinator() -> rocky_coordinator::MemoryCoordinator {
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    coordinator
-        .register(scope(1), PrincipalId([7; 16]), [6; 16], vec![NODE], 1, 1)
-        .unwrap();
-    coordinator
-        .acquire(scope(1), PrincipalId([7; 16]), NODE)
-        .unwrap();
-    coordinator
-}
 
 #[tokio::test]
 async fn a_buffered_commit_is_never_reported_as_flushed() {
@@ -150,44 +140,12 @@ async fn nothing_leaves_the_device_before_a_flush_covers_it() {
     let state = replica.sync_state().await.unwrap();
     assert!(state.holds(four.id));
     expose("state", vec![four.encode().unwrap()]).await;
-    // The frontier sealed into a published request covers a buffered write.
-    let five = note(&replica, 5, "sealed").committed().await.unwrap();
-    let request = replica
-        .submit_command_with_arguments(
-            CommandHandle([1; 32]),
-            inventory_app::RESERVE,
-            1u64.to_le_bytes().to_vec(),
-            [9; 32],
-        )
-        .unwrap()
-        .committed()
-        .await
-        .unwrap();
-    assert!(request.frontier.0.contains(&(NODE, five.id.sequence)));
-    expose("sealed", vec![five.encode().unwrap()]).await;
-    assert_eq!(
-        flushed(
-            &snapshot,
-            "author.db",
-            1,
-            "SELECT COUNT(*) FROM rocky_requests"
-        )
-        .await,
-        vec![vec![SqlValue::Integer(1)]]
-    );
-    replica.execute_pending(&coordinator()).await.unwrap();
-    let results = replica.strong_results().await.unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(
-        flushed(
-            &snapshot,
-            "author.db",
-            1,
-            "SELECT COUNT(*) FROM rocky_preparations WHERE applied=1"
-        )
-        .await,
-        vec![vec![SqlValue::Integer(1)]]
-    );
+    let five = note(&replica, 5, "sent").committed().await.unwrap();
+    expose(
+        "sent",
+        vec![replica.operation(five.scoped_id()).await.unwrap().unwrap()],
+    )
+    .await;
     // A receiver's acknowledgment lets the sender drop its outbox entry, so
     // the receipt is flushed before it is returned.
     let peer_snapshot = dir.path().join("peer-flushed");
@@ -220,63 +178,10 @@ fn lose_unflushed(snapshot: &Path, live: &Path, file: &str) {
     }
 }
 
-/// A stored, verified and applied result that was never exposed is one
-/// buffered commit. Power loss drops all of it; the request and the attempt
-/// were flushed when they were exposed, so the coordinator's receipt and the
-/// retained package complete the command again.
-#[tokio::test]
-async fn losing_buffered_strong_steps_keeps_the_exposed_attempt_and_recovers() {
-    use crate::write_concurrency_tests::{confirmed, coordinator};
-    let dir = TempDir::new().unwrap();
-    let (live, snapshot): (PathBuf, PathBuf) =
-        (dir.path().join("node"), dir.path().join("flushed"));
-    let file = live.join("node.db");
-    let runtime = open_node(&file, NODE, one_file()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    snapshots(&replica, &snapshot).await;
-    let coordinator = coordinator();
-    let (package, receipt) = confirmed(&replica, &coordinator).await;
-    replica
-        .strong_request(strong::Request::StoreResult(
-            package.encode().unwrap(),
-            receipt.encode(),
-            strong::Verdict::Verified,
-        ))
-        .await
-        .unwrap();
-    // Applied and visible locally, but not on the device yet.
-    assert_eq!(replica.query().await.unwrap().strong_head.sequence, 1);
-    let stored = |sql: &'static str| flushed(&snapshot, "node.db", 1, sql);
-    assert_eq!(
-        stored("SELECT state,receipt IS NULL,applied FROM rocky_preparations").await,
-        vec![vec![
-            SqlValue::Text("unknown".into()),
-            SqlValue::Integer(1),
-            SqlValue::Integer(0)
-        ]]
-    );
-    drop(replica);
-    runtime.close().await.unwrap();
-    lose_unflushed(&snapshot, &live, "node.db");
-    let runtime = open_node(&file, NODE, one_file()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    assert_eq!(replica.query().await.unwrap().strong_head.sequence, 0);
-    let status = replica.strong_status().await.unwrap();
-    assert!(status.received.is_empty());
-    assert_eq!(status.commands[0].state, CommandState::OutcomeUnknown);
-    // The coordinator kept the confirmation it issued.
-    replica.execute_pending(&coordinator).await.unwrap();
-    let publications = replica.confirmed_publications().await.unwrap();
-    assert_eq!(publications.len(), 1);
-    assert_eq!(publications[0].receipt, receipt);
-    assert_eq!(coordinator.head(scope(1)).unwrap().sequence, 1);
-    runtime.close().await.unwrap();
-}
-
 /// Local writes stay buffered while incoming pages and strong commands run
 /// on the same domain, and each exposure is on the device when it returns.
 #[tokio::test]
-async fn exposure_stays_behind_the_watermark_with_strong_and_incoming_work() {
+async fn exposure_stays_behind_the_watermark_with_incoming_work() {
     let dir = TempDir::new().unwrap();
     let snapshot = dir.path().join("flushed");
     let remote = crate::write_concurrency_tests::peer_operations(dir.path(), 12).await;
@@ -285,7 +190,6 @@ async fn exposure_stays_behind_the_watermark_with_strong_and_incoming_work() {
     snapshots(&replica, &snapshot).await;
     // The first copy is taken at the first flush.
     note(&replica, 200, "first").flushed().await.unwrap();
-    let coordinator = crate::write_concurrency_tests::coordinator();
     let on_device = async |bytes: &Vec<u8>| {
         flushed_operations(&snapshot, "node.db")
             .await
@@ -312,44 +216,6 @@ async fn exposure_stays_behind_the_watermark_with_strong_and_incoming_work() {
             .await
             .unwrap();
         assert_eq!(covered.unwrap().class, CommitClass::Flushed);
-        // A published request seals the frontier, buffered writes included.
-        let sealed = note(&replica, 2 * round + 2, "before a command")
-            .receipt()
-            .await
-            .unwrap();
-        assert_eq!(sealed.class, CommitClass::Buffered);
-        let request = replica
-            .submit_command_with_arguments(
-                CommandHandle([round + 1; 32]),
-                inventory_app::RESERVE,
-                1u64.to_le_bytes().to_vec(),
-                [9; 32],
-            )
-            .unwrap()
-            .committed()
-            .await
-            .unwrap();
-        assert!(
-            request
-                .frontier
-                .0
-                .contains(&(NODE, sealed.operation.id.sequence))
-        );
-        assert!(on_device(&sealed.operation.encode().unwrap()).await);
-        replica.execute_pending(&coordinator).await.unwrap();
-        // Results handed out for peers are applied on the device.
-        let results = replica.strong_results().await.unwrap();
-        assert_eq!(results.len(), usize::from(round) + 1);
-        assert_eq!(
-            flushed(
-                &snapshot,
-                "node.db",
-                1,
-                "SELECT COUNT(*) FROM rocky_preparations WHERE applied=1"
-            )
-            .await,
-            vec![vec![SqlValue::Integer(i64::from(round) + 1)]]
-        );
     }
     runtime.close().await.unwrap();
 }
@@ -427,42 +293,4 @@ async fn losing_unflushed_commits_drops_only_unexposed_work_and_never_forks() {
     assert_eq!(later.id.sequence.get(), 3);
     author.close().await.unwrap();
     peer.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn coordinator_retirement_follows_a_flush_of_the_applied_result() {
-    let dir = TempDir::new().unwrap();
-    let snapshot = dir.path().join("retirement-flushed");
-    let runtime = open_node(&dir.path().join("retirement.db"), NODE, one_file()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    snapshots(&replica, &snapshot).await;
-    let coordinator = coordinator();
-    let request = replica
-        .submit_command_with_arguments(
-            CommandHandle([4; 32]),
-            inventory_app::RESERVE,
-            1u64.to_le_bytes().to_vec(),
-            [9; 32],
-        )
-        .unwrap()
-        .committed()
-        .await
-        .unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(
-        coordinator.status(scope(1), request.id).unwrap(),
-        rocky_coordinator::Status::Retired
-    );
-    // The flushed copy already holds the result before its server response is discarded.
-    assert_eq!(
-        flushed(
-            &snapshot,
-            "retirement.db",
-            1,
-            "SELECT COUNT(*) FROM rocky_preparations WHERE applied=1"
-        )
-        .await,
-        vec![vec![SqlValue::Integer(1)]]
-    );
-    runtime.close().await.unwrap();
 }

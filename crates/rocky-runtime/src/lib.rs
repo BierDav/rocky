@@ -28,33 +28,23 @@ pub use sql::{
     SqlError, SqlOptions, SqlRows, SqlSession, SqlState, SqlStatement, TransactionOutcome,
     Unavailable, operation_handle,
 };
-mod strong_read;
 mod tracking;
 pub use query::{
     BoundQuery, Completeness, CursorKind, ReadCursor, ReadObserver, ReadOptions, ReadSnapshot,
-    StrongRead, TypedQuery, TypedSnapshot,
+    TypedQuery, TypedSnapshot,
 };
 pub use runtime::{DomainInstallation, DomainPlacement, Durability, Runtime, RuntimeOptions};
 pub use writer::{CheckpointInterval, CheckpointKind, WriterStats};
 
-pub use strong_read::{PayloadFuture, StrongPayloadSource};
-pub use tracking::{
-    CommandTracking, MutationProgress, PeerEvidence, ProgressObserver, TrackedHandle,
-    TrackingSnapshot,
-};
+pub use tracking::{MutationProgress, PeerEvidence, ProgressObserver};
 mod replication;
-mod strong;
-pub use strong::{
-    CommandHandle, CommandInvocation, CommandProgress, CommandReceipt, CommandState,
-    ConfirmedPublication, SealedInputs, StrongStatus, VerificationState,
-};
 mod storage;
 mod worker;
 mod writer;
 pub use checkpoint::{
-    AnchoredResult, AuditReport, Catchup, CheckpointCursor, CheckpointHold, CheckpointInfo,
-    CheckpointPage, CheckpointRecord, Deduplication, HorizonNotice, PeerRetention,
-    RebootstrapReport, RetentionPolicy, RetentionStatus, StrongAnchor,
+    AuditReport, Catchup, CheckpointCursor, CheckpointHold, CheckpointInfo, CheckpointPage,
+    CheckpointRecord, Deduplication, HorizonNotice, PeerRetention, RebootstrapReport,
+    RetentionPolicy, RetentionStatus,
 };
 pub use digest::SetDigest;
 pub use replication::{
@@ -71,9 +61,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-pub use rocky_storage::{
-    CommitClass, Error, FailureReason, MAX_FRAME_BYTES, PendingReason, StorageFailure,
-};
+pub use rocky_storage::{CommitClass, Error, FailureReason, MAX_FRAME_BYTES, StorageFailure};
 pub(crate) use rocky_storage::{
     capture, cursor, database, digest, observe, scoped_connection, sqlite, statement,
 };
@@ -108,7 +96,6 @@ pub struct Snapshot<R> {
     pub revision: LocalRevision,
     pub frontier: rocky_core::AppliedFrontier,
     pub query: QueryIdentity,
-    pub strong_head: LocalStrongHead,
 }
 
 impl<R> Snapshot<R> {
@@ -122,12 +109,6 @@ impl<R> Snapshot<R> {
 pub struct QueryIdentity {
     pub scope: Scope,
     pub name: &'static str,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LocalStrongHead {
-    pub configuration: Option<rocky_core::Configuration>,
-    pub sequence: u64,
-    pub head: Option<rocky_core::Commitment>,
 }
 /// Cursor pages cover retained records in key order. Restart a pass to discover
 /// new records inserted before its cursor. Records behind the horizon are gone.
@@ -221,7 +202,6 @@ enum Command<R> {
     Query(Reply<Snapshot<R>>),
     Close(Reply<()>),
     Sync(replication::Request, Reply<replication::Response>),
-    Strong(Box<strong::Request>, Reply<strong::Response>),
     Retention(Box<checkpoint::Request>, Reply<checkpoint::Response>),
     Sql(sql::Request, Reply<sql::Response>),
     #[cfg(test)]
@@ -233,7 +213,6 @@ impl<R> Command<R> {
         match self {
             Self::Mutate(..) => true,
             Self::Sync(request, _) => request.writes(),
-            Self::Strong(request, _) => request.writes(),
             Self::Retention(request, _) => request.writes(),
             _ => false,
         }
@@ -244,7 +223,6 @@ impl<R> Command<R> {
         match self {
             Self::Flush(_) => true,
             Self::Sync(request, _) => request.exposes(),
-            Self::Strong(request, _) => request.exposes(),
             Self::Retention(request, _) => request.exposes(),
             Self::Sql(request, _) => request.exposes(),
             _ => false,
@@ -267,7 +245,6 @@ impl<R> Command<R> {
             Self::Query(reply) => drop(reply.send(Err(error))),
             Self::Close(reply) => drop(reply.send(Err(error))),
             Self::Sync(_, reply) => drop(reply.send(Err(error))),
-            Self::Strong(_, reply) => drop(reply.send(Err(error))),
             Self::Retention(_, reply) => drop(reply.send(Err(error))),
             Self::Sql(_, reply) => drop(reply.send(Err(error))),
             #[cfg(test)]
@@ -281,12 +258,8 @@ struct Inner<R> {
     revisions: watch::Receiver<LocalRevision>,
     changes: watch::Receiver<u64>,
     thread: Mutex<Option<JoinHandle<()>>>,
-    strong_execution: tokio::sync::Mutex<()>,
-    verification: tokio::sync::Mutex<()>,
     nonce: rocky_core::Commitment,
     submissions: std::sync::atomic::AtomicU64,
-    /// The own sequence the coordinator was last told is settled.
-    acknowledged: std::sync::atomic::AtomicU64,
     observers: Arc<tokio::sync::Semaphore>,
     /// Set by the file's writer once the domain is open.
     reads: std::sync::OnceLock<Arc<read::Reads>>,
@@ -445,8 +418,6 @@ where
                 revisions: revision_receiver,
                 changes: change_receiver,
                 thread: Mutex::new(Some(thread)),
-                strong_execution: tokio::sync::Mutex::new(()),
-                verification: tokio::sync::Mutex::new(()),
                 nonce: rocky_core::commitment(
                     "rocky.submission.session",
                     &std::time::SystemTime::now()
@@ -456,7 +427,6 @@ where
                         .to_le_bytes(),
                 ),
                 submissions: std::sync::atomic::AtomicU64::new(0),
-                acknowledged: std::sync::atomic::AtomicU64::new(0),
                 observers: Arc::new(tokio::sync::Semaphore::new(MAX_OBSERVERS)),
                 reads: reads.into(),
                 metrics,
@@ -678,24 +648,6 @@ impl<R> CommandQueue<R> {
                 records.iter().map(Vec::len).sum()
             }
             Command::Sync(replication::Request::Missing(ids), _) => ids.len().saturating_mul(24),
-            Command::Strong(request, _) => match request.as_ref() {
-                strong::Request::StoreResult(package, receipt, _) => {
-                    package.len().saturating_add(receipt.len())
-                }
-                strong::Request::StoreCommand(bytes) => bytes.len(),
-                strong::Request::Publish(_, invocation) => invocation
-                    .method
-                    .len()
-                    .saturating_add(invocation.arguments.len())
-                    .saturating_add(
-                        invocation
-                            .inputs
-                            .as_ref()
-                            .map_or(0, |inputs| inputs.frontier.0.len().saturating_mul(24)),
-                    ),
-                strong::Request::Prepare(request, _) => request.encode()?.len(),
-                _ => 0,
-            },
             Command::Retention(request, _) => request.weight(),
             _ => 0,
         }
@@ -802,9 +754,6 @@ mod tests;
 mod sync_tests;
 
 #[cfg(test)]
-mod strong_tests;
-
-#[cfg(test)]
 mod audit_tests;
 
 #[cfg(test)]
@@ -839,9 +788,6 @@ mod crash_tests;
 
 #[cfg(all(test, unix))]
 mod retention_tests;
-
-#[cfg(test)]
-mod strong_cut_tests;
 
 #[cfg(test)]
 mod wide_schema_tests;

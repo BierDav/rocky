@@ -32,7 +32,7 @@ object IosPlatformBindings {
             deviceName = UIDevice.currentDevice.name,
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(name = path) },
             secrets = { secrets },
-            commands = ::publicCoordination,
+            coordinator = { publicCoordination((NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, true).first() as String) + "/shopping") },
             opened = { database -> lifecycle.follow(database, onApplied = { visible.value = it }, onError = { println("Shopping lifecycle: ${it.message}") }) },
             closed = lifecycle::unfollow,
             erase = secrets::clear,

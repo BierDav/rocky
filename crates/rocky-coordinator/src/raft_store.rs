@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 openraft::declare_raft_types!(pub Types: D = Proposal, R = Result<Outcome, CoordinationError>);
 pub type Consensus = Raft<Types>;
 /// The storage format this build reads; older images are refused.
-const FORMAT: u32 = 5;
+const FORMAT: u32 = 6;
 const RETAINED_SNAPSHOTS: usize = 2;
 const MAX_LOGS: usize = 2048;
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -110,7 +110,7 @@ pub struct Footprint {
     pub disk_bytes: u64,
     pub allocated_bytes: u64,
     pub state: crate::Retention,
-    /// Domain controls, sessions and tenant records charged to the state budget.
+    /// Domain controls, logs and tenant records charged to the state budget.
     pub state_bytes: usize,
     pub retry_records: usize,
 }

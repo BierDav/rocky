@@ -217,14 +217,6 @@ impl Node {
             || imports
                 .iter()
                 .any(|scope| scope.horizon_rebootstrap_required || scope.checkpoint.is_some());
-        let mut tickets = BTreeMap::<String, u64>::new();
-        for ticket in self.replica.open_tickets(usize::MAX).await? {
-            let state = crate::commands::ticket_json(&self.domain().app, &ticket)?["state"]
-                .as_str()
-                .ok_or("missing ticket state")?
-                .to_owned();
-            *tickets.entry(state).or_default() += 1;
-        }
         let renewal_routes = settings.renewal_routes();
         let profile = serde_json::to_value(&settings.profile)?;
         let mut status = DatabaseStatus {
@@ -281,7 +273,6 @@ impl Node {
                     manifest: HEXLOWER.encode(&generation.manifest),
                     current: crate::Generation {
                         schema: generation.current.schema,
-                        handler: generation.current.handler,
                     },
                     previous: generation
                         .previous
@@ -289,7 +280,6 @@ impl Node {
                         .map(|(generation, manifest)| GenerationRecord {
                             generation: crate::Generation {
                                 schema: generation.schema,
-                                handler: generation.handler,
                             },
                             manifest: HEXLOWER.encode(&manifest),
                         })
@@ -297,6 +287,8 @@ impl Node {
                     baseline: generation.baseline,
                     application: self.application(&settings)?,
                     migration: self.migration(&settings).await?,
+                    waiting_for_issuer: !settings.issuer()
+                        && self.application(&settings)? == crate::DeclaredSchema::Ahead,
                     rebuilding: generation.plan.map(|plan| RebuildProgress {
                         schema: HEXLOWER.encode(&plan.schema),
                         filled: plan.filled as u64,
@@ -324,17 +316,11 @@ impl Node {
                         }),
                     })
                     .collect(),
-                tickets: tickets
-                    .into_iter()
-                    .map(|(state, count)| TicketCount { state, count })
-                    .collect(),
             },
             network: self.observed_network().await?,
             coordination: CoordinationStatus {
                 mode: if self.service.is_some() {
                     CoordinationMode::Service
-                } else if self.coordinator.is_some() {
-                    CoordinationMode::Composed
                 } else {
                     CoordinationMode::NotConfigured
                 },
@@ -367,7 +353,6 @@ impl Node {
             transfers: Vec::new(),
             refused: Vec::new(),
             waiting: Vec::new(),
-            results_failure: None,
             upgrade_required: false,
             retry_pending: false,
         }
@@ -391,7 +376,6 @@ impl Node {
             transfers: Vec::new(),
             refused: Vec::new(),
             waiting: Vec::new(),
-            results_failure: None,
             upgrade_required: false,
             retry_pending: result.is_err(),
         };
@@ -415,7 +399,6 @@ impl Node {
                 .iter()
                 .map(|scope| self.observed_scope(*scope))
                 .collect();
-            report.results_failure = transfer.results_failure.clone();
             report.transfers = transfer
                 .scopes
                 .iter()
@@ -508,7 +491,6 @@ impl Node {
             prior.transfers.extend(next.transfers);
             prior.refused = next.refused;
             prior.waiting = next.waiting;
-            prior.results_failure = next.results_failure;
             prior.upgrade_required |= next.upgrade_required;
             prior.retry_pending = next.retry_pending;
         } else {

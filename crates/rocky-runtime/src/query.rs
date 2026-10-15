@@ -1,5 +1,5 @@
 use crate::*;
-use rocky_core::{Coordinator, SqlValue, StrongHead};
+use rocky_core::SqlValue;
 
 #[derive(Clone, Debug)]
 pub struct BoundQuery {
@@ -142,11 +142,6 @@ impl ReadCursor {
 pub enum Completeness {
     /// Applied local subset, including this retained dependency backlog.
     Local { pending_operations: usize },
-    /// Matches the head discovered for this read; later remote commits may exist.
-    CoordinatorHead {
-        sequence: u64,
-        head: rocky_core::Commitment,
-    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSnapshot {
@@ -154,7 +149,6 @@ pub struct ReadSnapshot {
     pub scope: Scope,
     pub revision: LocalRevision,
     pub completeness: Completeness,
-    pub strong_head: LocalStrongHead,
     /// Set when the result has more rows than this page holds.
     pub next: Option<ReadCursor>,
 }
@@ -164,7 +158,6 @@ pub struct TypedSnapshot<R> {
     pub scope: Scope,
     pub revision: LocalRevision,
     pub completeness: Completeness,
-    pub strong_head: LocalStrongHead,
     pub next: Option<ReadCursor>,
 }
 /// Application-owned decoding; UI code uses this facade without engine values.
@@ -172,15 +165,6 @@ pub trait TypedQuery {
     type Row;
     fn query(&self) -> BoundQuery;
     fn decode(&self, rows: Vec<Vec<SqlValue>>) -> Result<Vec<Self::Row>, Error>;
-}
-#[derive(Clone, Debug)]
-pub enum StrongRead {
-    Ready(ReadSnapshot),
-    Pending {
-        discovered: StrongHead,
-        reason: PendingReason,
-    },
-    Unavailable,
 }
 impl<A> Replica<A>
 where
@@ -219,12 +203,11 @@ where
             scope: snapshot.scope,
             revision: snapshot.revision,
             completeness: snapshot.completeness,
-            strong_head: snapshot.strong_head,
             next: snapshot.next,
         })
     }
     /// Registers before its first read. `next` returns again once a table the
-    /// query reads, the strong head or the dependency backlog changed.
+    /// query reads or the dependency backlog changed.
     pub fn observe_read(
         &self,
         query: BoundQuery,
@@ -245,60 +228,6 @@ where
             row: std::marker::PhantomData,
         })
     }
-    /// Reconcile retained payloads, then require the exact discovered head.
-    /// Transport supplies missing packages through `receive_result`; discovery
-    /// alone never upgrades a local snapshot to a strong read.
-    pub async fn read_strong(
-        &self,
-        query: BoundQuery,
-        options: ReadOptions,
-        coordinator: &dyn Coordinator,
-    ) -> Result<StrongRead, Error> {
-        let head = match coordinator.head(options.scope).await {
-            Ok(head) => head,
-            Err(rocky_core::CoordinationError::Unavailable) => return Ok(StrongRead::Unavailable),
-            Err(error) => return Err(error.into()),
-        };
-        self.strong_request(crate::strong::Request::Bind(head.clone()))
-            .await?;
-        self.reconcile_strong(coordinator).await?;
-        let mut snapshot = self.read(query, options).await?;
-        if snapshot.strong_head.configuration != Some(head.configuration)
-            || snapshot.strong_head.sequence != head.sequence
-            || snapshot.strong_head.head != Some(head.head)
-        {
-            let retained = self.strong_results().await?;
-            let held = self.sync_state().await?;
-            let missing_input = retained.iter().any(|result| {
-                result.package.base.sequence == snapshot.strong_head.sequence
-                    && Some(result.package.base.head) == snapshot.strong_head.head
-                    && result
-                        .package
-                        .required()
-                        .is_ok_and(|ids| ids.iter().any(|id| !held.holds(*id)))
-            });
-            return Ok(StrongRead::Pending {
-                discovered: head,
-                reason: if missing_input {
-                    PendingReason::MissingInput
-                } else {
-                    PendingReason::MissingConfirmedPackage
-                },
-            });
-        }
-        if matches!(snapshot.completeness, Completeness::Local { pending_operations } if pending_operations > 0)
-        {
-            return Ok(StrongRead::Pending {
-                discovered: head,
-                reason: PendingReason::MissingInput,
-            });
-        }
-        snapshot.completeness = Completeness::CoordinatorHead {
-            sequence: head.sequence,
-            head: head.head,
-        };
-        Ok(StrongRead::Ready(snapshot))
-    }
 }
 pub struct ReadObserver<R> {
     _budget: tokio::sync::OwnedSemaphorePermit,
@@ -306,7 +235,7 @@ pub struct ReadObserver<R> {
     shared: Arc<crate::read::SharedRead>,
     /// Change counter of the view the query reads; none if it names no view.
     view: Option<watch::Receiver<u64>>,
-    /// Advances when completeness or the strong head may have changed.
+    /// Advances when completeness may have changed.
     meta: watch::Receiver<u64>,
     query: BoundQuery,
     options: ReadOptions,

@@ -1,8 +1,10 @@
 //! Bounded-state probe: drives the durable store as a single-voter Raft
-//! would, with deterministic authority time, over retention windows. The
+//! would, with deterministic authority time, over weekly windows of
+//! coordinated-log commits, control revisions and closures. The
 //! ignored ten-window run and its report are in
 //! `docs/runtime/coordinator-evidence.md`.
 use super::*;
+use crate::coordinated::{Action, Result as LogResult};
 use crate::machine::Outcome;
 use crate::{Limits, retention::DAY};
 use openraft::storage::RaftLogStorageExt;
@@ -13,15 +15,16 @@ use std::time::{Duration, Instant};
 const T0: u64 = 1_900_000_000;
 const DOMAINS: usize = 4;
 const SPARE: usize = 2;
-const DEVICES: usize = 8;
+/// Entries each open domain commits a day.
+const ENTRIES: usize = 12;
 const SNAPSHOT_EVERY: u64 = 1024;
 const KEEP: u64 = 8;
 
 struct Domain {
     scope: Scope,
     revision: u64,
-    devices: Vec<PrivateKey>,
-    head: StrongHead,
+    /// The trusted node's last join or append sequence.
+    sequence: u64,
     open: bool,
 }
 struct Probe {
@@ -29,12 +32,12 @@ struct Probe {
     genesis: CertifiedGenesis,
     authority: PrivateKey,
     executor: PrivateKey,
-    owner: PrincipalId,
+    /// The voter that resolves entries with the nodes' signed acknowledgments.
+    voter: PrivateKey,
     domains: Vec<Domain>,
     spare: Vec<Scope>,
     index: u64,
     snapshot: u64,
-    counter: u64,
     apply: Duration,
     applied: u64,
     compaction: Duration,
@@ -44,8 +47,6 @@ struct Probe {
 }
 #[derive(Default)]
 struct Window {
-    entries: usize,
-    sessions: usize,
     state_bytes: usize,
     retry: usize,
     logs: usize,
@@ -53,7 +54,7 @@ struct Window {
     disk: u64,
     allocated: u64,
     snapshot_bytes: usize,
-    confirmed: u64,
+    committed: u64,
     refused: u64,
 }
 fn scope(n: u8) -> Scope {
@@ -67,25 +68,13 @@ impl Probe {
     fn store(&mut self) -> &mut Store {
         self.store.as_mut().expect("open store")
     }
-    fn control(
-        &self,
-        scope: Scope,
-        revision: u64,
-        devices: &[PrivateKey],
-        now: u64,
-    ) -> ControlCertificate {
-        let mut invokers = vec![(self.executor.public_key(), self.owner)];
-        invokers.extend(devices.iter().map(|d| (d.public_key(), self.owner)));
+    fn control(&self, scope: Scope, revision: u64, now: u64) -> ControlCertificate {
         ControlCertificate::sign(
             DomainControl {
                 scope,
                 configuration: [5; 16],
                 revision,
-                owner: self.owner,
-                executors: vec![self.executor.public_key()],
-                invokers,
-                schema: 1,
-                handler: 1,
+                trusted: vec![self.executor.public_key()],
                 not_before: now - DAY,
                 expires: now + 30 * DAY,
             },
@@ -153,35 +142,49 @@ impl Probe {
             .max(self.store().footprint().await.unwrap().disk_bytes);
         replies
     }
-    fn sequence(&mut self, now: u64) -> u64 {
-        self.counter += 1;
-        (now << ISSUE_SHIFT) + self.counter % (1 << ISSUE_SHIFT)
+    /// The trusted node's next call on domain `d`.
+    fn next(&mut self, d: usize) -> u64 {
+        self.domains[d].sequence += 1;
+        self.domains[d].sequence
     }
-    fn proposal(&self, domain: usize, device: &PrivateKey, sequence: u64) -> Confirmation {
-        let head = &self.domains[domain].head;
-        let request_hash = commitment("probe", &sequence.to_le_bytes());
-        let mut p = Confirmation {
-            caller: self.owner,
-            scope: head.scope,
-            configuration: head.configuration,
-            executor: head.executor,
-            epoch: head.epoch,
-            request: RequestId {
-                node: node_id(device.public_key()),
-                sequence: AuthorSequence::new(sequence).unwrap(),
-            },
-            request_hash,
-            expected_sequence: head.sequence,
-            expected_head: head.head,
-            schema: 1,
-            handler: 1,
-            result: [3; 32],
-            new_head: [0; 32],
+    async fn log(
+        &mut self,
+        now: u64,
+        scope: Scope,
+        action: Action,
+    ) -> Result<Outcome, CoordinationError> {
+        let operation = Operation::Coordinated { scope, action };
+        self.run(now, vec![(self.executor.clone(), operation)])
+            .await
+            .remove(0)
+    }
+    /// Registers `scope` under its first control and joins its log.
+    async fn open_domain(&mut self, scope: Scope, revision: u64, now: u64) {
+        let certificate = self.control(scope, revision, now);
+        let replies = self
+            .run(
+                now,
+                vec![(self.authority.clone(), Operation::Control(certificate))],
+            )
+            .await;
+        assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+        self.domains.push(Domain {
+            scope,
+            revision,
+            sequence: 0,
+            open: true,
+        });
+        let d = self.domains.len() - 1;
+        let sequence = self.next(d);
+        let join = Action::Join {
+            position: 0,
+            running_hash: genesis(scope, [5; 16]),
+            sequence,
         };
-        p.new_head = successor(p.expected_head, head.sequence + 1, p.request_hash, p.result);
-        p
+        self.log(now, scope, join).await.unwrap();
     }
-    /// One simulated day: commands, acknowledgments, reads, a takeover.
+    /// One simulated day: committed entries, a control revision each week
+    /// and a closure every three.
     async fn day(&mut self, day: u64, window: &mut Window) {
         let now = T0 + day * DAY;
         for d in 0..self.domains.len() {
@@ -189,93 +192,70 @@ impl Probe {
                 continue;
             }
             let scope = self.domains[d].scope;
-            let devices = self.domains[d].devices.clone();
-            let mut issued = Vec::new();
-            for (n, device) in devices.iter().enumerate() {
-                // Every device issues one command a day; even ones issue two.
-                for _ in 0..1 + usize::from(n % 2 == 0) {
-                    let sequence = self.sequence(now);
-                    let p = self.proposal(d, device, sequence);
-                    match self
-                        .run(now, vec![(self.executor.clone(), Operation::Confirm(p))])
-                        .await
-                        .remove(0)
-                    {
-                        Ok(Outcome::Receipt(Some(receipt))) => {
-                            let head = &mut self.domains[d].head;
-                            head.sequence = receipt.sequence;
-                            head.head = receipt.confirmation.new_head;
-                            window.confirmed += 1;
-                            issued.push((device.clone(), sequence));
-                        }
-                        Err(CoordinationError::Backpressure) => window.refused += 1,
-                        other => panic!("confirm: {other:?}"),
+            for n in 0..ENTRIES {
+                let head = self.store().log_head(scope).await.unwrap();
+                let sequence = self.next(d);
+                let append = Action::Append {
+                    expected: head.head,
+                    epoch: head.epoch,
+                    hash: commitment("probe", &[day, n as u64].map(u64::to_le_bytes).concat()),
+                    deadline: now + 20,
+                    sequence,
+                };
+                let pending = match self.log(now, scope, append).await {
+                    Ok(Outcome::Coordinated(LogResult::Assigned(pending))) => *pending,
+                    Err(CoordinationError::Backpressure) => {
+                        window.refused += 1;
+                        continue;
                     }
+                    other => panic!("append: {other:?}"),
+                };
+                let acknowledgment = Request::sign_at(
+                    self.genesis.id().unwrap(),
+                    nonce(),
+                    Operation::Coordinated {
+                        scope,
+                        action: Action::Acknowledge {
+                            pending: pending.clone(),
+                        },
+                    },
+                    &self.executor,
+                    now,
+                )
+                .unwrap();
+                let resolve = Operation::Coordinated {
+                    scope,
+                    action: Action::Resolve {
+                        pending,
+                        acknowledgments: vec![acknowledgment],
+                    },
+                };
+                match self
+                    .run(now, vec![(self.voter.clone(), resolve)])
+                    .await
+                    .remove(0)
+                {
+                    Ok(Outcome::Coordinated(LogResult::Committed { .. })) => window.committed += 1,
+                    other => panic!("resolve: {other:?}"),
                 }
             }
-            // Half the devices acknowledge; the others rely on the horizon.
-            let mut batch = Vec::new();
-            for (device, sequence) in issued.iter().filter(|(device, _)| {
-                devices
-                    .iter()
-                    .position(|d| d.public_key() == device.public_key())
-                    .unwrap()
-                    < DEVICES / 2
-            }) {
-                batch.push((
-                    device.clone(),
-                    Operation::Retire {
-                        scope,
-                        through: *sequence,
-                    },
-                ));
-            }
-            batch.push((
-                self.executor.clone(),
-                Operation::Takeover {
-                    scope,
-                    expected_epoch: self.domains[d].head.epoch,
-                },
-            ));
-            let replies = self.run(now, batch).await;
-            match replies.last() {
-                Some(Ok(Outcome::Head(head))) => self.domains[d].head = head.clone(),
-                other => panic!("takeover: {other:?}"),
-            }
-            assert!(replies.iter().all(Result::is_ok), "{replies:?}");
         }
-        // Weekly administration: rotate two devices per domain.
+        // Weekly administration: a control revision per domain.
         if day % 7 == 6 {
             for d in 0..self.domains.len() {
                 if !self.domains[d].open {
                     continue;
                 }
-                let mut devices = self.domains[d].devices.clone();
-                devices.drain(..2);
-                devices.extend([PrivateKey::new(), PrivateKey::new()]);
                 let revision = self.domains[d].revision + 1;
-                let certificate = self.control(self.domains[d].scope, revision, &devices, now);
+                let certificate = self.control(self.domains[d].scope, revision, now);
                 let replies = self
                     .run(
                         now,
-                        vec![
-                            (self.authority.clone(), Operation::Control(certificate)),
-                            (
-                                self.executor.clone(),
-                                Operation::Acquire {
-                                    scope: self.domains[d].scope,
-                                },
-                            ),
-                        ],
+                        vec![(self.authority.clone(), Operation::Control(certificate))],
                     )
                     .await;
-                let Ok(Outcome::Head(head)) = &replies[1] else {
-                    panic!("reacquire: {replies:?}")
-                };
-                let domain = &mut self.domains[d];
-                domain.revision = revision;
-                domain.devices = devices;
-                domain.head = head.clone();
+                assert!(replies.iter().all(Result::is_ok), "{replies:?}");
+                self.domains[d].revision = revision;
             }
         }
         // Every three weeks the owner closes one domain and opens a spare one.
@@ -283,43 +263,21 @@ impl Probe {
             && let Some(next) = self.spare.pop()
         {
             let d = self.domains.iter().position(|d| d.open).unwrap();
-            let head = self.domains[d].head.clone();
+            let scope = self.domains[d].scope;
             let replies = self
                 .run(
                     now,
-                    vec![(self.authority.clone(), Operation::Close { head })],
+                    vec![(self.authority.clone(), Operation::Close { scope })],
                 )
                 .await;
-            assert!(matches!(replies[0], Ok(Outcome::Head(_))), "{replies:?}");
+            assert!(matches!(replies[0], Ok(Outcome::Closed)), "{replies:?}");
             self.domains[d].open = false;
-            let devices: Vec<_> = (0..DEVICES).map(|_| PrivateKey::new()).collect();
-            let certificate = self.control(next, 1, &devices, now);
-            let replies = self
-                .run(
-                    now,
-                    vec![
-                        (self.authority.clone(), Operation::Control(certificate)),
-                        (self.executor.clone(), Operation::Acquire { scope: next }),
-                    ],
-                )
-                .await;
-            let Ok(Outcome::Head(head)) = &replies[1] else {
-                panic!("open: {replies:?}")
-            };
-            self.domains.push(Domain {
-                scope: next,
-                revision: 1,
-                devices,
-                head: head.clone(),
-                open: true,
-            });
+            self.open_domain(next, 1, now).await;
         }
         let footprint = self.store().footprint().await.unwrap();
         let encoded = encode(&self.store().0.image.lock().await.metadata)
             .unwrap()
             .len();
-        window.entries = window.entries.max(footprint.state.entries);
-        window.sessions = window.sessions.max(footprint.state.sessions);
         window.state_bytes = window.state_bytes.max(footprint.state.bytes);
         window.retry = window.retry.max(footprint.retry_records);
         window.logs = window.logs.max(footprint.logs);
@@ -366,18 +324,14 @@ async fn probe(windows: u64) {
     let root = PrivateKey::new();
     let authority = PrivateKey::new();
     let executor = PrivateKey::new();
-    let owner = PrincipalId([9; 16]);
+    let voter = PrivateKey::new();
     let scopes: Vec<_> = (1..=(DOMAINS + SPARE) as u8).map(scope).collect();
     let directory = ControlCertificate::sign(
         DomainControl {
             scope: scopes[0],
             configuration: [5; 16],
             revision: 1,
-            owner,
-            executors: vec![executor.public_key()],
-            invokers: vec![(executor.public_key(), owner)],
-            schema: 1,
-            handler: 1,
+            trusted: vec![executor.public_key()],
             not_before: T0 - DAY,
             expires: T0 + 30 * DAY,
         },
@@ -392,7 +346,11 @@ async fn probe(windows: u64) {
                 .map(|id| Voter {
                     id,
                     address: format!("127.0.0.1:{}", 9000 + id),
-                    key: PrivateKey::new().public_key(),
+                    key: if id == 1 {
+                        voter.public_key()
+                    } else {
+                        PrivateKey::new().public_key()
+                    },
                 })
                 .collect(),
             initial_voters: [1, 2, 3].into(),
@@ -419,12 +377,11 @@ async fn probe(windows: u64) {
         genesis,
         authority,
         executor,
-        owner,
+        voter,
         domains: Vec::new(),
         spare: scopes[DOMAINS..].iter().rev().copied().collect(),
         index: 0,
         snapshot: 0,
-        counter: 0,
         apply: Duration::ZERO,
         applied: 0,
         compaction: Duration::ZERO,
@@ -433,28 +390,9 @@ async fn probe(windows: u64) {
         peak_swap_bytes: 0,
     };
     for (n, scope) in scopes[..DOMAINS].iter().enumerate() {
-        let devices: Vec<_> = (0..DEVICES).map(|_| PrivateKey::new()).collect();
+        // The genesis already installed the first domain's first control.
         let revision = if n == 0 { 2 } else { 1 };
-        let certificate = probe.control(*scope, revision, &devices, T0);
-        let replies = probe
-            .run(
-                T0,
-                vec![
-                    (probe.authority.clone(), Operation::Control(certificate)),
-                    (probe.executor.clone(), Operation::Acquire { scope: *scope }),
-                ],
-            )
-            .await;
-        let Ok(Outcome::Head(head)) = &replies[1] else {
-            panic!("setup: {replies:?}")
-        };
-        probe.domains.push(Domain {
-            scope: *scope,
-            revision,
-            devices,
-            head: head.clone(),
-            open: true,
-        });
+        probe.open_domain(*scope, revision, T0).await;
     }
     let mut report = Vec::new();
     let mut peak_rss = 0;
@@ -480,15 +418,13 @@ async fn probe(windows: u64) {
         }
     }
     println!(
-        "window | confirmed refused | sessions responses state_bytes retry | logs snapshots snapshot_bytes disk_bytes allocated_bytes"
+        "window | committed refused | state_bytes retry | logs snapshots snapshot_bytes disk_bytes allocated_bytes"
     );
     for (n, w) in report.iter().enumerate() {
         println!(
-            "{n:>6} | {:>9} {:>7} | {:>8} {:>9} {:>11} {:>5} | {:>4} {:>9} {:>14} {:>10} {:>15}",
-            w.confirmed,
+            "{n:>6} | {:>9} {:>7} | {:>11} {:>5} | {:>4} {:>9} {:>14} {:>10} {:>15}",
+            w.committed,
             w.refused,
-            w.sessions,
-            w.entries,
             w.state_bytes,
             w.retry,
             w.logs,
@@ -516,26 +452,14 @@ async fn probe(windows: u64) {
     println!("sampled peak process RSS bytes={peak_rss}");
     assert!(peak_rss <= 128 * 1024 * 1024);
     assert!(p99 < Duration::from_millis(250));
-    // Settled after the first horizon: later windows stay within the
-    // second window's maxima, so nothing grows with lifetime.
+    // Settled after the first window: accounted state and retry records stay
+    // within the second window's maxima, so they do not grow with lifetime.
     let settled = &report[1..];
     let ceiling = |f: fn(&Window) -> u64| settled.first().map(f).unwrap_or(0) * 5 / 4 + 1;
     for w in settled.iter().skip(1) {
         assert!(
-            w.sessions as u64 <= ceiling(|w| w.sessions as u64),
-            "sessions grew"
-        );
-        assert!(
-            w.entries as u64 <= ceiling(|w| w.entries as u64),
-            "responses grew"
-        );
-        assert!(
             w.state_bytes as u64 <= ceiling(|w| w.state_bytes as u64),
             "state grew"
-        );
-        assert!(
-            w.snapshot_bytes as u64 <= ceiling(|w| w.snapshot_bytes as u64),
-            "snapshot grew"
         );
         assert!(
             w.retry as u64 <= ceiling(|w| w.retry as u64),
@@ -543,12 +467,12 @@ async fn probe(windows: u64) {
         );
         assert_eq!(w.refused, 0, "a bounded window refused work");
     }
-    // Configured budgets: sessions per open domain, tenant bytes, two snapshots.
+    // Configured budgets: tenant bytes, two snapshots. Snapshots grow with
+    // each log's hash window until it holds `HASH_WINDOW` hashes.
     for w in &report {
         assert!(w.disk <= 16 * 1024 * 1024);
         assert!(w.allocated <= 16 * 1024 * 1024);
         assert!(w.snapshot_bytes <= 256 * 1024);
-        assert!(w.sessions <= (DOMAINS + SPARE) * limits.sessions);
         assert!(w.state_bytes <= limits.tenant_bytes);
         assert!(w.snapshots <= 2);
         assert!(w.logs as u64 <= SNAPSHOT_EVERY + KEEP + 64);

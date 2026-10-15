@@ -13,7 +13,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: common::SCHEMA,
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 fn create(root: &Path, hub: &Arc<Hub>, name: &str) -> Result<Device, Failure> {

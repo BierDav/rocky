@@ -48,21 +48,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Companion, Error> {
         self.inner.lock().await.companion(scope, row).await
     }
-    pub async fn open_package(
-        &self,
-        package: &EncryptedPackage,
-        binding: &PackageSet,
-    ) -> Result<Vec<u8>, Error> {
-        binding.verify_subset(std::slice::from_ref(package))?;
-        let inner = self.inner.lock().await;
-        if !inner.can_read_key(package.scope, &inner.local_grants(now()?)?) {
-            return Err(denied("package read denied"));
-        }
-        let key = inner
-            .opening_key(package.scope, package.generation)
-            .ok_or_else(|| denied("package key unavailable"))?;
-        package.open(&key.key)
-    }
     /// Forward original bytes only. Restart a pass after subscription changes or new insertions.
     pub async fn transfer_page(
         &self,
@@ -236,10 +221,6 @@ impl<A: RowApplication> Inner<A> {
             )
             .await?;
         Ok(pending.next().await?.is_some())
-    }
-    /// Whether every admitted operation of a readable scope is applied.
-    pub(crate) async fn scope_complete(&self, scope: ResourceScope) -> Result<bool, Error> {
-        Ok(self.readable(scope)? && !self.has_pending(scope).await?)
     }
     pub(super) async fn page(
         &self,

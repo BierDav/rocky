@@ -26,7 +26,7 @@ impl<A: RowApplication> Inner<A> {
                     .any(|field| self.permission_fields.contains(field))
             {
                 return Err(denied(
-                    "row/field transition denied; ACL changes require strong execution",
+                    "row/field transition denied; permission fields never change by row writes",
                 ));
             }
         }
@@ -77,7 +77,7 @@ impl<A: RowApplication> Inner<A> {
                     })
             {
                 return Err(denied(
-                    "row/field transition denied; ACL changes require strong execution",
+                    "row/field transition denied; permission fields never change by row writes",
                 ));
             }
             let current = self.row(scope, self.storage_row(change)?).await?;

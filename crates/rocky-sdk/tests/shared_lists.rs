@@ -126,7 +126,7 @@ fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> O
         schema,
         secrets: Some(secrets::keys(directory)),
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 

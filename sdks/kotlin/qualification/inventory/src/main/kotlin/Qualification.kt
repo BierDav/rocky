@@ -79,20 +79,7 @@ fun main(args: Array<String>) = runBlocking {
         inventory = InventoryClient(client)
         check(inventory.note(handle(1), "first", baseline = "0") == first)
         check(client.read(counter).count() == 21)
-        check(inventory.stock() == 10L)
-        // Strong reads bind a discovered coordinator head and report it explicitly.
-        check(client.readStrong(query("SELECT remaining FROM stock", maxRows = 1)).getValue("state").jsonPrimitive.content == "ready")
-        val reservation = request("invoke") {
-            put("handle", handle(99))
-            put("method", "ReserveStock")
-            put("version", 1)
-            put("arguments", bytes(byteArrayOf(3, 0, 0, 0, 0, 0, 0, 0)))
-            put("policy", handle(9))
-        }
-        check(client.call(reservation).getValue("state").jsonPrimitive.content == "queued")
-        check(client.recoverCommand(handle(99)).getValue("state").jsonPrimitive.content == "confirmed_locally")
-        check(inventory.stock() == 7L)
         client.close()
-        println("Kotlin/JVM qualification passed: precise writes, handles, preconditions, scoped reads, Flow cancellation/coalescing/dynamic queries, process restart, strong reads and commands")
+        println("Kotlin/JVM qualification passed: precise writes, handles, preconditions, scoped reads, Flow cancellation/coalescing/dynamic queries, process restart")
     }
 }

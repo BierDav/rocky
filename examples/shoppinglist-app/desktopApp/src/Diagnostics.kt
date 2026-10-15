@@ -24,8 +24,6 @@ internal fun observeDiagnostics(session: ShoppingSession): Job {
 
                         is RockyEvent.LinkClosed -> if (event.error != null) logger.warn("Link with {} closed: {}", event.peer, event.error)
 
-                        is RockyEvent.ResultsFailed -> logger.warn("Approval results from {} failed: {}", event.peer, event.error)
-
                         is RockyEvent.EnvelopeRefused -> logger.warn("Key from {} refused: {}", event.peer, event.error)
 
                         is RockyEvent.RenewalFailed -> logger.warn("Credential renewal failed: {}", event.error)

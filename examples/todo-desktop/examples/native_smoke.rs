@@ -1,4 +1,4 @@
-//! Drives the production two-panel WebView: `offline` (default), `reopen` after it, or `publication`.
+//! Drives the production two-panel WebView: `offline` (default), `reopen` after it.
 use dioxus::desktop::{Config, WindowCloseBehaviour};
 use dioxus::prelude::*;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ fn main() {
         .expect("data directory argument");
     let scenario = std::env::args().nth(2).unwrap_or_else(|| "offline".into());
     assert!(
-        ["offline", "reopen", "publication"].contains(&scenario.as_str()),
+        ["offline", "reopen"].contains(&scenario.as_str()),
         "unknown scenario {scenario}"
     );
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -57,22 +57,6 @@ fn Smoke() -> Element {
                         demo.replicas[1].sync_state().await.unwrap()
                     );
                     "Native two-replica UI reopen and convergence passed"
-                }
-                "publication" => {
-                    assert_eq!(laptop.rows, phone.rows);
-                    let publications = demo.replicas[0].confirmed_publications().await.unwrap();
-                    assert_eq!(
-                        publications,
-                        demo.replicas[1].confirmed_publications().await.unwrap()
-                    );
-                    assert_eq!(publications.len(), 3);
-                    assert_eq!(
-                        todo_app::decode_snapshot(&publications[1].package.rows)
-                            .unwrap()
-                            .len(),
-                        1
-                    );
-                    "Native strong publication: immutable rows, outage recovery, peer application and Phone takeover passed"
                 }
                 _ => {
                     assert_eq!(laptop.rows.len(), 1);

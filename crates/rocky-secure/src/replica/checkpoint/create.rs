@@ -148,7 +148,6 @@ impl<A: RowApplication> Inner<A> {
                 if signed.signer() == signer
                     && signed.statement.revocations == inner.revocation_digest()?
                     && signed.statement.key_epoch == inner.scope_key(scope)?.0
-                    && signed.statement.strong.head == inner.capture_strong(scope).await?.head
                     && signed.statement.horizon == inner.mergeable_horizon(scope).await?
                 {
                     return Ok(Step::Done(Box::new(signed)));
@@ -337,7 +336,6 @@ impl<A: RowApplication> Inner<A> {
                 moves: inner.checkpoint_moves(id).await?,
                 definition: inner.manifest,
                 schema: manifest.schema,
-                handler: manifest.handler,
                 revocations: inner.revocation_digest()?,
                 scope,
                 key_epoch: generation,
@@ -353,12 +351,9 @@ impl<A: RowApplication> Inner<A> {
                 tombstones: capture.tombstones,
                 creations: record.sets.creations_summary(),
                 handles: capture.handles,
-                strong: inner.strong_summary(scope).await?,
                 custody: inner.custody_summary(id, record.position).await?,
                 coordinated: inner.seal_binding(scope, id, record.position).await?,
             };
-            let strong_state = inner.capture_strong(scope).await?;
-            inner.conn.execute("INSERT INTO secure_checkpoint_strong VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET state=excluded.state", bindings(vec![SqlValue::Integer(id),SqlValue::Blob(encode(&strong_state)?)])).await?;
             let signed = inner.sign_checkpoint(statement)?;
             inner
                 .conn
@@ -468,95 +463,6 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("installed checkpoint".into()))?;
         Ok(Step::Done(Box::new(self.verify_record(scope, &record)?)))
     }
-    /// Strong artifacts are bound by identity; none of them is pruned.
-    pub(in crate::replica) async fn strong_summary(
-        &self,
-        scope: ResourceScope,
-    ) -> Result<StrongSummary, Error> {
-        let head = collect_rows(
-            self.conn
-                .query(
-                    "SELECT sequence,head,rows FROM secure_command_rows WHERE scope=?",
-                    [encode(&scope)?],
-                )
-                .await?,
-        )
-        .await?;
-        let (head, row_commitment) = match head.first().map(Vec::as_slice) {
-            Some(
-                [
-                    SqlValue::Integer(sequence),
-                    SqlValue::Blob(head),
-                    SqlValue::Blob(rows),
-                ],
-            ) => (
-                Some((*sequence as u64, row_of(head)?)),
-                rocky_core::commitment("rocky.checkpoint-command-rows.v1", rows),
-            ),
-            _ => (
-                None,
-                rocky_core::commitment(
-                    "rocky.checkpoint-command-rows.v1",
-                    &encode(&BTreeMap::<Commitment, rocky_core::RowFields>::new())?,
-                ),
-            ),
-        };
-        let results = collect_rows(
-            self.conn
-                .query(
-                    "SELECT sequence,LENGTH(result) FROM secure_results WHERE domain=? AND sequence>? ORDER BY sequence",
-                    bindings(vec![SqlValue::Blob(encode(&scope.domain)?),SqlValue::Integer(head.map_or(0, |head| head.0) as i64)]),
-                )
-                .await?,
-        )
-        .await?;
-        let mut commands = Vec::new();
-        for record in rows(&self.conn,"SELECT handle,input,command FROM secure_commands UNION ALL SELECT handle,input,command FROM secure_recovered_commands ORDER BY handle").await? {
-            let [SqlValue::Blob(handle),SqlValue::Blob(input),SqlValue::Blob(bytes)] = record.as_slice() else { return Err(denied("command summary")); };
-            let request = EncryptedCommand::from_bytes(bytes)?.request()?;
-            if request.scope != scope.domain { continue; }
-            let (state,sequence) = self.progress_of(&request.hash()?).await?;
-            if ![3,4,5,6].contains(&state) || sequence.is_some_and(|sequence| sequence > head.map_or(0, |head| head.0)) {
-                commands.push(vec![SqlValue::Blob(handle.clone()),SqlValue::Blob(input.clone())]);
-            }
-        }
-        let mut preparations = Vec::new();
-        for record in rows(
-            &self.conn,
-            "SELECT request,result FROM secure_preparations ORDER BY request",
-        )
-        .await?
-        {
-            let [SqlValue::Blob(key), SqlValue::Blob(bytes)] = record.as_slice() else {
-                return Err(denied("preparation summary"));
-            };
-            let package = ConfirmedCommand::from_bytes(bytes)?.strong_package()?;
-            let (state, _) = self.progress_of(&package.request.hash()?).await?;
-            if package.request.scope == scope.domain
-                && (package.sequence > head.map_or(0, |head| head.0)
-                    || ![3, 4, 5, 6].contains(&state))
-            {
-                preparations.push(vec![SqlValue::Blob(key.clone())]);
-            }
-        }
-        Ok(StrongSummary {
-            base: head,
-            head,
-            rows: row_commitment,
-            results: chain("rocky.checkpoint-results.v1", &results)?,
-            commands: chain("rocky.checkpoint-commands.v1", &commands)?,
-            preparations: chain("rocky.checkpoint-preparations.v1", &preparations)?,
-            observations: self
-                .summary(
-                    "rocky.checkpoint-observations.v1",
-                    "SELECT id,job FROM secure_effect_observations ORDER BY id",
-                )
-                .await?,
-        })
-    }
-    async fn summary(&self, label: &str, sql: &str) -> Result<SetSummary, Error> {
-        chain(label, &rows(&self.conn, sql).await?)
-    }
     pub(in crate::replica) async fn custody_summary(
         &self,
         id: i64,
@@ -586,30 +492,12 @@ impl<A: RowApplication> Inner<A> {
         Ok(CustodySummary {
             superseded: *superseded as u64,
             sole: chain("rocky.checkpoint-sole-copies.v1", &sole)?,
-            archives: chain(
-                "rocky.checkpoint-archives.v1",
-                &rows(
-                    &self.conn,
-                    "SELECT id FROM secure_recovery_custody ORDER BY id",
-                )
-                .await?,
-            )?,
         })
     }
     /// One bounded step of automatic maintenance for the scopes a group
     /// wrote: continue or start a checkpoint, else prune one batch. The
     /// group is already committed, so a failure is kept for the status.
     pub(crate) async fn maintain(&mut self, scopes: &BTreeSet<ResourceScope>) {
-        for domain in scopes
-            .iter()
-            .map(|scope| scope.domain)
-            .collect::<BTreeSet<_>>()
-        {
-            if let Err(error) = self.prune_strong(domain).await {
-                self.maintenance_error = Some(error.to_string());
-                return;
-            }
-        }
         for scope in scopes {
             match self.maintain_scope(*scope).await {
                 Ok(true) => {

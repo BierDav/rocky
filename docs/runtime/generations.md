@@ -16,20 +16,18 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
   additive too: the field needs a default, rows that lack it or hold NULL
   read the default, and the schema's migrations compute its values once
   ([required fields](#required-fields)).
-- Handler semantics require a higher handler generation; declared command
-  versions within the support horizon keep their descriptors. Adding a version
-  requires a new handler generation. Removing/redefining one is refused.
 - Key rotation/revocation uses the existing explicit credential policy mechanism.
-  Generation plans refuse reader-scope remapping. Key/type changes, removals
-  and renames, which remove the old name, are unsupported.
+  Generation plans refuse reader-scope remapping and key/type changes.
+  Removing mergeable tables or fields needs [application confirmation](#confirmed-removals);
+  renaming is removal and addition.
 
 Partition group membership and names are immutable for existing tables, as are
 partition columns. A new mergeable table may join an existing group with matching
 slots. See [partition groups](partitioned-scopes.md#partition-groups).
 
-`rocky_core::classify` and `classify_commands` reject unsupported changes before
-activation. A signed transition (`rocky.transition.v4`) binds application,
-old/new manifest, schema/handler pairs, the field ids rows of the old
+`rocky_core::classify` rejects unsupported changes before
+activation. A signed transition (`rocky.transition.v5`) binds application,
+old/new manifest, schema generations, the field ids rows of the old
 generation may lack, the table and field ids the step named and removed, and
 when it was signed, in microseconds. A generation-number edit alone
 cannot open a different definition.
@@ -61,6 +59,32 @@ so reopening with the same schema continues after interruption. New collections
 do not silently expand member grants. SDK lineage is capped at 32 steps; secure
 runtime lineage at 64.
 
+## Confirmed removals
+
+An issuer opening a schema that removes tables or fields receives
+`RolloutConfirmationRequired` before settings, secrets or the replica change,
+and before its network starts. Its `report` lists removed tables and
+`table.field` names with the live stored row count of each table on this copy,
+including rows suppressed by constraints and every held partition. A removed
+field counts every live row of its table, including NULL or missing values.
+Counts are neither a device inventory nor a domain-wide estimate.
+
+The application shows the report with its own wording and asks for confirmation.
+Only after confirmation does it call `Database::open_confirmed(open, digest)`;
+Kotlin calls `RockyDatabase.open(..., confirmation = report.digest)` or `resume`.
+The digest binds the domain, installed manifest, complete target SDK schema
+(including migrations) and counts. Open recomputes it under the directory lock.
+A mismatch returns the current report with `mismatch = true` and changes nothing;
+the application must show that report again. Counts changing invalidates approval;
+a value change that leaves counts unchanged does not change this impact report.
+Cancelling leaves the old schema usable. Pure additions need no confirmation.
+
+Members never sign or authorize removal. Until an issuer supplies a signed
+new generation, they open the installed one with `application = ahead` and
+`waiting_for_issuer = true`. Adopting a generation already signed by an issuer
+needs no further local confirmation. Confirmation governs SDK signing, not
+verification of publisher signatures from peers.
+
 ## Adopting newer generations
 
 A device that meets a newer generation adopts it whatever its application
@@ -88,7 +112,7 @@ The SDK schema's `granted_like` maps a new table to an existing one, as in
 the table. Wherever the SDK turns a profile into grants or asks whether it
 reads a table (enrollment, renewal, revocation rotation, group delivery and
 horizons), a grant naming `items` in whole rows also names `item_categories`
-with the same rights, `Invoke` and `Execute` aside. Partition selectors on
+with the same read and write rights. Partition selectors on
 `items` select the same partitions of `item_categories`, and renewal widens a
 partition grant that covered a whole row to the fields later generations added.
 A partial replica holds the new table wherever it holds its group partition. A member renewing into the
@@ -160,7 +184,7 @@ earlier generation may lack and the table and field ids it named and removed.
 Removal and re-adding are read from them alone ([removal](removal.md)), and a
 device checks a step against its manifests where it holds both. A manifest of an
 earlier generation is kept only while a retained frame, a checkpoint, a
-horizon statement, an existence base, a command or the credential chain of a
+horizon statement, an existence base or the credential chain of a
 retained frame or registered author names it. After a horizon finalizes,
 `EncryptedReplica::drop_unreferenced_generations` drops the others, and the
 SDK removes them from the saved lineage. Retained history stays verifiable
@@ -175,24 +199,12 @@ again before the frame applies, as for any
 Every generation of the lineage stays admissible; a dropped manifest is
 fetched again when a frame needs it. New admission verifies the
 original generation's signed credentials plus current revocations, never invented
-current authority. Current execution authorization remains required for commands.
+current authority.
 
-Pending operations preserve exact original bytes and author logs. Pending command
-tickets retain invocation/handle identity, accepted result, receipt and retry state.
-No argument translation or automatic fresh invocation is performed. Retained
+Pending operations preserve exact original bytes and author logs. Retained
 checkpoints keep typed keys/incarnations, tombstones, bundles and signed history;
 rebootstrap accepts only supported generations and authorized dependency closure.
 Existing [retention holds](retention-holds.md) protect unresolved outcomes.
-
-## Activate strong execution
-
-`command_activation` returns a proposal with transition, state commitment and
-exact predecessor head. The owner's coordinator activation checks this head and
-installed generation commitments; the new handler waits until that succeeds.
-Native `DevelopmentCoordinator.activate` and Kotlin's equivalent accept the
-proposal's `activation` object. Public coordination uses the certified owner
-control lane described in [public coordination](public-coordination.md).
-Schema distribution and payload verification stay on application nodes.
 
 ## Evidence
 
@@ -218,10 +230,9 @@ and definition activation; verifies atomic visibility, stale sessions, pending
 work, old peers and typed checkpoint recovery, and drops and learns again an
 unreferenced manifest (`an_unreferenced_manifest_is_dropped_and_learned_again_from_a_frame`).
 Core/credentials tests
-verify transition encoding, classification and signing; coordinator tests verify
-authorized exact-head activation. SDK `tests/generations.rs` exercises issuer/member
+verify transition encoding, classification and signing; SDK `tests/generations.rs` exercises issuer/member
 upgrade, an offline member opening at its generation, nullable fields, scope denial
-and queued handler work; [adopting generations](adopting-generations.md#evidence)
+and ordinary pending writes; [adopting generations](adopting-generations.md#evidence)
 lists its own evidence.
 See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package) for execution results.
 

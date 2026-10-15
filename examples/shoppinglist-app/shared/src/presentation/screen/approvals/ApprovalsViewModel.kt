@@ -18,7 +18,7 @@ data class ApprovalsState(
     val approvals: List<Approval> = emptyList(),
     val status: Coordinated = Coordinated.Unavailable,
     val trusted: Boolean = false,
-    /** Requests this device is deciding, and asks it is sending, until their tickets settle. */
+    /** Requests this device is deciding, and asks it is sending, until their writes finish. */
     val deciding: Set<String> = emptySet(),
     val asking: Int = 0,
 )

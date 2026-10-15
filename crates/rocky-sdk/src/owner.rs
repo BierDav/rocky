@@ -17,7 +17,7 @@ mod service {
         certified::{ControlCertificate, DomainControl, TrustBundle},
         service::NetworkCoordinator,
     };
-    use rocky_core::{PrincipalId, Scope};
+    use rocky_core::Scope;
     use rocky_credentials::{
         CoordinationGrant, CoordinatorControl, PrivateKey, PublicKey, Publisher,
         SignedCoordinationGrant, SignedTenantAdmission,
@@ -37,7 +37,7 @@ mod service {
         time: u64,
     }
 
-    /// The service a database's commands are composed with.
+    /// The metadata service composed with a database.
     pub(crate) struct Service {
         bundle: TrustBundle,
         directory: PathBuf,
@@ -49,16 +49,11 @@ mod service {
     pub(crate) struct Domain<'a> {
         pub scope: Scope,
         pub application: String,
-        pub owner: PrincipalId,
-        pub schema: u32,
-        pub handler: u32,
         /// The domain's publisher, whose coordination grant registering needs.
         pub anchor: PublicKey,
         /// Present on an issuer only, which signs that grant itself.
         pub publisher: Option<PrivateKey>,
         pub transport: Option<Arc<dyn Transport>>,
-        /// The verified activation of this device's generation, to activate.
-        pub activation: Option<rocky_core::Activation>,
         pub request: &'a Value,
     }
 
@@ -78,18 +73,17 @@ mod service {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| refused(format!("{name} must be 32 bytes")))
     }
-    /// A device as `command_identity` reports it.
-    fn device(identity: &Value) -> Result<(PublicKey, PrincipalId), Failure> {
-        let node = PublicKey::from_bytes(&key::<32>(&identity["key"], "key")?)
-            .map_err(|_| refused("key is not a valid node key"))?;
-        Ok((node, PrincipalId(key(&identity["principal"], "principal")?)))
-    }
-    fn devices(request: &Value, name: &str) -> Result<Vec<(PublicKey, PrincipalId)>, Failure> {
-        let list = request[name]
+    fn devices(request: &Value) -> Result<Vec<PublicKey>, Failure> {
+        let list = request["trusted"]
             .as_array()
-            .filter(|list| list.len() <= 64)
-            .ok_or_else(|| refused(format!("{name} must list at most 64 identities")))?;
-        list.iter().map(device).collect()
+            .filter(|list| !list.is_empty() && list.len() <= 32)
+            .ok_or_else(|| refused("trusted must list 1 through 32 node keys"))?;
+        list.iter()
+            .map(|value| {
+                PublicKey::from_bytes(&key::<32>(value, "trusted")?)
+                    .map_err(|_| refused("invalid trusted node key"))
+            })
+            .collect()
     }
 
     impl Service {
@@ -112,40 +106,21 @@ mod service {
                         "coordination service control",
                     ))?;
             let _held = self.lock.lock().await;
-            let client = NetworkCoordinator::connect(
-                &self.bundle,
-                tenant.clone(),
-                self.directory.join("tenant.evidence"),
-                transport,
-            )?;
+            let client = NetworkCoordinator::connect(&self.bundle, tenant.clone(), transport)?;
             match kind {
-                "command_service_usage" => {
+                "coordination_usage" => {
                     return Ok(serde_json::to_value(client.usage().await?)?);
                 }
-                "command_service_close" => {
-                    use rocky_core::Coordinator;
-                    let head = client.head(domain.scope).await?;
-                    // A retry reads the head again, including after closure.
-                    // Keep each exact-head attempt's wire identity stable.
-                    let close_id = rocky_core::commitment(
-                        "rocky.sdk.service-close.v1",
-                        &serde_json::to_vec(&(id(request, "id")?, &head))?,
-                    );
-                    return Ok(serde_json::to_value(
-                        client.close_domain(head, close_id).await?,
-                    )?);
-                }
-                "command_service_activate" => {
-                    let activation = domain
-                        .activation
-                        .ok_or_else(|| refused("no verified activation was prepared"))?;
-                    let head = client.activate(activation, id(request, "id")?).await?;
-                    return Ok(json!({"active": true, "sequence": head.sequence}));
+                "coordination_close" => {
+                    client
+                        .close_domain(domain.scope, id(request, "id")?)
+                        .await?;
+                    return Ok(json!({"closed": true}));
                 }
                 _ => {}
             }
             let revision = match kind {
-                "command_service_register" => 1,
+                "coordination_register" => 1,
                 _ => request["revision"]
                     .as_u64()
                     .filter(|revision| *revision > 1)
@@ -160,14 +135,7 @@ mod service {
                     scope: domain.scope,
                     configuration: self.bundle.genesis()?.genesis.configuration,
                     revision,
-                    owner: domain.owner,
-                    executors: devices(request, "executors")?
-                        .into_iter()
-                        .map(|(node, _)| node)
-                        .collect(),
-                    invokers: devices(request, "invokers")?,
-                    schema: domain.schema,
-                    handler: domain.handler,
+                    trusted: devices(request)?,
                     not_before: time.saturating_sub(60),
                     expires: time.saturating_add(lifetime),
                 })
@@ -221,7 +189,7 @@ mod service {
                     )?,
                     (None, None) => {
                         return Err(refused(
-                            "registering needs the publisher's coordination grant: an issuer signs one with command_coordination_grant",
+                            "registering needs the publisher's coordination grant: an issuer signs one with coordination_grant",
                         ));
                     }
                     (Some(supplied), _) => supplied,

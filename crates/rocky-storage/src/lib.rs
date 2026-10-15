@@ -11,7 +11,7 @@ pub mod sql;
 pub mod sqlite;
 pub mod statement;
 pub mod storage;
-pub use storage::{Error, FailureReason, PendingReason, StorageFailure};
+pub use storage::{Error, FailureReason, StorageFailure};
 
 /// Largest single frame or payload a replica accepts.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;

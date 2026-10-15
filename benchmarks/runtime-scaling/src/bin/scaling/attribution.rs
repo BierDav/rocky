@@ -2,7 +2,7 @@
 //! same-file sync interference. Measurement only: it changes no runtime
 //! default and runs with the runtime's instrumentation switch.
 use super::gate::{Histogram, open};
-use super::{CALLER, Failure, NODE, scope};
+use super::{Failure, NODE, scope};
 use rocky_core::*;
 use rocky_runtime::{CheckpointInterval, Durability, Error, Mutation, RuntimeOptions, WriterStats};
 use std::collections::VecDeque;
@@ -11,9 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant};
-
-const STRONG: [u8; 2] = [17, 18];
-const STRONG_PAUSE: Duration = Duration::from_millis(250);
 
 /// A bounded ring of recent per-write service intervals on the monotonic
 /// clock. `dropped` counts records evicted from the front once the ring filled,
@@ -205,7 +202,7 @@ fn open_options(instrument: bool) -> RuntimeOptions {
 
 /// Fixed-rate open-loop local writes with subphase attribution, bounded
 /// latency samples and checkpoint-overlap analysis. Mirrors the Part 2
-/// `erp-open-loop` schedule (and its strong stream) so the latency is
+/// `erp-open-loop` schedule so the latency is
 /// comparable, and returns the run's raw facts for the report.
 pub(super) async fn erp_open_loop(
     rate: u64,
@@ -213,7 +210,6 @@ pub(super) async fn erp_open_loop(
     tables: u16,
     directory: Option<PathBuf>,
     instrument: bool,
-    strong: bool,
     label: &str,
 ) -> Result<Outcome, Failure> {
     if rate == 0 || ![100, 250, 500, 1000].contains(&rate) || seconds == 0 || seconds > 1800 {
@@ -227,14 +223,9 @@ pub(super) async fn erp_open_loop(
     let runtime = open(path.clone(), NODE, options, tables).await?;
     let domain = runtime.domain(scope(1))?;
     println!(
-        "{label}: rate={rate}/s duration_s={seconds} tables={tables} files=1 durability=Full group=128 instrument={instrument} strong={strong} checkpoint_frames={}",
+        "{label}: rate={rate}/s duration_s={seconds} tables={tables} files=1 durability=Full group=128 instrument={instrument} checkpoint_frames={}",
         options.checkpoint_frames
     );
-    let coordinator = Arc::new(rocky_coordinator::MemoryCoordinator::default());
-    for value in STRONG {
-        coordinator.register(scope(value), CALLER, [6; 16], vec![NODE], 1, 1)?;
-        coordinator.acquire(scope(value), CALLER, NODE)?;
-    }
     let origin = tokio::time::Instant::now() + Duration::from_secs(2);
     let deadline = origin + Duration::from_secs(seconds);
     let cpu_before = super::cpu::process();
@@ -298,42 +289,7 @@ pub(super) async fn erp_open_loop(
         }
         Ok::<_, Error>((histogram, samples, dropped, max_lag, intervals))
     });
-    let strong_task = if strong {
-        let strong_runtime = runtime.domain(scope(STRONG[0]))?;
-        let strong_coordinator = coordinator.clone();
-        Some(tokio::spawn(async move {
-            let mut histogram = Histogram::new();
-            let mut index = 0u64;
-            while tokio::time::Instant::now() < deadline {
-                let started = Instant::now();
-                let mut handle = [STRONG[0]; 32];
-                handle[..8].copy_from_slice(&index.to_le_bytes());
-                strong_runtime
-                    .submit_command_with_arguments(
-                        rocky_runtime::CommandHandle(handle),
-                        inventory_app::RESERVE,
-                        1u64.to_le_bytes().to_vec(),
-                        [9; 32],
-                    )?
-                    .committed()
-                    .await?;
-                strong_runtime
-                    .execute_pending(strong_coordinator.as_ref())
-                    .await?;
-                histogram.record(started.elapsed());
-                index += 1;
-                tokio::time::sleep(STRONG_PAUSE).await;
-            }
-            Ok::<_, Error>(histogram)
-        }))
-    } else {
-        None
-    };
     let (histogram, samples, dropped, max_lag, intervals) = writer.await??;
-    let strong_histogram = match strong_task {
-        Some(task) => Some(task.await??),
-        None => None,
-    };
     let stats = domain.writer_stats();
     let (checkpoints, dropped_checkpoints) = if instrument {
         domain.checkpoint_intervals()
@@ -357,7 +313,6 @@ pub(super) async fn erp_open_loop(
         dropped_checkpoints,
         cpu: cpu_after.zip(cpu_before).map(|(a, b)| a - b),
         writer_cpu: writer_cpu_after.zip(writer_cpu_before).map(|(a, b)| a - b),
-        strong: strong_histogram,
         facts,
     };
     outcome.print(label, elapsed);
@@ -376,7 +331,6 @@ pub(super) struct Outcome {
     pub(super) dropped_checkpoints: u64,
     pub(super) cpu: Option<Duration>,
     pub(super) writer_cpu: Option<Duration>,
-    pub(super) strong: Option<Histogram>,
     pub(super) facts: Option<StorageFacts>,
 }
 
@@ -384,9 +338,6 @@ impl Outcome {
     fn print(&self, label: &str, elapsed: Duration) {
         self.histogram
             .line(&format!("{label} scheduled local writes"), elapsed);
-        if let Some(strong) = &self.strong {
-            strong.line(&format!("{label} strong commands"), elapsed);
-        }
         let completed = self.offered - self.dropped;
         println!(
             "{label}: offered={} completed={completed} dropped_sends={} max_send_lag_ms={:.3}",

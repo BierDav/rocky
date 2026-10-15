@@ -24,7 +24,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: SCHEMA,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 impl Device {
@@ -197,4 +197,22 @@ pub fn exchange_failed(result: &Result<Value, Value>) -> bool {
             })
         }),
     }
+}
+
+/// Confirms a removal after inspecting its report in a test.
+pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
+    let directory = open.directory;
+    let schema = open.schema;
+    let secrets = open.secrets.clone();
+    let report = Database::open(Open {
+        directory,
+        schema,
+        secrets,
+        network: None,
+        coordination: None,
+    })
+    .err()
+    .ok_or("expected removal confirmation")?
+    .downcast::<rocky_sdk::RolloutConfirmationRequired>()?;
+    Database::open_confirmed(open, &report.report.digest)
 }

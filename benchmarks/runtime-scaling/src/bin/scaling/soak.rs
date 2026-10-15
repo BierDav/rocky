@@ -92,7 +92,7 @@ pub async fn run(config: Config) -> Result<(), Failure> {
         config.operations
     );
     println!(
-        "soak gaps: strong/effects, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner"
+        "soak gaps: coordinated writes, encrypted, topology, process faults, second hardware and power-loss are NOT qualified by this runner"
     );
     let app = WideSchema::new(config.tables).with_domains(3);
     let installed = Instant::now();

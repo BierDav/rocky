@@ -2,7 +2,7 @@
 //! sessions and an optional network service, each closed on its own. The
 //! starter `NativeSession` composes the same services. See
 //! `docs/runtime/sdk-composition.md`.
-use crate::{NativeCommands, NativeError, NativeSecretStore, failure, foreign};
+use crate::{NativeError, NativeSecretStore, failure, foreign};
 use rocky_sdk::Network;
 use std::{
     path::Path,
@@ -117,6 +117,37 @@ impl NativeDatabaseSession {
     }
 }
 
+/// In-process coordinated log for development. Its ledger ends with the process.
+#[derive(uniffi::Object)]
+pub struct NativeDevelopmentLog {
+    log: rocky_coordinator::coordinated::MemoryLog,
+}
+#[uniffi::export]
+impl NativeDevelopmentLog {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            log: rocky_coordinator::coordinated::MemoryLog::new(),
+        })
+    }
+    /// Sets the minimum before any node joins this domain.
+    pub fn configure(&self, scope: String, minimum: u32) -> Result<(), NativeError> {
+        let scope = serde_json::from_str(&scope).map_err(message)?;
+        self.log.configure(scope, minimum as usize).map_err(message)
+    }
+    pub async fn attach(&self, database: Arc<NativeDatabase>) -> Result<(), NativeError> {
+        let session = database.database.session();
+        let status = session.status().await.map_err(failure);
+        session.close().await;
+        let key = status?.authority.node.parse().map_err(message)?;
+        database
+            .database
+            .coordinate(Some(Arc::new(self.log.client(key))))
+            .await
+            .map_err(failure)
+    }
+}
+
 /// One secure database. It owns its file and reactor thread, and no
 /// network unless one is attached. Coordinators and borrowed transports
 /// stay the application's.
@@ -131,7 +162,7 @@ struct Parts<'a> {
     schema: &'a str,
     secrets: Option<Arc<dyn NativeSecretStore>>,
     network: Option<Arc<NativeNetwork>>,
-    commands: Option<NativeCommands>,
+    coordinator: Option<String>,
 }
 impl<'a> Parts<'a> {
     fn open(self) -> Result<rocky_sdk::Open<'a>, NativeError> {
@@ -140,7 +171,7 @@ impl<'a> Parts<'a> {
             schema: self.schema,
             secrets: foreign(self.secrets),
             network: self.network.map(|network| network.take()).transpose()?,
-            commands: self.commands.map(NativeCommands::compose).transpose()?,
+            coordination: crate::coordination(self.coordinator)?,
         })
     }
 }
@@ -168,7 +199,7 @@ impl NativeDatabase {
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
         network: Option<Arc<NativeNetwork>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
         credential_ttl: Option<u64>,
     ) -> Result<Arc<Self>, NativeError> {
         let open = Parts {
@@ -176,7 +207,7 @@ impl NativeDatabase {
             schema: &schema,
             secrets,
             network,
-            commands,
+            coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::create(open, credential_ttl))
@@ -189,7 +220,7 @@ impl NativeDatabase {
         supplied: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
         network: Option<Arc<NativeNetwork>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         if supplied.len() > 1024 * 1024 {
             return Err(message("credential frame quota"));
@@ -200,7 +231,7 @@ impl NativeDatabase {
             schema: &schema,
             secrets,
             network,
-            commands,
+            coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::install(open, supplied))
@@ -213,17 +244,37 @@ impl NativeDatabase {
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
         network: Option<Arc<NativeNetwork>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let open = Parts {
             directory: &directory,
             schema: &schema,
             secrets,
             network,
-            commands,
+            coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::open(open))
+    }
+    /// Opens with the digest of a removal report confirmed by the application.
+    #[uniffi::constructor]
+    pub fn open_confirmed(
+        directory: String,
+        schema: String,
+        digest: String,
+        secrets: Option<Arc<dyn NativeSecretStore>>,
+        network: Option<Arc<NativeNetwork>>,
+        coordinator: Option<String>,
+    ) -> Result<Arc<Self>, NativeError> {
+        let open = Parts {
+            directory: &directory,
+            schema: &schema,
+            secrets,
+            network,
+            coordinator,
+        }
+        .open()?;
+        Self::wrap(rocky_sdk::Database::open_confirmed(open, &digest))
     }
     /// Enrolls with the issuer `invitation` names, over `network`, which
     /// stays attached.
@@ -234,14 +285,14 @@ impl NativeDatabase {
         invitation: String,
         network: Arc<NativeNetwork>,
         secrets: Option<Arc<dyn NativeSecretStore>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let open = Parts {
             directory: &directory,
             schema: &schema,
             secrets,
             network: Some(network),
-            commands,
+            coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::join(open, &invitation))
@@ -256,14 +307,14 @@ impl NativeDatabase {
         invitation: String,
         network: Arc<NativeNetwork>,
         secrets: Option<Arc<dyn NativeSecretStore>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let open = Parts {
             directory: &directory,
             schema: &schema,
             secrets,
             network: Some(network),
-            commands,
+            coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::restore(

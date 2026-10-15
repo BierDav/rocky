@@ -7,7 +7,6 @@ data class Schema(
     val application: String,
     val version: Int = 1,
     val tables: List<Table>,
-    val commands: CommandSet? = null,
     val updatePolicy: UpdatePolicy = UpdatePolicy.Changed,
     val views: Map<String, String> = emptyMap(),
     val migrations: List<Migration> = emptyList(),
@@ -34,8 +33,6 @@ data class Schema(
         put("tables", JsonArray(tables.sortedBy { it.name }.map { it.definition() }))
         put("update_policy", updatePolicy.wire)
         if (views.isNotEmpty()) put("views", viewsJson())
-        // Part of the domain's signed definition: every device declares the same commands.
-        commands?.let { put("commands", it.json()) }
         if (migrations.isNotEmpty()) put("migrations", JsonArray(migrations.map { it.json() }))
         tables.filter { it.grantedLike != null }.sortedBy { it.name }.takeIf { it.isNotEmpty() }?.let { followers ->
             put("granted_like", buildJsonObject { followers.forEach { put(it.name, it.grantedLike) } })

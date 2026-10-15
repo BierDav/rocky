@@ -2,7 +2,7 @@
 //! every collection over request channels of its live link with that peer.
 //! See `docs/runtime/live-links.md`.
 use crate::Failure;
-use rocky_core::{Coordinator, ResourceScope, TypedCommands};
+use rocky_core::{ResourceScope, TypedRows};
 use rocky_secure::{
     EncryptedReplica, MAX_SECURE_FRAME, PublicKey,
     network::{NativeSession, link::channels::Handle},
@@ -12,10 +12,6 @@ use rocky_secure::{
 const QUOTA: usize = MAX_SECURE_FRAME / 2;
 /// Request channels one sync may open when each exhausts its byte budget.
 const SESSIONS: usize = 16;
-/// Command results one sync pulls from a peer.
-const RESULTS: usize = 64;
-/// How long result sync waits for the coordinator's head.
-const HEAD: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One device's view of a peer: the link that proved the `peer` key.
 pub(crate) struct Upstream<'a> {
@@ -77,9 +73,6 @@ pub(crate) struct Transfer {
     /// Scopes the peer restores from a checkpoint, as it is importing them
     /// or behind this device's pruning horizon: no history was pushed.
     pub waiting: Vec<ResourceScope>,
-    /// Why the confirmed results pass failed; rows still synced.
-    pub results: Option<String>,
-    pub results_failure: Option<crate::AttemptFailure>,
 }
 impl Transfer {
     pub fn extend(&mut self, other: Self) {
@@ -92,10 +85,6 @@ impl Transfer {
             if !self.held.contains(&scope) {
                 self.held.push(scope);
             }
-        }
-        if other.results.is_some() {
-            self.results = other.results;
-            self.results_failure = other.results_failure;
         }
     }
     fn refuse(&mut self, scopes: &[ResourceScope]) {
@@ -124,18 +113,16 @@ impl Transfer {
 }
 
 /// Pushes what the peer lacks and pulls what this device lacks, for every
-/// scope, until both hold the same frames. Confirmed command results the
-/// peer holds follow in a session of their own.
-/// Returns whether another generation requires an upgrade, whether results
-/// need another pass and what moved. A peer may run a newer definition
+/// scope, until both hold the same frames.
+/// Returns whether another generation requires an upgrade, whether another
+/// pass is needed and what moved. A peer may run a newer definition
 /// generation, whose credentials this device cannot verify: it pulls, and
 /// its own changes wait until it upgrades. See `docs/runtime/generations.md`.
 /// `first` is a session already open with the peer, which rows use first.
 pub(crate) async fn reconcile(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
-    coordinator: Option<&dyn Coordinator>,
     progress: impl Fn(bool),
     first: Option<NativeSession>,
 ) -> Result<(bool, bool, Transfer), Failure> {
@@ -158,45 +145,7 @@ pub(crate) async fn reconcile(
             return Err(error);
         }
     };
-    // Rows stay in sync while a coordinator is unreachable or a peer holds
-    // no results; a ticket then stays `confirmed` until a later sync.
-    let retry =
-        match coordinator {
-            Some(coordinator) => {
-                let attempt = upstream.observations.begin(
-                    upstream.peer.to_hex(),
-                    crate::AttemptOperation::PullResults,
-                    crate::AttemptStage::ResultRetrieval,
-                );
-                let result = results(replica, upstream, scopes, coordinator).await;
-                attempt.finish(result.as_ref().err().map(|error| {
-                    crate::status::failure(error, &crate::AttemptStage::ResultRetrieval)
-                }));
-                match result {
-                    Ok(retry) => retry,
-                    // A peer without coordination holds no results to pull.
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref(),
-                            Some(rocky_secure::Error::Rejected(reason))
-                                if reason == rocky_secure::network::NO_COORDINATION
-                        ) =>
-                    {
-                        false
-                    }
-                    Err(error) => {
-                        transfer.results = Some(error.to_string());
-                        transfer.results_failure = Some(crate::status::failure(
-                            &error,
-                            &crate::AttemptStage::ResultRetrieval,
-                        ));
-                        true
-                    }
-                }
-            }
-            None => false,
-        };
-    Ok((newer, retry, transfer))
+    Ok((newer, false, transfer))
 }
 /// One scope of a bootstrap: the checkpoint its peer offered and the
 /// stored rows it holds, which progress counts.
@@ -212,7 +161,7 @@ pub(crate) struct Planned {
 /// `None` when the peer offers no checkpoint for some scope, as a keyless
 /// custody peer: the remaining intent waits for a peer that does.
 pub(crate) async fn bootstrap(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
     marker: &std::path::Path,
@@ -353,7 +302,7 @@ pub(crate) async fn bootstrap(
 /// `offered` that should go on with that signer: two peers signing the same
 /// rows still offer different checkpoints, and switching discards the pages.
 async fn deferred(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
     scope: ResourceScope,
     offered: Option<rocky_core::Commitment>,
@@ -376,7 +325,7 @@ async fn deferred(
 /// left `replica` holding every revocation statement the peer sent; see
 /// `Learned`.
 pub(crate) async fn session(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
 ) -> Result<NativeSession, Failure> {
     let mut session = upstream.link.open().await?;
@@ -392,7 +341,7 @@ pub(crate) async fn session(
     Ok(session)
 }
 async fn rows(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     upstream: &Upstream<'_>,
     scopes: &[ResourceScope],
     progress: impl Fn(bool),
@@ -514,92 +463,4 @@ async fn rows(
         }
     }
     Err("sync exceeded its session budget; it continues on the next sync".into())
-}
-/// Pulls the confirmed results this device lacks, lowest sequence first,
-/// each filtered by the peer to the scopes this device may hold.
-async fn results(
-    replica: &EncryptedReplica<TypedCommands>,
-    upstream: &Upstream<'_>,
-    scopes: &[ResourceScope],
-    coordinator: &dyn Coordinator,
-) -> Result<bool, Failure> {
-    let Some(domain) = scopes.first().map(|scope| scope.domain) else {
-        return Ok(false);
-    };
-    // A custodian the coordinator does not name, or one that cannot reach
-    // it, pulls in order until the peer holds no later result; each result
-    // verifies with the receipt evidence the peer sends along.
-    // The head only bounds the request; an outage must not stall row sync.
-    let (head, unavailable) = match tokio::time::timeout(HEAD, coordinator.head(domain)).await {
-        Ok(Ok(head)) => (head.sequence, false),
-        _ => (u64::MAX, true),
-    };
-    let missing = replica.missing_results(domain, head, RESULTS).await?;
-    if missing.is_empty() {
-        let mut incomplete = Vec::new();
-        for scope in scopes {
-            if !replica.key_epochs(*scope).await.is_empty()
-                && !replica.command_snapshot(*scope).await?.complete
-            {
-                incomplete.push(*scope);
-            }
-        }
-        let repairing = !incomplete.is_empty();
-        if !repairing && (unavailable || head == 0) {
-            return Ok(unavailable);
-        }
-        // A checkpoint can supply the head before results are pulled; the
-        // executor still needs the reader's applied acknowledgment.
-
-        let mut session = session(replica, upstream).await?;
-        for scope in incomplete {
-            session.bootstrap_scope(replica, scope, QUOTA).await?;
-        }
-        if !unavailable {
-            session
-                .pull_result(replica, domain, head, scopes.to_vec(), coordinator)
-                .await?;
-        }
-        session.close().await?;
-        return Ok(unavailable || repairing);
-    }
-    let mut retry = unavailable || missing.len() == RESULTS;
-    // Without a head, a sequence past every one known confirmed may not exist.
-    let known = match unavailable {
-        true => replica.known_result_head(domain).await?,
-        false => head,
-    };
-    let mut session = session(replica, upstream).await?;
-    for sequence in missing {
-        let pulled = session
-            .pull_result(replica, domain, sequence, scopes.to_vec(), coordinator)
-            .await?;
-        // The peer holds no later result either.
-        if !pulled {
-            if sequence > known {
-                break;
-            }
-            // A source may have pruned this prefix or sealed it under an older key.
-            // Existing checkpoint bootstrap carries the current strong base.
-            let bases = replica.result_scopes(domain).await?;
-            for scope in scopes.iter().filter(|scope| bases.contains(scope)) {
-                if session
-                    .bootstrap_scope(replica, *scope, QUOTA)
-                    .await?
-                    .is_some()
-                {
-                    retry = true;
-                }
-            }
-            if !unavailable {
-                session
-                    .pull_result(replica, domain, head, scopes.to_vec(), coordinator)
-                    .await?;
-            }
-            retry |= head != u64::MAX && sequence <= head;
-            break;
-        }
-    }
-    session.close().await?;
-    Ok(retry)
 }

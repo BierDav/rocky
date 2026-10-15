@@ -47,23 +47,6 @@ impl<A: RowApplication> Inner<A> {
         if self.holding(scope).await? == Some(Holding::Evicted) {
             return Err(denied("scope is already evicted"));
         }
-        let mut durability = self
-            .conn
-            .query(
-                "SELECT policy FROM secure_durability WHERE domain=?",
-                [encode(&scope.domain)?],
-            )
-            .await?;
-        if let Some(row) = durability.next().await?
-            && matches!(
-                decode::<DurabilityPolicy>(&row.get::<Vec<u8>>(0)?)?,
-                DurabilityPolicy::RequiredCustodians { .. }
-            )
-        {
-            return Err(denied(
-                "the domain requires recovery custodians, whose archives need complete history",
-            ));
-        }
         let needed = role.custody.max(1);
         let covering = self.custody_coverage(scope, &role.full_nodes).await?;
         if covering < needed {
@@ -219,7 +202,6 @@ impl<A: RowApplication> Inner<A> {
                         "secure_checkpoints",
                         "secure_rebootstrap",
                         "secure_rebootstrap_stubs",
-                        "secure_rebootstrap_strong",
                         "secure_rebootstrap_pages",
                         "secure_checkpoint_pages",
                         "secure_checkpoint_stubs",

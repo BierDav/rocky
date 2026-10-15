@@ -2,8 +2,7 @@
 use super::*;
 use crate::checkpoint::{Request, Response, Step};
 use crate::tests::{create, fault, mutation};
-use rocky_coordinator::MemoryCoordinator;
-use rocky_core::{AuthorSequence, RequestId, SqlValue, fixtures};
+use rocky_core::{SqlValue, fixtures};
 use std::os::unix::process::ExitStatusExt;
 use tempfile::TempDir;
 use todo_app::{Action, StaticPolicy, TodoApp};
@@ -21,23 +20,6 @@ fn manual() -> RuntimeOptions {
         },
         ..RuntimeOptions::default()
     }
-}
-fn coordinator() -> MemoryCoordinator {
-    let coordinator = MemoryCoordinator::default();
-    coordinator
-        .register(
-            fixtures::SCOPE,
-            fixtures::OWNER,
-            [7; 16],
-            vec![fixtures::LAPTOP, fixtures::PHONE],
-            1,
-            1,
-        )
-        .unwrap();
-    coordinator
-        .acquire(fixtures::SCOPE, fixtures::OWNER, fixtures::LAPTOP)
-        .unwrap();
-    coordinator
 }
 fn file(node: NodeId) -> &'static str {
     if node == fixtures::LAPTOP {
@@ -395,7 +377,6 @@ async fn retried_handles_from_before_the_horizon_do_not_execute_twice() {
     let dir = TempDir::new().unwrap();
     let laptop = open(&dir, fixtures::LAPTOP).await;
     let phone = open(&dir, fixtures::PHONE).await;
-    let coordinator = coordinator();
     let handle = MutationHandle([7; 32]);
     let once = || {
         mutation(
@@ -412,25 +393,10 @@ async fn retried_handles_from_before_the_horizon_do_not_execute_twice() {
         .committed()
         .await
         .unwrap();
-    let commands = [CommandHandle([8; 32]), CommandHandle([9; 32])];
-    let mut submitted = Vec::new();
-    for command in commands {
-        let request = laptop
-            .submit_command(command, todo_app::PUBLISH_LIST_SNAPSHOT)
-            .unwrap()
-            .committed()
-            .await
-            .unwrap();
-        submitted.push(request.id.sequence.get());
-        laptop.execute_pending(&coordinator).await.unwrap();
-    }
     laptop.checkpoint().await.unwrap();
     laptop.declare_behind(fixtures::PHONE).await.unwrap();
     laptop.prune().await.unwrap();
     assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
-    // The first result and its request are gone; the latest stays.
-    assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_preparations").await, 1);
-    assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_requests").await, 1);
     let pruned = |error: Error, sequence: u64| {
         assert!(
             matches!(error, Error::Pruned { node, sequence: found }
@@ -465,253 +431,15 @@ async fn retried_handles_from_before_the_horizon_do_not_execute_twice() {
             .await,
         Err(Error::Conflict)
     ));
-    pruned(
-        laptop
-            .submit_command(commands[0], todo_app::PUBLISH_LIST_SNAPSHOT)
-            .unwrap()
-            .committed()
-            .await
-            .unwrap_err(),
-        submitted[0],
-    );
-    pruned(
-        laptop.lookup_command(commands[0]).await.unwrap_err(),
-        submitted[0],
-    );
-    // The retained one still answers with its request.
-    assert!(laptop.lookup_command(commands[1]).await.unwrap().is_some());
     let snapshot = laptop.query().await.unwrap();
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(sequence(&snapshot.frontier, fixtures::LAPTOP), 1);
-    let status = laptop.strong_status().await.unwrap();
-    assert_eq!((status.sequence, status.commands.len()), (2, 1));
     laptop.close().await.unwrap();
-    // The pruned ledger reopens, audits and takes the next command.
+    // The pruned history reopens and audits.
     let laptop = open(&dir, fixtures::LAPTOP).await;
-    laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    laptop.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(laptop.strong_status().await.unwrap().sequence, 3);
     assert!(laptop.audit().await.unwrap().recomputed);
     laptop.close().await.unwrap();
     phone.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn an_unresolved_request_holds_the_checkpoint_at_its_cut() {
-    let dir = TempDir::new().unwrap();
-    let laptop = open(&dir, fixtures::LAPTOP).await;
-    let coordinator = coordinator();
-    create(&laptop, "sealed").await;
-    laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    create(&laptop, "after the cut").await;
-    assert!(matches!(laptop.checkpoint().await, Err(Error::Rejected(_))));
-    let status = laptop.retention_status().await.unwrap();
-    assert_eq!(status.hold, Some(CheckpointHold::UnresolvedRequest));
-    assert!(!laptop.audit().await.unwrap().recomputed);
-    laptop.execute_pending(&coordinator).await.unwrap();
-    let checkpoint = laptop.checkpoint().await.unwrap();
-    assert_eq!(checkpoint.record.strong.sequence, 1);
-    assert!(checkpoint.record.strong.result.is_some());
-    // The next command seals a cut after the checkpoint and replays from it.
-    create(&laptop, "after the checkpoint").await;
-    laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    laptop.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(laptop.confirmed_publications().await.unwrap().len(), 2);
-    assert!(laptop.audit().await.unwrap().recomputed);
-    laptop.close().await.unwrap();
-}
-
-/// Confirms nothing: a submitted attempt's outcome stays unknown.
-struct Unreachable<'a>(&'a MemoryCoordinator);
-impl rocky_core::Coordinator for Unreachable<'_> {
-    fn head(&self, scope: Scope) -> rocky_core::CoordinationFuture<'_, rocky_core::StrongHead> {
-        Box::pin(async move { self.0.head(scope) })
-    }
-    fn lookup(
-        &self,
-        scope: Scope,
-        id: RequestId,
-    ) -> rocky_core::CoordinationFuture<'_, Option<rocky_core::StrongReceipt>> {
-        Box::pin(async move { self.0.lookup(scope, id) })
-    }
-    fn verify<'a>(
-        &'a self,
-        receipt: &'a rocky_core::StrongReceipt,
-    ) -> rocky_core::CoordinationFuture<'a, ()> {
-        Box::pin(async move { self.0.verify(receipt) })
-    }
-    fn confirm(
-        &self,
-        _: rocky_core::Confirmation,
-    ) -> rocky_core::CoordinationFuture<'_, rocky_core::StrongReceipt> {
-        Box::pin(async { Err(rocky_core::CoordinationError::Unavailable) })
-    }
-    fn retire(&self, _: Scope, _: NodeId, _: u64) -> rocky_core::CoordinationFuture<'_, ()> {
-        Box::pin(async { Err(rocky_core::CoordinationError::Unavailable) })
-    }
-}
-fn state_of(status: &crate::StrongStatus, id: RequestId) -> CommandState {
-    status
-        .commands
-        .iter()
-        .find(|progress| progress.request.id == id)
-        .map(|progress| progress.state.clone())
-        .unwrap()
-}
-
-/// A request that was never submitted is released explicitly or after the
-/// policy's hold; one whose submitted attempt has an unknown outcome keeps
-/// holding until it is reconciled.
-#[tokio::test]
-async fn a_released_or_expired_request_stops_holding_checkpoints() {
-    let dir = TempDir::new().unwrap();
-    let laptop = open(&dir, fixtures::LAPTOP).await;
-    let coordinator = coordinator();
-    create(&laptop, "sealed").await;
-    let first = laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    create(&laptop, "after the cut").await;
-    assert!(matches!(laptop.checkpoint().await, Err(Error::Rejected(_))));
-    laptop.release_command(first.id).await.unwrap();
-    // Releasing twice changes nothing; an unknown request is refused.
-    laptop.release_command(first.id).await.unwrap();
-    let unknown = RequestId {
-        node: fixtures::PHONE,
-        sequence: AuthorSequence::new(9).unwrap(),
-    };
-    assert!(matches!(
-        laptop.release_command(unknown).await,
-        Err(Error::Rejected(_))
-    ));
-    assert_eq!(laptop.retention_status().await.unwrap().hold, None);
-    laptop.checkpoint().await.unwrap();
-    // The executor skips it: later requests are not blocked behind it.
-    let second = laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    laptop.execute_pending(&coordinator).await.unwrap();
-    let status = laptop.strong_status().await.unwrap();
-    assert_eq!(status.sequence, 1);
-    assert_eq!(state_of(&status, first.id), CommandState::Released);
-    assert_eq!(state_of(&status, second.id), CommandState::ConfirmedLocally);
-    assert_eq!(coordinator.lookup(fixtures::SCOPE, first.id).unwrap(), None);
-    // An attempt whose outcome is unknown holds, expired or not.
-    laptop.close().await.unwrap();
-    let expiring = RuntimeOptions {
-        retention: RetentionPolicy {
-            request_hold: Some(std::time::Duration::ZERO),
-            ..manual().retention
-        },
-        ..RuntimeOptions::default()
-    };
-    let laptop = open_at(dir.path(), fixtures::LAPTOP, expiring).await;
-    assert_eq!(
-        state_of(&laptop.strong_status().await.unwrap(), first.id),
-        CommandState::Released
-    );
-    let submitted = laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    assert!(matches!(
-        laptop.execute_pending(&Unreachable(&coordinator)).await,
-        Err(Error::Coordination(
-            rocky_core::CoordinationError::Unavailable
-        ))
-    ));
-    create(&laptop, "after the submission").await;
-    assert!(matches!(
-        laptop.release_command(submitted.id).await,
-        Err(Error::Rejected(_))
-    ));
-    assert!(matches!(laptop.checkpoint().await, Err(Error::Rejected(_))));
-    assert_eq!(
-        state_of(&laptop.strong_status().await.unwrap(), submitted.id),
-        CommandState::OutcomeUnknown
-    );
-    // Reconciled, it resolves; a never-submitted one expires at the next
-    // checkpoint without a call.
-    laptop.execute_pending(&coordinator).await.unwrap();
-    let expired = laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    create(&laptop, "after the last cut").await;
-    laptop.checkpoint().await.unwrap();
-    let status = laptop.strong_status().await.unwrap();
-    assert_eq!(status.sequence, 2);
-    assert_eq!(state_of(&status, expired.id), CommandState::Released);
-    laptop.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(laptop.strong_status().await.unwrap().sequence, 2);
-    assert!(laptop.audit().await.unwrap().recomputed);
-    laptop.close().await.unwrap();
-}
-
-/// A request that is never executed holds checkpoints until retained bytes
-/// reach the bound and writes push back; releasing it lets pruning continue.
-#[tokio::test]
-async fn a_stuck_request_pushes_writes_back_until_it_is_released() {
-    let dir = TempDir::new().unwrap();
-    let options = RuntimeOptions {
-        retention: RetentionPolicy {
-            checkpoint_operations: 0,
-            window: 0,
-            retained_bytes: 16 * 1024,
-            automatic: true,
-            ..RetentionPolicy::default()
-        },
-        ..RuntimeOptions::default()
-    };
-    let laptop = open_at(dir.path(), fixtures::LAPTOP, options).await;
-    // Only the request holds history back: the phone is not waited for.
-    laptop.declare_behind(fixtures::PHONE).await.unwrap();
-    let stuck = laptop
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    let mut written = 0;
-    let error = loop {
-        match laptop
-            .mutate(mutation(
-                None,
-                Action::CreateTodo {
-                    title: format!("todo-{written}"),
-                    completed: false,
-                },
-            ))
-            .unwrap()
-            .committed()
-            .await
-        {
-            Ok(_) => written += 1,
-            Err(error) => break error,
-        }
-        assert!(written < 1000, "the bound never pushed back");
-    };
-    assert!(matches!(error, Error::Retention { .. }), "{error}");
-    let status = laptop.retention_status().await.unwrap();
-    assert_eq!(status.hold, Some(CheckpointHold::UnresolvedRequest));
-    assert!(status.checkpoint.is_none());
-    laptop.release_command(stuck.id).await.unwrap();
-    laptop.checkpoint().await.unwrap();
-    laptop.prune().await.unwrap();
-    assert_eq!(count(&dir, fixtures::LAPTOP, "rocky_operations").await, 0);
-    create(&laptop, "accepted again").await;
-    assert_eq!(laptop.query().await.unwrap().rows.len(), written + 1);
-    assert!(laptop.audit().await.unwrap().recomputed);
-    laptop.close().await.unwrap();
 }
 
 /// With `behind_after`, a delivery target that holds back the horizon that

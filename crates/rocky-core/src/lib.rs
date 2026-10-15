@@ -9,7 +9,7 @@ pub use definition::*;
 mod generation;
 pub use generation::{
     Generation, GenerationTransition, ItemChanges, MAX_TRANSITION_IDS, Removed, SchemaChange,
-    Unsupported, classify, classify_commands,
+    Unsupported, classify,
 };
 mod manifest;
 pub use manifest::*;
@@ -29,9 +29,8 @@ pub use history::{AppliedOperations, Delivery};
 pub use key::{KeyColumn, MAX_KEY_BYTES, bound_key, key_components, key_values};
 pub use logical::*;
 pub use storage::{
-    ApplicationDescriptor, AuthoredFollow, CommandHandler, CompiledSchema, InstalledSchema,
-    ProjectionSchema, ProjectionStatement, ReadView, Sql, StoredApplication, columns,
-    installed_definition,
+    ApplicationDescriptor, AuthoredFollow, CompiledSchema, InstalledSchema, ProjectionSchema,
+    ProjectionStatement, ReadView, Sql, StoredApplication, columns, installed_definition,
 };
 pub use types::*;
 pub use value::{Real, SqlValue};
@@ -84,8 +83,8 @@ pub trait Application {
     ) -> Result<(), Self::Error>;
 }
 
-mod strong;
-pub use strong::*;
+mod coordination;
+pub use coordination::*;
 
 mod partition_groups;
 pub use partition_groups::{GroupAddress, PartitionGroup};
@@ -102,10 +101,3 @@ pub use row_identity::{RowIdentity, RowIdentityError};
 
 mod typed_rows;
 pub use typed_rows::{TypedRows, TypedTable, default_value, fillable};
-
-mod handler_reads;
-pub use handler_reads::{HandlerReads, MAX_HANDLER_SCAN_ROWS};
-mod command;
-pub use command::*;
-mod typed_commands;
-pub use typed_commands::TypedCommands;

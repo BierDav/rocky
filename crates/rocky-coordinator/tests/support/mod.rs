@@ -1,6 +1,6 @@
 #[cfg(feature = "iroh")]
 pub mod public;
-use p2panda_core::{PrivateKey, PublicKey};
+use p2panda_core::PrivateKey;
 use rocky_coordinator::{certified::*, service::*};
 use rocky_core::*;
 use std::{
@@ -77,24 +77,7 @@ impl Cluster {
                 scope: directory_scope,
                 configuration: [7; 16],
                 revision: 1,
-                owner: directory_app.bootstrap_registrar,
-                executors: vec![directory_key.public_key()],
-                invokers: vec![
-                    (
-                        directory_key.public_key(),
-                        directory_app.bootstrap_registrar,
-                    ),
-                    (
-                        executor.public_key(),
-                        directory_app::principal(*user.public_key().as_bytes()),
-                    ),
-                    (
-                        phone.public_key(),
-                        directory_app::principal(*user.public_key().as_bytes()),
-                    ),
-                ],
-                schema: 1,
-                handler: 1,
+                trusted: vec![directory_key.public_key()],
                 not_before: 0,
                 expires: u64::MAX,
             },
@@ -153,7 +136,7 @@ impl Cluster {
         for id in 1..=3 {
             cluster.spawn(id, true, None);
         }
-        let admin = cluster.client(&cluster.admin, "admin");
+        let admin = cluster.client(&cluster.admin);
         for id in 1..=3 {
             cluster.wait_online(id, &admin).await;
         }
@@ -161,13 +144,12 @@ impl Cluster {
         cluster.wait_leader(&admin).await;
         cluster
     }
-    pub fn client(&self, key: &PrivateKey, name: &str) -> NetworkCoordinator {
+    pub fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
         NetworkCoordinator::open(
             self.genesis.clone(),
             self.genesis.root,
             self.genesis.genesis.mesh,
             key.clone(),
-            self.dir.path().join(format!("{name}.evidence")),
         )
         .unwrap()
     }
@@ -177,20 +159,7 @@ impl Cluster {
                 scope: self.scope,
                 configuration: self.genesis.genesis.configuration,
                 revision,
-                owner: directory_app::principal(*self.user.public_key().as_bytes()),
-                executors: vec![self.executor.public_key(), self.alternate.public_key()],
-                invokers: vec![
-                    (
-                        self.executor.public_key(),
-                        directory_app::principal(*self.user.public_key().as_bytes()),
-                    ),
-                    (
-                        self.phone.public_key(),
-                        directory_app::principal(*self.user.public_key().as_bytes()),
-                    ),
-                ],
-                schema: 1,
-                handler: 1,
+                trusted: vec![self.executor.public_key(), self.alternate.public_key()],
                 not_before: timestamp() - 1,
                 expires: timestamp() + 3600,
             },
@@ -298,37 +267,36 @@ pub fn timestamp() -> u64 {
         .unwrap()
         .as_secs()
 }
-pub fn proposal(
-    head: &StrongHead,
-    node: PublicKey,
-    caller: PrincipalId,
+/// Joins `client` to `scope`'s log at its committed position.
+pub async fn join(client: &NetworkCoordinator, scope: Scope, sequence: u64) {
+    let head = client.coordinated_head(scope).await.unwrap();
+    client
+        .coordinated(
+            scope,
+            rocky_coordinator::coordinated::Action::Join {
+                position: head.commit,
+                running_hash: head.running_hash,
+                sequence,
+            },
+        )
+        .await
+        .unwrap();
+}
+/// An append of `hash` at the log's current head.
+pub async fn append(
+    client: &NetworkCoordinator,
+    scope: Scope,
+    hash: u8,
     sequence: u64,
-) -> Confirmation {
-    let mut p = Confirmation {
-        caller,
-        scope: head.scope,
-        configuration: head.configuration,
-        executor: head.executor,
+) -> rocky_coordinator::coordinated::Action {
+    let head = client.coordinated_head(scope).await.unwrap();
+    rocky_coordinator::coordinated::Action::Append {
+        expected: head.head,
         epoch: head.epoch,
-        request: RequestId {
-            node: node_id(node),
-            sequence: AuthorSequence::new((timestamp() << ISSUE_SHIFT) + sequence).unwrap(),
-        },
-        request_hash: [sequence as u8; 32],
-        expected_sequence: head.sequence,
-        expected_head: head.head,
-        schema: head.schema,
-        handler: head.handler,
-        result: [8; 32],
-        new_head: [0; 32],
-    };
-    p.new_head = successor(
-        p.expected_head,
-        p.expected_sequence + 1,
-        p.request_hash,
-        p.result,
-    );
-    p
+        hash: [hash; 32],
+        deadline: timestamp() + 30,
+        sequence,
+    }
 }
 
 // Removing the leader can outlast one client call. Retry the same plan;

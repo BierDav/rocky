@@ -137,9 +137,6 @@ impl StoredApplication for WideApp {
             .collect();
         Some(manifest)
     }
-    fn commands(&self) -> &'static [CommandMethod] {
-        &[]
-    }
 
     fn projection_rows(&self, state: &Self::State) -> Vec<Vec<SqlValue>> {
         InventoryApp.projection_rows(state)

@@ -1,5 +1,10 @@
 # Scaling limits and evidence
 
+Phase 11 removes the command streams from the trusted probes. Earlier measured
+command mixes remain historical evidence; current local/incoming/paced-write
+probes do not reproduce those mixes. No new performance result is claimed by
+[command removal](../features_09/11-removing-strong-commands-evidence.md).
+
 Enforced bounds and measured limits of both runtime paths on SQLite. Figures are
 one release run on the reference machine (Apple M5 Pro, internal SSD/APFS)
 unless a range or another profile is named; repeated runs varied by about ±10%.

@@ -2,10 +2,8 @@ mod audit;
 mod horizon;
 mod incoming;
 mod rebootstrap;
-mod restore_strong;
 pub(crate) mod retention;
 mod sql;
-mod strong;
 use crate::read::{Changed, ReadPlan, ReadPool, Reads};
 use crate::scoped_connection::ScopedConnection;
 use crate::{
@@ -19,7 +17,6 @@ use rocky_core::{
 };
 pub(crate) use sql::Sealed;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
-pub(crate) use strong::STRONG_SCHEMA;
 use tokio::sync::watch;
 
 #[cfg(test)]
@@ -78,7 +75,7 @@ pub(crate) struct Notifications {
 struct Unpublished {
     revision: bool,
     changes: bool,
-    /// Completeness or the strong head may have changed.
+    /// Completeness may have changed.
     meta: bool,
     views: Changed,
     /// Why the tables in `views` changed.
@@ -224,13 +221,9 @@ where
                 identity.scope,
                 app.descriptor().operations,
                 app.descriptor().projection,
-            ) || app.commands().iter().any(|method| {
-                method.schema != manifest.schema
-                    || method.handler != manifest.handler
-                    || !manifest.methods.iter().any(|item| item.name == method.name)
-            }) {
+            ) {
                 return Err(Error::Incompatible(
-                    "installed manifest/handler binding differs".into(),
+                    "installed manifest binding differs".into(),
                 ));
             }
         }
@@ -375,20 +368,9 @@ where
                 worker.reads.bind_logical(schema.clone());
             }
             if fresh {
-                worker.strong_schema().await?;
                 worker.conn().execute(storage::PEER_SCHEMA, ()).await?;
             } else {
-                for table in [
-                    "rocky_mutation_handles",
-                    "rocky_peer_ack",
-                    "rocky_strong_meta",
-                    "rocky_command_handles",
-                    "rocky_requests",
-                    "rocky_preparations",
-                    "rocky_strong_outbox",
-                    "rocky_rejected_receipts",
-                    "rocky_strong_ack",
-                ] {
+                for table in ["rocky_mutation_handles", "rocky_peer_ack"] {
                     if !tables.contains(&vec![SqlValue::Text(table.into())]) {
                         return Err(Error::Corrupt(format!("missing storage table {table}")));
                     }
@@ -530,14 +512,6 @@ where
                 }
                 Box::new(Answered { reply, result })
             }
-            Command::Strong(request, reply) => {
-                let result = self.strong(*request).await;
-                if result.is_ok() {
-                    self.notify(false);
-                    self.unpublished.meta = true;
-                }
-                Box::new(Answered { reply, result })
-            }
             Command::Retention(request, reply) => {
                 let result = self.retention(*request).await;
                 Box::new(Answered { reply, result })
@@ -575,9 +549,6 @@ where
             }
             Command::Sync(request, reply) => {
                 let _ = reply.send(self.sync(request).await);
-            }
-            Command::Strong(request, reply) => {
-                let _ = reply.send(self.strong(*request).await);
             }
             Command::Retention(request, reply) => {
                 let _ = reply.send(self.retention(*request).await);
@@ -777,7 +748,6 @@ where
                     scope: self.identity.scope,
                     name: self.app.definition(),
                 },
-                strong_head: self.local_strong_head().await?,
             })
         }
     }

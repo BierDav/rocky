@@ -157,7 +157,7 @@ async fn simulator_peer() -> Result<(), Failure> {
             schema: &schema,
             secrets: None,
             network: Some(starter(None, true)),
-            commands: None,
+            coordination: None,
         },
         invitation.trim(),
     )?)?;

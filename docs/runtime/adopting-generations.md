@@ -51,7 +51,7 @@ without them before the switch returns; status reports their count in `held`.
 | --- | --- | --- |
 | The installed schema | Opens it | `current` |
 | What a generation the domain left defined | Opens the installed database unchanged | `behind` |
-| A newer schema, on an issuer | Signs and adopts it, as [before](generations.md#plan-backfill-and-switch) | `current` |
+| A newer schema, on an issuer | Signs and adopts additions; removals first require [confirmation](generations.md#confirmed-removals) | `current` after confirmation |
 | A newer schema, on a member | Fetches it from an issuer that signed it; otherwise opens at the domain's generation | `current` or `ahead` |
 
 Schema versions are local and unsigned. They decide only one case: a schema

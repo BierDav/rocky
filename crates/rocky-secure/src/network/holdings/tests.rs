@@ -56,7 +56,6 @@ async fn refusal(client: &Replica, server: &Replica, message: Message) -> (Strin
 
 fn requests(
     scope: ResourceScope,
-    ordinary: ResourceScope,
     node: &PrivateKey,
     credentials: &CredentialChain,
 ) -> Vec<Message> {
@@ -65,39 +64,6 @@ fn requests(
         logs: Vec::new(),
         cuts: 0,
     };
-    let invocation = EncryptedPackage {
-        scope,
-        generation: rocky_core::KeyEpoch::new(1, &[9; 32]),
-        kind: PackageKind::Invocation,
-        bytes: Vec::new(),
-    };
-    let request = rocky_core::StrongRequest {
-        scope: scope.domain,
-        caller: crate::secure_principal_id(node.public_key()),
-        id: rocky_core::RequestId {
-            node: crate::secure_node_id(node.public_key()),
-            sequence: rocky_core::AuthorSequence::new(1).unwrap(),
-        },
-        method: "probe".into(),
-        version: 1,
-        schema: 1,
-        handler: 1,
-        client_request: [0; 32],
-        arguments: encode(&invocation).unwrap(),
-        policy: [0; 32],
-        frontier: Default::default(),
-        digest: [0; 32],
-    };
-    let command: EncryptedCommand = serde_json::from_value(serde_json::json!({
-        "request": request.encode().unwrap(), "node": node.public_key(), "credentials": credentials,
-        "signature": node.sign(b"invalid command: proof gate must run first")
-    }))
-    .unwrap();
-    let result: ConfirmedCommand = serde_json::from_value(serde_json::json!({
-        "command": command, "package": [], "receipt": [], "executor": node.public_key(),
-        "credentials": credentials, "signature": node.sign(b"invalid result"),
-        "parts": [{"scope": scope, "generation": rocky_core::KeyEpoch::new(1, &[9;32]), "kind": "CommandResult", "bytes": []}]
-    })).unwrap();
     vec![
         RowMessage::Pull {
             scopes: vec![scope],
@@ -154,23 +120,6 @@ fn requests(
             ack: rocky_credentials::HorizonAck::sign([0; 32], node, credentials.clone()).unwrap(),
         }
         .into(),
-        CommandMessage::Execute {
-            command: command.clone(),
-            scopes: vec![scope],
-        }
-        .into(),
-        CommandMessage::Execute {
-            command,
-            scopes: vec![ordinary],
-        }
-        .into(),
-        CommandMessage::ResultPull {
-            domain: scope.domain,
-            sequence: 1,
-            scopes: vec![scope],
-        }
-        .into(),
-        CommandMessage::ResultPush { result }.into(),
         ExistenceMessage::BaseOffer {
             scope,
             expected: None,
@@ -249,14 +198,9 @@ async fn transcript_case(custody: bool) {
         let inner = member.inner.lock().await;
         (inner.config.node.clone(), inner.config.credentials.clone())
     };
-    for (known, missing) in requests(scope, f.scope("products", 0), &node, &credentials)
+    for (known, missing) in requests(scope, &node, &credentials)
         .into_iter()
-        .zip(requests(
-            unknown,
-            f.scope("products", 0),
-            &node,
-            &credentials,
-        ))
+        .zip(requests(unknown, &node, &credentials))
     {
         let known = refusal(&member, &server, known).await;
         let missing = refusal(&member, &server, missing).await;
@@ -299,74 +243,6 @@ async fn transcript_case(custody: bool) {
             panic!("frontiers reply")
         };
         assert!(matches!(states.as_slice(), [FrontierReply::Refused(scope)] if *scope == asked));
-    }
-    let config = {
-        let inner = server.inner.lock().await;
-        SecureConfig {
-            publisher: inner.config.publisher,
-            manifest: inner.config.manifest.clone(),
-            revocations: inner.config.revocations.clone(),
-            node: inner.config.node.clone(),
-            credentials: inner.config.credentials.clone(),
-            keys: inner
-                .config
-                .keys
-                .iter()
-                .map(|key| KeyMaterial::at(key.scope, key.generation, key.key))
-                .collect(),
-        }
-    };
-    drop(server);
-    let app = rocky_core::TypedCommands::new(f.app(), Default::default(), Default::default(), None)
-        .unwrap();
-    let server = EncryptedReplica::open(root.path().join("server.db"), app, config)
-        .await
-        .unwrap();
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    // Exercise both command dispatchers: the gate must precede payload decoding,
-    // result lookup/import and all coordinator calls, even for invalid payloads.
-    for command_only in [false, true] {
-        for (known, missing) in requests(scope, f.scope("products", 0), &node, &credentials)
-            .into_iter()
-            .zip(requests(
-                unknown,
-                f.scope("products", 0),
-                &node,
-                &credentials,
-            ))
-        {
-            if !matches!(known, Message::Commands(_)) {
-                continue;
-            }
-            let mut transcripts = Vec::new();
-            for message in [known, missing] {
-                let (mut c, mut s) = pair(&member, &server).await;
-                c.send(message).await.unwrap();
-                let before = s.sent;
-                let error = if command_only {
-                    s.serve_command_once(&server, &coordinator)
-                        .await
-                        .unwrap_err()
-                } else {
-                    s.serve_with_commands(&server, &coordinator)
-                        .await
-                        .unwrap_err()
-                };
-                transcripts.push((error.to_string(), s.sent - before));
-                let (closed, received) = tokio::join!(s.close(), async {
-                    let received = c.receive().await;
-                    c.close().await.unwrap();
-                    received
-                });
-                closed.unwrap();
-                assert!(
-                    matches!(received, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof)
-                );
-            }
-            assert_eq!(transcripts[0], transcripts[1]);
-            assert!(transcripts[0].0.contains(HOLDING_DENIED));
-            assert_eq!(transcripts[0].1, 0);
-        }
     }
 }
 

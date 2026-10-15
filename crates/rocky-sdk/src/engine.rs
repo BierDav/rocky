@@ -3,7 +3,6 @@
 //! to the services it composes. See `docs/runtime/sdk-composition.md`.
 use crate::{
     Failure,
-    commands::Commands,
     database::{Database, NetworkService, Open, Opened, Session},
     secrets::SecretStore,
     service::Network,
@@ -62,38 +61,27 @@ impl Engine {
     ) -> Result<Arc<Self>, Failure> {
         Self::open_composed(options, schema, secrets, network, None)
     }
-    /// `open_with`, with the coordinator and handlers of the schema's
-    /// strong commands. The coordinator stays the application's.
+    /// Opens with an application-owned metadata log or service.
     pub fn open_composed(
         options: &str,
         schema: &str,
         secrets: Option<Arc<dyn SecretStore>>,
         network: Option<Network>,
-        commands: Option<Commands>,
+        coordination: Option<crate::Coordination>,
     ) -> Result<Arc<Self>, Failure> {
         if options.len() > 16 * 1024 {
             return Err("native options quota".into());
         }
         let options: Options = serde_json::from_str(options)?;
-        let commands = match (options.coordinator.clone(), commands) {
-            (None, commands) => commands,
-            (Some(_), Some(_)) => {
-                return Err(
-                    "options name a coordination service and commands compose another".into(),
-                );
-            }
+        let coordination = match (options.coordinator.clone(), coordination) {
+            (None, coordination) => coordination,
+            (Some(_), Some(_)) => return Err("two coordinators supplied".into()),
             #[cfg(feature = "iroh")]
-            (Some(bundle), None) => Some(Commands {
-                coordinator: crate::Coordination::Service(Box::new(serde_json::from_value(
-                    bundle,
-                )?)),
-                handler: None,
-                deadline: None,
-            }),
+            (Some(bundle), None) => Some(crate::Coordination::Service(Box::new(
+                serde_json::from_value(bundle)?,
+            ))),
             #[cfg(not(feature = "iroh"))]
-            (Some(_), None) => {
-                return Err("a coordination service needs the iroh network".into());
-            }
+            (Some(_), None) => return Err("a coordination service needs iroh".into()),
         };
         let network =
             network.unwrap_or_else(|| Network::Owned(Arc::new(options.transport.clone())));
@@ -102,7 +90,7 @@ impl Engine {
             schema,
             secrets,
             network: Some(network),
-            commands,
+            coordination,
         };
         let Opened { database, network } = match &options.mode {
             Mode::Create { credential_ttl } => Database::create(open, *credential_ttl)?,

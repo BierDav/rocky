@@ -3,12 +3,9 @@ use crate::Limits;
 use p2panda_core::PrivateKey;
 use rocky_core::*;
 use std::collections::BTreeSet;
-fn certified() -> (CertifiedGenesis, PrivateKey, Scope) {
-    let (genesis, executor, _, scope) = certified_with_authority();
-    (genesis, executor, scope)
-}
-/// Also returns the scope's control authority.
-fn certified_with_authority() -> (CertifiedGenesis, PrivateKey, PrivateKey, Scope) {
+/// A genesis whose directory key also administers membership, and the
+/// trusted node of its one domain.
+fn certified() -> (CertifiedGenesis, PrivateKey, Scope, PrivateKey) {
     let root = PrivateKey::new();
     let directory = PrivateKey::new();
     let executor = PrivateKey::new();
@@ -23,11 +20,7 @@ fn certified_with_authority() -> (CertifiedGenesis, PrivateKey, PrivateKey, Scop
             scope,
             configuration: [4; 16],
             revision: 1,
-            owner: PrincipalId([5; 16]),
-            executors: vec![executor.public_key()],
-            invokers: vec![(executor.public_key(), PrincipalId([5; 16]))],
-            schema: 1,
-            handler: 1,
+            trusted: vec![executor.public_key()],
             not_before: time - 1,
             expires: time + 7200,
         },
@@ -59,7 +52,7 @@ fn certified_with_authority() -> (CertifiedGenesis, PrivateKey, PrivateKey, Scop
         &root,
     )
     .unwrap();
-    (genesis, executor, directory, scope)
+    (genesis, executor, scope, directory)
 }
 struct Builder(CertifiedGenesis);
 impl openraft::testing::StoreBuilder<Types, Store, Store, tempfile::TempDir> for Builder {
@@ -79,18 +72,24 @@ fn openraft_storage_contract() {
 }
 #[test]
 fn retry_records_expire_and_are_bounded_per_signer() {
-    let (genesis, executor, scope) = certified();
+    let (genesis, _, scope, directory) = certified();
     let mut metadata = Metadata::new(genesis.clone()).unwrap();
     let id = genesis.id().unwrap();
     let time = now().unwrap();
     let limits = Limits::default();
+    // Membership requests keep their outcome, refusals included.
     let acquire = |n: u64, time| {
         let mut identity = [0; 32];
         identity[..8].copy_from_slice(&n.to_le_bytes());
-        Request::sign_at(id, identity, Operation::Acquire { scope }, &executor, time).unwrap()
+        let operation = Operation::Membership {
+            voters: BTreeSet::from([1, 2, 3]),
+            expected: BTreeSet::from([1, 2, 3]),
+            expected_revision: 0,
+        };
+        Request::sign_at(id, identity, operation, &directory, time).unwrap()
     };
     for n in 0..limits.retry_records as u64 {
-        metadata.apply_at(time, &acquire(n, time)).unwrap();
+        let _ = metadata.apply_at(time, &acquire(n, time));
     }
     assert_eq!(
         metadata.apply_at(time, &acquire(u64::MAX, time)),
@@ -102,11 +101,8 @@ fn retry_records_expire_and_are_bounded_per_signer() {
     let conflict = Request::sign_at(
         id,
         acquire(0, time).id,
-        Operation::Takeover {
-            scope,
-            expected_epoch: 1,
-        },
-        &executor,
+        Operation::Close { scope },
+        &directory,
         time,
     )
     .unwrap();
@@ -121,12 +117,12 @@ fn retry_records_expire_and_are_bounded_per_signer() {
         Err(CoordinationError::Expired)
     );
     assert_eq!(metadata.retry_records(), 0);
-    assert!(metadata.apply_at(later, &acquire(1, later)).is_ok());
+    let _ = metadata.apply_at(later, &acquire(1, later));
     assert_eq!(metadata.retry_records(), 1);
 }
 #[test]
 fn stores_fail_closed_on_corruption_lost_state_and_old_formats() {
-    let (genesis, _, scope) = certified();
+    let (genesis, _, scope, _) = certified();
     assert!(
         genesis
             .verify(PrivateKey::new().public_key(), scope.mesh)
@@ -159,7 +155,7 @@ fn stores_fail_closed_on_corruption_lost_state_and_old_formats() {
 
 #[test]
 fn membership_replays_cannot_reverse_a_later_configuration_after_retry_expiry() {
-    let (genesis, _, _) = certified();
+    let (genesis, ..) = certified();
     // Use a genesis with a known membership signing key.
     let authority = PrivateKey::new();
     let root = PrivateKey::new();
@@ -204,7 +200,7 @@ fn membership_replays_cannot_reverse_a_later_configuration_after_retry_expiry() 
 #[tokio::test]
 async fn missing_committed_prefix_cannot_reopen_at_genesis() {
     use openraft::storage::RaftLogStorageExt;
-    let (genesis, _, _) = certified();
+    let (genesis, ..) = certified();
     let directory = tempfile::tempdir().unwrap();
     let mut store =
         Store::open(directory.path(), genesis.clone(), true, Limits::default()).unwrap();
@@ -226,8 +222,8 @@ async fn missing_committed_prefix_cannot_reopen_at_genesis() {
 
 #[test]
 fn unsupported_store_versions_refuse_open_and_restore_before_writes() {
-    let (genesis, _, _) = certified();
-    for format in [0, 1, 2, 3, FORMAT - 1, FORMAT + 1] {
+    let (genesis, ..) = certified();
+    for format in [0, 1, 2, 3, 4, 5, FORMAT - 1, FORMAT + 1] {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
         drop(Store::open(&source, genesis.clone(), true, Limits::default()).unwrap());
@@ -261,7 +257,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     use crate::coordinated::{Action, Result as LogResult};
     use crate::machine::Outcome;
     use openraft::storage::RaftLogStorageExt;
-    let (genesis, executor, scope) = certified();
+    let (genesis, executor, scope, _) = certified();
     let voter = PrivateKey::new();
     let root = PrivateKey::new();
     let mut definition = genesis.genesis;
@@ -370,7 +366,7 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
     use crate::machine::Outcome;
     use openraft::storage::RaftLogStorageExt;
     use rocky_credentials::{CutPoint, CutStatement, SignedCut};
-    let (genesis, executor, authority, scope) = certified_with_authority();
+    let (genesis, executor, scope, authority) = certified();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();

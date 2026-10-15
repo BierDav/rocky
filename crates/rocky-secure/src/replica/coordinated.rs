@@ -666,7 +666,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
         let decided = match decided {
             Some(decided) => decided,
-            None => self.await_decision(log, coordinator, &pending).await?,
+            None => {
+                self.await_decision(log, coordinator, peers, &pending, &ids)
+                    .await?
+            }
         };
         match decided {
             Decision::Committed => {
@@ -710,6 +713,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let Ok(head) = coordinator.log_head(log).await else {
             return Ok((sent.frames, None));
         };
+        let decided = decision(&head, pending.position, pending.hash);
+        if decided != Decision::Pending {
+            return Ok((sent.frames, Some(decided)));
+        }
         for member in head.members.iter().filter(|member| member.key != me) {
             // A member that does not store it misses the deadline and
             // leaves the set.
@@ -723,13 +730,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         Ok((sent.frames, decided))
     }
-    /// Polls the head until `pending` is decided, a little past its
-    /// deadline. A lost coordinator leaves it undecided.
+    /// Retries storage and polls until `pending` is decided, a little past
+    /// its deadline. A lost coordinator leaves it undecided.
     async fn await_decision(
         &self,
         log: Scope,
         coordinator: &dyn DomainLog,
+        peers: &dyn EntryPeers,
         pending: &LogPending,
+        ids: &[Hash],
     ) -> Result<Decision, CoordinatedError> {
         let mut delay = std::time::Duration::from_millis(10);
         loop {
@@ -741,6 +750,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 return Ok(decided);
             }
             tokio::time::sleep(delay).await;
+            if let (_, Some(decided)) = self.send_own(log, pending, ids, coordinator, peers).await?
+            {
+                return Ok(decided);
+            }
             delay = (delay * 2).min(std::time::Duration::from_millis(500));
         }
     }

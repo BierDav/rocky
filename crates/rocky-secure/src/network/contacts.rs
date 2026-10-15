@@ -158,7 +158,7 @@ impl NativeSession {
         Ok(response)
     }
     /// Answers one contact request inside an admitted session.
-    pub(super) async fn answer_contact<A: rocky_core::RowCommandApplication>(
+    pub(super) async fn answer_contact<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
         handler: &dyn ContactHandler,
@@ -179,11 +179,10 @@ impl NativeSession {
         replica.admit_chain(self.peer, &self.credentials).await?;
         self.send_contact(Payload::Response(response)).await
     }
-    /// Serves the SDK mesh metadata alongside rows and optional commands.
-    pub async fn serve_with_contacts<A: rocky_core::RowCommandApplication>(
+    /// Serves the SDK mesh metadata alongside rows.
+    pub async fn serve_with_contacts<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
-        coordinator: Option<&dyn rocky_core::Coordinator>,
         handler: &dyn ContactHandler,
     ) -> Result<(), Error> {
         loop {
@@ -196,11 +195,6 @@ impl NativeSession {
             match message {
                 Message::Contacts(message) => {
                     self.answer_contact(replica, handler, message).await?
-                }
-                Message::Commands(message) => {
-                    let coordinator =
-                        coordinator.ok_or_else(|| denied("command coordinator unavailable"))?;
-                    self.answer_command(replica, coordinator, message).await?;
                 }
                 message => self.answer(replica, message).await?,
             }
@@ -228,13 +222,7 @@ mod tests {
         let fixture = Fixture::new(1);
         let client_key = PrivateKey::new();
         let server_key = PrivateKey::new();
-        let app = rocky_core::TypedCommands::new(
-            fixture.app(),
-            Default::default(),
-            Default::default(),
-            None,
-        )
-        .unwrap();
+        let app = fixture.app();
         let manifest = app.manifest();
         let signed =
             rocky_credentials::SignedManifest::sign(&manifest, &fixture.publisher).unwrap();
@@ -303,7 +291,7 @@ mod tests {
                 .await
                 .unwrap();
             },
-            s.serve_with_contacts(&server, None, &handler)
+            s.serve_with_contacts(&server, &handler)
         );
         assert!(
             error

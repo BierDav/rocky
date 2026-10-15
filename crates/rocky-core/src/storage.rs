@@ -20,9 +20,9 @@ pub struct InstalledSchema {
     pub additive_indexes: Vec<Sql>,
     pub projection_query: Sql,
     /// The tables of `statements` that hold the mergeable projection and
-    /// nothing else: every row `project` writes, deletion evidence included,
-    /// and no row a command result writes. A checkpoint commits to their
-    /// rows, a checkpoint import replaces them, and replay must reproduce them.
+    /// nothing else: every row `project` writes, deletion evidence included.
+    /// A checkpoint commits to their rows, a checkpoint import replaces them,
+    /// and replay must reproduce them.
     pub checkpoint_tables: Vec<Sql>,
 }
 impl InstalledSchema {
@@ -59,7 +59,7 @@ impl<T: CompiledSchema> ProjectionSchema for T {
 }
 
 /// Persisted compatibility contract. Reducer/codec changes require a new definition;
-/// projection and handler generations are independently bound by the runtime.
+/// the projection generation is independently bound by the runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApplicationDescriptor {
     pub definition: &'static str,
@@ -82,13 +82,6 @@ pub trait StoredApplication: Application + ProjectionSchema + Sized + Send + 'st
     }
     fn definition(&self) -> &'static str {
         self.descriptor().definition
-    }
-    /// Optional immutable command handlers, registered by method identity.
-    fn command(&self, _method: &str) -> Option<&dyn CommandHandler<Self>> {
-        None
-    }
-    fn commands(&self) -> &'static [crate::CommandMethod] {
-        &[]
     }
     type Row: Clone + Send + PartialEq + 'static;
     /// Translates rows captured from SQL transactions into operations. None:
@@ -153,45 +146,6 @@ pub trait StoredApplication: Application + ProjectionSchema + Sized + Send + 'st
     ) -> Result<(), Self::Error>;
 }
 
-/// Optional sealed-input command extension. Merge-only apps need no handler.
-pub trait CommandHandler<A: Application> {
-    /// `state` is complete for the sealed cut, unlike a reducer's window.
-    fn seal(&self, state: &A::State) -> Result<Vec<u8>, A::Error>;
-    fn admit(&self, request: &crate::StrongRequest, policy: &A::Policy) -> Result<(), A::Error>;
-    /// Select the complete immutable result under current read policy.
-    fn select_result(
-        &self,
-        bytes: &[u8],
-        context: crate::AdmissionContext,
-        policy: &A::Policy,
-    ) -> Result<bool, A::Error>;
-    fn validate(&self, request: &crate::StrongRequest) -> Result<(), A::Error>;
-    /// Previous confirmed result bytes are separate from the sealed mergeable cut.
-    fn execute_after(
-        &self,
-        state: &A::State,
-        request: &crate::StrongRequest,
-        _previous: Option<&[u8]>,
-    ) -> Result<Vec<u8>, A::Error> {
-        self.execute(state, request)
-    }
-    /// Atomic strong projection and job intents, supplied only by installed code.
-    fn result_projection_query(&self) -> Option<&'static str> {
-        None
-    }
-    fn result_projection_rows(&self, _result: &[u8]) -> Result<Vec<Vec<SqlValue>>, A::Error> {
-        Ok(Vec::new())
-    }
-    fn project_result(&self, _result: &[u8]) -> Result<Vec<ProjectionStatement>, A::Error> {
-        Ok(Vec::new())
-    }
-    fn execute(
-        &self,
-        state: &A::State,
-        request: &crate::StrongRequest,
-    ) -> Result<Vec<u8>, A::Error>;
-}
-
 /// An authorized read table supplied by installed application code: bound
 /// reads see `name` as the result of `sql`, never the stored tables themselves.
 /// Each `?` in `sql` takes the next of `values`; a policy filter belongs here.
@@ -230,13 +184,6 @@ pub fn installed_definition<A: StoredApplication>(app: &A) -> crate::Commitment 
     for sql in schema.statements.iter().chain([&schema.projection_query]) {
         definition.extend((sql.len() as u64).to_le_bytes());
         definition.extend(sql.as_bytes());
-    }
-    for handler in app.commands() {
-        definition.extend((handler.name.len() as u64).to_le_bytes());
-        definition.extend(handler.name.as_bytes());
-        for version in [handler.version, handler.schema, handler.handler] {
-            definition.extend(version.to_le_bytes());
-        }
     }
     crate::commitment("rocky.installed-definition.v2", &definition)
 }

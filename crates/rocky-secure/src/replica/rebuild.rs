@@ -11,7 +11,7 @@ pub(super) const SCHEMA: &[&str] = &[
 impl<A: RowApplication> EncryptedReplica<A> {
     /// Rebuilds one local row projection from the verified checkpoint and the
     /// original signed bytes after it. This does not migrate application
-    /// generations or reinterpret a confirmed strong head.
+    /// generations.
     pub async fn rebuild_projection(&self, scope: ResourceScope) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         if !inner.can_read_key(scope, &inner.local_grants(now()?)?) {

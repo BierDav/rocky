@@ -35,7 +35,6 @@ pub struct Tenant {
     pub publisher: PrivateKey,
     pub executor: PrivateKey,
     pub alternate: PrivateKey,
-    pub phone: PrivateKey,
 }
 /// nextest sets the path at run time, remapped when tests run from an archive
 /// built elsewhere; `cargo test` has only the compile-time path.
@@ -195,7 +194,6 @@ impl PublicCluster {
             self.genesis.root,
             self.genesis.genesis.mesh,
             self.admin.clone(),
-            self.dir.path().join("admin.evidence"),
         )
         .unwrap()
     }
@@ -292,7 +290,6 @@ impl Tenant {
             publisher: PrivateKey::new(),
             executor: PrivateKey::new(),
             alternate: PrivateKey::new(),
-            phone: PrivateKey::new(),
         }
     }
     pub fn app(&self) -> AppId {
@@ -305,9 +302,6 @@ impl Tenant {
             app: self.app(),
             domain: DomainId([n; 16]),
         }
-    }
-    pub fn principal(&self) -> PrincipalId {
-        PrincipalId(self.key.public_key().as_bytes()[..16].try_into().unwrap())
     }
     pub fn grant(&self) -> SignedCoordinationGrant {
         SignedCoordinationGrant::sign(
@@ -327,22 +321,14 @@ impl Tenant {
         genesis: &CertifiedGenesis,
         scope: Scope,
         revision: u64,
-        executors: &[&PrivateKey],
+        trusted: &[&PrivateKey],
     ) -> ControlCertificate {
         ControlCertificate::sign(
             DomainControl {
                 scope,
                 configuration: genesis.genesis.configuration,
                 revision,
-                owner: self.principal(),
-                executors: executors.iter().map(|k| k.public_key()).collect(),
-                invokers: vec![
-                    (self.executor.public_key(), self.principal()),
-                    (self.alternate.public_key(), self.principal()),
-                    (self.phone.public_key(), self.principal()),
-                ],
-                schema: 1,
-                handler: 1,
+                trusted: trusted.iter().map(|k| k.public_key()).collect(),
                 not_before: timestamp() - 60,
                 expires: timestamp() + DAY,
             },
@@ -350,22 +336,8 @@ impl Tenant {
         )
         .unwrap()
     }
-    pub async fn client(
-        &self,
-        cluster: &PublicCluster,
-        key: &PrivateKey,
-        name: &str,
-    ) -> NetworkCoordinator {
-        NetworkCoordinator::connect(
-            &cluster.bundle,
-            key.clone(),
-            cluster
-                .dir
-                .path()
-                .join(format!("{}-{name}.evidence", self.name)),
-            transport().await,
-        )
-        .unwrap()
+    pub async fn client(&self, cluster: &PublicCluster, key: &PrivateKey) -> NetworkCoordinator {
+        NetworkCoordinator::connect(&cluster.bundle, key.clone(), transport().await).unwrap()
     }
     pub fn public_key(&self) -> PublicKey {
         self.key.public_key()

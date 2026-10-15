@@ -662,7 +662,6 @@ impl Node {
                             refused: vec![],
                             waiting: vec![],
                             held: vec![],
-                            results: None,
                         });
                         last.error = Some(error.to_string());
                     }
@@ -810,7 +809,6 @@ impl Node {
         Ok(commitment(
             "rocky.link-auxiliary.v1",
             &rocky_credentials::encode(&(
-                self.replica.known_result_head(scope.domain).await?,
                 self.replica.admitted_horizon(scope).await?,
                 self.replica.finalized_horizon(scope).await?,
             ))?,

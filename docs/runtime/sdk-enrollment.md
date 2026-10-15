@@ -153,6 +153,17 @@ device's user is completed with its node key. Everything is verified first; a
 chain for another device, a key for an unread collection or a missing reader
 key installs nothing. No network is needed.
 
+## Confirm a removing rollout
+
+Opening a removing schema on an issuer returns a structured impact report
+before changing its installation or starting its network. The application owns
+its confirmation UI and opens again with that report's digest. A stale digest
+returns the current report; it never signs. Members wait for an issuer's signed
+generation and report `waiting_for_issuer` while their application is ahead.
+See [confirmed removals](generations.md#confirmed-removals) for Rust/Kotlin APIs,
+row-count semantics and the digest binding. The shopping app shows its own
+removal dialog; cancelling leaves the existing installation intact.
+
 ## Renewal, revocation and logout
 
 Credentials last 30 days by default (`credential_ttl`, a minute to a year). A

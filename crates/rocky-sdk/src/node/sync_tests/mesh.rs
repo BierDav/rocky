@@ -346,12 +346,10 @@ async fn contact_requests_are_bounded_and_a_wrong_node_hash_is_refused() -> Resu
                 let task = tokio::task::spawn_local(async move {
                     if misleading {
                         serving
-                            .serve_with_contacts(&node.replica, None, &Misleading(a_key))
+                            .serve_with_contacts(&node.replica, &Misleading(a_key))
                             .await?;
                     } else {
-                        serving
-                            .serve_with_contacts(&node.replica, None, &*node)
-                            .await?;
+                        serving.serve_with_contacts(&node.replica, &*node).await?;
                     }
                     Ok::<_, Failure>(())
                 });

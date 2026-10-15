@@ -160,10 +160,7 @@ async fn a_round_hands_over_deposits_and_collects_in_pages_with_receipts() {
             .unwrap();
     let served = mailbox_port.clone();
     let server = async {
-        serving
-            .serve_all(&mailbox, None, &*served, None)
-            .await
-            .unwrap();
+        serving.serve_all(&mailbox, &*served, None).await.unwrap();
         serving.close().await.unwrap();
     };
     let client = async {
@@ -228,59 +225,4 @@ async fn a_session_without_an_owner_refuses_delivery() {
             .contains("serves no envelope delivery")
     );
     assert!(delivered.is_err());
-}
-
-/// A peer without coordination refuses command requests and keeps serving:
-/// a mixed household keeps its links.
-#[tokio::test]
-async fn a_peer_without_coordination_refuses_commands_and_keeps_the_session() {
-    let fixture = Fixture::new();
-    let dir = TempDir::new().unwrap();
-    let (a, b) = (PrivateKey::new(), PrivateKey::new());
-    let ac = fixture.config(&a, fixture.full(), &[fixture.public]);
-    let bc = fixture.config(&b, fixture.full(), &[fixture.public]);
-    let (coordinator, _) = super::recovery::coordination(&fixture, &[&ac, &bc]);
-    let (acred, bcred) = (ac.credentials.clone(), bc.credentials.clone());
-    let serving_replica = EncryptedReplica::open(dir.path().join("a.db"), fixture.app(), ac)
-        .await
-        .unwrap();
-    let asking = EncryptedReplica::open(dir.path().join("b.db"), fixture.app(), bc)
-        .await
-        .unwrap();
-    let (mut session, mut serving) = network::link::testing::sessions(
-        (&asking, b.clone(), bcred),
-        (&serving_replica, a.clone(), acred),
-    )
-    .await
-    .unwrap();
-    let port = Port::default();
-    let server = async {
-        serving
-            .serve_all(&serving_replica, None, &port, None)
-            .await
-            .unwrap();
-        serving.close().await.unwrap();
-    };
-    let client = async {
-        let refused = session
-            .pull_result(
-                &asking,
-                fixture.public.domain,
-                1,
-                vec![fixture.public],
-                &coordinator,
-            )
-            .await;
-        assert!(
-            matches!(&refused, Err(Error::Rejected(reason)) if reason == network::NO_COORDINATION),
-            "{:?}",
-            refused.err()
-        );
-        session
-            .peer_frontier(&asking, fixture.public)
-            .await
-            .unwrap();
-        session.close().await.unwrap();
-    };
-    tokio::join!(server, client);
 }

@@ -55,7 +55,7 @@ pub(super) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: SCHEMA,
         secrets: Some(keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 pub(super) fn identity(root: &Path, name: &str) -> Result<Value, Failure> {

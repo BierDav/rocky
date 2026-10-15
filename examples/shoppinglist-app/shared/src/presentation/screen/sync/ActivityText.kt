@@ -88,14 +88,6 @@ fun describe(event: RockyEvent, partitions: Map<String, String>, lists: Map<Long
             event.scopes.joinToString("\n") { scope(it) },
         )
 
-        is RockyEvent.ResultsFailed -> ActivityEntry(
-            key,
-            event.atEpochMillis,
-            EntryKind.Problem,
-            "Could not pull approval results from ${device(event.peer)}; retrying",
-            event.error,
-        )
-
         is RockyEvent.PeerAdded -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Added ${device(event.peer)} as a peer")
 
         is RockyEvent.PeerRemoved -> ActivityEntry(key, event.atEpochMillis, EntryKind.Network, "Removed peer ${device(event.peer)}")

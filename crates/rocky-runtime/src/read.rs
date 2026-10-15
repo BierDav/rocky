@@ -4,7 +4,7 @@
 //! read-only connections beside the file's writer. See
 //! `docs/runtime/local-replica.md`.
 use crate::{
-    BoundQuery, Completeness, Error, LocalStrongHead, ReadCursor, ReadOptions, ReadSnapshot,
+    BoundQuery, Completeness, Error, ReadCursor, ReadOptions, ReadSnapshot,
     scoped_connection::{Names, tokens},
     sqlite, storage,
 };
@@ -63,7 +63,6 @@ pub(crate) struct ReadPlan {
     by_source: HashMap<String, Vec<usize>>,
     rewritten: Mutex<HashMap<(String, Option<usize>), Rewritten>>,
     revision: String,
-    head: String,
     pending: String,
 }
 fn denied() -> Error {
@@ -188,7 +187,6 @@ impl ReadPlan {
             by_source,
             rewritten: Mutex::new(HashMap::new()),
             revision: names.sql("SELECT revision FROM rocky_replica WHERE id=1"),
-            head: names.sql("SELECT configuration,sequence,head FROM rocky_strong_meta WHERE id=1"),
             pending: names.sql(
                 "SELECT COUNT(*) FROM rocky_operations WHERE status<>'applied' AND status='pending'",
             ),
@@ -861,7 +859,6 @@ impl Reads {
                     [SqlValue::Integer(revision)] => LocalRevision::new(*revision as u64)?,
                     _ => return Err(Error::Corrupt("missing revision".into())),
                 };
-                let strong_head = decode_head(&single(&self.plan.head)?)?;
                 let pending_operations = match single(&self.plan.pending)?.as_slice() {
                     [SqlValue::Integer(pending)] => *pending as usize,
                     _ => return Err(Error::Corrupt("pending operations".into())),
@@ -910,7 +907,6 @@ impl Reads {
                     scope: self.scope,
                     revision,
                     completeness: Completeness::Local { pending_operations },
-                    strong_head,
                     next,
                 })
             })();
@@ -1006,37 +1002,6 @@ fn read_error(error: sqlite::Error) -> Error {
 }
 fn sql_values(row: Vec<sqlite::Value>) -> Result<Vec<SqlValue>, Error> {
     row.into_iter().map(storage::sql_value).collect()
-}
-/// A `configuration,sequence,head` row of `rocky_strong_meta`.
-pub(crate) fn decode_head(row: &[SqlValue]) -> Result<LocalStrongHead, Error> {
-    let [configuration, SqlValue::Integer(sequence), head] = row else {
-        return Err(Error::Corrupt("strong head".into()));
-    };
-    let configuration = match configuration {
-        SqlValue::Null => None,
-        SqlValue::Blob(bytes) => Some(
-            bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Corrupt("configuration".into()))?,
-        ),
-        _ => return Err(Error::Corrupt("configuration".into())),
-    };
-    let head = match head {
-        SqlValue::Null => None,
-        SqlValue::Blob(bytes) => Some(
-            bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::Corrupt("head".into()))?,
-        ),
-        _ => return Err(Error::Corrupt("head".into())),
-    };
-    Ok(LocalStrongHead {
-        configuration,
-        sequence: *sequence as u64,
-        head,
-    })
 }
 /// The logical table a projection statement writes, if it names one.
 pub(crate) fn written_table(sql: &str) -> Option<String> {
@@ -1292,11 +1257,9 @@ mod tests {
         for sql in [
             "PRAGMA journal_mode=wal",
             "CREATE TABLE rocky_replica(id INTEGER PRIMARY KEY,revision INTEGER)",
-            "CREATE TABLE rocky_strong_meta(id INTEGER PRIMARY KEY,configuration BLOB,sequence INTEGER,head BLOB)",
             "CREATE TABLE rocky_operations(status TEXT)",
             "CREATE TABLE notes(id INTEGER PRIMARY KEY,owner TEXT,body TEXT)",
             "INSERT INTO rocky_replica VALUES(1,7)",
-            "INSERT INTO rocky_strong_meta VALUES(1,NULL,0,NULL)",
         ] {
             conn.rows(sql, ()).unwrap();
         }

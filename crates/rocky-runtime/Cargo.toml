@@ -15,7 +15,6 @@ serde_json = "1"
 
 [dev-dependencies]
 inventory-app = { path = "../../examples/inventory-app" }
-rocky-coordinator.workspace = true
 rocky-storage = { workspace = true, features = ["test-support"] }
 todo-app.workspace = true
 tempfile = "3"

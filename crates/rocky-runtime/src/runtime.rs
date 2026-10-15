@@ -201,11 +201,7 @@ where
                 domain.identity.scope,
                 domain.app.descriptor().operations,
                 domain.app.descriptor().projection,
-            ) || domain.app.commands().iter().any(|method| {
-                method.schema != manifest.schema
-                    || method.handler != manifest.handler
-                    || !manifest.methods.iter().any(|item| item.name == method.name)
-            }) {
+            ) {
                 return Err(Error::Incompatible(
                     "manifest does not bind installed domain and generations".into(),
                 ));
@@ -316,11 +312,8 @@ where
                         revisions: revision_receiver,
                         changes: change_receiver,
                         thread: Mutex::new(None),
-                        strong_execution: tokio::sync::Mutex::new(()),
-                        verification: tokio::sync::Mutex::new(()),
                         nonce,
                         submissions: std::sync::atomic::AtomicU64::new(0),
-                        acknowledged: std::sync::atomic::AtomicU64::new(0),
                         observers: Arc::new(tokio::sync::Semaphore::new(MAX_OBSERVERS)),
                         reads: std::sync::OnceLock::new(),
                         // File assignment follows the validated routes.

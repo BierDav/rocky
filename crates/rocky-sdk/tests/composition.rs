@@ -25,7 +25,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: SCHEMA,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 fn service(error: &Failure) -> Option<&ServiceError> {

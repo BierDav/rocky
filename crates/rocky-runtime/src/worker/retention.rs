@@ -5,19 +5,17 @@
 use super::*;
 use crate::checkpoint::{
     CheckpointHold, CheckpointInfo, CheckpointRecord, Deduplication, PeerRetention, Request,
-    Response, RetentionPolicy, RetentionStatus, RowAudit, Step, StrongAnchor,
+    Response, RetentionPolicy, RetentionStatus, RowAudit, Step,
 };
 use crate::digest::{SetDigest, Tracker, operation_hash};
-use rocky_core::{Commitment, RequestId};
+use rocky_core::Commitment;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS rocky_checkpoint(id INTEGER PRIMARY KEY CHECK(id=1),live BLOB NOT NULL,shadow BLOB NOT NULL,state BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS rocky_rejected_local(node BLOB NOT NULL,sequence INTEGER NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(node,sequence))",
     "CREATE INDEX IF NOT EXISTS rocky_mutation_handles_sequence ON rocky_mutation_handles(node,sequence)",
-    "CREATE TABLE IF NOT EXISTS rocky_request_holds(node BLOB NOT NULL,sequence INTEGER NOT NULL,stored INTEGER NOT NULL,released INTEGER NOT NULL,PRIMARY KEY(node,sequence))",
 ];
 pub(crate) fn initial_checkpoint() -> Result<Vec<crate::sqlite::Value>, Error> {
     Ok(vec![
@@ -39,8 +37,6 @@ pub(super) const ADVANCE_OPERATIONS: usize = 128;
 pub(super) const ADVANCE_BOUNDS: (usize, usize) = (32, 256);
 /// Records one step deletes, and sequences it moves the horizon per author.
 pub(super) const PRUNE_BATCH: usize = 512;
-/// Strong results one step deletes.
-pub(super) const STRONG_BATCH: usize = 16;
 /// Rows and bytes of one exported checkpoint page.
 pub(super) const EXPORT_ROWS: usize = 512;
 pub(super) const EXPORT_BYTES: usize = 256 * 1024;
@@ -108,7 +104,6 @@ pub(super) struct PeerMark {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Import {
     pub(super) record: Vec<u8>,
-    pub(super) strong: Option<(Vec<u8>, Vec<u8>)>,
     pub(super) table: u32,
     pub(super) position: i64,
 }
@@ -123,8 +118,6 @@ pub(super) struct Stored {
     pub(super) record: Option<Vec<u8>>,
     pub(super) horizon: Marks,
     pub(super) peers: Vec<(NodeId, PeerMark)>,
-    /// Sequence and head the retained strong results start after.
-    pub(super) strong_base: Option<(u64, Commitment)>,
     pub(super) import: Option<Import>,
 }
 impl Default for Stored {
@@ -137,7 +130,6 @@ impl Default for Stored {
             record: None,
             horizon: Vec::new(),
             peers: Vec::new(),
-            strong_base: None,
             import: None,
         }
     }
@@ -311,9 +303,6 @@ impl Retention {
     }
     pub(super) fn status_record(&self) -> Option<&CheckpointRecord> {
         self.record.as_ref().map(|(record, _)| record)
-    }
-    pub(super) fn strong_base(&self) -> Option<(u64, Commitment)> {
-        self.stored.strong_base
     }
     pub(super) fn handle_window(&self) -> usize {
         self.policy.handles
@@ -600,7 +589,7 @@ where
         }
         let budget = (2 * writes).clamp(ADVANCE_BOUNDS.0, ADVANCE_BOUNDS.1);
         match self.checkpoint_step(false, budget).await {
-            // Held by an unresolved request; retried beside a later group.
+            // Held by an import or a missing base; retried beside a later group.
             Err(Error::Rejected(_)) => Ok(()),
             result => result.map(|_| ()),
         }
@@ -697,10 +686,7 @@ where
     }
     pub(super) async fn retention_status(&self) -> Result<RetentionStatus, Error> {
         let retention = &self.retention;
-        let hold = match retention.hold() {
-            None if self.unresolved_requests().await? => Some(CheckpointHold::UnresolvedRequest),
-            hold => hold,
-        };
+        let hold = retention.hold();
         Ok(RetentionStatus {
             checkpoint: retention
                 .record
@@ -804,12 +790,6 @@ where
             return Ok(None);
         }
         if start {
-            self.release_expired().await?;
-            if self.unresolved_requests().await? {
-                return Err(Error::Rejected(
-                    "an unresolved strong request holds the checkpoint at its sealed cut".into(),
-                ));
-            }
             let live = self.retention.current()?.0;
             stored.candidate = Some(Candidate {
                 frontier: applied,
@@ -934,12 +914,6 @@ where
         }
         Ok(())
     }
-    /// The complete state at the checkpoint copy's frontier, for a sealed cut.
-    pub(super) async fn base_state(&self) -> Result<A::State, Error> {
-        self.app
-            .window(rows(self.shadow(), &self.schema.projection_query).await?)
-            .map_err(application)
-    }
     pub(super) async fn record_at(
         &self,
         stored: &Stored,
@@ -960,8 +934,6 @@ where
         };
         let mutations =
             count("SELECT COUNT(*),COALESCE(MIN(sequence),0) FROM rocky_mutation_handles").await?;
-        let commands =
-            count("SELECT COUNT(*),COALESCE(MIN(sequence),0) FROM rocky_command_handles").await?;
         let descriptor = self.app.descriptor();
         Ok(CheckpointRecord {
             scope: self.identity.scope,
@@ -980,176 +952,13 @@ where
             key_epoch: 0,
             sequence,
             previous,
-            strong: self.strong_anchor().await?,
             handles: Deduplication {
                 mutations: mutations.0,
                 mutation_floor: mutations.1,
-                commands: commands.0,
-                command_floor: commands.1,
             },
             superseded_recovery: Vec::new(),
             sole_recovery: Vec::new(),
         })
-    }
-    pub(super) async fn strong_anchor(&self) -> Result<StrongAnchor, Error> {
-        let head = self.local_strong_head().await?;
-        let mut unresolved = SetDigest::default();
-        let mut result = None;
-        let mut confirmed = BTreeSet::new();
-        for (package, _, receipt, _, applied) in self.attempts().await? {
-            let hash = package.confirmation()?.result;
-            if applied {
-                confirmed.insert(package.request.id);
-                if package.sequence == head.sequence && receipt.is_some() {
-                    result = Some(hash);
-                }
-            } else {
-                unresolved.add(&hash);
-            }
-        }
-        for row in rows(self.conn(), "SELECT bytes FROM rocky_requests").await? {
-            let [SqlValue::Blob(bytes)] = row.as_slice() else {
-                return Err(Error::Corrupt("request row".into()));
-            };
-            if !confirmed.contains(&rocky_core::StrongRequest::decode(bytes)?.id) {
-                unresolved.add(&rocky_core::commitment(
-                    "rocky.checkpoint.request.v1",
-                    bytes,
-                ));
-            }
-        }
-        Ok(StrongAnchor {
-            configuration: head.configuration,
-            sequence: head.sequence,
-            head: head.head,
-            result,
-            unresolved,
-        })
-    }
-    /// A request without an applied result needs the state of its cut, so
-    /// the checkpoint copy must not move past it until it is released.
-    pub(super) async fn unresolved_requests(&self) -> Result<bool, Error> {
-        Ok(!self.holding_requests().await?.is_empty())
-    }
-    /// Unreleased requests without an applied result: when this replica
-    /// stored each, and whether a submitted attempt has an unknown outcome.
-    async fn holding_requests(&self) -> Result<Vec<(RequestId, i64, bool)>, Error> {
-        let requests = self.open_requests().await?;
-        if requests.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut unknown = BTreeSet::new();
-        for (package, ..) in self
-            .attempts_where("WHERE applied=0 AND state='unknown'")
-            .await?
-        {
-            unknown.insert(package.request.id);
-        }
-        let mut holding = Vec::new();
-        for (bytes, stored) in requests {
-            let id = rocky_core::StrongRequest::decode(&bytes)?.id;
-            let stored = match stored {
-                SqlValue::Integer(stored) => stored,
-                _ => i64::MAX,
-            };
-            holding.push((id, stored, unknown.contains(&id)));
-        }
-        Ok(holding)
-    }
-    /// Releases requests that held checkpoints longer than the policy allows.
-    /// One with a submitted attempt of unknown outcome keeps holding: its
-    /// result may be confirmed and must then be verified at its cut.
-    pub(super) async fn release_expired(&self) -> Result<(), Error> {
-        let Some(hold) = self.retention.policy.request_hold else {
-            return Ok(());
-        };
-        let now = now_millis();
-        for (id, stored, unknown) in self.holding_requests().await? {
-            if !unknown && now.saturating_sub(stored) >= hold.as_millis() as i64 {
-                self.mark_released(id).await?;
-            }
-        }
-        Ok(())
-    }
-    /// Releases one request at once; see `Replica::release_command`.
-    pub(super) async fn release_request(&self, id: RequestId) -> Result<(), Error> {
-        match self
-            .holding_requests()
-            .await?
-            .into_iter()
-            .find(|(held, ..)| *held == id)
-        {
-            Some((_, _, true)) => Err(Error::Rejected(
-                "a submitted attempt has an unknown outcome; reconcile it first".into(),
-            )),
-            Some(_) => self.mark_released(id).await,
-            None => {
-                let mut known = self
-                    .conn()
-                    .query(
-                        "SELECT 1 FROM rocky_requests WHERE node=? AND sequence=?",
-                        crate::sqlite::params![id.node.0.to_vec(), id.sequence.get() as i64],
-                    )
-                    .await?;
-                match known.next().await? {
-                    // Already released, or resolved: nothing holds.
-                    Some(_) => Ok(()),
-                    None => Err(Error::Rejected("unknown command request".into())),
-                }
-            }
-        }
-    }
-    async fn mark_released(&self, id: RequestId) -> Result<(), Error> {
-        self.mark_hold(id, 1).await
-    }
-    /// `released` is 1 for a local release, or a [`Settled`] code.
-    async fn mark_hold(&self, id: RequestId, released: i64) -> Result<(), Error> {
-        self.conn()
-            .execute(
-                "INSERT INTO rocky_request_holds VALUES(?,?,?,?) ON CONFLICT(node,sequence) DO UPDATE SET released=excluded.released",
-                crate::sqlite::params![
-                    id.node.0.to_vec(),
-                    id.sequence.get() as i64,
-                    now_millis(),
-                    released
-                ],
-            )
-            .await?;
-        Ok(())
-    }
-    /// A stale fence discards refused preparations; terminal answers release the cut.
-    pub(super) async fn settle_request(
-        &self,
-        id: RequestId,
-        settled: crate::strong::Settled,
-    ) -> Result<(), Error> {
-        let mut known = self
-            .conn()
-            .query(
-                "SELECT 1 FROM rocky_requests WHERE node=? AND sequence=?",
-                crate::sqlite::params![id.node.0.to_vec(), id.sequence.get() as i64],
-            )
-            .await?;
-        if known.next().await?.is_none() {
-            return Err(Error::Rejected("unknown command request".into()));
-        }
-        if settled == crate::strong::Settled::StaleFence {
-            for (package, _, receipt, _, applied) in self.attempts().await? {
-                if package.request.id != id {
-                    continue;
-                }
-                if receipt.is_some() || applied {
-                    return Err(Error::Corrupt("stale fence for a confirmed request".into()));
-                }
-                self.conn()
-                    .execute(
-                        "DELETE FROM rocky_preparations WHERE hash=?",
-                        [package.confirmation()?.result.to_vec()],
-                    )
-                    .await?;
-            }
-        }
-        self.mark_hold(id, settled as i64).await
     }
     pub(super) async fn rejected_local(&self) -> Result<Vec<(OperationId, String)>, Error> {
         let mut records = self

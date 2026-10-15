@@ -4,7 +4,7 @@
 //! never as JSON; a compatibility profile answers an ORM's housekeeping
 //! statements. See `docs/runtime/sql-driver.md`.
 use crate::{Failure, node::Node};
-use rocky_core::{SqlValue, TypedCommands};
+use rocky_core::{SqlValue, TypedRows};
 use rocky_runtime::{CursorLimits, SnapshotCursor, SqlControl, TableObserver, classify_sql};
 use rocky_secure::{Error, SecureSession, SecureSql, SqlError, Unavailable};
 use std::{
@@ -300,8 +300,8 @@ struct Reading {
 /// The session a connection runs on, opened again after an authority
 /// change ended it.
 struct Opened {
-    session: SecureSession<TypedCommands>,
-    sql: SecureSql<TypedCommands>,
+    session: SecureSession<TypedRows>,
+    sql: SecureSql<TypedRows>,
 }
 
 /// One connection's state on the database's reactor.
@@ -368,7 +368,7 @@ impl State {
     }
     /// The connection's session; a new one once the old one lost its
     /// authority outside a transaction.
-    async fn sql(&mut self) -> Result<&SecureSql<TypedCommands>, Failure> {
+    async fn sql(&mut self) -> Result<&SecureSql<TypedRows>, Failure> {
         let current = match &self.opened {
             Some(opened) => self.authority_pinned() || opened.session.status().await.is_ok(),
             None => false,

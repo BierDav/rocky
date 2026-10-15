@@ -13,10 +13,11 @@ sketch of the change, and what it must not break.
 | Optimization | Trigger |
 | --- | --- |
 | [Lean checkpoints](lean-checkpoints.md) | The doubled storage or write cost of checkpoint tables matters for an application |
-| [Stored cut rows](stored-cut-rows.md) | Strong requests must stay executable while a long coordinator outage or slow executor would otherwise hold checkpoints |
 | [Checkpoint instead of history](checkpoint-instead-of-history.md) | Catch-up of far-behind replicas is slow on scopes whose history is much longer than their state |
 | [Single-copy typed rows](single-copy-typed-rows.md) | The second copy of mergeable values in a typed-table application costs too much storage or write time |
-| [Large command-controlled tables](large-command-tables.md) | A strong invariant covers a table that does not fit one command envelope |
-| [Independent command sequences](independent-command-sequences.md) | Unrelated strong commands of one schema delay each other or depend on one executor |
 | [Cloned node detection](cloned-node-detection.md) | Devices or servers are copied while running, and their copies keep writing |
 | [Coordinated migrations](coordinated-migrations.md) | Issuers often migrate the same generation concurrently and the duplicate work matters |
+
+The former command-specific proposals are historical after
+[command removal](../features_09/11-removing-strong-commands.md). Race-free
+application transitions now use [coordinated writes](../runtime/coordinated-writes.md).

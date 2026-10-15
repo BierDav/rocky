@@ -107,24 +107,21 @@ pub enum Protocol {
     Link,
     /// Renewal of an enrolled device's credentials.
     Renew,
-    /// One signed command invocation and its executor's answer.
-    Command,
     /// A signed request to a metadata coordinator and its voter's answer.
     /// Coordinator voters serve it; a database does not.
     Coordinate,
 }
 impl Protocol {
     /// The protocols a database serves.
-    pub const ALL: [Self; 4] = [Self::Pair, Self::Link, Self::Renew, Self::Command];
+    pub const ALL: [Self; 3] = [Self::Pair, Self::Link, Self::Renew];
     /// The protocol's versioned name, used as the QUIC ALPN. A changed wire
     /// format takes a new name.
     pub fn name(self) -> &'static [u8] {
         match self {
             Self::Pair => b"rocky/sdk-pair/1",
-            Self::Link => b"rocky/link/3",
+            Self::Link => b"rocky/link/4",
             Self::Renew => b"rocky/sdk-renew/2",
-            Self::Command => b"rocky/command/2",
-            Self::Coordinate => b"rocky/coordinator/1",
+            Self::Coordinate => b"rocky/coordinator/3",
         }
     }
     pub fn named(name: &[u8]) -> Option<Self> {
@@ -262,9 +259,9 @@ pub trait Connector: Send + Sync {
 mod tests {
     use super::*;
     #[test]
-    fn only_the_current_command_protocol_is_named() {
-        assert_eq!(Protocol::named(b"rocky/command/1"), None);
-        assert_eq!(Protocol::named(b"rocky/command/2"), Some(Protocol::Command));
+    fn only_current_protocols_are_named() {
+        assert_eq!(Protocol::named(b"rocky/command/2"), None);
         assert_eq!(Protocol::named(b"rocky/link/1"), None);
+        assert_eq!(Protocol::named(b"rocky/link/4"), Some(Protocol::Link));
     }
 }

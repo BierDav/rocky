@@ -1,7 +1,5 @@
 //! Credential chains by reference: the frame header's digest, the session's
-//! chain table, stored chains and the chains beside a checkpoint page
-//! (`docs/decisions/0053-chains-by-reference.md`).
-use super::commands::command_grants;
+//! chain table and stored chains (`docs/decisions/0053-chains-by-reference.md`).
 use super::*;
 use crate::network::NativeSession;
 use crate::replica::checkpoint::Stage;
@@ -319,10 +317,9 @@ async fn a_horizon_credential_keeps_its_chain_until_a_renewal_replaces_it() {
     );
 }
 
-/// A command table whose latest command was called and executed under
-/// chains of `grants` scope grants. Forty grants of the fixture's full shape
-/// exceed the command envelope itself, so beyond 20 the others only read.
-struct Commanded {
+/// A private row the source authored and checkpointed, for the target to
+/// bootstrap.
+struct Checkpointed {
     f: Fixture,
     _dir: TempDir,
     source: Replica,
@@ -332,43 +329,33 @@ struct Commanded {
     source_key: PrivateKey,
     source_chain: Chain,
 }
-async fn commanded(grants: usize) -> Commanded {
+async fn checkpointed() -> Checkpointed {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
     let (source_key, target_key) = (PrivateKey::new(), PrivateKey::new());
     let scopes = [f.public, f.private];
-    let wide = |f: &Fixture| {
-        let twenty = widened(f, command_grants(f), grants.min(20), false);
-        widened(f, twenty, grants, true)
-    };
-    let ac = f.config(&source_key, wide(&f), &scopes);
-    let bc = f.config(&target_key, wide(&f), &scopes);
+    let ac = f.config(&source_key, f.full(), &scopes);
+    let bc = f.config(&target_key, f.full(), &scopes);
     let (source_chain, target_chain) = (
         Chain::new(ac.credentials.clone()).unwrap(),
         Chain::new(bc.credentials.clone()).unwrap(),
     );
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    super::effects::register(&coordinator, &ac, f.public, &[&bc]);
     let source = EncryptedReplica::open(dir.path().join("a.db"), f.app(), ac)
         .await
         .unwrap();
     let target = EncryptedReplica::open(dir.path().join("b.db"), f.app(), bc)
         .await
         .unwrap();
-    let command = source
-        .invoke_encrypted(
+    source
+        .author(
             [7; 32],
-            f.private,
-            "SetEmployee",
-            b"employee-1\nAlice\n731994",
+            vec![change(f.private, 7, None, Some(f.app().salary("731994")))],
+            vec![],
         )
         .await
         .unwrap();
-    source
-        .execute_encrypted(command, &coordinator)
-        .await
-        .unwrap();
-    Commanded {
+    source.checkpoint(f.private).await.unwrap();
+    Checkpointed {
         f,
         _dir: dir,
         source,
@@ -382,7 +369,7 @@ async fn commanded(grants: usize) -> Commanded {
 
 #[tokio::test]
 async fn an_installed_checkpoint_is_not_imported_again() {
-    let c = commanded(20).await;
+    let c = checkpointed().await;
     let (mut server, mut client) = sessions(
         (&c.source_key, &c.source, &c.source_chain),
         (&c.target_key, &c.target, &c.target_chain),
@@ -407,119 +394,8 @@ async fn an_installed_checkpoint_is_not_imported_again() {
     served.unwrap();
     assert!(revisions[0].0 && !revisions[1].0);
     assert_eq!(revisions[0].1, revisions[1].1);
-    // The checkpoint brought the strong base, so its head is known.
-    let domain = c.f.private.domain;
-    assert_eq!(c.target.known_result_head(domain).await.unwrap(), 1);
     assert_eq!(
-        c.target.result_scopes(domain).await.unwrap(),
-        BTreeSet::from([c.f.public, c.f.private])
-    );
-}
-
-#[tokio::test]
-async fn a_command_table_bootstraps_by_checkpoint_under_20_and_40_grant_chains() {
-    for grants in [20, 40] {
-        let c = commanded(grants).await;
-        let (mut server, mut client) = sessions(
-            (&c.source_key, &c.source, &c.source_chain),
-            (&c.target_key, &c.target, &c.target_chain),
-        )
-        .await;
-        let (served, ()) = tokio::join!(server.serve_to_end(&c.source), async {
-            for scope in [c.f.public, c.f.private] {
-                let sync = client
-                    .bootstrap_scope(&c.target, scope, MAX_SECURE_FRAME / 2)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(sync.rebootstrap.is_some() && !sync.catch_up.exhausted);
-            }
-            client.close().await.unwrap();
-        });
-        served.unwrap();
-        for scope in [c.f.public, c.f.private] {
-            let (theirs, ours) = (
-                c.source.command_snapshot(scope).await.unwrap(),
-                c.target.command_snapshot(scope).await.unwrap(),
-            );
-            assert!(ours.complete);
-            assert_eq!(ours.rows, theirs.rows);
-        }
-        assert!(
-            !c.target
-                .command_snapshot(c.f.private)
-                .await
-                .unwrap()
-                .rows
-                .is_empty()
-        );
-        // What the first page spent on the strong state: with both chains
-        // embedded, of a budget of 63 KiB at two bytes a byte, and now.
-        let (before, after) = c.source.strong_page_bytes(c.f.private).await;
-        let chain = encode(&c.source_chain).unwrap().len();
-        assert!(before > 2 * chain && after < before - 2 * chain);
-        assert!(after < 16 * 1024, "{after}");
-        println!(
-            "P11 strong_state grants={grants} chain={chain} before={before} after={after} budget={}",
-            rocky_core::MAX_PAYLOAD_BYTES - 1024
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_chain_beside_the_page_that_differs_from_its_digest_stages_nothing() {
-    let c = commanded(20).await;
-    let scope = c.f.private;
-    let signed = c.source.checkpoint(scope).await.unwrap();
-    c.target.begin_rebootstrap(signed.clone()).await.unwrap();
-    let page = c
-        .source
-        .checkpoint_page(
-            c.target_key.public_key(),
-            c.target_chain.credentials(),
-            scope,
-            signed.id().unwrap(),
-            None,
-            MAX_SECURE_FRAME - 8192,
-        )
-        .await
-        .unwrap();
-    // The caller and the executor are one device here: one chain.
-    assert_eq!(page.chains.len(), 1);
-    let staged = async || {
-        (
-            c.target.rebootstrap_progress(scope).await.unwrap().unwrap(),
-            count(&c.target, "SELECT scope FROM secure_rebootstrap_strong").await,
-            count(&c.target, "SELECT scope FROM secure_rebootstrap_rows").await,
-        )
-    };
-    let untouched = ((signed.id().unwrap(), None, false), 0, 0);
-    let other = c.f.credentials(&c.source_key, command_grants(&c.f));
-    for chains in [
-        vec![other.clone()],
-        vec![],
-        vec![page.chains[0].clone(), other],
-    ] {
-        let mut altered = page.clone();
-        altered.chains = chains;
-        let error = c.target.stage_checkpoint_page(altered).await.unwrap_err();
-        assert!(
-            error.to_string().contains(crate::command::CHAIN_MISMATCH),
-            "{error}"
-        );
-        assert_eq!(staged().await, untouched);
-    }
-    // The page with the chain its strong state names is staged.
-    let next = page.next;
-    c.target.stage_checkpoint_page(page).await.unwrap();
-    assert_eq!(staged().await.1, 1);
-    assert_eq!(
-        c.target
-            .rebootstrap_progress(scope)
-            .await
-            .unwrap()
-            .unwrap()
-            .1,
-        next
+        c.target.snapshot(c.f.private).await.unwrap().rows,
+        c.source.snapshot(c.f.private).await.unwrap().rows
     );
 }

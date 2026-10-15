@@ -106,12 +106,6 @@ impl StoredApplication for Wide {
         }
         Some(manifest)
     }
-    fn commands(&self) -> &'static [CommandMethod] {
-        InventoryApp.commands()
-    }
-    fn command(&self, method: &str) -> Option<&dyn CommandHandler<Self>> {
-        InventoryApp.command(method).map(|_| self as _)
-    }
     fn projection_rows(&self, state: &Self::State) -> Vec<Vec<SqlValue>> {
         InventoryApp.projection_rows(state)
     }
@@ -143,49 +137,6 @@ impl StoredApplication for Wide {
         InventoryApp.admit_read(scope, caller, policy)
     }
 }
-type Drafts = <InventoryApp as Application>::State;
-type Invalid = <InventoryApp as Application>::Error;
-/// The inventory command handler under the wide manifest.
-impl CommandHandler<Wide> for Wide {
-    fn seal(&self, state: &Drafts) -> Result<Vec<u8>, Invalid> {
-        CommandHandler::seal(&InventoryApp, state)
-    }
-    fn admit(&self, request: &StrongRequest, policy: &Policy) -> Result<(), Invalid> {
-        CommandHandler::admit(&InventoryApp, request, policy)
-    }
-    fn select_result(
-        &self,
-        bytes: &[u8],
-        context: AdmissionContext,
-        policy: &Policy,
-    ) -> Result<bool, Invalid> {
-        CommandHandler::select_result(&InventoryApp, bytes, context, policy)
-    }
-    fn validate(&self, request: &StrongRequest) -> Result<(), Invalid> {
-        CommandHandler::validate(&InventoryApp, request)
-    }
-    fn execute_after(
-        &self,
-        state: &Drafts,
-        request: &StrongRequest,
-        previous: Option<&[u8]>,
-    ) -> Result<Vec<u8>, Invalid> {
-        CommandHandler::execute_after(&InventoryApp, state, request, previous)
-    }
-    fn result_projection_query(&self) -> Option<&'static str> {
-        CommandHandler::result_projection_query(&InventoryApp)
-    }
-    fn result_projection_rows(&self, result: &[u8]) -> Result<Vec<Vec<SqlValue>>, Invalid> {
-        CommandHandler::result_projection_rows(&InventoryApp, result)
-    }
-    fn project_result(&self, result: &[u8]) -> Result<Vec<ProjectionStatement>, Invalid> {
-        CommandHandler::project_result(&InventoryApp, result)
-    }
-    fn execute(&self, state: &Drafts, request: &StrongRequest) -> Result<Vec<u8>, Invalid> {
-        CommandHandler::execute(&InventoryApp, state, request)
-    }
-}
-
 const CALLER: PrincipalId = PrincipalId([7; 16]);
 const NODE: NodeId = NodeId([3; 16]);
 fn scope(domain: u8) -> Scope {
@@ -546,123 +497,6 @@ async fn observers() -> Result<(), Failure> {
     }
     Ok(())
 }
-/// Strong commands against a memory coordinator: local durable steps only.
-async fn strong() -> Result<(), Failure> {
-    for (profile, options) in profiles() {
-        let dir = tempfile::tempdir()?;
-        let runtime = Runtime::open_with_options(
-            dir.path().join("strong.db"),
-            [1, 2]
-                .into_iter()
-                .map(|domain| {
-                    let wide = installation(2, domain);
-                    DomainInstallation {
-                        app: InventoryApp,
-                        policy: wide.policy,
-                        identity: wide.identity,
-                        config: wide.config,
-                    }
-                })
-                .collect(),
-            options,
-        )
-        .await?;
-        let coordinator = rocky_coordinator::MemoryCoordinator::default();
-        for domain in [1, 2] {
-            coordinator.register(scope(domain), CALLER, [6; 16], vec![NODE], 1, 1)?;
-            coordinator.acquire(scope(domain), CALLER, NODE)?;
-        }
-        let replicas = [runtime.domain(scope(1))?, runtime.domain(scope(2))?];
-        let started = Instant::now();
-        let results = futures(2, |domain| {
-            let replica = &replicas[domain];
-            let coordinator = &coordinator;
-            async move {
-                let mut timings = Vec::new();
-                for index in 0..8u8 {
-                    let command_started = Instant::now();
-                    let mut handle = [domain as u8 + 1; 32];
-                    handle[0] = index;
-                    replica
-                        .submit_command_with_arguments(
-                            rocky_runtime::CommandHandle(handle),
-                            inventory_app::RESERVE,
-                            1u64.to_le_bytes().to_vec(),
-                            [9; 32],
-                        )?
-                        .committed()
-                        .await?;
-                    replica.execute_pending(coordinator).await?;
-                    timings.push(command_started.elapsed());
-                }
-                Ok::<_, rocky_runtime::Error>(timings)
-            }
-        })
-        .await;
-        let elapsed = started.elapsed();
-        let mut timings = Vec::new();
-        let mut failure = None;
-        for result in results {
-            match result {
-                Ok(result) => timings.extend(result),
-                Err(error) => failure = Some(error),
-            }
-        }
-        match failure {
-            None => line(&format!("strong {profile} domains=2"), timings, elapsed),
-            Some(error) => println!("strong {profile} domains=2: failed: {error}"),
-        }
-        runtime.close().await?;
-    }
-    Ok(())
-}
-/// Strong commands on one long-lived domain with automatic checkpoints: a
-/// cut costs the operations after the executor's checkpoint base, so
-/// lifetimes past the former 43,690-operation refusal still execute.
-async fn strong_cut() -> Result<(), Failure> {
-    let dir = tempfile::tempdir()?;
-    let runtime = shared(dir.path(), 1, RuntimeOptions::default()).await?;
-    let replica = runtime.domain(scope(1))?;
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    coordinator.register(scope(1), CALLER, [6; 16], vec![NODE], 1, 1)?;
-    coordinator.acquire(scope(1), CALLER, NODE)?;
-    let mut total = 0;
-    let mut command = 0u16;
-    for target in [50_000usize, 100_000, 200_000] {
-        write(&replica, 8, target - total, "c").await?;
-        total = target;
-        let mut timings = Vec::new();
-        let mut after = 0;
-        let started = Instant::now();
-        for _ in 0..8 {
-            command += 1;
-            let mut handle = [5; 32];
-            handle[..2].copy_from_slice(&command.to_le_bytes());
-            let command_started = Instant::now();
-            replica
-                .submit_command_with_arguments(
-                    rocky_runtime::CommandHandle(handle),
-                    inventory_app::RESERVE,
-                    1u64.to_le_bytes().to_vec(),
-                    [9; 32],
-                )?
-                .committed()
-                .await?;
-            replica.execute_pending(&coordinator).await?;
-            timings.push(command_started.elapsed());
-            let results = replica.confirmed_publications().await?;
-            let latest = results.last().ok_or("no confirmed result")?;
-            after = after.max(latest.package.required()?.len());
-        }
-        line(
-            &format!("strong-cut lifetime={target} max_after_base={after}"),
-            timings,
-            started.elapsed(),
-        );
-    }
-    runtime.close().await?;
-    Ok(())
-}
 fn resident_mib() -> u64 {
     let pid = std::process::id().to_string();
     std::process::Command::new("ps")
@@ -740,11 +574,8 @@ async fn main() -> Result<(), Failure> {
     if all || section == "observers" {
         observers().await?;
     }
-    if all || section == "strong" {
-        strong().await?;
-    }
-    if all || section == "strong-cut" {
-        strong_cut().await?;
+    if matches!(section.as_str(), "strong" | "strong-cut") {
+        return Err("this probe mode was removed with strong commands".into());
     }
     if all || section == "retention" {
         retention().await?;
@@ -901,25 +732,15 @@ async fn main() -> Result<(), Failure> {
                 let directory = root
                     .as_ref()
                     .map(|path: &std::path::PathBuf| path.join(format!("rate-{rate}")));
-                attribution::erp_open_loop(
-                    rate,
-                    seconds,
-                    tables,
-                    directory,
-                    true,
-                    true,
-                    "erp attrib",
-                )
-                .await?;
+                attribution::erp_open_loop(rate, seconds, tables, directory, true, "erp attrib")
+                    .await?;
             } else {
                 for (instrument, tag) in [(false, "control"), (true, "measured")] {
                     let directory = root
                         .as_ref()
                         .map(|path: &std::path::PathBuf| path.join(format!("rate-{rate}-{tag}")));
-                    attribution::erp_open_loop(
-                        rate, seconds, tables, directory, instrument, false, tag,
-                    )
-                    .await?;
+                    attribution::erp_open_loop(rate, seconds, tables, directory, instrument, tag)
+                        .await?;
                 }
             }
         }

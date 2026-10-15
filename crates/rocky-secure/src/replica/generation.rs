@@ -10,12 +10,12 @@ use rocky_core::{ApplicationManifest, Generation, LogicalSchema, Scope};
 use rocky_credentials::SignedTransition;
 
 pub(super) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,handler INTEGER NOT NULL,signed BLOB,transition BLOB NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS secure_generations(manifest BLOB PRIMARY KEY,schema INTEGER NOT NULL,signed BLOB,transition BLOB NOT NULL)",
 ];
 /// Earlier generations a replica keeps admitting.
 pub const MAX_GENERATIONS: usize = 64;
 /// Stored artifacts that may name a manifest: frames, checkpoints, horizon
-/// statements and acknowledgments, existence bases and commands. A
+/// statements and acknowledgments and existence bases. A
 /// generation's manifest is kept while any of them, or a credential chain
 /// of a retained frame or registered author, names it. The chains peers
 /// last authenticated with do not keep it: a peer presents its chain again
@@ -33,11 +33,6 @@ const REFERENCES: &[(&str, &str)] = &[
     ("secure_existence_base", "attachment"),
     ("secure_existence_archive", "attachment"),
     ("secure_existence_stage", "attachment"),
-    ("secure_tickets", "request"),
-    ("secure_commands", "command"),
-    ("secure_recovered_commands", "command"),
-    ("secure_pruned_commands", "input"),
-    ("secure_preparation_requests", "request"),
 ];
 
 /// One generation a transition leaves: the transition to the next and,
@@ -315,18 +310,19 @@ pub(crate) struct Previous {
 fn generation(manifest: &ApplicationManifest) -> Generation {
     Generation {
         schema: manifest.schema,
-        handler: manifest.handler,
     }
 }
 fn incompatible(reason: impl Into<String>) -> Error {
     Error::Incompatible(reason.into())
 }
+/// The one encrypted replica file format; files of another are refused.
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v21";
 /// The file identity of `manifest` at `node`.
 pub(super) fn identity(manifest: Commitment, node: PublicKey) -> Result<Vec<u8>, Error> {
-    encode(&("rocky.encrypted-replica.v20", manifest, node))
+    encode(&(FILE_IDENTITY, manifest, node))
 }
 /// A newer definition keeps what replicas of the older one agree on: its
-/// methods, operations and domains, and every table and field it still
+/// operations and domains, and every table and field it still
 /// names. A field may become required; rows that lack it or hold NULL read
 /// its default. Tables and fields may be removed; every device drops them.
 /// `steps`, the transitions from `old` to `new`, account for each removal,
@@ -376,10 +372,9 @@ fn extends(
         || old.operations != new.operations
         || !fields_kept
         || !tables_kept
-        || !old.methods.iter().all(|item| new.methods.contains(item))
     {
         return Err(incompatible(
-            "the new definition does not keep the methods and domains, and the tables and fields it names, of the installed one",
+            "the new definition does not keep the operations and domains, and the tables and fields it names, of the installed one",
         ));
     }
     Ok(())
@@ -455,8 +450,7 @@ impl<A: RowApplication> Inner<A> {
         let revocations = self.revocations_for(manifest, &self.config.revocations)?;
         self.resolve_chain_scopes_at(chain, manifest, key, revocations, time, scopes)
     }
-    /// `verify_chain` under `revocations`: the held set, or none for a
-    /// confirmed result verified at the time it was issued.
+    /// `verify_chain` under `revocations`.
     pub(crate) fn verify_chain_with(
         &self,
         chain: &CredentialChain,
@@ -470,41 +464,6 @@ impl<A: RowApplication> Inner<A> {
             .map_or(self.manifest, |root| root.capability.manifest);
         let revocations = self.revocations_for(manifest, revocations)?;
         self.resolve_chain_at(chain, manifest, key, revocations, time)
-    }
-    pub(crate) fn verify_reference_chain_with(
-        &self,
-        chain: &CredentialChain,
-        node: rocky_credentials::PeerId,
-        revocations: &RevocationSet,
-        time: u64,
-    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let manifest = chain
-            .0
-            .first()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        let revocations = self.revocations_for(manifest, revocations)?;
-        let (mut grants, selectors) = chain
-            .verify_reference_selectors(self.config.publisher, manifest, node, revocations, time)
-            .map_err(credential)?;
-        for (scope, tuple) in &self.partitions {
-            for selector in &selectors {
-                if let Some(grant) = selector
-                    .resolve(scope.domain, scope.table, tuple)
-                    .map_err(credential)?
-                {
-                    grants.push(grant);
-                }
-            }
-        }
-        Ok(grants)
-    }
-    pub(crate) fn verify_reference_chain(
-        &self,
-        chain: &CredentialChain,
-        node: rocky_credentials::PeerId,
-        time: u64,
-    ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        self.verify_reference_chain_with(chain, node, &self.config.revocations, time)
     }
     /// `revocations` once `manifest` names a recorded generation. A chain
     /// needs only its generation's signed transition; frames under a
@@ -521,7 +480,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn load_generations(&mut self) -> Result<(), Error> {
         let stored = rows(
             &self.conn,
-            "SELECT manifest,schema,handler,signed IS NOT NULL FROM secure_generations ORDER BY schema,handler",
+            "SELECT manifest,schema,signed IS NOT NULL FROM secure_generations ORDER BY schema",
         )
         .await?;
         let mut previous = Vec::new();
@@ -529,7 +488,6 @@ impl<A: RowApplication> Inner<A> {
             let [
                 SqlValue::Blob(manifest),
                 SqlValue::Integer(schema),
-                SqlValue::Integer(handler),
                 SqlValue::Integer(held),
             ] = row.as_slice()
             else {
@@ -540,7 +498,6 @@ impl<A: RowApplication> Inner<A> {
                 manifest: manifest.as_slice().try_into().map_err(|_| corrupt())?,
                 generation: Generation {
                     schema: u32::try_from(*schema).map_err(|_| corrupt())?,
-                    handler: u32::try_from(*handler).map_err(|_| corrupt())?,
                 },
                 held: *held != 0,
             });
@@ -553,7 +510,7 @@ impl<A: RowApplication> Inner<A> {
     async fn lineage_names(&self) -> Result<Names, Error> {
         let stored = rows(
             &self.conn,
-            "SELECT transition FROM secure_generations ORDER BY schema,handler",
+            "SELECT transition FROM secure_generations ORDER BY schema",
         )
         .await?;
         let publisher = self.config.publisher;
@@ -617,9 +574,7 @@ impl<A: RowApplication> Inner<A> {
                 .iter()
                 .map(|rule| rule.domain)
                 .collect();
-            let mut expected = schema.manifest_at(&domains, self.definition.schema);
-            expected.methods = self.definition.methods.clone();
-            expected.handler = self.definition.handler;
+            let expected = schema.manifest_at(&domains, self.definition.schema);
             if expected.hash() != self.manifest {
                 return Err(incompatible(
                     "the new typed tables differ from the signed manifest",
@@ -724,11 +679,10 @@ impl<A: RowApplication> Inner<A> {
         };
         self.conn
             .execute(
-                "INSERT INTO secure_generations VALUES(?,?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed),transition=excluded.transition",
+                "INSERT INTO secure_generations VALUES(?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed),transition=excluded.transition",
                 bindings(vec![
                     SqlValue::Blob(transition.from.to_vec()),
                     SqlValue::Integer(i64::from(transition.before.schema)),
-                    SqlValue::Integer(i64::from(transition.before.handler)),
                     signed,
                     SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
                 ]),
@@ -749,11 +703,10 @@ impl<A: RowApplication> Inner<A> {
         };
         self.conn
             .execute(
-                "INSERT INTO secure_generations VALUES(?,?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed)",
+                "INSERT INTO secure_generations VALUES(?,?,?,?) ON CONFLICT(manifest) DO UPDATE SET signed=coalesce(excluded.signed,signed)",
                 bindings(vec![
                     SqlValue::Blob(transition.from.to_vec()),
                     SqlValue::Integer(i64::from(transition.before.schema)),
-                    SqlValue::Integer(i64::from(transition.before.handler)),
                     signed,
                     SqlValue::Blob(step.transition.to_bytes().map_err(credential)?),
                 ]),
@@ -1013,8 +966,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(count)
     }
     /// Forgets the manifest of each earlier generation that no retained
-    /// frame, credential, checkpoint, horizon statement, existence base or
-    /// command names; its transition stays, so retained history remains
+    /// frame, credential, checkpoint, horizon statement or existence base
+    /// names; its transition stays, so retained history remains
     /// verifiable and a peer that still writes it is asked for it again.
     /// Returns the manifests dropped.
     pub async fn drop_unreferenced_generations(&self) -> Result<Vec<Commitment>, Error> {
@@ -1182,28 +1135,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         drop(inner);
         self.settle().await?;
         Ok(true)
-    }
-    /// The sequence and head of the newest confirmed result this replica
-    /// holds for `domain`; `None` before the first. An activation is
-    /// proposed only when this equals the coordinator's head.
-    pub async fn confirmed_head(&self, domain: Scope) -> Result<Option<(u64, Commitment)>, Error> {
-        let inner = self.inner.lock().await;
-        let stored = collect_rows(
-            inner
-                .conn
-                .query(
-                    "SELECT result FROM secure_results WHERE domain=? ORDER BY sequence DESC LIMIT 1",
-                    [encode(&domain)?],
-                )
-                .await?,
-        )
-        .await?;
-        let Some([SqlValue::Blob(bytes)]) = stored.first().map(Vec::as_slice) else {
-            return Ok(None);
-        };
-        let result: crate::ConfirmedCommand = decode(bytes)?;
-        let receipt = result.receipt()?;
-        Ok(Some((receipt.sequence, receipt.confirmation.new_head)))
     }
     #[cfg(test)]
     pub(crate) fn fail_next_activation() {

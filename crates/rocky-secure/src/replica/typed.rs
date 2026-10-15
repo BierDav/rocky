@@ -19,13 +19,6 @@ pub(super) struct Projected {
     pub(super) upsert: String,
     pub(super) delete: String,
 }
-impl Projected {
-    /// Command-controlled: its rows are the confirmed command rows of its
-    /// scope, never stored mergeable rows.
-    pub(super) fn confirmed(&self) -> bool {
-        self.table.class == TableClass::CommandControlled
-    }
-}
 /// The installed typed tables of a replica.
 pub(super) struct Typed {
     pub(super) rows: TypedRows,
@@ -83,13 +76,8 @@ impl Typed {
             .and_then(|rows| rows.at_generation(1, rocky_core::fillable(&schema)))
             .map_err(|error| incompatible(error.to_string()))?;
         let mut tables = Vec::new();
-        // Confirmed tables are never rebuilt from stored rows, so a
-        // projection plan keeps them in place.
         let typed: Vec<_> = rows.tables().collect();
-        for table in typed
-            .iter()
-            .filter(|table| !shadow || table.class != TableClass::CommandControlled)
-        {
+        for table in typed.iter() {
             let logical = schema
                 .table(&table.sql_name)
                 .ok_or_else(|| incompatible(format!("{} is not in the schema", table.sql_name)))?;
@@ -379,9 +367,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 )
                 .await?;
             for table in &typed.tables {
-                if table.confirmed() {
-                    fill_confirmed(&inner.conn, &typed, table).await?;
-                } else if typed
+                if typed
                     .constraints
                     .as_ref()
                     .and_then(|c| c.node(table.scope))
@@ -424,11 +410,9 @@ impl<A: RowApplication> Inner<A> {
         if domain.app != self.definition.app || !domains.contains(&domain.domain) {
             return Err(denied("typed tables need a domain of the signed manifest"));
         }
-        // Command methods and the generations are the installed
-        // application's; the tables must be exactly the signed ones.
-        let mut expected = schema.manifest_at(&domains, self.definition.schema);
-        expected.methods = self.definition.methods.clone();
-        expected.handler = self.definition.handler;
+        // The generation is the installed application's; the tables must be
+        // exactly the signed ones.
+        let expected = schema.manifest_at(&domains, self.definition.schema);
         if expected.hash() != self.manifest {
             return Err(Error::Incompatible(
                 "the schema's definition differs from the signed manifest".into(),
@@ -693,21 +677,7 @@ impl<A: RowApplication> Inner<A> {
         };
         Ok(())
     }
-    /// Follows a scope's confirmed command rows into its command-controlled
-    /// table, inside the caller's transaction.
-    pub(crate) async fn project_confirmed(&self, scope: ResourceScope) -> Result<(), Error> {
-        let Some(typed) = self.typed.clone() else {
-            return Ok(());
-        };
-        if let Some(table) = typed.by_scope(scope).filter(|table| table.confirmed())
-            && fill_confirmed(&self.conn, &typed, table).await?
-        {
-            self.touch(&table.table.sql_name);
-        }
-        Ok(())
-    }
-    /// Empties a scope's typed table, as its rows are evicted. Confirmed
-    /// rows are not evicted with stored rows.
+    /// Empties a scope's typed table, as its rows are evicted.
     pub(crate) async fn clear_typed(&self, scope: ResourceScope) -> Result<(), Error> {
         self.restart_plan(scope).await?;
         if self
@@ -727,12 +697,7 @@ impl<A: RowApplication> Inner<A> {
             // Children elsewhere lose their parents with it.
             return Box::pin(self.rebuild_constraints(Some(scope), Some(scope))).await;
         }
-        if let Some(table) = self
-            .typed
-            .as_ref()
-            .and_then(|typed| typed.by_scope(scope))
-            .filter(|table| !table.confirmed())
-        {
+        if let Some(table) = self.typed.as_ref().and_then(|typed| typed.by_scope(scope)) {
             self.touch(&table.table.sql_name);
             reproject(
                 &self.conn,
@@ -763,7 +728,6 @@ impl<A: RowApplication> Inner<A> {
             return Box::pin(self.rebuild_constraints(Some(scope), None)).await;
         }
         match typed.by_scope(scope) {
-            Some(table) if table.confirmed() => self.project_confirmed(scope).await,
             Some(table) => {
                 self.touch(&table.table.sql_name);
                 reproject(&self.conn, &typed, table).await
@@ -780,58 +744,6 @@ async fn rows_with(
     params: Vec<SqlValue>,
 ) -> Result<Vec<Vec<SqlValue>>, Error> {
     collect_rows(conn.query(sql.to_string(), bindings(params)).await?).await
-}
-
-/// Makes a command-controlled table hold exactly its scope's confirmed
-/// command rows. Returns whether it changed. Command tables are small, so
-/// a difference replaces the whole table.
-async fn fill_confirmed(
-    conn: &crate::scoped_connection::ScopedConnection,
-    typed: &Typed,
-    table: &Projected,
-) -> Result<bool, Error> {
-    let stored = collect_rows(
-        conn.query(
-            "SELECT rows FROM secure_command_rows WHERE scope=?",
-            [encode(&table.scope)?],
-        )
-        .await?,
-    )
-    .await?;
-    let rows: BTreeMap<Commitment, rocky_core::RowFields> = match stored.first().map(Vec::as_slice)
-    {
-        Some([SqlValue::Blob(bytes)]) => decode(bytes)?,
-        Some(_) => return Err(Error::Corrupt("command rows".into())),
-        None => BTreeMap::new(),
-    };
-    let wanted = rows
-        .values()
-        .map(|fields| typed.rows.values(&table.table, fields))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Error::Corrupt)?;
-    let name = quoted(&table.table.sql_name);
-    let counted = rows_with(conn, &format!("SELECT count(*) FROM {name}"), Vec::new()).await?;
-    let mut same = counted == vec![vec![SqlValue::Integer(wanted.len() as i64)]];
-    for values in &wanted {
-        if !same {
-            break;
-        }
-        let key = table
-            .table
-            .key
-            .iter()
-            .filter_map(|index| values.get(*index).cloned())
-            .collect();
-        same = rows_with(conn, &table.select, key).await?.first() == Some(values);
-    }
-    if same {
-        return Ok(false);
-    }
-    conn.execute(format!("DELETE FROM {name}"), ()).await?;
-    for values in wanted {
-        conn.execute(table.upsert.clone(), bindings(values)).await?;
-    }
-    Ok(true)
 }
 
 /// Replaces a typed table's rows by the live stored rows of its scope, or

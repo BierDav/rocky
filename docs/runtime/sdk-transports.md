@@ -18,8 +18,8 @@ token, renewals are signed, and sync runs on mutually authenticated
 [live links](live-links.md) carrying encrypted rows. A relay or network observer still sees who talks to whom,
 credential chains and sizes.
 
-Protocols are versioned strings, used as QUIC ALPNs: `rocky/sdk-pair/1`, `rocky/link/3`,
-`rocky/sdk-renew/2`, `rocky/command/2`, and `rocky/coordinator/1`, which only
+Protocols are versioned strings, used as QUIC ALPNs: `rocky/sdk-pair/1`, `rocky/link/4`,
+`rocky/sdk-renew/2` and `rocky/coordinator/3`, which only
 voters answer. A changed wire format takes a new name; an endpoint that does
 not register a name refuses the stream, a retired one included. A link stream
 also answers the resolution of a pinned contact reference without opening.

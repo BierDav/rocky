@@ -18,47 +18,20 @@ pub enum Operation {
         scope: Scope,
         action: crate::coordinated::Action,
     },
-    Acquire {
-        scope: Scope,
-    },
-    Takeover {
-        scope: Scope,
-        expected_epoch: u64,
-    },
-    Replace {
-        record: ReplacementRecord,
-        certificate: ControlCertificate,
-    },
-    Head {
-        scope: Scope,
-    },
-    Confirm(Confirmation),
-    Lookup {
-        scope: Scope,
-        request: RequestId,
-    },
     Membership {
         voters: BTreeSet<u64>,
         expected: BTreeSet<u64>,
         expected_revision: u64,
     },
-    /// The signer's durable acknowledgment of its identities through `through`.
-    Retire {
-        scope: Scope,
-        through: u64,
-    },
-    /// Owner-initiated closure at an exact head, by the scope's authority.
+    /// Owner-initiated closure, by the scope's authority.
     Close {
-        head: StrongHead,
+        scope: Scope,
     },
     /// A tenant installs a domain of an application its publisher granted
     /// it, under its own control key. Public services only.
     Register(Box<Registration>),
     /// The signing tenant's quota use.
     Usage,
-    /// The scope authority's move to the next definition generation at an
-    /// exact head; see `rocky_core::Activation`.
-    Activate(Activation),
 }
 /// What a tenant presents to register a domain.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,7 +84,7 @@ impl Request {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-request.v2",
+            "rocky.coordination-request.v4",
             &(self.genesis, self.key, self.id, self.time, &self.operation),
         )
     }
@@ -133,18 +106,12 @@ impl Request {
             &encode(&self.operation)?,
         ))
     }
-    /// Administrative mutations keep retry outcomes. Reads keep nothing;
-    /// confirmations deduplicate in their session window and retirement is
-    /// idempotent.
+    /// Administrative mutations keep retry outcomes. Reads keep nothing, and
+    /// log actions deduplicate by their own sequences.
     fn retained(&self) -> bool {
         !matches!(
             self.operation,
-            Operation::Coordinated { .. }
-                | Operation::Head { .. }
-                | Operation::Lookup { .. }
-                | Operation::Confirm(_)
-                | Operation::Retire { .. }
-                | Operation::Usage
+            Operation::Coordinated { .. } | Operation::Usage
         ) || matches!(
             self.operation,
             Operation::Coordinated {
@@ -157,9 +124,7 @@ impl Request {
     pub fn read_only(&self) -> bool {
         matches!(
             self.operation,
-            Operation::Head { .. }
-                | Operation::Lookup { .. }
-                | Operation::Usage
+            Operation::Usage
                 | Operation::Coordinated {
                     action: crate::coordinated::Action::Head,
                     ..
@@ -169,15 +134,11 @@ impl Request {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Outcome {
-    Head(StrongHead),
-    CoordinatedHead(crate::coordinated::Head),
+    CoordinatedHead(Box<crate::coordinated::Head>),
     Coordinated(crate::coordinated::Result),
-    Receipt(Option<StrongReceipt>),
     Controlled(Commitment),
     Membership(BTreeSet<u64>),
-    Replacement(ReplacementRecord),
-    /// The signer's retirement floor after `Retire`.
-    Floor(u64),
+    Closed,
     Usage(Usage),
 }
 /// A tenant's use of its budgets.
@@ -284,22 +245,7 @@ impl Metadata {
                     Err(CoordinationError::Denied)
                 }
             }
-            Operation::Acquire { scope } | Operation::Takeover { scope, .. } => {
-                self.authorized(*scope, request, true, time).map(|_| ())
-            }
-            Operation::Head { scope } => self.head_authorized(*scope, request, time),
-            Operation::Lookup { scope, .. } | Operation::Retire { scope, .. } => {
-                self.authorized(*scope, request, false, time).map(|_| ())
-            }
-            Operation::Replace {
-                record,
-                certificate,
-            } => self.replacement_authorized(request, record, certificate, time),
-            Operation::Close { head } => self.closure_authorized(request, head.scope),
-            Operation::Activate(activation) => {
-                self.closure_authorized(request, activation.head.scope)
-            }
-            Operation::Confirm(p) => self.authorized(p.scope, request, true, time).map(|_| ()),
+            Operation::Close { scope } => self.closure_authorized(request, *scope),
             Operation::Register(registration) => {
                 let Registration {
                     grant,
@@ -371,11 +317,6 @@ impl Metadata {
         }
         result
     }
-    /// Applies at the request's own time; deterministic tests only.
-    #[cfg(test)]
-    pub fn apply(&mut self, request: &Request) -> Result<Outcome, CoordinationError> {
-        self.apply_at(request.time, request)
-    }
     /// Answers a read-only request from applied state at its authority time.
     pub fn read(&self, request: &Request) -> Result<Outcome, CoordinationError> {
         request.authenticate(self.genesis.id()?)?;
@@ -386,18 +327,9 @@ impl Metadata {
                 action: crate::coordinated::Action::Head,
             } => {
                 self.log_authorized(*scope, &crate::coordinated::Action::Head, request, time)?;
-                Ok(Outcome::CoordinatedHead(
+                Ok(Outcome::CoordinatedHead(Box::new(
                     self.state.find(*scope)?.coordinated.head.clone(),
-                ))
-            }
-            Operation::Head { scope } => {
-                self.head_authorized(*scope, request, time)?;
-                Ok(Outcome::Head(self.state.find(*scope)?.head.clone()))
-            }
-            Operation::Lookup { scope, request: id } => {
-                self.authorized(*scope, request, false, time)?;
-                self.state.find(*scope)?;
-                self.state.status(*scope, *id).map(Outcome::Receipt)
+                )))
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
             _ => Err(CoordinationError::Denied),
@@ -442,25 +374,10 @@ impl Metadata {
             Operation::Register(_) | Operation::Usage => return Some(request.key),
             Operation::Membership { .. } => return None,
             Operation::Control(certificate) => certificate.control.scope,
-            Operation::Replace { record, .. } => record.lost_head.scope,
-            Operation::Close { head } => head.scope,
-            Operation::Activate(activation) => activation.head.scope,
-            Operation::Confirm(proposal) => proposal.scope,
-            Operation::Coordinated { scope, .. }
-            | Operation::Acquire { scope }
-            | Operation::Takeover { scope, .. }
-            | Operation::Head { scope }
-            | Operation::Lookup { scope, .. }
-            | Operation::Retire { scope, .. } => *scope,
+            Operation::Close { scope } | Operation::Coordinated { scope, .. } => *scope,
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
-        if certificate.issuer != request.key
-            && !certificate.control.executors.contains(&request.key)
-            && !certificate
-                .control
-                .invokers
-                .iter()
-                .any(|(key, _)| *key == request.key)
+        if certificate.issuer != request.key && !certificate.control.trusted.contains(&request.key)
         {
             return None;
         }
@@ -484,7 +401,7 @@ impl Metadata {
                 .iter()
                 .find(|d| d.scope == certificate.control.scope)
             {
-                used += domain.sessions.bytes() + domain.coordinated.bytes();
+                used += domain.coordinated.bytes();
             }
         }
         Ok(used)
@@ -550,14 +467,14 @@ impl Metadata {
         certificate: &ControlCertificate,
         retired: Option<Scope>,
     ) -> Result<(), CoordinationError> {
-        let mut keys: BTreeSet<_> = certificate.control.executors.iter().copied().collect();
+        let mut keys: BTreeSet<_> = certificate.control.trusted.iter().copied().collect();
         for existing in self.controls.iter().filter(|c| {
             c.issuer == certificate.issuer
                 && c.control.scope != certificate.control.scope
                 && Some(c.control.scope) != retired
                 && self.state.find(c.control.scope).is_ok_and(Domain::open)
         }) {
-            keys.extend(existing.control.executors.iter().copied());
+            keys.extend(existing.control.trusted.iter().copied());
         }
         if keys.len() > crate::coordinated::TRUSTED_NODES {
             return Err(CoordinationError::Backpressure);
@@ -616,7 +533,7 @@ impl Metadata {
                     .head
                     .members
                     .iter()
-                    .any(|m| !control.executors.contains(&m.key))
+                    .any(|m| !control.trusted.contains(&m.key))
             {
                 return Err(CoordinationError::Backpressure);
             }
@@ -625,32 +542,9 @@ impl Metadata {
             if growth > self.issuer_available(certificate.issuer)? {
                 return Err(CoordinationError::Backpressure);
             }
-            let domain = self
-                .state
-                .domains
-                .iter_mut()
-                .find(|d| d.scope == control.scope)
-                .ok_or(CoordinationError::Corrupt)?;
-            if !domain.open() {
+            if !self.state.find(control.scope)?.open() {
                 return Err(CoordinationError::Denied);
             }
-            if control.schema != domain.head.schema || control.handler != domain.head.handler {
-                return Err(CoordinationError::Generations);
-            }
-            domain.head.epoch = domain
-                .head
-                .epoch
-                .checked_add(1)
-                .filter(|v| *v <= MAX_COUNTER)
-                .ok_or(CoordinationError::StaleEpoch)?;
-            domain.head.executor = NodeId([0; 16]);
-            domain.owner = control.owner;
-            domain.eligible = control.executors.iter().copied().map(node_id).collect();
-            domain.invokers = control
-                .invokers
-                .iter()
-                .map(|(key, principal)| (node_id(*key), *principal))
-                .collect();
             self.controls[index] = certificate;
         } else {
             if control.revision != 1 || self.controls.len() >= 64 {
@@ -664,19 +558,9 @@ impl Metadata {
     fn install(&mut self, certificate: ControlCertificate) -> Result<(), CoordinationError> {
         self.trusted_budget(&certificate, None)?;
         let control = &certificate.control;
-        self.state.domains.push(Domain::new(
-            control.scope,
-            control.owner,
-            control.executors.iter().copied().map(node_id).collect(),
-            control
-                .invokers
-                .iter()
-                .map(|(key, principal)| (node_id(*key), *principal))
-                .collect(),
-            control.configuration,
-            control.schema,
-            control.handler,
-        ));
+        self.state
+            .domains
+            .push(Domain::new(control.scope, control.configuration));
         self.controls.push(certificate);
         Ok(())
     }
@@ -782,11 +666,11 @@ impl Metadata {
         self.trusted_budget(certificate, None)?;
         certificate.check(&self.genesis.genesis, time)
     }
+    /// A trusted node of `scope` under its current control.
     fn authorized(
         &self,
         scope: Scope,
         request: &Request,
-        executor: bool,
         time: u64,
     ) -> Result<&DomainControl, CoordinationError> {
         let certificate = self
@@ -800,56 +684,13 @@ impl Metadata {
             certificate.check(&self.genesis.genesis, time)?;
         }
         let c = &certificate.control;
-        if !(c.executors.contains(&request.key)
-            || (!executor && c.invokers.iter().any(|(k, _)| *k == request.key)))
-        {
+        if !c.trusted.contains(&request.key) {
             return Err(CoordinationError::Denied);
         }
         Ok(c)
     }
-    /// An owner needs the current head to fence a closure or activation.
-    fn head_authorized(
-        &self,
-        scope: Scope,
-        request: &Request,
-        time: u64,
-    ) -> Result<(), CoordinationError> {
-        self.closure_authorized(request, scope)
-            .or_else(|_| self.authorized(scope, request, false, time).map(|_| ()))
-    }
     fn closure_authorized(&self, request: &Request, scope: Scope) -> Result<(), CoordinationError> {
         if !self.authority(scope, request.key) || self.issuer(scope) != Some(request.key) {
-            return Err(CoordinationError::Denied);
-        }
-        Ok(())
-    }
-    fn replacement_authorized(
-        &self,
-        request: &Request,
-        record: &ReplacementRecord,
-        certificate: &ControlCertificate,
-        time: u64,
-    ) -> Result<(), CoordinationError> {
-        let lost = record.lost_head.scope;
-        self.trusted_budget(certificate, Some(lost))?;
-        if self.genesis_bound(lost) {
-            certificate.verify(&self.genesis.genesis, time)?;
-        } else if self.genesis_bound(record.replacement) {
-            return Err(CoordinationError::Denied);
-        } else {
-            certificate.check(&self.genesis.genesis, time)?;
-        }
-        if certificate.issuer != request.key
-            || certificate.control.scope != record.replacement
-            || !self.authority(lost, request.key)
-            || self
-                .controls
-                .iter()
-                .find(|c| c.control.scope == lost)
-                .is_none_or(|c| c.control.owner != certificate.control.owner)
-            || certificate.control.schema != record.lost_head.schema
-            || certificate.control.handler != record.lost_head.handler
-        {
             return Err(CoordinationError::Denied);
         }
         Ok(())
@@ -873,7 +714,7 @@ impl Metadata {
                     return Err(CoordinationError::Denied);
                 }
                 self.closure_authorized(request, scope)
-                    .or_else(|_| self.authorized(scope, request, true, time).map(|_| ()))
+                    .or_else(|_| self.authorized(scope, request, time).map(|_| ()))
             }
             Action::Resolve { .. } => {
                 if self
@@ -888,7 +729,7 @@ impl Metadata {
                     Err(CoordinationError::Denied)
                 }
             }
-            _ => self.authorized(scope, request, true, time).map(|_| ()),
+            _ => self.authorized(scope, request, time).map(|_| ()),
         }?;
         if !matches!(action, Action::Head) && !self.state.find(scope)?.open() {
             return Err(CoordinationError::Denied);
@@ -918,7 +759,10 @@ impl Metadata {
         use crate::coordinated::Action;
         self.log_authorized(scope, action, request, self.state.time)?;
         if matches!(action, Action::Head) {
-            return self.log_head(scope).map(Outcome::CoordinatedHead);
+            return self
+                .log_head(scope)
+                .map(Box::new)
+                .map(Outcome::CoordinatedHead);
         }
         let domain = self.state.find(scope)?;
         let mut next = domain.coordinated.clone();
@@ -933,7 +777,7 @@ impl Metadata {
                 let mut keys = Vec::new();
                 for ack in acknowledgments {
                     ack.authenticate(self.genesis.id()?)?;
-                    self.authorized(scope, ack, true, ack.time)?;
+                    self.authorized(scope, ack, ack.time)?;
                     if ack.operation
                         != (Operation::Coordinated {
                             scope,
@@ -1030,79 +874,9 @@ impl Metadata {
                 certificate.reference().map(Outcome::Controlled)
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
-            Operation::Replace {
-                record,
-                certificate,
-            } => {
-                self.replacement_authorized(request, record, certificate, time)?;
-                let known = self
-                    .controls
-                    .iter()
-                    .find(|c| c.control.scope == record.replacement);
-                if known.is_some_and(|old| old != certificate) {
-                    return Err(CoordinationError::RequestConflict);
-                }
-                let public = !self.genesis_bound(record.lost_head.scope);
-                if known.is_none() {
-                    if certificate.control.revision != 1 || (!public && self.controls.len() >= 64) {
-                        return Err(CoordinationError::Configuration);
-                    }
-                    if public {
-                        self.public_admits(request.key, certificate)?;
-                    }
-                }
-                let result = self.state.replace(
-                    certificate.control.owner,
-                    record.clone(),
-                    certificate
-                        .control
-                        .executors
-                        .iter()
-                        .copied()
-                        .map(node_id)
-                        .collect(),
-                )?;
-                if known.is_none() {
-                    self.controls.push(certificate.clone());
-                    if public {
-                        self.count_registration(request.key);
-                    }
-                }
-                let domain = self
-                    .state
-                    .domains
-                    .iter_mut()
-                    .find(|d| d.scope == record.replacement)
-                    .ok_or(CoordinationError::Corrupt)?;
-                domain.invokers = certificate
-                    .control
-                    .invokers
-                    .iter()
-                    .map(|(key, principal)| (node_id(*key), *principal))
-                    .collect();
-                Ok(Outcome::Replacement(result))
-            }
-            Operation::Activate(activation) => {
-                self.closure_authorized(request, activation.head.scope)?;
-                let owner = self
-                    .controls
-                    .iter()
-                    .find(|c| c.control.scope == activation.head.scope)
-                    .ok_or(CoordinationError::UnknownDomain)?
-                    .control
-                    .owner;
-                self.state.activate(owner, activation).map(Outcome::Head)
-            }
-            Operation::Close { head } => {
-                self.closure_authorized(request, head.scope)?;
-                let owner = self
-                    .controls
-                    .iter()
-                    .find(|c| c.control.scope == head.scope)
-                    .ok_or(CoordinationError::UnknownDomain)?
-                    .control
-                    .owner;
-                self.state.close(owner, head).map(Outcome::Head)
+            Operation::Close { scope } => {
+                self.closure_authorized(request, *scope)?;
+                self.state.close(*scope).map(|()| Outcome::Closed)
             }
             Operation::Membership {
                 voters,
@@ -1129,55 +903,6 @@ impl Metadata {
                 self.desired_voters = voters.clone();
                 Ok(Outcome::Membership(voters.clone()))
             }
-            Operation::Acquire { scope } => {
-                let owner = self.authorized(*scope, request, true, time)?.owner;
-                // A control update deliberately clears the executor while preserving its fencing epoch.
-                let d = self.state.domain(*scope)?;
-                if !d.open() {
-                    return Err(CoordinationError::Denied);
-                }
-                if d.head.executor == NodeId([0; 16]) && d.head.epoch > 0 {
-                    d.head.executor = node_id(request.key);
-                    return Ok(Outcome::Head(d.head.clone()));
-                }
-                self.state
-                    .acquire(*scope, owner, node_id(request.key))
-                    .map(Outcome::Head)
-            }
-            Operation::Takeover {
-                scope,
-                expected_epoch,
-            } => {
-                let owner = self.authorized(*scope, request, true, time)?.owner;
-                self.state
-                    .takeover(*scope, owner, node_id(request.key), *expected_epoch)
-                    .map(Outcome::Head)
-            }
-            Operation::Head { scope } => {
-                self.head_authorized(*scope, request, time)?;
-                Ok(Outcome::Head(self.state.domain(*scope)?.head.clone()))
-            }
-            Operation::Lookup { scope, request: id } => {
-                self.authorized(*scope, request, false, time)?;
-                self.state.lookup(*scope, *id).map(Outcome::Receipt)
-            }
-            Operation::Retire { scope, through } => {
-                self.authorized(*scope, request, false, time)?;
-                let available = self.tenant_available(*scope)?;
-                self.state
-                    .retire(*scope, node_id(request.key), *through, available)
-                    .map(Outcome::Floor)
-            }
-            Operation::Confirm(proposal) => {
-                self.authorized(proposal.scope, request, true, time)?;
-                if proposal.executor != node_id(request.key) {
-                    return Err(CoordinationError::Denied);
-                }
-                let available = self.tenant_available(proposal.scope)?;
-                self.state
-                    .confirm(proposal.clone(), available)
-                    .map(|r| Outcome::Receipt(Some(r)))
-            }
         }
     }
 }
@@ -1185,9 +910,6 @@ impl Metadata {
 #[cfg(test)]
 #[path = "machine/public_tests.rs"]
 mod public_tests;
-#[cfg(test)]
-#[path = "machine/replacement_tests.rs"]
-mod replacement_tests;
 #[cfg(test)]
 #[path = "machine/retention_tests.rs"]
 mod retention_tests;

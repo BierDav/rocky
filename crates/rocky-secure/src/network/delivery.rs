@@ -172,13 +172,11 @@ fn pages(items: Vec<SealedDelivery>) -> Result<Vec<Vec<SealedDelivery>>, Error> 
 }
 
 impl NativeSession {
-    /// Serves every family until the peer ends the session: strong
-    /// commands with a coordinator, deliveries from their owner, and
-    /// contact metadata through `handler`.
-    pub async fn serve_all<A: rocky_core::RowCommandApplication>(
+    /// Serves every family until the peer ends the session: deliveries
+    /// from their owner, and contact metadata through `handler`.
+    pub async fn serve_all<A: RowApplication>(
         &mut self,
         replica: &EncryptedReplica<A>,
-        coordinator: Option<&dyn rocky_core::Coordinator>,
         deliveries: &dyn Deliveries,
         handler: Option<&dyn ContactHandler>,
     ) -> Result<(), Error> {
@@ -189,21 +187,14 @@ impl NativeSession {
                 }
                 other => other?,
             };
-            match (message, coordinator, handler) {
-                (Message::Contacts(message), _, Some(handler)) => {
+            match (message, handler) {
+                (Message::Contacts(message), Some(handler)) => {
                     self.answer_contact(replica, handler, message).await?;
                 }
-                (Message::Commands(message), Some(coordinator), _) => {
-                    self.answer_command(replica, coordinator, message).await?;
-                }
-                // Refused politely: a mixed household keeps its links.
-                (Message::Commands(_), None, _) => {
-                    self.send(CommandMessage::Unavailable).await?;
-                }
-                (Message::Delivery(message), _, _) => {
+                (Message::Delivery(message), _) => {
                     self.answer_delivery(deliveries, message).await?;
                 }
-                (message, _, _) => self.answer(replica, message).await?,
+                (message, _) => self.answer(replica, message).await?,
             }
         }
     }

@@ -60,6 +60,8 @@ pub struct Pending {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Member {
     pub key: PublicKey,
+    /// The identity that certified the node; its own key without one.
+    pub identity: PublicKey,
     pub acknowledged: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -343,6 +345,7 @@ impl Log {
                         .ok_or(CoordinationError::StaleEpoch)?;
                     self.head.members.push(Member {
                         key,
+                        identity: key,
                         acknowledged: *position,
                     });
                     self.head.epoch = epoch;

@@ -86,7 +86,7 @@ fn retry_records_expire_and_are_bounded_per_signer() {
             expected: BTreeSet::from([1, 2, 3]),
             expected_revision: 0,
         };
-        Request::sign_at(id, identity, operation, &directory, time).unwrap()
+        crate::machine::self_certified(id, identity, operation, &directory, time).unwrap()
     };
     for n in 0..limits.retry_records as u64 {
         let _ = metadata.apply_at(time, &acquire(n, time));
@@ -98,7 +98,7 @@ fn retry_records_expire_and_are_bounded_per_signer() {
     // A retry within the window returns the retained outcome; a different
     // operation under the same ID conflicts.
     assert!(metadata.apply_at(time, &acquire(0, time)).is_ok());
-    let conflict = Request::sign_at(
+    let conflict = crate::machine::self_certified(
         id,
         acquire(0, time).id,
         Operation::Close { scope },
@@ -170,7 +170,8 @@ fn membership_replays_cannot_reverse_a_later_configuration_after_retry_expiry() 
         expected_revision: 0,
     };
     let sign = |id, operation, time| {
-        Request::sign_at(genesis.id().unwrap(), id, operation, &authority, time).unwrap()
+        crate::machine::self_certified(genesis.id().unwrap(), id, operation, &authority, time)
+            .unwrap()
     };
     metadata
         .apply_at(time, &sign([1; 32], plan.clone(), time))
@@ -267,7 +268,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();
     let request = |key: &PrivateKey, action| {
-        Request::sign_at(
+        crate::machine::self_certified(
             genesis.id().unwrap(),
             crate::transport::nonce(),
             Operation::Coordinated { scope, action },
@@ -371,7 +372,7 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
     let mut store = Store::open(dir.path(), genesis.clone(), true, Limits::default()).unwrap();
     let time = now().unwrap();
     let request = |key: &PrivateKey, action| {
-        Request::sign_at(
+        crate::machine::self_certified(
             genesis.id().unwrap(),
             crate::transport::nonce(),
             Operation::Coordinated { scope, action },

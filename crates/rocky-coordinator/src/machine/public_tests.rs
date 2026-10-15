@@ -161,8 +161,14 @@ impl Service {
         operation: Operation,
         time: u64,
     ) -> Result<Outcome, CoordinationError> {
-        let request =
-            Request::sign_at(self.genesis.id().unwrap(), nonce(), operation, key, time).unwrap();
+        let request = crate::machine::self_certified(
+            self.genesis.id().unwrap(),
+            nonce(),
+            operation,
+            key,
+            time,
+        )
+        .unwrap();
         metadata.apply_at(time, &request)
     }
     fn read(
@@ -171,7 +177,7 @@ impl Service {
         key: &PrivateKey,
         operation: Operation,
     ) -> Result<Outcome, CoordinationError> {
-        let request = Request::sign_at(
+        let request = crate::machine::self_certified(
             self.genesis.id().unwrap(),
             nonce(),
             operation,
@@ -565,7 +571,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
     let mut m = service.open();
     let (a, b) = (Tenant::new(), Tenant::new());
     let (sa, sb) = (a.scope(1), b.scope(2));
-    let pending = Request::sign_at(
+    let pending = crate::machine::self_certified(
         service.genesis.id().unwrap(),
         nonce(),
         Operation::Register(Box::new(Registration {
@@ -587,7 +593,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
     // The shared trusted node's calls count against the tenant of the domain
     // it names.
     for (scope, tenant) in [(sa, &a), (sb, &b)] {
-        let request = Request::sign_at(
+        let request = crate::machine::self_certified(
             service.genesis.id().unwrap(),
             nonce(),
             Operation::Coordinated {

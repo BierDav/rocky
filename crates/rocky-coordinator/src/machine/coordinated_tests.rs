@@ -88,7 +88,7 @@ impl Fixture {
         fixture
     }
     pub(super) fn request(&self, key: &PrivateKey, action: Action, time: u64) -> Request {
-        Request::sign_at(
+        crate::machine::self_certified(
             self.state.genesis.id().unwrap(),
             crate::transport::nonce(),
             Operation::Coordinated {
@@ -492,7 +492,7 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     control
         .trusted
         .extend((0..31).map(|_| PrivateKey::new().public_key()));
-    let request = Request::sign_at(
+    let request = crate::machine::self_certified(
         f.state.genesis.id().unwrap(),
         [9; 32],
         Operation::Control(ControlCertificate::sign(control, &f.owner).unwrap()),
@@ -556,7 +556,7 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
         Err(CoordinationError::Denied)
     );
     // Closure cannot strand a pending log entry.
-    let close = Request::sign_at(
+    let close = crate::machine::self_certified(
         f.state.genesis.id().unwrap(),
         [8; 32],
         Operation::Close { scope: f.scope },
@@ -569,4 +569,105 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
         Err(CoordinationError::Denied)
     );
     assert_eq!(f.state.log_head(f.scope).unwrap().pending, Some(pending));
+}
+
+/// `identity`'s certificate for the node `node`.
+fn certificate(identity: &PrivateKey, node: &PrivateKey) -> rocky_credentials::SignedCapability {
+    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    rocky_credentials::SignedCapability::sign(
+        Capability {
+            manifest: [0; 32],
+            subject: node.public_key(),
+            kind: rocky_core::PrincipalKind::Node,
+            grants: Vec::new(),
+            not_before: T - 1,
+            expires: T + 1000,
+            delegations: 0,
+            extension: Extension::new(Extended {
+                node: Some(PeerId::of(node.public_key())),
+                ..Extended::default()
+            })
+            .unwrap(),
+        },
+        identity,
+    )
+    .unwrap()
+}
+
+#[test]
+fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
+    let mut f = Fixture::new(1, Limits::default());
+    let (genesis, owner, scope) = (f.state.genesis.id().unwrap(), f.owner.clone(), f.scope);
+    let identity = PrivateKey::new();
+    let mut control = f.state.controls[0].control.clone();
+    control.revision = 2;
+    control.trusted.push(identity.public_key());
+    let revise = |control: DomainControl, id: u8| {
+        crate::machine::self_certified(
+            genesis,
+            [id; 32],
+            Operation::Control(ControlCertificate::sign(control, &owner).unwrap()),
+            &owner,
+            T,
+        )
+        .unwrap()
+    };
+    f.state.apply_at(T, &revise(control.clone(), 9)).unwrap();
+    let join = |head: crate::coordinated::Head,
+                node: &PrivateKey,
+                certificate: Option<rocky_credentials::SignedCapability>| {
+        Request::certified(
+            genesis,
+            crate::transport::nonce(),
+            Operation::Coordinated {
+                scope,
+                action: Action::Join {
+                    position: head.commit,
+                    running_hash: head.running_hash,
+                    sequence: 1,
+                },
+            },
+            (node, certificate),
+            T,
+        )
+        .unwrap()
+    };
+    // Two nodes of the trusted identity join; the set counts them apart.
+    let (first, second) = (PrivateKey::new(), PrivateKey::new());
+    for node in [&first, &second] {
+        let head = f.state.log_head(scope).unwrap();
+        let request = join(head, node, Some(certificate(&identity, node)));
+        f.state.apply_at(T, &request).unwrap();
+    }
+    let members = f.state.log_head(scope).unwrap().members;
+    assert_eq!(members.len(), 4);
+    for node in [&first, &second] {
+        let member = members.iter().find(|m| m.key == node.public_key()).unwrap();
+        assert_eq!(member.identity, identity.public_key());
+    }
+    // No certificate, another identity's, or one for another node.
+    let stranger = PrivateKey::new();
+    let other = PrivateKey::new();
+    let head = f.state.log_head(scope).unwrap();
+    for request in [
+        join(head.clone(), &stranger, None),
+        join(
+            head.clone(),
+            &stranger,
+            Some(certificate(&other, &stranger)),
+        ),
+        join(head, &stranger, Some(certificate(&identity, &first))),
+    ] {
+        assert_eq!(
+            f.state.apply_at(T, &request),
+            Err(CoordinationError::Denied)
+        );
+    }
+    // A control that drops the identity waits while its nodes are in the set.
+    control.revision = 3;
+    control.trusted.retain(|key| *key != identity.public_key());
+    assert_eq!(
+        f.state.apply_at(T, &revise(control, 10)),
+        Err(CoordinationError::Backpressure)
+    );
 }

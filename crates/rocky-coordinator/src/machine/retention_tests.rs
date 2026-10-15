@@ -65,7 +65,8 @@ impl Mesh {
         control(&self.authority, &self.executor, scope, revision, self.time)
     }
     fn request(&self, key: &PrivateKey, operation: Operation, time: u64) -> Request {
-        Request::sign_at(self.genesis.id().unwrap(), nonce(), operation, key, time).unwrap()
+        crate::machine::self_certified(self.genesis.id().unwrap(), nonce(), operation, key, time)
+            .unwrap()
     }
     fn apply(
         &self,

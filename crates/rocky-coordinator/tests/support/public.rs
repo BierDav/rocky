@@ -337,7 +337,10 @@ impl Tenant {
         .unwrap()
     }
     pub async fn client(&self, cluster: &PublicCluster, key: &PrivateKey) -> NetworkCoordinator {
-        NetworkCoordinator::connect(&cluster.bundle, key.clone(), transport().await).unwrap()
+        let client =
+            NetworkCoordinator::connect(&cluster.bundle, key.clone(), transport().await).unwrap();
+        client.certify(super::certificate(key));
+        client
     }
     pub fn public_key(&self) -> PublicKey {
         self.key.public_key()

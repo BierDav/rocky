@@ -1,7 +1,7 @@
 # Public coordination
 
 A shared coordination service orders the metadata log of each application's
-domains. It stores trusted node keys, in-sync membership, a pending entry and a
+domains. It stores trusted identities, in-sync membership, a pending entry and a
 bounded hash window; schemas, rows, business rules and encrypted bundles stay
 on application nodes. See [coordinated log](coordinated-log.md) and
 [coordinated writes](coordinated-writes.md).
@@ -14,11 +14,16 @@ makes coordinated progress unavailable; ordinary writes and replication remain
 local operations. A trusted-node designation grants no row, reader-key or
 enrollment authority.
 
-A publisher signs a coordination grant naming an application and tenant key.
-An issuer registers its domain under that tenant, supplying the signed control
-certificate listing trusted node keys. Tenant keys coordinate metadata only.
-Later control revisions update trusted nodes while preserving the log. Closing
-is permanent and frees the open-domain quota without reopening its identity.
+The owner, whose identity key is the publisher key, signs a coordination
+grant naming an application and tenant key. An issuer registers its domain
+under that tenant, supplying the signed control certificate listing trusted
+identities. Every request of a node presents its node certificate; the
+coordinator admits a node whose certificate a trusted identity signed for
+its key and that is valid at the request's time. Revocation stays the
+domain's: a control revision drops an identity. Tenant keys coordinate
+metadata only. Later control revisions update trusted identities while
+preserving the log. Closing is permanent and frees the open-domain quota
+without reopening its identity.
 
 ## Compose
 
@@ -26,7 +31,9 @@ Rust `Open::coordination` accepts `Coordination::Service(Box<TrustBundle>)`.
 The starter's JSON options take the same bundle object as `coordinator`.
 Kotlin uses `coordinator = ServiceCoordinator(bundleJson)` on database open.
 Service clients use the attached network, whose ownership remains independent
-of the database. `NetworkCoordinator` implements the metadata-only `DomainLog`.
+of the database. `NetworkCoordinator` implements the metadata-only `DomainLog`;
+`certify` sets the node certificate its requests present, which the SDK
+replaces at every renewal.
 
 For in-process development, Rust supplies `coordinated::MemoryLog`, and Kotlin
 supplies `DevelopmentLog`: configure the domain minimum, then call
@@ -41,9 +48,9 @@ Only issuers register through the SDK owner lane.
 
 | JSON request | Inputs | Result |
 | --- | --- | --- |
-| `coordination_register` | `tenant` secret as 64 hex digits, `registration` as 32 bytes, `trusted` node keys as hex strings, `lifetime`, optional `admission` and publisher `grant` | `tenant`, `revision`, `control` |
+| `coordination_register` | `tenant` secret as 64 hex digits, `registration` as 32 bytes, `trusted` identity keys as hex strings, `lifetime`, optional `admission` and owner `grant` | `tenant`, `revision`, `control` |
 | `coordination_control` | `tenant`, `id`, `revision` above 1, `trusted`, `lifetime` | accepted control |
-| `coordination_grant` | public `tenant` or `tenant_secret`, `lifetime`; issuer only | signed publisher grant |
+| `coordination_grant` | public `tenant` or `tenant_secret`, `lifetime`; the owner only | grant signed by the owner's identity |
 | `coordination_close` | `tenant`, `id` | `closed: true` |
 | `coordination_usage` | `tenant` | open/closed domains, bytes, registrations today |
 
@@ -57,7 +64,7 @@ quota/backpressure/expiry errors. See [coordinator retention](coordinator-retent
 
 Trust bundles use format 2 and bootstrap signatures `rocky.genesis.v2`.
 The earlier provider certificate is retired and not composed by default; a
-deployment supplies its new bundle explicitly. Domain controls use `rocky.control.v2`; Raft stores/snapshots use format 6.
+deployment supplies its new bundle explicitly. Domain controls use `rocky.control.v3`, naming trusted identities; requests use `rocky.coordination-request.v5`, carrying the node certificate; Raft stores/snapshots use format 7, whose in-sync members record the identity that certified them.
 The removed executor/invoker controls and command operations are not interpreted.
 There are no command heads, preparations, receipts or result-forwarding lanes.
 

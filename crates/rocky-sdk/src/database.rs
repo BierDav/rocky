@@ -1200,15 +1200,15 @@ async fn run(
                     .map(|(transport, _)| transport.clone())
                     .ok_or("a coordination service needs the database's network")?;
                 let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
-                service = Some(crate::owner::Service::new(
-                    (**bundle).clone(),
-                    directory.to_path_buf(),
-                ));
-                Some(Arc::new(
-                    rocky_coordinator::service::NetworkCoordinator::connect(
-                        bundle, key, transport,
-                    )?,
-                ))
+                let client = Arc::new(rocky_coordinator::service::NetworkCoordinator::connect(
+                    bundle, key, transport,
+                )?);
+                let composed =
+                    crate::owner::Service::new((**bundle).clone(), directory.to_path_buf())
+                        .with_client(client.clone());
+                composed.certify(&settings.credentials);
+                service = Some(composed);
+                Some(client)
             }
         };
         settings.save(&path)?;

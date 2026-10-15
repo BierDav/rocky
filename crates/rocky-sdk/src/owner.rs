@@ -8,6 +8,12 @@ pub(crate) use service::{Domain, Service};
 /// Never constructed without iroh: no coordination service is reachable.
 #[cfg(not(feature = "iroh"))]
 pub(crate) enum Service {}
+#[cfg(not(feature = "iroh"))]
+impl Service {
+    pub(crate) fn certify(&self, _: &rocky_credentials::CredentialChain) {
+        match *self {}
+    }
+}
 
 #[cfg(feature = "iroh")]
 mod service {
@@ -43,6 +49,8 @@ mod service {
         directory: PathBuf,
         /// One tenant client at a time holds its evidence file.
         lock: Mutex<()>,
+        /// This node's client of the domain's coordinated log.
+        client: Option<Arc<NetworkCoordinator>>,
     }
 
     /// What the owner's calls need from the open database.
@@ -77,11 +85,11 @@ mod service {
         let list = request["trusted"]
             .as_array()
             .filter(|list| !list.is_empty() && list.len() <= 32)
-            .ok_or_else(|| refused("trusted must list 1 through 32 node keys"))?;
+            .ok_or_else(|| refused("trusted must list 1 through 32 identity keys"))?;
         list.iter()
             .map(|value| {
                 PublicKey::from_bytes(&key::<32>(value, "trusted")?)
-                    .map_err(|_| refused("invalid trusted node key"))
+                    .map_err(|_| refused("invalid trusted identity key"))
             })
             .collect()
     }
@@ -92,6 +100,19 @@ mod service {
                 bundle,
                 directory,
                 lock: Mutex::new(()),
+                client: None,
+            }
+        }
+        /// The log client whose requests present this node's certificate.
+        pub(crate) fn with_client(mut self, client: Arc<NetworkCoordinator>) -> Self {
+            self.client = Some(client);
+            self
+        }
+        /// Presents the node certificate `chain` ends at from now on: the
+        /// coordinator admits nodes of the identities a control trusts.
+        pub(crate) fn certify(&self, chain: &rocky_credentials::CredentialChain) {
+            if let (Some(client), Some(leaf)) = (&self.client, chain.0.last()) {
+                client.certify(leaf.clone());
             }
         }
 

@@ -9,11 +9,14 @@ use rocky_core::{
     net::{Protocol, Transport},
     *,
 };
-use rocky_credentials::{SignedCoordinationGrant, SignedTenantAdmission};
-use std::sync::Arc;
+use rocky_credentials::{SignedCapability, SignedCoordinationGrant, SignedTenantAdmission};
+use std::sync::{Arc, Mutex, PoisonError};
 pub struct NetworkCoordinator {
     genesis: CertifiedGenesis,
     key: PrivateKey,
+    /// The node certificate requests present, which a trusted identity
+    /// signed; replaced when it is renewed.
+    certificate: Mutex<Option<SignedCapability>>,
     /// The client lane of a public service; voter TCP when absent.
     route: Option<Arc<dyn Transport>>,
 }
@@ -28,8 +31,17 @@ impl NetworkCoordinator {
         Ok(Self {
             genesis,
             key,
+            certificate: Mutex::new(None),
             route: None,
         })
+    }
+    /// Presents `certificate`, this node's under a trusted identity, with
+    /// every later request.
+    pub fn certify(&self, certificate: SignedCapability) {
+        *self
+            .certificate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(certificate);
     }
     /// A client of the public service `bundle` pins, reached through
     /// `transport` at the certified client endpoints of its kind. Requests
@@ -111,7 +123,18 @@ impl NetworkCoordinator {
         id: Commitment,
         operation: Operation,
     ) -> Result<Outcome, CoordinationError> {
-        let request = Request::sign(self.genesis.id()?, id, operation, &self.key)?;
+        let certificate = self
+            .certificate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let request = Request::certified(
+            self.genesis.id()?,
+            id,
+            operation,
+            (&self.key, certificate),
+            now()?,
+        )?;
         tokio::time::timeout(std::time::Duration::from_secs(12), async {
             for _ in 0..3 {
                 for response in self.attempt(&request).await {

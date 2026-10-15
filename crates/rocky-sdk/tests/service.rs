@@ -160,10 +160,11 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     let session = opened.database.session();
     let scope: Value = serde_json::from_str(&opened.database.scope())?;
     let identity = call(&session, &scope, json!({"type": "session"})).await?;
-    let node = identity["node"].clone();
+    // Controls trust identities; the node presents its certificate.
+    let trusted = identity["principal"].clone();
     let tenant = PrivateKey::new();
     let register = json!({"type": "coordination_register", "tenant": tenant.to_hex(),
-        "registration": vec![1u8; 32], "trusted": [node], "lifetime": 3600});
+        "registration": vec![1u8; 32], "trusted": [trusted], "lifetime": 3600});
     let registered = call(&session, &scope, register.clone()).await?;
     assert_eq!(registered["tenant"], tenant.public_key().to_hex());
     assert_eq!(call(&session, &scope, register).await?, registered);

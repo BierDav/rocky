@@ -44,10 +44,53 @@ pub struct Registration {
 pub struct Request {
     pub genesis: Commitment,
     pub key: PublicKey,
+    /// The signing node's certificate, by which a trusted identity
+    /// vouches for it.
+    pub certificate: Option<rocky_credentials::SignedCapability>,
     pub id: Commitment,
     pub time: u64,
     pub operation: Operation,
     signature: Signature,
+}
+/// A node certificate its node signed itself: its key is its own identity,
+/// as controls that name node keys trust it.
+#[cfg(test)]
+pub(crate) fn self_certificate(
+    key: &p2panda_core::PrivateKey,
+) -> rocky_credentials::SignedCapability {
+    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    let capability = Capability {
+        manifest: [0; 32],
+        subject: key.public_key(),
+        kind: rocky_core::PrincipalKind::Node,
+        grants: Vec::new(),
+        not_before: 0,
+        expires: u64::MAX,
+        delegations: 0,
+        extension: Extension::new(Extended {
+            node: Some(PeerId::of(key.public_key())),
+            ..Extended::default()
+        })
+        .expect("extension"),
+    };
+    rocky_credentials::SignedCapability::sign(capability, key).expect("certificate")
+}
+/// A request of a node that presents its own certificate.
+#[cfg(test)]
+pub(crate) fn self_certified(
+    genesis: Commitment,
+    id: Commitment,
+    operation: Operation,
+    key: &p2panda_core::PrivateKey,
+    time: u64,
+) -> Result<Request, CoordinationError> {
+    Request::certified(
+        genesis,
+        id,
+        operation,
+        (key, Some(self_certificate(key))),
+        time,
+    )
 }
 /// A Raft log entry: the leader-proposed authority time and a client request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,9 +114,23 @@ impl Request {
         key: &p2panda_core::PrivateKey,
         time: u64,
     ) -> Result<Self, CoordinationError> {
+        Self::certified(genesis, id, operation, (key, None), time)
+    }
+    /// A request of a node presenting `certificate`, its identity's.
+    pub fn certified(
+        genesis: Commitment,
+        id: Commitment,
+        operation: Operation,
+        (key, certificate): (
+            &p2panda_core::PrivateKey,
+            Option<rocky_credentials::SignedCapability>,
+        ),
+        time: u64,
+    ) -> Result<Self, CoordinationError> {
         let mut request = Self {
             genesis,
             key: key.public_key(),
+            certificate,
             id,
             time,
             operation,
@@ -84,9 +141,20 @@ impl Request {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-request.v4",
-            &(self.genesis, self.key, self.id, self.time, &self.operation),
+            "rocky.coordination-request.v5",
+            &(
+                self.genesis,
+                self.key,
+                &self.certificate,
+                self.id,
+                self.time,
+                &self.operation,
+            ),
         )
+    }
+    /// The identity whose current certificate the signing node presents.
+    pub fn identity(&self, time: u64) -> Option<PublicKey> {
+        self.certificate.as_ref()?.certifies(self.key, time).ok()
     }
     pub fn authenticate(&self, genesis: Commitment) -> Result<(), CoordinationError> {
         if self.genesis != genesis || !self.key.verify(&self.signing_bytes()?, &self.signature) {
@@ -377,7 +445,10 @@ impl Metadata {
             Operation::Close { scope } | Operation::Coordinated { scope, .. } => *scope,
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
-        if certificate.issuer != request.key && !certificate.control.trusted.contains(&request.key)
+        if certificate.issuer != request.key
+            && !request
+                .identity(request.time)
+                .is_some_and(|identity| certificate.control.trusted.contains(&identity))
         {
             return None;
         }
@@ -533,7 +604,7 @@ impl Metadata {
                     .head
                     .members
                     .iter()
-                    .any(|m| !control.trusted.contains(&m.key))
+                    .any(|m| !control.trusted.contains(&m.identity))
             {
                 return Err(CoordinationError::Backpressure);
             }
@@ -684,7 +755,10 @@ impl Metadata {
             certificate.check(&self.genesis.genesis, time)?;
         }
         let c = &certificate.control;
-        if !c.trusted.contains(&request.key) {
+        if !request
+            .identity(time)
+            .is_some_and(|identity| c.trusted.contains(&identity))
+        {
             return Err(CoordinationError::Denied);
         }
         Ok(c)
@@ -818,6 +892,17 @@ impl Metadata {
                 )
             }
             Action::Cut { record, authority } => next.cut(scope, record, authority),
+            Action::Join { .. } => {
+                let joined = next.apply(request.key, action, self.state.time, true);
+                // The in-sync set counts nodes and remembers whose they are.
+                let identity = request
+                    .identity(self.state.time)
+                    .ok_or(CoordinationError::Denied)?;
+                if let Some(member) = next.head.members.iter_mut().find(|m| m.key == request.key) {
+                    member.identity = identity;
+                }
+                joined
+            }
             _ => next.apply(request.key, action, self.state.time, true),
         };
         let growth = next.bytes().saturating_sub(domain.coordinated.bytes());

@@ -95,7 +95,7 @@ impl Probe {
                     log_id: LogId::new(CommittedLeaderId::new(1, 1), self.index),
                     payload: EntryPayload::Normal(Proposal {
                         time: now,
-                        request: Request::sign_at(
+                        request: crate::machine::self_certified(
                             self.genesis.id().unwrap(),
                             nonce(),
                             operation,
@@ -210,7 +210,7 @@ impl Probe {
                     }
                     other => panic!("append: {other:?}"),
                 };
-                let acknowledgment = Request::sign_at(
+                let acknowledgment = crate::machine::self_certified(
                     self.genesis.id().unwrap(),
                     nonce(),
                     Operation::Coordinated {

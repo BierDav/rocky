@@ -8,11 +8,13 @@ registration and tenant isolation.
 
 ## Configure and join
 
-The control certificate lists trusted node keys. An ordinary member cannot
-read or mutate this metadata log. The control authority
+The control certificate lists trusted identities; a node presents the
+certificate its identity signed for its key with every request. The in-sync
+set still counts nodes, each recorded with its identity. An ordinary member
+cannot read or mutate this metadata log. The control authority
 may configure `Action::Configure { minimum }` before the first node joins. Default
-minimum: one. A control revision cannot remove an in-sync key or occur while an
-entry is pending; renew it before expiry. Removing a key that already missed a
+minimum: one. A control revision cannot remove an identity whose node is in
+sync or occur while an entry is pending; renew it before expiry. Removing a key that already missed a
 write does not erase its bounded retry watermark. Exhausting the domain's retained
 node slots refuses further identities with `Backpressure`.
 

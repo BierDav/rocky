@@ -11,6 +11,27 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// A node certificate its node signed itself: the node key is its own
+/// identity, which the controls these exercises sign trust.
+pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
+    use rocky_credentials::{Capability, Extended, Extension, PeerId};
+    let capability = Capability {
+        manifest: [0; 32],
+        subject: key.public_key(),
+        kind: PrincipalKind::Node,
+        grants: Vec::new(),
+        not_before: 0,
+        expires: u64::MAX,
+        delegations: 0,
+        extension: Extension::new(Extended {
+            node: Some(PeerId::of(key.public_key())),
+            ..Extended::default()
+        })
+        .unwrap(),
+    };
+    rocky_credentials::SignedCapability::sign(capability, key).unwrap()
+}
+
 #[allow(dead_code)] // Shared by independent multiprocess exercises.
 pub struct Cluster {
     pub dir: TempDir,
@@ -145,13 +166,15 @@ impl Cluster {
         cluster
     }
     pub fn client(&self, key: &PrivateKey) -> NetworkCoordinator {
-        NetworkCoordinator::open(
+        let client = NetworkCoordinator::open(
             self.genesis.clone(),
             self.genesis.root,
             self.genesis.genesis.mesh,
             key.clone(),
         )
-        .unwrap()
+        .unwrap();
+        client.certify(certificate(key));
+        client
     }
     pub fn app_control(&self, revision: u64) -> ControlCertificate {
         ControlCertificate::sign(

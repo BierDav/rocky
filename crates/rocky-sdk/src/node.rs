@@ -1684,6 +1684,9 @@ impl Node {
     ) -> Result<(), Failure> {
         self.replica.learn_revocations(revocations).await?;
         self.replica.renew_credentials(chain.clone()).await?;
+        if let Some(service) = &self.service {
+            service.certify(chain);
+        }
         keys.sort_by_key(|(_, epoch, _)| *epoch);
         for (name, generation, key) in keys {
             let scope = self

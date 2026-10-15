@@ -67,7 +67,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
             if header.extensions.tip == tip {
                 removed.insert(
                     hash.clone(),
-                    (*size, header.extensions.scope, header.public_key),
+                    (
+                        *size,
+                        header.extensions.scope,
+                        header.public_key,
+                        header.seq_num,
+                    ),
                 );
             }
             headers.push(header);
@@ -112,7 +117,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
         let needed = inner.role().await?.custody.max(1) as i64;
         let local_nodes = rows(&inner.conn, "SELECT node FROM secure_line_nodes").await?;
-        for (hash, (_, scope, author)) in &removed {
+        for (hash, (_, scope, author, sequence)) in &removed {
             for sql in [
                 "SELECT 1 FROM secure_held_frames WHERE hash=?",
                 "SELECT 1 FROM secure_voids WHERE hash=?",
@@ -160,7 +165,21 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .map_err(|_| Error::Corrupt("line node key".into()))?;
                     own.insert(rocky_credentials::PeerId::of(public).as_bytes().to_vec());
                 }
-                let remote = acknowledged.iter().filter(|record| matches!(record.as_slice(), [SqlValue::Blob(peer)] if !own.contains(peer))).count() as i64;
+                // Acknowledged per operation or through a reported frontier,
+                // as pruning counts them.
+                let (_, mut applied) = inner
+                    .covering_peers(&encode(scope)?, *author, *sequence)
+                    .await?;
+                for record in &acknowledged {
+                    let [SqlValue::Blob(peer)] = record.as_slice() else {
+                        return Err(Error::Corrupt("acknowledgment".into()));
+                    };
+                    applied.insert(super::roles::peer_id(peer)?);
+                }
+                let remote = applied
+                    .iter()
+                    .filter(|peer| !own.contains(peer.as_bytes().as_slice()))
+                    .count() as i64;
                 if remote < needed {
                     return Err(denied(
                         "dropping local tip writes requires acknowledged custody",
@@ -185,7 +204,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             }
         }
         let count = removed.len() as u64;
-        let bytes = removed.values().map(|(size, _, _)| size).sum::<i64>();
+        let bytes = removed.values().map(|(size, _, _, _)| size).sum::<i64>();
         transaction!(inner, |inner| {
             for hash in removed.keys() {
                 inner

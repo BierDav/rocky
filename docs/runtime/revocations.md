@@ -80,7 +80,8 @@ own chain: its owner records it instead.
 
 ## In the SDK
 
-`revoke` with a `node` or an `identity` on an issuer builds the statement and
+`revoke` with a `node`, an `identity` or, on the owner, a trusted grant's
+capability id as `trust` builds the statement and
 each scope's target key epoch from the nodes' [registry](issuer-registry.md)
 records and saves them as the intent, then makes the keys, signs the
 statement, renews its own chain, commits the records' tombstones and then

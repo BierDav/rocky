@@ -38,7 +38,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Current `identity.json` format: issuer records live in the registry,
 /// revocations are a set of statements, envelopes wait in `deliveries`.
-pub const VERSION: u32 = 17;
+pub const VERSION: u32 = 18;
 /// Current invitation format, with an explicit custody routing flag.
 const INVITE_VERSION: u32 = 5;
 const CONTACT_VERSION: u32 = 2;
@@ -162,6 +162,9 @@ pub struct Settings {
     pub author_high_water: u32,
     /// Envelopes this device sends, by delivery digest, until delivered.
     pub deliveries: BTreeMap<String, crate::delivery::Pending>,
+    /// The owner's trusted grant to this identity for its domain, through
+    /// which it signs tip statements. See `docs/runtime/tips-and-bookmarks.md`.
+    pub trusted: Option<SignedCapability>,
 }
 /// An assigner's author numbers: its range and the next free one. It is
 /// saved before any number it hands out leaves the device.
@@ -249,6 +252,8 @@ pub struct Rotation {
 pub enum Revoke {
     Node(PublicKey),
     Identity(PublicKey),
+    /// One trusted grant, by its capability id; the identity keeps its others.
+    Trust(Commitment),
 }
 /// What the registry recorded of a device a revocation acts on.
 struct Revoking {
@@ -1251,6 +1256,7 @@ impl Settings {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
+            trusted: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -1299,12 +1305,81 @@ impl Settings {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
+            trusted: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         }
     }
     fn validity(&self) -> Result<(u64, u64, u64), Failure> {
         Ok((now()?, self.ttl, SKEW))
+    }
+    /// The owner's trusted grant to `identity` for this domain: tip and
+    /// bookmark authority with no grants, over the author range a device
+    /// of that identity was recorded with.
+    pub fn issue_trust(
+        &self,
+        vault: &Vault,
+        registry: &Registry,
+        identity: PublicKey,
+    ) -> Result<SignedCapability, Failure> {
+        if !self.owner() {
+            return Err("only the owner grants trust".into());
+        }
+        if identity == self.publisher {
+            return Err("the owner needs no trusted grant".into());
+        }
+        if self.tombstoned(&identity) || self.revocations.revokes(&identity) {
+            return Err("identity was revoked".into());
+        }
+        let authors = registry
+            .records
+            .values()
+            .filter(|record| {
+                record
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.user == identity)
+            })
+            .find_map(|record| record.capability().map(|capability| capability.authors))
+            .ok_or("no device of this identity is recorded")?;
+        let owner = self.identity(vault)?;
+        Ok(Authority::owner(&*owner).issue_trusted(
+            identity,
+            self.domain()?.scope,
+            Vec::new(),
+            authors,
+            self.validity()?,
+        )?)
+    }
+    /// Keeps `link` once it is the owner's current trusted grant to this
+    /// identity for its domain.
+    pub fn install_trust(&mut self, path: &Path, link: SignedCapability) -> Result<(), Failure> {
+        let identity = CredentialChain(vec![link.clone()]).trusted_identity(
+            self.publisher,
+            self.domain()?.scope,
+            &self.revocations,
+            now()?,
+        )?;
+        if identity != self.identity {
+            return Err("the trusted grant names another identity".into());
+        }
+        self.trusted = Some(link);
+        self.save(path)
+    }
+    /// The chain this identity signs tip statements through as a trusted
+    /// identity, while its grant holds.
+    pub(crate) fn trusted_links(&self) -> Option<CredentialChain> {
+        let chain = CredentialChain(vec![self.trusted.clone()?]);
+        chain
+            .trusted_identity(
+                self.publisher,
+                self.domain().ok()?.scope,
+                &self.revocations,
+                now().ok()?,
+            )
+            .ok()
+            .filter(|identity| *identity == self.identity)
+            .map(|_| chain)
     }
     /// The owner's own chain, signed afresh: its identity's issuer
     /// authority over every author number, then this node's certificate.
@@ -2326,6 +2401,7 @@ impl Settings {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
+            trusted: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -2504,6 +2580,7 @@ impl Joining {
             granted_authors: BTreeMap::new(),
             author_high_water: 0,
             deliveries: BTreeMap::new(),
+            trusted: None,
             groups: BTreeMap::new(),
             epoch_statements: BTreeMap::new(),
         };
@@ -3177,6 +3254,12 @@ impl Settings {
                     .map(|(node, _)| *node)
                     .collect()
             }
+            Revoke::Trust(_) => {
+                if !self.owner() {
+                    return Err("only the owner revokes a trusted grant".into());
+                }
+                Vec::new()
+            }
         };
         if self.issuing("revokes devices")?.rotation.is_some() {
             return Err("another revocation is unfinished".into());
@@ -3215,7 +3298,17 @@ impl Settings {
                     .filter_map(|record| record.capability)
                     .collect(),
             },
+            Revoke::Trust(capability) => Revocation {
+                app: domain.manifest().app,
+                issuer: own,
+                time,
+                nodes: BTreeSet::new(),
+                identities: BTreeSet::new(),
+                capabilities: [capability].into(),
+            },
         };
+        // A trusted grant reads nothing: no key rotates.
+        let trust = matches!(target, Revoke::Trust(_));
         // Only nodes without any record use the full-rotation fallback.
         let recorded = !records.is_empty();
         let readable: Vec<Profile> = records
@@ -3225,7 +3318,7 @@ impl Settings {
             .collect();
         let mut keys = BTreeMap::new();
         for (name, epochs) in &self.keys {
-            if recorded && !readable.iter().any(|profile| profile.reads(name)) {
+            if trust || (recorded && !readable.iter().any(|profile| profile.reads(name))) {
                 continue;
             }
             if epochs.len() >= MAX_EPOCHS {
@@ -3259,7 +3352,7 @@ impl Settings {
                         .any(|member| profile.reads(&member.table))
                 })
                 || records.iter().any(|record| record.selects(&partition));
-            if let (true, Some(held)) = (read, partition.record.current()) {
+            if let (true, false, Some(held)) = (read, trust, partition.record.current()) {
                 let target = held
                     .generation
                     .checked_add(1)
@@ -3881,6 +3974,7 @@ impl Settings {
             granted_authors,
             author_high_water,
             deliveries,
+            trusted,
         } = self;
         *version == other.version
             && *installation == other.installation
@@ -3905,6 +3999,7 @@ impl Settings {
             && *minting == other.minting
             && *author_high_water == other.author_high_water
             && *deliveries == other.deliveries
+            && *trusted == other.trusted
             && self.saved_contacts() == other.saved_contacts()
     }
     fn validate_saved_contacts(&self) -> Result<(), Failure> {

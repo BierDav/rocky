@@ -50,6 +50,31 @@ class Tips internal constructor(private val client: RockyClient) {
 
     /** Releases local frames of an unfollowed tip when no retained evidence depends on them. */
     suspend fun drop(tip: String): TipStatus = TipStatus.decode(call("drop") { put("tip", tip) })
+
+    /**
+     * The owner grants [identity] trust for this domain: it opens tips and moves bookmarks backward or sideways.
+     * Hand [TrustGrant.grant] to a device of that identity for [installTrust].
+     */
+    suspend fun trust(identity: String): TrustGrant = TrustGrant.decode(call("trust") { put("identity", identity) })
+
+    /** Installs a trusted grant the owner issued to this device's identity. */
+    suspend fun installTrust(grant: String): TipStatus = TipStatus.decode(call("install_trust") { put("grant", grant) })
+
+    /** The owner revokes a trusted grant by its [TrustGrant.capability]; the identity keeps its other grants. */
+    suspend fun revokeTrust(capability: String) {
+        client.call(request("revoke") { put("trust", capability) })
+    }
+}
+
+/** The owner's trusted grant to [identity]: [grant] is opaque hex its device installs, [capability] what revocation names. */
+data class TrustGrant(val identity: String, val capability: String, val grant: String) {
+    internal companion object {
+        fun decode(value: JsonObject) = TrustGrant(
+            value.getValue("identity").jsonPrimitive.content,
+            value.getValue("capability").jsonPrimitive.content,
+            value.getValue("grant").jsonPrimitive.content,
+        )
+    }
 }
 
 /** A per-author sequence through which a device or seal has seen operations. */

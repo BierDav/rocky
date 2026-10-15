@@ -79,10 +79,12 @@ impl Node {
                     .await?;
             }
             "follow" => {
+                let before = self.replica.followed_tip().await;
                 self.replica
                     .follow_bookmark(scope, text(request, "name")?)
                     .await
                     .map_err(refused)?;
+                self.followed_tip_changed(before).await;
                 self.ensure_tip_node().await?;
                 self.observations.touch();
             }
@@ -91,6 +93,42 @@ impl Node {
                     .drop_tip(TipId(digest(request, "tip")?))
                     .await
                     .map_err(refused)?;
+                self.observations.touch();
+            }
+            "trust" => {
+                let identity: PublicKey = text(request, "identity")?
+                    .parse()
+                    .map_err(|_| refused("identity must be a hex key"))?;
+                let registry = self.registry().await?;
+                let link = self
+                    .settings
+                    .lock()
+                    .await
+                    .issue_trust(&self.vault, &registry, identity)
+                    .map_err(refused)?;
+                return Ok(json!({
+                    "identity": identity.to_hex(),
+                    "capability": hex(&link.id()?),
+                    "grant": HEXLOWER.encode(&rocky_credentials::encode(&link)?),
+                }));
+            }
+            "install_trust" => {
+                let link = HEXLOWER
+                    .decode(text(request, "grant")?.as_bytes())
+                    .ok()
+                    .and_then(|bytes| {
+                        rocky_credentials::decode_bounded::<rocky_credentials::SignedCapability>(
+                            &bytes,
+                            rocky_credentials::MAX_CREDENTIAL_BYTES,
+                        )
+                        .ok()
+                    })
+                    .ok_or_else(|| refused("grant must be a hex trusted grant"))?;
+                let mut settings = self.settings.lock().await;
+                let mut draft = (**settings).clone();
+                draft.install_trust(&self.path, link).map_err(refused)?;
+                *settings = Shared::new(draft);
+                drop(settings);
                 self.observations.touch();
             }
             _ => return Err(refused("unknown tips action")),
@@ -229,6 +267,15 @@ impl Node {
         })
     }
 
+    /// Links refused while peers followed other tips are retried at once
+    /// once this device follows another tip.
+    async fn followed_tip_changed(&self, before: TipId) {
+        if self.replica.followed_tip().await != before {
+            self.reset_retry(None);
+            self.wake_sync();
+        }
+    }
+
     /// The owner signs as itself, a trusted identity through its trusted
     /// grant and an issuer through its issuer links.
     async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
@@ -239,6 +286,8 @@ impl Node {
             links.0.len() == 1 && links.0[0].capability.extended()?.trusted == Some(scope);
         let links = if settings.owner() {
             CredentialChain::default()
+        } else if let Some(trusted) = settings.trusted_links() {
+            trusted
         } else if trusted {
             links
         } else if settings.issuer() {
@@ -270,7 +319,9 @@ impl Node {
         }
         expected(&graph)?;
         // The replica's codes stay: `sealed`, `coordinator_unavailable`.
+        let before = self.replica.followed_tip().await;
         self.replica.publish_tip_statements(&statements).await?;
+        self.followed_tip_changed(before).await;
         // A move of the followed bookmark may have switched lines.
         self.ensure_tip_node().await?;
         self.observations.touch();

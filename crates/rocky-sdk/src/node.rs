@@ -1053,10 +1053,25 @@ impl Node {
                         None => Ok(None),
                     }
                 };
-                let target = match (key("node")?, key("identity")?) {
-                    (Some(node), None) => crate::enrollment::Revoke::Node(node),
-                    (None, Some(identity)) => crate::enrollment::Revoke::Identity(identity),
-                    _ => return Err(refused("revoke names one node or one identity")),
+                let trust = match request["trust"].as_str() {
+                    Some(id) => Some(
+                        HEXLOWER
+                            .decode(id.as_bytes())
+                            .ok()
+                            .and_then(|bytes| bytes.try_into().ok())
+                            .ok_or_else(|| refused("trust must be a hex capability id"))?,
+                    ),
+                    None => None,
+                };
+                let target = match (key("node")?, key("identity")?, trust) {
+                    (Some(node), None, None) => crate::enrollment::Revoke::Node(node),
+                    (None, Some(identity), None) => crate::enrollment::Revoke::Identity(identity),
+                    (None, None, Some(trust)) => crate::enrollment::Revoke::Trust(trust),
+                    _ => {
+                        return Err(refused(
+                            "revoke names one node, one identity or one trusted grant",
+                        ));
+                    }
                 };
                 let revoked = self.revoke(target).await?;
                 self.activity.record(
@@ -1065,6 +1080,9 @@ impl Node {
                         crate::enrollment::Revoke::Node(node) => json!({"node": node.to_hex()}),
                         crate::enrollment::Revoke::Identity(identity) => {
                             json!({"identity": identity.to_hex()})
+                        }
+                        crate::enrollment::Revoke::Trust(trust) => {
+                            json!({"trust": HEXLOWER.encode(&trust)})
                         }
                     },
                 );

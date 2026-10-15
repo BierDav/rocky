@@ -178,6 +178,43 @@ class TipsTest {
     }
 
     @Test
+    fun trustRequestsAndGrantDecode() = runBlocking {
+        val grant = buildJsonObject {
+            put("identity", "identity-key")
+            put("capability", "capability-id")
+            put("grant", "00ff")
+        }
+        val (transport, tips) = recordingTips {
+            when (it.getValue("type").jsonPrimitive.content) {
+                "revoke" -> buildJsonObject {}
+                else -> if (it.action() == "trust") grant else status
+            }
+        }
+        assertEquals(TrustGrant("identity-key", "capability-id", "00ff"), tips.trust("identity-key"))
+        tips.installTrust("00ff")
+        tips.revokeTrust("capability-id")
+        assertEquals(
+            listOf(
+                buildJsonObject {
+                    put("type", "tips")
+                    put("action", "trust")
+                    put("identity", "identity-key")
+                },
+                buildJsonObject {
+                    put("type", "tips")
+                    put("action", "install_trust")
+                    put("grant", "00ff")
+                },
+                buildJsonObject {
+                    put("type", "revoke")
+                    put("trust", "capability-id")
+                },
+            ),
+            transport.calls,
+        )
+    }
+
+    @Test
     fun coordinatedRefusalsKeepTheirCodes() = runBlocking {
         for ((code, retryable) in listOf("sealed" to false, "coordinator_unavailable" to true)) {
             val tips = recordingTips { throw RockyException(code, retryable, "refused") }.second

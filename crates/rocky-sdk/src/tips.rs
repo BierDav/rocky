@@ -85,6 +85,15 @@ pub struct TipNode {
     pub kept_tips: Option<Vec<String>>,
     pub kept_seals: Option<Vec<String>>,
 }
+/// The owner's trusted grant to an identity: `grant` is opaque hex the
+/// identity's device installs; `capability` is what revocation names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustGrant {
+    pub identity: String,
+    pub capability: String,
+    pub grant: String,
+}
 /// The domain's complete graph, for developers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TipInspection {

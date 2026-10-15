@@ -604,6 +604,17 @@ impl Session {
     pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"follow","name":name})).await
     }
+    /// The owner grants `identity` trust for this domain: it opens tips and
+    /// moves bookmarks backward or sideways.
+    pub async fn trust(&self, identity: &str) -> Result<crate::TrustGrant, Failure> {
+        self.tips(json!({"action":"trust","identity":identity}))
+            .await
+    }
+    /// Installs a trusted grant the owner issued to this device's identity.
+    pub async fn install_trust(&self, grant: &str) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"install_trust","grant":grant}))
+            .await
+    }
     /// Drops the local frames of a tip this device no longer follows.
     pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {
         self.tips(json!({"action":"drop","tip":tip})).await

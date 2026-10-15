@@ -342,6 +342,24 @@ impl CredentialChain {
     ) -> Result<Vec<ResourceGrant>, Error> {
         self.check(publisher, subject, Some((revocations, time)))
     }
+    /// The identity this chain grants trust for `scope`: it must be exactly
+    /// one owner-direct trusted grant, valid at `time` and unrevoked.
+    pub fn trusted_identity(
+        &self,
+        publisher: PublicKey,
+        scope: rocky_core::Scope,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<PublicKey, Error> {
+        let leaf = self.links(publisher, Some((revocations, time)))?;
+        if self.0.len() != 1
+            || leaf.kind != PrincipalKind::User
+            || leaf.extended()?.trusted != Some(scope)
+        {
+            return Err(denied("not an owner-direct trusted grant for this domain"));
+        }
+        Ok(leaf.subject)
+    }
     /// Whether the publisher once delegated to the node `subject` through
     /// this chain, whatever the time and later revocations. It proves who a
     /// renewal is for; it authorizes nothing. Returns the identity's link:

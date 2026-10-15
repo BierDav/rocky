@@ -400,7 +400,7 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `pairing` with `profile` | `uri`, `expires`, `profile`, invitation activity `sequence` (issuer) |
 | `grant` / `delegate` with `device` and `grants` or `profile` | `supplied` for `install`; `delegate` narrows this device's grants |
 | `install` with `supplied` | Replaces credentials; the new `session` |
-| `devices`, `device_label`, `revoke` with `node` or `identity` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
+| `devices`, `device_label`, `revoke` with `node`, `identity` or `trust` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
 | `renew` | The renewed `session` |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |

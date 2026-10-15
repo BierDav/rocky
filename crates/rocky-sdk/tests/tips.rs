@@ -562,3 +562,200 @@ mod coordinated {
         Ok(())
     }
 }
+
+/// A trusted identity through the SDK: the owner grants it, its device
+/// installs the grant, and it opens tips and moves bookmarks back.
+mod trusted {
+    use super::*;
+
+    struct Household {
+        _root: tempfile::TempDir,
+        owner: Device,
+        devices: Vec<Device>,
+    }
+    /// The owner on `main` and `count` writers following it, every pair
+    /// introduced, then one row and a seal. The writers join before any
+    /// row: a device that imported a checkpoint neither seals nor switches
+    /// tips until phase 15 places checkpoints at seals.
+    async fn household(count: usize) -> Result<Household, Failure> {
+        let root = tempfile::tempdir()?;
+        let hub = Arc::new(Hub::default());
+        let owner = Device::create(
+            &root.path().join("owner"),
+            Some(Network::Owned(hub.connector("owner"))),
+        )?;
+        main(&owner).await;
+        let mut devices = Vec::new();
+        for index in 0..count {
+            let name = format!("d{index}");
+            let device = Device::join(
+                &root.path().join(&name),
+                &owner.invite().await,
+                Network::Owned(hub.connector(&name)),
+            )?;
+            introduce(&owner, &device).await;
+            for other in &devices {
+                introduce(other, &device).await;
+            }
+            device.sync().await.expect("join sync");
+            ok(&device, "follow", json!({"name": "main"})).await;
+            devices.push(device);
+        }
+        owner.add(1, "before").await;
+        ok(&owner, "seal", json!({})).await;
+        let all: Vec<&Device> = std::iter::once(&owner).chain(&devices).collect();
+        settle(&all).await;
+        for device in &devices {
+            assert_eq!(device.titles().await, ["before"]);
+        }
+        Ok(Household {
+            _root: root,
+            owner,
+            devices,
+        })
+    }
+    async fn identity(device: &Device) -> String {
+        device.ok(json!({"type": "session"})).await["principal"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+    /// The owner grants `device`'s identity trust and the device installs it.
+    async fn trust(owner: &Device, device: &Device) -> Value {
+        let granted = ok(owner, "trust", json!({"identity": identity(device).await})).await;
+        ok(device, "install_trust", json!({"grant": granted["grant"]})).await;
+        granted
+    }
+    /// Syncs every device until the last round moved nothing new.
+    async fn settle(devices: &[&Device]) {
+        for _ in 0..3 {
+            for device in devices {
+                let _ = device.sync().await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trusted_identity_opens_a_branch_that_devices_on_main_never_see()
+    -> Result<(), Failure> {
+        let house = household(3).await?;
+        let owner = &house.owner;
+        let [t, u, m] = &house.devices[..] else {
+            return Err("devices".into());
+        };
+        let inspection = ok(t, "inspect", json!({})).await;
+        let main_tip = ok(t, "status", json!({})).await["tip"].clone();
+        let seal = inspection["seals"]
+            .as_array()
+            .and_then(|seals| seals.iter().find(|seal| seal["id"] == main_tip))
+            .ok_or("main's latest seal")?["id"]
+            .clone();
+        // Without the grant a writer opens nothing.
+        let refused = tips(t, "open", json!({"seal": seal, "minimum_in_sync": 1}))
+            .await
+            .expect_err("untrusted");
+        assert!(message(refused).contains("only the owner"));
+        trust(owner, t).await;
+
+        let dev = ok(t, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
+        ok(t, "create", json!({"name": "dev", "tip": dev})).await;
+        ok(t, "follow", json!({"name": "dev"})).await;
+        u.sync().await.expect("graph sync");
+        ok(u, "follow", json!({"name": "dev"})).await;
+        t.add(2, "t on dev").await;
+        u.add(3, "u on dev").await;
+        m.add(4, "m on main").await;
+        settle(&[t, u, m, owner]).await;
+        for device in [t, u] {
+            assert_eq!(device.titles().await, ["before", "t on dev", "u on dev"]);
+        }
+        for device in [m, owner] {
+            assert_eq!(device.titles().await, ["before", "m on main"]);
+        }
+
+        // u returns to main, drops dev, and its writes there reach main.
+        ok(u, "follow", json!({"name": "main"})).await;
+        ok(u, "drop", json!({"tip": dev})).await;
+        u.add(5, "u on main").await;
+        settle(&[u, m, owner, t]).await;
+        for device in [u, m, owner] {
+            assert_eq!(device.titles().await, ["before", "m on main", "u on main"]);
+        }
+        assert_eq!(t.titles().await, ["before", "t on dev", "u on dev"]);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trusted_identity_moves_main_back_and_the_abandoned_writes_are_held()
+    -> Result<(), Failure> {
+        let house = household(2).await?;
+        let owner = &house.owner;
+        let [t, m] = &house.devices[..] else {
+            return Err("devices".into());
+        };
+        trust(owner, t).await;
+        let earlier = ok(t, "status", json!({})).await["tip"].clone();
+        let inspection = ok(t, "inspect", json!({})).await;
+        let seal = inspection["seals"]
+            .as_array()
+            .and_then(|seals| seals.iter().find(|seal| seal["id"] == earlier))
+            .ok_or("seal")?["id"]
+            .clone();
+        // main moves on; m writes on the line t then abandons.
+        t.add(2, "kept").await;
+        ok(t, "seal", json!({})).await;
+        settle(&[t, m, owner]).await;
+        m.add(3, "abandoned").await;
+        settle(&[m, t, owner]).await;
+        for device in [t, m, owner] {
+            assert_eq!(device.titles().await, ["abandoned", "before", "kept"]);
+        }
+        let back = ok(t, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
+        let moved = ok(t, "move", json!({"name": "main", "tip": back})).await;
+        assert_eq!(moved["tip"], back);
+        settle(&[t, m, owner]).await;
+        for device in [t, m, owner] {
+            assert_eq!(ok(device, "status", json!({})).await["tip"], back);
+            assert_eq!(device.titles().await, ["before"]);
+            let held = device.ok(json!({"type": "held_changes"})).await;
+            assert!(held["count"].as_u64() >= Some(1), "{held}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoking_a_trusted_grant_ends_the_identitys_tip_authority() -> Result<(), Failure> {
+        let house = household(1).await?;
+        let owner = &house.owner;
+        let t = &house.devices[0];
+        let granted = trust(owner, t).await;
+        // Only the owner grants, and only an identity's own device installs.
+        assert!(
+            tips(t, "trust", json!({"identity": identity(owner).await}))
+                .await
+                .is_err()
+        );
+        assert!(
+            tips(owner, "install_trust", json!({"grant": granted["grant"]}))
+                .await
+                .is_err()
+        );
+        owner
+            .ok(json!({"type": "revoke", "trust": granted["capability"]}))
+            .await;
+        settle(&[owner, t]).await;
+        let tip = ok(t, "status", json!({})).await["tip"].clone();
+        let seal = ok(t, "inspect", json!({})).await["seals"]
+            .as_array()
+            .and_then(|seals| seals.iter().find(|seal| seal["id"] == tip))
+            .ok_or("seal")?["id"]
+            .clone();
+        let refused = tips(t, "open", json!({"seal": seal, "minimum_in_sync": 1}))
+            .await
+            .expect_err("trust revoked");
+        assert!(message(refused).contains("only the owner"));
+        // The identity keeps writing under its other grants.
+        t.add(2, "still writing").await;
+        Ok(())
+    }
+}

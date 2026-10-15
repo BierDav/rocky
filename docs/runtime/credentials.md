@@ -186,7 +186,10 @@ device or one that missed intervening epochs.
 An issuer revokes one node or an identity. `revoke` with `node` names that
 node's certificate; other nodes of its identity keep working. `revoke` with
 `identity` names the identity and every node and capability its records
-list: every chain through it ends, unrecorded nodes included. The owner's identity is never revoked.
+list: every chain through it ends, unrecorded nodes included. `revoke` with
+`trust` names one trusted grant by its capability id; only the owner revokes
+one, and since it reads nothing no key rotates
+([trusted identities](tips-and-bookmarks.md#trusted-identities)). The owner's identity is never revoked.
 The intent is saved in `identity.json` first: the
 [revocation statement](revocations.md) and the key epoch each collection and
 group partition the nodes could read rotates to, the scope's held maximum

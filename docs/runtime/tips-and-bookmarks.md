@@ -78,7 +78,32 @@ workspace refuses writes, and a failed enrollment is recorded as
 `line_node_failed` [activity](activity.md).
 
 `drop(tip)` releases a tip the device no longer follows. It refuses the
-followed tip and its ancestors, and frames other devices do not hold yet.
+followed tip and its ancestors, and its own writes until a peer that reads
+them reported holding them, by acknowledgment or frontier, as pruning counts.
+
+A device that bootstrapped a table from a checkpoint holds no author
+positions for it: it neither seals nor switches to a branch whose base it
+lacks, until [phase 15](../features_09/15-lazy-compaction.md) places
+checkpoints at seals. Following another bookmark retries peers at once that
+refused links while their tips differed.
+
+## Trusted identities
+
+The owner grants an identity trust for the domain; its devices then open tips
+and move bookmarks backward or sideways like the owner. The grant is an
+owner-direct link with no table grants, handed to a device of that identity,
+which installs it; revoking it by its capability id ends the authority and
+leaves the identity's other grants.
+
+```kotlin
+val grant = ownerTips.trust(identity)       // identity: its `session` principal
+deviceTips.installTrust(grant.grant)        // on a device of that identity
+ownerTips.revokeTrust(grant.capability)     // later, to remove it
+```
+
+The owner issues it for the domain's credential lifetime; granting again
+extends it. Only an identity's own device installs it, and only while it is
+current and unrevoked.
 
 ## Move or delete a bookmark
 
@@ -106,6 +131,9 @@ refused instead of published.
 | `deleteBookmark(name)` | `delete_bookmark` | `delete`, `name` | `TipStatus` |
 | `follow(name)` | `follow` | `follow`, `name` | `TipStatus` |
 | `drop(tip)` | `drop_tip` | `drop`, `tip` | `TipStatus` |
+| `trust(identity)` | `trust` | `trust`, `identity` | `TrustGrant` |
+| `installTrust(grant)` | `install_trust` | `install_trust`, `grant` | `TipStatus` |
+| `revokeTrust(capability)` | — | `{"type": "revoke", "trust": capability}` | `{}` |
 
 The JSON request is `{"type": "tips", "action": ...}` in the
 [SDK contract](sdk-contract.md) envelope; Kotlin's `RockyClient.tips` and
@@ -144,7 +172,8 @@ The caller keeps line-node keys and supplies them again after reopening.
 Statements are signed by the identity, never a node. The owner signs with no
 links; trust is an owner-direct grant, `Extended.trusted: Option<Scope>`,
 issued by `Authority::issue_trusted`; issuers sign through their issuer links.
-The SDK offers no call that grants trust yet.
+The SDK's `trust` call issues it; an identity with an installed grant signs
+through that single link, else through its issuer links.
 
 Peers declare their followed tip in the authenticated hello. Row offers,
 frontiers, range transfers and remote reads need the same tip; frames of

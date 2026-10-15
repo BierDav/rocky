@@ -7,13 +7,14 @@ records why.
 
 ## Discovery
 
-A sync finds a peer on a newer generation when the peer's credentials, a
-frame or a [horizon statement](mergeable-horizon.md) name a manifest this
+A sync finds a peer on a newer generation when the peer's session hello, a
+frame or a [horizon statement](mergeable-horizon.md) names a manifest this
 device does not know, including when opening the link to the peer fails on
-its credentials; after adopting, earlier failures no longer back that peer
-off. The device then asks that peer for its generations on
-the renewal protocol (`rocky.sdk.generations.v1`); every device answers, since
-all of it is public. Before anything is saved it verifies the reply:
+it; after adopting, earlier failures no longer back that peer off.
+Credentials name no generation, so they never decide this. The device then
+asks that peer for its generations on the renewal protocol
+(`rocky.sdk.generations.v1`); every device answers, since all of it is
+public. Before anything is saved it verifies the reply:
 
 - every manifest is endorsed by the domain's owner or an issuer through its
   chain, and one met for the first time by a signer no statement this device
@@ -23,15 +24,27 @@ all of it is public. Before anything is saved it verifies the reply:
 - the transitions chain from step to step, through this device's generation,
   to the offered one.
 
-A forged schema, manifest or transition is refused and nothing changes. An
-issuer, the peer first when it is one, renews the device into the
-generation, so its credentials and reader keys name the new manifest; a
-device that reaches no issuer records `generation_pending` in its
-[activity](activity.md) and tries again at the next sync.
+A forged schema, manifest or transition is refused, nothing changes, and the
+sync with that peer fails. The device adopts a verified generation on its
+own: no issuer renews it, because its chain and reader keys hold in every
+generation ([credentials](credentials.md)). A member that meets the
+generation through another member, with no issuer reachable, adopts it the
+same way and keeps writing every table its grants name. An issuer that
+adopts one also derives the first reader key of each table it adds from the
+registry key, as the signing issuer did, and certifies its node again under
+the issuer authority it holds. Tables and columns the grants cover join the
+projection at the switch.
+
+A table the generation [grants like](generations.md#tables-granted-like-another)
+one the device holds is not in its chain. The next sync asks an issuer, once
+per generation, for an ordinary [renewal](sdk-enrollment.md), which grants it
+with its reader key; until then the device cannot open that table. The
+renewal grows the installed projection by the table through a
+[projection plan](generations.md#plan-backfill-and-switch).
 
 ## The switch
 
-The renewed settings are saved first. The open replica then moves to the
+The verified generation is saved first. The open replica then moves to the
 generation with `EncryptedReplica::adopt_generation`: it verifies the lineage
 again, activates the generation in one transaction and runs the
 [backfill and switch](generations.md#plan-backfill-and-switch) before it
@@ -54,7 +67,7 @@ without them before the switch returns; status reports their count in `held`.
 | The installed schema | Opens it | `current` |
 | What a generation the domain left defined | Opens the installed database unchanged | `behind` |
 | A newer schema, on an issuer | Signs and adopts additions; removals first require [confirmation](generations.md#confirmed-removals) | `current` after confirmation |
-| A newer schema, on a member | Fetches it from an issuer that signed it; otherwise opens at the domain's generation | `current` or `ahead` |
+| A newer schema, on a member | Fetches it from a device that runs it, issuers first; otherwise opens at the domain's generation | `current` or `ahead` |
 
 Schema versions are local and unsigned. They decide only one case: a schema
 that matches an earlier generation is behind unless it declares a later
@@ -90,7 +103,8 @@ Frames of devices that have not migrated are admitted under their own
 manifest. A replica that lacks the manifest of a generation a peer still writes
 under, such as one it [dropped](generations.md#manifests-are-a-cache), learns
 it on demand: when a sync, or a live link the peer opened, meets a frame or
-credentials it cannot place and the peer is not newer, the device asks that
+a session hello naming a generation it cannot place and the peer is not
+newer, the device asks that
 peer for its generations. `EncryptedReplica::learn_generations` records each
 endorsed manifest whose transitions, the peer's or its own, lead to a
 generation it knows, then admits the frames refused under it; the SDK keeps
@@ -117,6 +131,10 @@ undefined. This is an
   `a_newer_horizon_is_acknowledged_after_adopting_its_generation`,
   `an_older_application_joins_at_the_households_generation` and
   `issuers_that_sign_one_schema_apart_end_on_one_generation`.
+- Adoption without an issuer: `rocky-sdk` `tests/generations.rs`
+  `a_member_adopts_a_generation_from_another_member_with_no_issuer_reachable`,
+  `an_invitation_created_before_a_schema_change_enrolls_a_device_after_it`
+  and `a_table_granted_like_another_reaches_existing_members`.
 - `rocky-sdk` `enrollment::tests::a_forged_generation_offer_is_refused_before_anything_changes`
   and `an_earlier_signed_step_moves_the_baseline`.
 - `rocky-sdk` `tests/driver.rs` `an_older_room_application_validates_the_schema_it_declares`.

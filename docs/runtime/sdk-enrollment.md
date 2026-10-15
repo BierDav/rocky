@@ -128,6 +128,9 @@ subsequent `DeviceEnrolled` events before another invitation replaces it.
 
 - It lasts ten minutes and enrolls one device. A new one replaces it. Ten
   wrong tokens lock it.
+- Its profile names tables, not a generation: an invitation created before a
+  schema change enrolls a device into the generation the issuer runs when it
+  is used.
 - The joiner brings its identity, its provider's or a new one, makes its node
   key and proves the token. The issuer grants the profile to that identity:
   a capability signed through the issuer's own chain, the current reader keys
@@ -162,9 +165,10 @@ return the public identity (`user`) and node keys, the same ones when asked
 again. The owner or an issuer signs a capability with
 `credentials::Authority`, or an issuer answers the `grant` call with
 [raw grants](credential-primitives.md#raw-grants). `Database::install` takes
-the result as `Supplied`: mesh and domain IDs, `Credentials`, reader keys by
-collection and epoch, and renewing issuers' contacts. A chain ending at the
-node's identity is certified for its node. Everything is verified first; a
+the result as `Supplied`: mesh and domain IDs, the signed manifest of the
+generation it starts at, `Credentials`, reader keys by collection and epoch,
+and renewing issuers' contacts. A chain ending at the node's identity is
+certified for its node. Everything is verified first; a
 chain for another node, a key for an unread collection or a missing reader
 key installs nothing. No network is needed.
 
@@ -185,7 +189,12 @@ Credentials last 30 days by default (`credential_ttl`, a minute to a year). A
 sync renews them past half their lifetime: the device signs a timestamped
 request for one issuer, which answers with the same grants, the
 [revocations](revocations.md) it holds and the current reader key epochs,
-sealed to a one-time key. Any issuer renews any unrevoked identity below it:
+sealed to a one-time key. Credentials name no generation, so adopting one
+renews nothing ([adopting generations](adopting-generations.md)); a renewal
+only adds the tables a later generation
+[grants like](generations.md#tables-granted-like-another) one the identity
+holds, and a member asks for one once per generation that adds such a table.
+Any issuer renews any unrevoked identity below it:
 it takes the tombstone and profile from the node's registry record, or renews
 the presented chain and records it when the record has not reached it yet.
 The renewed chain runs through the answering issuer and expires no later than

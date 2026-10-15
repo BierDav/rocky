@@ -233,9 +233,9 @@ impl HorizonAck {
             &(self.horizon, self.node, self.signer, &self.credentials),
         )
     }
-    pub fn verify(&self, publisher: PublicKey, manifest: Commitment) -> Result<(), Error> {
+    pub fn verify(&self, publisher: PublicKey) -> Result<(), Error> {
         self.credentials
-            .verify_node_alias(publisher, manifest, self.node, self.signer)?;
+            .verify_node_alias(publisher, self.node, self.signer)?;
         if !self.signer.verify(&self.bytes()?, &self.signature) {
             return Err(denied("invalid horizon acknowledgment"));
         }

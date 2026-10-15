@@ -30,24 +30,21 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         ),
         rows: RowSelection::All,
         rights: [Right::Read].into(),
-        fields: BTreeSet::new(),
+        fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
     }];
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let device = DeviceKeys {
         user: user.public_key(),
         node: node.public_key(),
     };
-    let capability = Authority::owner(
-        &PrivateKey::from_bytes(&vault.get("identity")?),
-        domain.manifest().hash(),
-    )
-    .issue_partition_terms(
-        user.public_key(),
-        vec![],
-        grants.clone(),
-        (1, Some(rocky_credentials::AuthorRange::ALL)),
-        issuer.validity()?,
-    )?;
+    let capability = Authority::owner(&PrivateKey::from_bytes(&vault.get("identity")?))
+        .issue_partition_terms(
+            user.public_key(),
+            vec![],
+            grants.clone(),
+            (1, Some(rocky_credentials::AuthorRange::ALL)),
+            issuer.validity()?,
+        )?;
     let mut rows = BTreeMap::new();
     let changes = issuer.holder_changes(&vault, &device, &grants, 1, &Registry::default())?;
     let registry = Registry::merged(&mut rows, &changes)?;
@@ -215,7 +212,6 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
     )?;
     let (_, selectors) = chain.verify_selectors(
         issuer.publisher,
-        domain.manifest().hash(),
         node.public_key(),
         &issuer.revocations,
         now()?,
@@ -805,7 +801,7 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let identity = issuer.identity(&vault)?;
     let links = issuer.issuer_links();
     let capability = issuer.issue(
-        &issuer.authority(&*identity, &links, &domain)?,
+        &issuer.authority(&*identity, &links)?,
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,

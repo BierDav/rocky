@@ -19,6 +19,12 @@ async fn sync(
     scope: ResourceScope,
 ) {
     let credentials = lineage.credentials(generation, target_key);
+    // As the target's session hello declares its generation.
+    let manifest = target.inner.lock().await.manifest;
+    source
+        .admit_peer(target_key.public_key(), &credentials, manifest)
+        .await
+        .unwrap();
     let mut after = None;
     loop {
         let frontier = target.frontier(scope).await.unwrap();

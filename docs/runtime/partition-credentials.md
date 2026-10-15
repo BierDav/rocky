@@ -47,7 +47,7 @@ policy, and refuses a revoked subject. `provenance` verifies historical identity
 without authorizing any partition.
 
 `verify_partition` verifies the complete node chain under the supplied publisher,
-manifest, current signed policy statement and time, then resolves its grants on
+current signed policy statement and time, in any generation, then resolves its grants on
 one concrete tuple and scope. It refuses a tuple whose derived encryption scope
 does not match, a wrong subject or a partition outside the leaf's selectors.
 Custody-only grants pass these checks without any reader key. A caller still
@@ -71,19 +71,20 @@ supported by these APIs.
 HKDF-SHA256 binding the domain, group address, table identity and positive
 epoch; a derived key reveals neither the secret nor a sibling table's key.
 
-`GroupSecretEnvelope::seal` (version 2) wraps one group partition's 32-byte
+`GroupSecretEnvelope::seal` (version 3) wraps one group partition's 32-byte
 secret for one epoch to one recipient's Ed25519 public key, converted to
 X25519, with ChaCha20-Poly1305. The delivering signer signs the whole envelope under
-`rocky.group-secret-envelope.v2`. The epoch identity and its revocation IDs
+`rocky.group-secret-envelope.v3`. The epoch identity and its revocation IDs
 are bound by the signature. `seal_many` wraps the same secret
 independently to 1–256 distinct recipients, each with fresh ephemeral material
 and a fresh AEAD nonce. The sealed length follows from the secret length.
 
-`verify` pins the expected delivering issuer, manifest, group address and
-epoch and checks its signature, without any reader secret. `open` additionally
+`verify` pins the expected delivering issuer, group address and epoch and
+checks its signature, without any reader secret. `open` additionally
 requires the intended recipient's secret key. The wrapping key and associated
-data bind the version, manifest, group address, epoch, recipient, issuer and
-ephemeral public key. Wrong recipients, keys, contexts, zero DH shared secrets,
+data bind the version, group address, epoch, recipient, issuer and
+ephemeral public key. No envelope names a generation: group secrets follow
+key epochs only. Wrong recipients, keys, contexts, zero DH shared secrets,
 other versions or sealed lengths and modified ciphertext are refused.
 `from_bytes` enforces a 128 KiB canonical CBOR bound; SDK delivery
 additionally limits the inner envelope to 4 KiB. decoding alone does not

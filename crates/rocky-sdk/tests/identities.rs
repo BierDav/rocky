@@ -140,6 +140,27 @@ async fn further_nodes_of_an_identity_join_without_an_issuer() -> Result<(), Fai
         .await
         .map_err(|error| error.to_string())?;
     assert_eq!(household.nodes[2].titles().await, ["Milk"]);
+    // Each node writes its identity's table under its own number: the rows
+    // never collide and every node reads them all.
+    let mut ids = Vec::new();
+    for (index, device) in household.nodes.iter().enumerate() {
+        ids.push(device.add(10 + index as u8, &format!("Node {index}")).await);
+    }
+    for index in [2, 1, 0, 1, 2] {
+        household.nodes[index]
+            .sync()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3);
+    for device in &household.nodes {
+        assert_eq!(
+            device.titles().await,
+            ["Milk", "Node 0", "Node 1", "Node 2"]
+        );
+    }
     // A provider of another identity is refused by the identity's nodes.
     let stranger = Database::enroll_identity(
         open(

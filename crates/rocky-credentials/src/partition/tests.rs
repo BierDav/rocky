@@ -5,8 +5,8 @@ use crate::{
 };
 use crate::{PrivateKey, decode_bounded, encode};
 use rocky_core::{
-    Affinity, AppId, Collation, DomainId, KeyColumn, MeshId, PartitionSelection, PartitionValue,
-    PrincipalKind, ResourceScope, RowChange, RowWrite, SqlValue,
+    Affinity, AppId, Collation, DomainId, FieldSelection, KeyColumn, MeshId, PartitionSelection,
+    PartitionValue, PrincipalKind, ResourceScope, RowChange, RowWrite, SqlValue,
 };
 const NOW: u64 = 100;
 const VALIDITY: (u64, u64, u64) = (NOW, 1000, 0);
@@ -49,7 +49,7 @@ fn grant(
         ),
         rows: RowSelection::All,
         rights: rights.iter().copied().collect(),
-        fields: fields.iter().map(|field| [*field; 32]).collect(),
+        fields: FieldSelection::Only(fields.iter().map(|field| [*field; 32]).collect()),
     }
 }
 fn policy() -> RevocationSet {
@@ -71,7 +71,7 @@ fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
     .unwrap()
 }
 fn authority(key: &PrivateKey) -> Authority<'_> {
-    Authority::owner(key, [9; 32])
+    Authority::owner(key)
 }
 
 struct SelectorFixture {
@@ -152,13 +152,12 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     } = selector_fixture();
     assert!(
         chain
-            .provenance(publisher.public_key(), [9; 32], node.public_key())
+            .provenance(publisher.public_key(), node.public_key())
             .is_ok()
     );
     let grants = chain
         .verify_partition(
             publisher.public_key(),
-            [9; 32],
             node.public_key(),
             scope,
             &t,
@@ -171,13 +170,7 @@ fn selector_chain_checks_attenuation_and_concrete_scope_without_a_key() {
     // The ordinary table-scope admission path cannot discard the selector.
     assert!(
         chain
-            .verify(
-                publisher.public_key(),
-                [9; 32],
-                node.public_key(),
-                &policy(),
-                NOW
-            )
+            .verify(publisher.public_key(), node.public_key(), &policy(), NOW)
             .is_err()
     );
 }
@@ -199,7 +192,6 @@ fn selector_chain_binds_each_slot_to_its_concrete_scope() {
             chain
                 .verify_partition(
                     publisher.public_key(),
-                    [9; 32],
                     node.public_key(),
                     t.scope(domain(), [3; 32]).unwrap(),
                     &t,
@@ -214,7 +206,6 @@ fn selector_chain_binds_each_slot_to_its_concrete_scope() {
         chain
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &changed,
@@ -269,7 +260,6 @@ fn refuses_wider_partition_grant(wide: PartitionGrant) {
         forged
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &t,
@@ -322,7 +312,6 @@ fn selector_chain_refuses_expired_credentials() {
         chain
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &t,
@@ -351,7 +340,6 @@ fn selector_chain_refuses_a_revoked_delegate() {
         chain
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &t,
@@ -454,13 +442,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
     chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());
     assert!(
         chain
-            .verify_selectors(
-                prefix.0[0].issuer,
-                [9; 32],
-                node_signer.public_key(),
-                &policy(),
-                NOW
-            )
+            .verify_selectors(prefix.0[0].issuer, node_signer.public_key(), &policy(), NOW)
             .is_err()
     );
     assert!(
@@ -484,7 +466,6 @@ fn partition_node_signer_rows_keep_their_granted_fields() {
     let grants = chain
         .verify_partition_author(
             publisher.public_key(),
-            [9; 32],
             node_signer.public_key(),
             11,
             scope,
@@ -521,7 +502,6 @@ fn partition_nodes_bind_the_author_and_sequence() {
         chain
             .verify_partition_author(
                 publisher.public_key(),
-                [9; 32],
                 node_signer.public_key(),
                 12,
                 scope,
@@ -535,7 +515,6 @@ fn partition_nodes_bind_the_author_and_sequence() {
         chain
             .verify_partition_author(
                 publisher.public_key(),
-                [9; 32],
                 PrivateKey::new().public_key(),
                 11,
                 scope,
@@ -560,7 +539,6 @@ fn partition_nodes_cannot_discard_their_selector() {
         chain
             .verify_partition_author(
                 publisher.public_key(),
-                [9; 32],
                 node_signer.public_key(),
                 11,
                 other.scope(domain(), [3; 32]).unwrap(),
@@ -574,7 +552,6 @@ fn partition_nodes_cannot_discard_their_selector() {
         chain
             .verify(
                 publisher.public_key(),
-                [9; 32],
                 node_signer.public_key(),
                 &policy(),
                 NOW
@@ -596,7 +573,6 @@ fn partition_node_signer_credentials_verify_after_round_trip() {
     let grants = chain
         .verify_partition_author(
             publisher.public_key(),
-            [9; 32],
             node_signer.public_key(),
             11,
             scope,
@@ -611,7 +587,6 @@ fn partition_node_signer_credentials_verify_after_round_trip() {
         roundtrip
             .verify_partition_author(
                 publisher.public_key(),
-                [9; 32],
                 node_signer.public_key(),
                 11,
                 scope,
@@ -654,7 +629,6 @@ fn partition_selectors_cannot_be_dropped() {
         dropped
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &t,
@@ -673,7 +647,6 @@ fn partition_selectors_cannot_be_dropped() {
         dropped
             .verify_partition(
                 publisher.public_key(),
-                [9; 32],
                 node.public_key(),
                 scope,
                 &t,

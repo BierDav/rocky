@@ -96,7 +96,6 @@ impl<A: RowApplication> Inner<A> {
             Some(author) if partition.is_some() => credentials
                 .verify_partition_author(
                     self.config.publisher,
-                    self.manifest,
                     signing_key.public_key(),
                     author.number,
                     scope,
@@ -110,7 +109,6 @@ impl<A: RowApplication> Inner<A> {
             Some(author) => credentials
                 .verify_author(
                     self.config.publisher,
-                    self.manifest,
                     signing_key.public_key(),
                     author.number,
                     scope.table,

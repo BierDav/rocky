@@ -59,9 +59,9 @@ the range granted to the principal. No table-key mapping is recorded.
 - `peer_add` on an issuer refuses a tombstoned contact; any device refuses a
   contact a held [revocation](revocations.md) names.
 - Renewal refuses a node or identity a held statement, a tombstone or the
-  record revoked and renews
-  an earlier generation into the record's profile. Without a record it renews
-  the presented chain and writes one.
+  record revoked. It renews the record's profile over the current
+  generation, which widens the grants only by tables granted like held ones;
+  without a record it renews the presented chain and writes one.
 - `logout` counts recorded issuers besides `issuers`.
 - `revoke` builds its [statement](revocations.md) and target key epochs
   from the records and saves them as its intent: with `node` that node's

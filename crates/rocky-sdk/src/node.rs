@@ -308,6 +308,9 @@ pub(crate) struct Node {
     declared: crate::schema::Schema,
     /// Peers whose baselines this process compared, by generation.
     compared: std::sync::Mutex<std::collections::BTreeSet<(PublicKey, String)>>,
+    /// Generations whose wider profile grants this process asked an issuer
+    /// for once.
+    widened: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl Node {
@@ -379,6 +382,7 @@ impl Node {
             mailbox: Mutex::new(None),
             declared: settings_schema,
             compared: Default::default(),
+            widened: Default::default(),
         }
     }
     /// Lets the owner control its domain on this coordination service.
@@ -1766,10 +1770,30 @@ impl Node {
         let (keys, adopted) = settings.adopt(&self.path, &self.vault, &renewed)?;
         let mut changed = !epochs_only || adopted;
         if changed {
+            let readable = self
+                .granted
+                .lock()
+                .map_err(|_| "scope catalog poisoned")?
+                .len();
             self.apply(&settings.revocations, &settings.credentials, keys)
                 .await?;
             for partition in settings.partitions(&self.domain())? {
                 self.hold_keys(&settings, &partition).await?;
+            }
+            // A table granted like a held one is projected, and held where
+            // its group partitions are, once granted.
+            if settings.granted(&self.domain()).len() > readable {
+                let domain = self.domain();
+                let mut widened = (**settings).clone();
+                crate::database::attach(
+                    &self.replica,
+                    &mut widened,
+                    &self.vault,
+                    &domain,
+                    &self.path,
+                )
+                .await?;
+                *settings = Shared::new(widened);
             }
         }
         if settings.issuer() {
@@ -2215,7 +2239,17 @@ impl Node {
         }
         let settings = self.settings.lock().await.clone();
         let member = !settings.issuer();
-        if settings.expires() < now()?.saturating_add(settings.ttl / 2) {
+        // Adopting a generation renews nothing. A table it granted like one
+        // this member holds joins its grants at a renewal, asked for once
+        // per generation while an issuer is reachable.
+        let widen = member
+            && settings.profile_widens(&self.domain())?
+            && self
+                .widened
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(settings.manifest.clone());
+        if widen || settings.expires() < now()?.saturating_add(settings.ttl / 2) {
             let renewed = self.renew(Some(transport), false, None, false).await;
             if let Err(error) = &renewed {
                 self.activity
@@ -2923,7 +2957,27 @@ impl Node {
         // Envelopes first, on the exchange's first session: a list a
         // delivery opens syncs in this exchange. A stalled dial must not
         // hold the shared checkpoint import slot.
-        let mut first = Some(self.deliver(&upstream).await?);
+        let mut first = match self.deliver(&upstream).await {
+            Ok(delivered) => Some(delivered),
+            // An envelope of a generation this replica lacks ends the
+            // exchange as a frame of it does: adopt or learn it first.
+            Err(error)
+                if matches!(
+                    error.downcast_ref(),
+                    Some(rocky_secure::Error::Incompatible(_))
+                ) =>
+            {
+                let _ = reconcile.close().await;
+                let _ = upstream.link.drain().await;
+                if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
+                    || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
+                {
+                    return Ok((false, true, sync::Transfer::default()));
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let marker = self.path.with_file_name("bootstrap.json");
         let mut bootstrapped = sync::Transfer::default();
         if marker.exists() {
@@ -2954,7 +3008,27 @@ impl Node {
                 .await;
                 self.observations
                     .record_partial(peer.to_hex(), std::mem::take(&mut bootstrapped));
-                if let Some(completed) = completed? {
+                let completed = match completed {
+                    // A checkpoint of a generation this replica lacks: adopt
+                    // or learn it first, as for a frame of it.
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref(),
+                            Some(rocky_secure::Error::Incompatible(_))
+                        ) =>
+                    {
+                        let _ = reconcile.close().await;
+                        let _ = upstream.link.drain().await;
+                        if matches!(self.adopt_newer(transport, peer, contact).await, Ok(true))
+                            || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
+                        {
+                            return Ok((false, true, sync::Transfer::default()));
+                        }
+                        return Err(error);
+                    }
+                    other => other?,
+                };
+                if let Some(completed) = completed {
                     self.replica.flush().await?;
                     if std::fs::read(&marker)? != completed {
                         return Err("bootstrap authority changed; retry with the new intent".into());
@@ -3026,22 +3100,14 @@ impl Node {
         // A peer on a newer generation: this database moves to it, and the
         // next pass syncs at it.
         if newer {
-            match self.adopt_newer(transport, peer, contact).await {
-                Ok(true) => return Ok((false, true, sync::Transfer::default())),
-                // A peer under an older generation this replica lacks.
-                Ok(false) | Err(_)
-                    if matches!(self.learn_older(transport, peer, contact).await, Ok(true)) =>
-                {
-                    return Ok((false, true, sync::Transfer::default()));
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    self.activity.record(
-                        "generation_pending",
-                        json!({"peer": peer.to_hex(), "error": error.to_string()}),
-                    );
-                }
+            let adopted = self.adopt_newer(transport, peer, contact).await;
+            // A peer under an older generation this replica lacks.
+            if matches!(adopted, Ok(true))
+                || matches!(self.learn_older(transport, peer, contact).await, Ok(true))
+            {
+                return Ok((false, true, sync::Transfer::default()));
             }
+            adopted?;
         } else if let Err(error) = self.compare_baselines(transport, peer, contact).await {
             self.activity.record(
                 "baseline_unknown",
@@ -3108,7 +3174,6 @@ impl Node {
                         signed.verify(
                             PrivateKey::from_bytes(&self.vault.get("node")?).public_key(),
                             settings.publisher,
-                            self.domain().manifest().hash(),
                             (now()?, 300),
                         )?;
                         let registry = self.registry().await?;

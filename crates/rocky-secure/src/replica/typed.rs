@@ -286,19 +286,14 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 if previous.is_none() && inner.installed_typed().await?.is_some() {
                     return Err(Error::Incompatible("a complete projection cannot become a readable projection; reinstall the database".into()));
                 }
-                if let Some(previous) = previous.as_ref() {
-                    let installed = inner.installed_typed().await?.map(|(schema, _, _)| schema);
-                    if !previous.is_subset(&allowed)
-                        || allowed.difference(previous).any(|name| {
-                            installed
-                                .as_ref()
-                                .is_some_and(|schema| schema.table(name).is_some())
-                        })
-                    {
-                        return Err(Error::Incompatible(
-                            "projection grants changed; reinstall the database".into(),
-                        ));
-                    }
+                // Grants may widen, as a renewal adds a table granted like a
+                // held one; the plan below projects it. They never narrow.
+                if let Some(previous) = previous.as_ref()
+                    && !previous.is_subset(&allowed)
+                {
+                    return Err(Error::Incompatible(
+                        "projection grants changed; reinstall the database".into(),
+                    ));
                 }
                 inner.conn.execute("INSERT INTO secure_projection_access VALUES(1,?) ON CONFLICT(id) DO UPDATE SET tables=excluded.tables", [encode(&allowed)?]).await?;
                 Ok(())
@@ -342,7 +337,15 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .await?;
             let expected: Vec<SqlValue> = record.iter().cloned().map(SqlValue::Blob).collect();
             match stored.first() {
-                Some(row) if *row == expected => return Ok(false),
+                // Grants that widened over the same schema project the
+                // tables they add through a plan, as another schema does.
+                Some(row) if *row == expected => {
+                    if inner.projection_grew(&typed).await? {
+                        inner.record_growth().await?;
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
                 // Another schema of the same definition: rebuild the tables
                 // through a projection plan.
                 Some(_) => {
@@ -443,7 +446,6 @@ impl<A: RowApplication> Inner<A> {
             .credentials
             .verify_selectors(
                 self.config.publisher,
-                self.manifest,
                 self.config.node.public_key(),
                 &self.config.revocations,
                 now()?,

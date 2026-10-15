@@ -519,6 +519,9 @@ pub struct DeviceKeys {
 pub struct Supplied {
     pub mesh: MeshId,
     pub domain: DomainId,
+    /// The signed manifest of the supplier's generation, which an
+    /// installation starts at. The credentials name no generation.
+    pub manifest: SignedManifest,
     /// The chain ends at the node's certificate, or at its identity; the
     /// device then delegates to its own node.
     pub credentials: Credentials,
@@ -643,6 +646,15 @@ pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<Resour
         _ => {}
     }
     Ok(grants)
+}
+/// `grants_of`, or none for a profile that names no collection, as one of
+/// partition grants alone does: what a renewal grants over the current
+/// generation.
+fn profile_grants(profile: &Profile, domain: &Domain) -> Result<Vec<ResourceGrant>, Failure> {
+    if matches!(profile, Profile::Grants { grants } if grants.is_empty()) {
+        return Ok(Vec::new());
+    }
+    grants_of(profile, domain)
 }
 impl Settings {
     /// The statement of `set` that revokes this device, once the whole set
@@ -1297,7 +1309,7 @@ impl Settings {
     /// authority over every author number, then this node's certificate.
     fn owner_chain(&self, vault: &Vault, domain: &Domain) -> Result<CredentialChain, Failure> {
         let identity = self.identity(vault)?;
-        let root = Authority::owner(&*identity, domain.manifest().hash()).issue_issuer(
+        let root = Authority::owner(&*identity).issue_issuer(
             self.publisher,
             self.minting.map(|minting| minting.range),
             self.validity()?,
@@ -1407,7 +1419,6 @@ impl Settings {
                 envelopes.push(
                     rocky_credentials::GroupSecretEnvelope::seal_recorded(
                         &sender,
-                        domain.manifest().hash(),
                         record.address,
                         epoch.generation,
                         vault.get(&role)?,
@@ -1456,13 +1467,7 @@ impl Settings {
                     return Err("group renewal epoch mismatch".into());
                 }
                 // The enrollment or renewal carrying it is the issuer's.
-                let secret = envelope.open(
-                    &node,
-                    envelope.issuer(),
-                    domain.manifest().hash(),
-                    offered.address,
-                    epoch,
-                )?;
+                let secret = envelope.open(&node, envelope.issuer(), offered.address, epoch)?;
                 record.admit(epoch)?;
                 let role = secret_role(&record.address, epoch);
                 if vault.find(&role)?.is_some_and(|held| held != secret) {
@@ -1709,7 +1714,7 @@ impl Settings {
             user: request.user,
             authors,
         });
-        let authority = self.authority(&*identity, &links, &domain)?;
+        let authority = self.authority(&*identity, &links)?;
         let issued = self.issue(
             &authority,
             &domain,
@@ -1803,7 +1808,7 @@ impl Settings {
         let authors = Some(self.reserve_authors(device.user, Some(registry), terms.authors)?);
         let identity = self.identity(vault)?;
         let links = self.issuer_links();
-        let authority = self.authority(&*identity, &links, &domain)?;
+        let authority = self.authority(&*identity, &links)?;
         let time = now()?;
         let capability = authority.issue_partition_terms(
             device.user,
@@ -1852,9 +1857,9 @@ impl Settings {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
             domain: self.domain,
+            manifest: self.manifest()?,
             credentials: Credentials {
                 publisher: self.publisher,
-                manifest: self.manifest()?,
                 revocations: self.revocations.clone(),
                 chain: authority.chain_of(capability),
             },
@@ -1952,9 +1957,9 @@ impl Settings {
             epoch_statements: self.statements_for_keys(&keys),
             mesh: self.mesh,
             domain: self.domain,
+            manifest: self.manifest()?,
             credentials: Credentials {
                 publisher: self.publisher,
-                manifest: self.manifest()?,
                 revocations: self.revocations.clone(),
                 chain,
             },
@@ -1976,9 +1981,8 @@ impl Settings {
         if supplied.mesh != self.mesh
             || supplied.domain != self.domain
             || credentials.publisher != self.publisher
-            || credentials.manifest.verify(self.publisher)?.hash() != domain.manifest().hash()
         {
-            return Err("the credentials belong to another domain or definition".into());
+            return Err("the credentials belong to another domain".into());
         }
         let node = PrivateKey::from_bytes(&vault.get("node")?);
         let chain = self.own_chain(vault, &domain, credentials)?;
@@ -1989,13 +1993,8 @@ impl Settings {
             domain.manifest().app,
             now()?,
         )?;
-        let (grants, _) = chain.verify_selectors(
-            self.publisher,
-            domain.manifest().hash(),
-            node.public_key(),
-            &revocations,
-            now()?,
-        )?;
+        let (grants, _) =
+            chain.verify_selectors(self.publisher, node.public_key(), &revocations, now()?)?;
         let mut keys = Vec::new();
         for (name, epoch, key) in &supplied.keys {
             let scope = domain
@@ -2061,13 +2060,7 @@ impl Settings {
             .is_some_and(|last| last.capability.kind == rocky_core::PrincipalKind::Node)
             && chain.principal() == Some(self.identity)
         {
-            chain.verify_selectors(
-                self.publisher,
-                domain.manifest().hash(),
-                node,
-                &credentials.revocations,
-                now()?,
-            )?;
+            chain.verify_selectors(self.publisher, node, &credentials.revocations, now()?)?;
             chain.0.pop();
         }
         if chain
@@ -2311,7 +2304,7 @@ impl Settings {
             identity,
             stored_identity: intent.stored_identity,
             provider,
-            manifest: HEXLOWER.encode(&credentials.manifest.to_bytes()?),
+            manifest: HEXLOWER.encode(&supplied.manifest.to_bytes()?),
             revocations: RevocationSet::new(),
             credentials: credentials.chain.clone(),
             ttl: DEFAULT_TTL,
@@ -2336,7 +2329,7 @@ impl Settings {
             epoch_statements: BTreeMap::new(),
         };
         let domain = settings.domain()?;
-        if credentials.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
+        if supplied.manifest.verify(credentials.publisher)?.hash() != domain.manifest().hash() {
             return Err("the domain's manifest differs from this application schema".into());
         }
         // A chain that ends at this node's identity is certified here.
@@ -2345,7 +2338,6 @@ impl Settings {
         settings.learn_revocations(&credentials.revocations)?;
         let (grants, _) = settings.credentials.verify_selectors(
             settings.publisher,
-            domain.manifest().hash(),
             node.public_key(),
             &settings.revocations,
             now()?,
@@ -2586,7 +2578,6 @@ impl Settings {
         let prior = request.verify(
             PrivateKey::from_bytes(&vault.get("node")?).public_key(),
             self.publisher,
-            domain.manifest().hash(),
             (now()?, SKEW),
         )?;
         let (prior, granted) = held(prior, &domain)?;
@@ -2621,7 +2612,7 @@ impl Settings {
         let identity = self.identity(vault)?;
         let links = self.issuer_links();
         Ok(Renewal::seal_current(
-            &self.authority(&*identity, &links, &domain)?,
+            &self.authority(&*identity, &links)?,
             self.publisher,
             &request,
             self.revocations.clone(),
@@ -2819,99 +2810,16 @@ impl Settings {
         let renewal = Renewal::from_bytes(&reply)?;
         let sealed = renewal.open(self.publisher, &request, &secret)?;
         let domain = self.domain()?;
-        if !self.renews_identity(&renewal.capability.capability)? {
+        // The same grants, or this identity's profile over the current
+        // generation, which tables granted like held ones widen.
+        if !self.renews_identity(&renewal.capability.capability, &domain)? {
             return Err("renewal names another identity or other grants".into());
         }
         let mut next = self.clone();
         next.learn_revocations(&renewal.revocations)?;
         let chain = next.certify(vault, renewal.chain(), &domain)?;
-        let Sealed {
-            keys: received,
-            groups,
-            epoch_statements,
-            issuers,
-        } = Sealed::parse(&sealed)?;
-        let mut keys = Vec::new();
-        for (name, scope) in domain.scopes() {
-            if !reads(self.grants(), scope) {
-                continue;
-            }
-            let held = self.keys.get(name);
-            for (epoch, key) in received.get(name).into_iter().flatten() {
-                if epoch.valid() && !held.is_some_and(|held| held.contains(epoch)) {
-                    keys.push((name.to_owned(), *epoch, hex32(key)?));
-                }
-            }
-        }
-        Ok(Renewed {
-            contacted: Some(issuer),
-            revocations: renewal.revocations,
-            chain,
-            groups,
-            epoch_statements,
-            keys,
-            profile: None,
-            issuers,
-        })
-    }
-    /// An issuer's own chain, signed again where it can.
-    fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
-        self.issue_own(vault)
-    }
-    /// An issuer's own chain for the current definition: the owner signs
-    /// its identity's authority afresh; another issuer certifies its node
-    /// again under the issuer links it holds, which an issuer above it
-    /// renews.
-    pub(crate) fn issue_own(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
-        let domain = self.domain()?;
-        if self.owner() {
-            return self.owner_chain(vault, &domain);
-        }
-        self.certify(vault, self.identity_links(), &domain)
-    }
-    /// Whether a renewed capability is this identity's own, with the
-    /// grants and authority it holds.
-    fn renews_identity(&self, renewed: &rocky_credentials::Capability) -> Result<bool, Failure> {
-        let links = self.identity_links();
-        let held = &links
-            .0
-            .last()
-            .ok_or("missing identity credential")?
-            .capability;
-        Ok(renewed.subject == self.identity
-            && renewed.grants == held.grants
-            && renewed.extended()?.issues == held.extended()?.issues)
-    }
-    /// Renews into this identity's generation from an issuer, presenting
-    /// `previous`'s chain. The grants are this device's profile over the
-    /// new definition; reader keys of collections it now reads arrive too.
-    pub(crate) async fn renew_into_generation(
-        &self,
-        vault: &Vault,
-        transport: &dyn Transport,
-        issuer: PublicKey,
-        addresses: &[String],
-        previous: &Settings,
-    ) -> Result<Renewed, Failure> {
-        let node = PrivateKey::from_bytes(&vault.get("node")?);
-        let (request, secret) =
-            RenewRequest::sign(&node, issuer, previous.credentials.clone(), now()?)?;
-        let reply = exchange(transport, addresses, Protocol::Renew, &request.to_bytes()?).await?;
-        let renewal = Renewal::from_bytes(&reply)?;
-        let sealed = renewal.open(self.publisher, &request, &secret)?;
-        let domain = self.domain()?;
-        let grants = grants_of(&self.profile, &domain)?;
-        let renewed = &renewal.capability.capability;
-        let issues = renewed.extended()?.issues;
-        if renewed.subject != self.identity
-            || issues != self.profile.issues()
-            || (!issues && renewed.grants != grants)
-        {
-            return Err("the renewal names another identity or other grants".into());
-        }
-        let mut next = self.clone();
-        next.learn_revocations(&renewal.revocations)?;
-        let chain = next.certify(vault, renewal.chain(), &domain)?;
+        // Keys of tables the renewal widened to arrive with it.
+        let grants = chain.grants().to_vec();
         let Sealed {
             keys: received,
             groups,
@@ -2940,6 +2848,58 @@ impl Settings {
             profile: None,
             issuers,
         })
+    }
+    /// Whether this device's profile over the current generation grants
+    /// more than its chain holds, as a table granted like a held one does.
+    /// Only a renewal adds it; the chain holds in every generation.
+    pub(crate) fn profile_widens(&self, domain: &Domain) -> Result<bool, Failure> {
+        let held = self.grants();
+        let wanted = profile_grants(&self.profile, domain)?;
+        let partitions = match self.credentials.0.last() {
+            Some(leaf) => leaf.capability.extended()?.partitions,
+            None => Vec::new(),
+        };
+        Ok(domain.effective_partitions(&partitions) != partitions
+            || (held
+                .iter()
+                .all(|grant| wanted.iter().any(|wide| wide.includes(grant)))
+                && wanted
+                    .iter()
+                    .any(|wide| !held.iter().any(|grant| grant.includes(wide)))))
+    }
+    /// An issuer's own chain, signed again where it can.
+    fn renew_locally(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
+        self.issue_own(vault)
+    }
+    /// An issuer's own chain for the current definition: the owner signs
+    /// its identity's authority afresh; another issuer certifies its node
+    /// again under the issuer links it holds, which an issuer above it
+    /// renews.
+    pub(crate) fn issue_own(&self, vault: &Vault) -> Result<CredentialChain, Failure> {
+        let domain = self.domain()?;
+        if self.owner() {
+            return self.owner_chain(vault, &domain);
+        }
+        self.certify(vault, self.identity_links(), &domain)
+    }
+    /// Whether a renewed capability is this identity's own, with the
+    /// authority it holds and the grants it holds or its profile's over
+    /// `domain`.
+    fn renews_identity(
+        &self,
+        renewed: &rocky_credentials::Capability,
+        domain: &Domain,
+    ) -> Result<bool, Failure> {
+        let links = self.identity_links();
+        let held = &links
+            .0
+            .last()
+            .ok_or("missing identity credential")?
+            .capability;
+        Ok(renewed.subject == self.identity
+            && (renewed.grants == held.grants
+                || renewed.grants == profile_grants(&self.profile, domain)?)
+            && renewed.extended()?.issues == held.extended()?.issues)
     }
     /// Saves what a renewal brought before the replica learns it: the keys
     /// in the provider, then the identity. Returns the keys now listed and
@@ -3017,38 +2977,28 @@ impl Settings {
         if self.revoked_device(&request.node, registry) {
             return Err("device was revoked".into());
         }
-        let current = domain.manifest().hash();
-        // A device of an earlier generation is renewed into this one with
-        // its profile's grants over the current definition.
-        let prior = match request.verify(me, self.publisher, current, (time, SKEW)) {
-            Ok(prior) => prior.clone(),
-            Err(error) => {
-                let earlier = self.lineage.iter().find_map(|step| {
-                    let hash = step.verified(self.publisher).ok()?.from;
-                    request
-                        .verify(me, self.publisher, hash, (time, SKEW))
-                        .ok()
-                        .cloned()
-                });
-                let Some(mut prior) = earlier else {
-                    return Err(error.into());
-                };
-                let profile = known
-                    .and_then(registry::Record::profile)
-                    .cloned()
-                    .unwrap_or_else(|| profile_of(&prior.grants, &domain));
-                // Issuer authority names no grants: it holds every one.
-                if !prior.extended()?.issues {
-                    prior.grants = grants_of(&profile, &domain)?;
-                }
-                // Partitions it selects extend to tables that follow theirs.
-                let mut extended = prior.extended()?;
-                extended.partitions = domain.effective_partitions(&extended.partitions);
-                prior.extension = rocky_credentials::Extension::new(extended)?;
-                prior.manifest = current;
-                prior
+        // A chain names no generation. Tables later generations granted like
+        // one the identity holds join its grants; nothing is narrowed. Issuer
+        // authority names no grants: it holds every one.
+        let mut prior = request.verify(me, self.publisher, (time, SKEW))?.clone();
+        if !prior.extended()?.issues {
+            let profile = known
+                .and_then(registry::Record::profile)
+                .cloned()
+                .unwrap_or_else(|| profile_of(&prior.grants, &domain));
+            let widened = profile_grants(&profile, &domain)?;
+            if prior
+                .grants
+                .iter()
+                .all(|grant| widened.iter().any(|wide| wide.includes(grant)))
+            {
+                prior.grants = widened;
             }
-        };
+        }
+        // Partitions it selects extend to tables that follow theirs.
+        let mut extended = prior.extended()?;
+        extended.partitions = domain.effective_partitions(&extended.partitions);
+        prior.extension = rocky_credentials::Extension::new(extended)?;
         let (held_by, granted) = held(&prior, &domain)?;
         let prior = &prior;
         if self.tombstoned(&prior.subject) {
@@ -3061,7 +3011,7 @@ impl Settings {
         }
         let identity = self.identity(vault)?;
         let links = self.issuer_links();
-        let authority = self.authority(&*identity, &links, &domain)?;
+        let authority = self.authority(&*identity, &links)?;
         let sealed = Sealed {
             groups: self.groups_for(vault, request.node, &held_by, false)?,
             epoch_statements: self.statements_for(&self.keys_for(vault, &domain, &granted)?),
@@ -3547,12 +3497,9 @@ impl Settings {
             self.groups.insert(address, record);
             fault::check(fault::Stage::Key)?;
         }
-        let domain = self.domain()?;
         let signed = match self.revocations.get(&statement.id()?) {
             Some(held) => held.clone(),
-            None => self
-                .authority(&*identity, &links, &domain)?
-                .revoke(statement)?,
+            None => self.authority(&*identity, &links)?.revoke(statement)?,
         };
         self.learn_revocations(&RevocationSet::try_from(vec![signed])?)?;
         fault::check(fault::Stage::Signed)?;

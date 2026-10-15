@@ -45,7 +45,6 @@ impl Node {
                 .credentials
                 .verify_partition(
                     settings.publisher,
-                    self.domain().manifest().hash(),
                     node,
                     member.scope,
                     &member.tuple,
@@ -135,7 +134,7 @@ impl Node {
                 } else {
                     // An issuer grants and delegates through its authority.
                     let links = settings.issuer_links();
-                    let authority = settings.authority(&*identity, &links, &self.domain())?;
+                    let authority = settings.authority(&*identity, &links)?;
                     Ok(authority.chain_of(authority.issue_partition_terms(
                         device.user,
                         vec![],
@@ -154,9 +153,9 @@ impl Node {
             epoch_statements: BTreeMap::new(),
             mesh: settings.mesh,
             domain: settings.domain,
+            manifest: settings.manifest()?,
             credentials: rocky_credentials::Credentials {
                 publisher: settings.publisher,
-                manifest: settings.manifest()?,
                 revocations: settings.revocations.clone(),
                 chain,
             },
@@ -236,7 +235,6 @@ impl Node {
                 for member in &partition.members {
                     let grants = chain.verify_partition(
                         settings.publisher,
-                        self.domain().manifest().hash(),
                         signer,
                         member.scope,
                         &member.tuple,
@@ -256,7 +254,6 @@ impl Node {
         let secret = envelope.open(
             &PrivateKey::from_bytes(&self.vault.get("node")?),
             signer,
-            self.domain().manifest().hash(),
             partition.record.address,
             epoch,
         )?;
@@ -383,7 +380,6 @@ impl Node {
         for recipient in &recipients {
             let envelope = GroupSecretEnvelope::seal_recorded(
                 &signer,
-                self.domain().manifest().hash(),
                 record.address,
                 epoch.generation,
                 secret,

@@ -42,8 +42,8 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
-    // Revoking the identity names its recorded node, capability and
-    // pseudonyms, so no node of it renews again.
+    // Revoking the identity names it, its recorded node and capability, so
+    // no node of it renews again.
     let response = b
         .ok(json!({"type":"revoke","identity":recorded["user"]}))
         .await;
@@ -81,7 +81,6 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     // The same verifier used for incoming frames refuses A's assigned author.
     let leaf = old_chain.0.last().ok_or("node leaf")?;
     let publisher = state["publisher"].as_str().ok_or("publisher")?.parse()?;
-    let manifest = leaf.capability.manifest;
     let author = old_chain
         .authors()?
         .and_then(|range| range.single())
@@ -92,7 +91,6 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         .as_secs();
     old_chain.verify_author(
         publisher,
-        manifest,
         leaf.capability.subject,
         author,
         table,
@@ -103,7 +101,6 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
         old_chain
             .verify_author(
                 publisher,
-                manifest,
                 leaf.capability.subject,
                 author,
                 table,

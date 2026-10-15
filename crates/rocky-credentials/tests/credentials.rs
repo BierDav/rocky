@@ -1,8 +1,9 @@
 //! Credentials verify, issue, enroll and renew with no database and no
 //! endpoint: everything here is keys and bytes.
 use rocky_core::{
-    AppId, ApplicationManifest, AuthorLogScope, Commitment, DefinitionItem, DomainId, DomainRule,
-    MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection, Scope,
+    AppId, ApplicationManifest, AuthorLogScope, DefinitionItem, DomainId, DomainRule,
+    FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
+    Scope,
 };
 use rocky_credentials::*;
 use std::collections::BTreeSet;
@@ -69,7 +70,7 @@ impl Domain {
         }
     }
     fn authority(&self) -> Authority<'_> {
-        Authority::owner(&self.publisher, self.manifest.hash())
+        Authority::owner(&self.publisher)
     }
     fn policy(&self) -> RevocationSet {
         RevocationSet::new()
@@ -112,13 +113,7 @@ impl Domain {
         policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        chain.verify(
-            self.publisher.public_key(),
-            self.manifest.hash(),
-            node.public_key(),
-            policy,
-            time,
-        )
+        chain.verify(self.publisher.public_key(), node.public_key(), policy, time)
     }
 }
 fn rights(grants: &[ResourceGrant]) -> BTreeSet<Right> {
@@ -137,13 +132,14 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     let (user, node, chain) = domain.device(&writer);
     let credentials = Credentials {
         publisher: domain.publisher.public_key(),
-        manifest: SignedManifest::sign(&domain.manifest, &domain.publisher).expect("manifest"),
         revocations: domain.policy(),
         chain,
     };
     // Any channel may carry the bytes; they verify on arrival.
     let received = Credentials::from_bytes(&credentials.to_bytes().expect("bytes")).expect("set");
-    let verified = received.verify(node.public_key(), NOW).expect("verified");
+    let verified = received
+        .verify(node.public_key(), domain.manifest.app, NOW)
+        .expect("verified");
     assert_eq!(verified.principal, user.public_key());
     assert_eq!(verified.device, node.public_key());
     assert_eq!(
@@ -156,20 +152,34 @@ fn a_supplied_set_verifies_with_keys_and_bytes_alone() {
     // Another device, a later time and another publisher are refused.
     assert!(
         received
-            .verify(PrivateKey::new().public_key(), NOW)
+            .verify(PrivateKey::new().public_key(), domain.manifest.app, NOW)
             .is_err()
     );
-    assert!(received.verify(node.public_key(), NOW + 31 * DAY).is_err());
+    assert!(
+        received
+            .verify(node.public_key(), domain.manifest.app, NOW + 31 * DAY)
+            .is_err()
+    );
+    // Another application's credentials are refused.
+    assert!(
+        received
+            .verify(node.public_key(), AppId([9; 16]), NOW)
+            .is_err()
+    );
     let mut foreign = received.clone();
     foreign.publisher = PrivateKey::new().public_key();
-    assert!(foreign.verify(node.public_key(), NOW).is_err());
+    assert!(
+        foreign
+            .verify(node.public_key(), domain.manifest.app, NOW)
+            .is_err()
+    );
     let mut bytes = credentials.to_bytes().expect("bytes");
     bytes.push(0);
     assert!(Credentials::from_bytes(&bytes).is_err());
 }
 
 #[test]
-fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
+fn chains_keep_publisher_revocations_expiry_attenuation_and_paired_rights() {
     let domain = Domain::new();
     let policy = domain.policy();
     let writer = Profile::Writer {
@@ -183,13 +193,13 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
             .verify(&chain, &node, &policy, NOW + 30 * DAY)
             .is_err()
     );
-    // Another manifest and a revocation of any link end the chain; a
-    // revocation of someone else does not.
+    // Another publisher and a revocation of any link end the chain; a
+    // revocation of someone else does not. No generation is named: the
+    // chain holds in each.
     assert!(
         chain
             .verify(
-                domain.publisher.public_key(),
-                [9; 32],
+                PrivateKey::new().public_key(),
                 node.public_key(),
                 &policy,
                 NOW
@@ -249,7 +259,6 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
         ])
     };
     let other = domain.resources[1].scope;
-    let extra: Commitment = [7; 32];
     assert!(
         domain
             .verify(&widen(&|grant| grant.scope = other), &node, &policy, NOW)
@@ -260,18 +269,6 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
             .verify(
                 &widen(&|grant| {
                     grant.rights.insert(Right::PublishSchema);
-                }),
-                &node,
-                &policy,
-                NOW
-            )
-            .is_err()
-    );
-    assert!(
-        domain
-            .verify(
-                &widen(&|grant| {
-                    grant.fields.insert(extra);
                 }),
                 &node,
                 &policy,
@@ -309,7 +306,7 @@ fn a_login_principal_alone_grants_nothing() {
     // The user signs itself the capability it would like to hold.
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
-    let claimed = Authority::owner(&user, domain.manifest.hash())
+    let claimed = Authority::owner(&user)
         .issue(
             user.public_key(),
             grants,
@@ -321,11 +318,7 @@ fn a_login_principal_alone_grants_nothing() {
     assert!(domain.verify(&chain, &node, &policy, NOW).is_err());
     assert!(
         chain
-            .provenance(
-                domain.publisher.public_key(),
-                domain.manifest.hash(),
-                node.public_key()
-            )
+            .provenance(domain.publisher.public_key(), node.public_key())
             .is_err()
     );
     // Distinct identities are distinct types over distinct keys.
@@ -343,7 +336,7 @@ fn profiles_are_scoped_and_hold_no_schema_right() {
     };
     let grants = custody.grants(&domain.resources).expect("custody");
     assert_eq!(rights(&grants), [Right::Custody].into());
-    assert!(grants[0].fields.is_empty());
+    assert!(grants[0].fields.is_none());
     assert!(!custody.reads("notes") && !custody.issues());
     let reader = Profile::Reader {
         scopes: Domain::names(&["notes"]),
@@ -486,12 +479,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     let (request, secret) = RenewRequest::sign(&node, issuer, chain.clone(), NOW).expect("request");
     let request = RenewRequest::from_bytes(&request.to_bytes().expect("bytes")).expect("request");
     let prior = request
-        .verify(
-            issuer,
-            domain.publisher.public_key(),
-            domain.manifest.hash(),
-            (NOW, 300),
-        )
+        .verify(issuer, domain.publisher.public_key(), (NOW, 300))
         .expect("verified");
     let renewal = Renewal::seal(
         &domain.authority(),
@@ -527,17 +515,9 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
 
     // Another issuer, a stale request and another device's secret are refused.
     let other = PrivateKey::new().public_key();
-    let anchor = (domain.publisher.public_key(), domain.manifest.hash());
-    assert!(
-        request
-            .verify(other, anchor.0, anchor.1, (NOW, 300))
-            .is_err()
-    );
-    assert!(
-        request
-            .verify(issuer, anchor.0, anchor.1, (NOW + 301, 300))
-            .is_err()
-    );
+    let anchor = (domain.publisher.public_key(),);
+    assert!(request.verify(other, anchor.0, (NOW, 300)).is_err());
+    assert!(request.verify(issuer, anchor.0, (NOW + 301, 300)).is_err());
     let (_, stranger) = RenewRequest::sign(&node, issuer, chain.clone(), NOW).expect("request");
     assert!(renewal.open(anchor.0, &request, &stranger).is_err());
     // An answer for another request, or signed by anyone else, is refused.
@@ -546,7 +526,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     assert!(renewal.open(anchor.0, &again, &again_secret).is_err());
     let impostor = PrivateKey::new();
     let forged = Renewal::seal(
-        &Authority::owner(&impostor, domain.manifest.hash()),
+        &Authority::owner(&impostor),
         &request,
         prior,
         policy.clone(),
@@ -564,11 +544,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
         chain.0[1].clone(),
     ]);
     let (escalating, _) = RenewRequest::sign(&node, issuer, claimed, NOW).expect("request");
-    assert!(
-        escalating
-            .verify(issuer, anchor.0, anchor.1, (NOW, 300))
-            .is_err()
-    );
+    assert!(escalating.verify(issuer, anchor.0, (NOW, 300)).is_err());
 
     // An expired chain still proves who asks; another device's revocation
     // does not stop it.
@@ -577,7 +553,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     let (late, late_secret) =
         RenewRequest::sign(&node, issuer, chain.clone(), later).expect("request");
     let prior = late
-        .verify(issuer, anchor.0, anchor.1, (later, 300))
+        .verify(issuer, anchor.0, (later, 300))
         .expect("provenance");
     let renewal = Renewal::seal(
         &domain.authority(),
@@ -631,7 +607,7 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     ]))
     .expect("grants");
     let grants = Grant::resolve_all(&raw, &resources).expect("resolved");
-    assert_eq!(grants[0].fields, [[6; 32]].into());
+    assert_eq!(grants[0].fields, FieldSelection::Only([[6; 32]].into()));
     assert_eq!(rights(&grants[1..]), [Right::Delete, Right::Custody].into());
     assert_eq!(
         serde_json::to_value(&raw[0]).expect("json")["rights"],
@@ -762,7 +738,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         )
     };
     let mut beyond = grants[0].clone();
-    beyond.fields.insert([1; 32]);
+    beyond.rights.insert(Right::PublishSchema);
     for (holder, grants, depth) in [
         (&holder, vec![beyond], 1),
         (&holder, vec![other], 1),
@@ -792,12 +768,8 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
     // An issuer renews the delegator, never the delegate: the root is not its.
     let issuer = PrivateKey::new().public_key();
     let (request, _) = RenewRequest::sign(&node, issuer, chain, NOW).expect("request");
-    let anchor = (domain.publisher.public_key(), domain.manifest.hash());
-    assert!(
-        request
-            .verify(issuer, anchor.0, anchor.1, (NOW, 300))
-            .is_err()
-    );
+    let anchor = (domain.publisher.public_key(),);
+    assert!(request.verify(issuer, anchor.0, (NOW, 300)).is_err());
     // A renewed delegator keeps its depth.
     let renewed = domain
         .authority()
@@ -838,7 +810,6 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
             let verified = chain
                 .verify_author(
                     domain.publisher.public_key(),
-                    domain.manifest.hash(),
                     nodes[index].public_key(),
                     number,
                     resource.scope.table,
@@ -864,7 +835,6 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
             decoded
                 .verify_author(
                     domain.publisher.public_key(),
-                    domain.manifest.hash(),
                     nodes[index].public_key(),
                     number + 1,
                     domain.resources[0].scope.table,
@@ -901,7 +871,6 @@ fn node_leaves_bind_one_number_inside_the_principal_range() {
         forged
             .verify(
                 domain.publisher.public_key(),
-                domain.manifest.hash(),
                 nodes[0].public_key(),
                 &domain.policy(),
                 NOW
@@ -954,7 +923,6 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
     let verify = |chain: &CredentialChain| {
         chain.verify(
             domain.publisher.public_key(),
-            domain.manifest.hash(),
             node.public_key(),
             &policy,
             NOW,
@@ -1121,7 +1089,6 @@ fn acknowledgments_bind_the_certified_node_key() {
     chain
         .verify(
             domain.publisher.public_key(),
-            domain.manifest.hash(),
             node.public_key(),
             &domain.policy(),
             NOW,
@@ -1131,7 +1098,6 @@ fn acknowledgments_bind_the_certified_node_key() {
         chain
             .verify(
                 domain.publisher.public_key(),
-                domain.manifest.hash(),
                 PrivateKey::new().public_key(),
                 &domain.policy(),
                 NOW
@@ -1139,8 +1105,7 @@ fn acknowledgments_bind_the_certified_node_key() {
             .is_err()
     );
     let ack = HorizonAck::sign([7; 32], &alias, chain.clone()).unwrap();
-    ack.verify(domain.publisher.public_key(), domain.manifest.hash())
-        .unwrap();
+    ack.verify(domain.publisher.public_key()).unwrap();
     let bytes = encode(&ack).unwrap();
     assert!(
         bytes
@@ -1149,15 +1114,7 @@ fn acknowledgments_bind_the_certified_node_key() {
     );
     let mut forged = ack;
     forged.horizon[0] ^= 1;
-    assert!(
-        forged
-            .verify(domain.publisher.public_key(), domain.manifest.hash())
-            .is_err()
-    );
+    assert!(forged.verify(domain.publisher.public_key()).is_err());
     let outsider = HorizonAck::sign([7; 32], &PrivateKey::new(), chain).unwrap();
-    assert!(
-        outsider
-            .verify(domain.publisher.public_key(), domain.manifest.hash())
-            .is_err()
-    );
+    assert!(outsider.verify(domain.publisher.public_key()).is_err());
 }

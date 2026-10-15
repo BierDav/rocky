@@ -7,13 +7,15 @@ use rocky_credentials::PeerId;
 /// Unconfigured peers whose horizon credentials and frontiers a replica
 /// keeps; the least recently served beyond it lose theirs.
 pub const MAX_UNCONFIGURED_PEERS: usize = 256;
+/// Session peers whose declared generation a replica remembers; the least
+/// recently served beyond it count as running this replica's generation.
+const MAX_PEER_MANIFESTS: usize = 4 * MAX_UNCONFIGURED_PEERS;
 
 impl<A: RowApplication> Inner<A> {
-    /// The chain check of a session peer, before any revocation: a node
-    /// chain under the publisher, unexpired, for a generation this replica
-    /// admits. A newer generation's chain, which this replica cannot read
-    /// yet, is checked under its own manifest and must grant only this
-    /// application.
+    /// The chain check of a session peer, before any revocation: an
+    /// unexpired node chain under the publisher granting only this
+    /// application. A chain names no generation; peers of every
+    /// generation present the same one.
     fn admit_chain(
         &self,
         node: PublicKey,
@@ -27,30 +29,37 @@ impl<A: RowApplication> Inner<A> {
         {
             return Err(denied("a session requires a node credential"));
         }
-        let manifest = chain
-            .0
-            .last()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        // A generation whose manifest this replica lacks, newer or dropped:
-        // the session proceeds and the sync fetches it.
-        let newer = self.admits(manifest).is_err();
         let (grants, selectors) = chain
-            .verify_selectors(
-                self.config.publisher,
-                manifest,
-                node,
-                &RevocationSet::new(),
-                time,
-            )
+            .verify_selectors(self.config.publisher, node, &RevocationSet::new(), time)
             .map_err(credential)?;
         let app = self.definition.app;
-        if newer
-            && (grants.iter().any(|grant| grant.scope.domain.app != app)
-                || selectors.iter().any(|grant| grant.domain.app != app))
+        if grants.iter().any(|grant| grant.scope.domain.app != app)
+            || selectors.iter().any(|grant| grant.domain.app != app)
         {
             return Err(denied("credentials for another domain"));
         }
         Ok(())
+    }
+    /// Records the generation `peer` declared when its session opened.
+    fn record_peer_manifest(&mut self, peer: PublicKey, manifest: Commitment) {
+        self.peer_manifests.insert(PeerId::of(peer), manifest);
+        if self.peer_manifests.len() > MAX_PEER_MANIFESTS
+            && let Some(oldest) = self
+                .peer_manifests
+                .keys()
+                .min_by_key(|peer| self.served.1.get(*peer).copied().unwrap_or(0))
+                .copied()
+        {
+            self.peer_manifests.remove(&oldest);
+        }
+    }
+    /// The generation `peer` declared in its session; this replica's own
+    /// for a peer it recorded none of.
+    pub(crate) fn peer_manifest(&self, peer: PublicKey) -> Commitment {
+        self.peer_manifests
+            .get(&PeerId::of(peer))
+            .copied()
+            .unwrap_or(self.manifest)
     }
     /// Marks `peer` served now.
     pub(super) fn touch_peer(&mut self, peer: PublicKey) {
@@ -123,6 +132,23 @@ impl<A: RowApplication> EncryptedReplica<A> {
         chain: &CredentialChain,
     ) -> Result<(), Error> {
         self.inner.lock().await.admit_chain(node, chain, now()?)
+    }
+    /// `admit_chain` for a session that opens, remembering the generation
+    /// `manifest` the peer declared, which decides what it is sent.
+    pub(crate) async fn admit_peer(
+        &self,
+        node: PublicKey,
+        chain: &CredentialChain,
+        manifest: Commitment,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock().await;
+        inner.admit_chain(node, chain, now()?)?;
+        inner.record_peer_manifest(node, manifest);
+        Ok(())
+    }
+    /// The generation this replica runs, which its sessions declare.
+    pub(crate) async fn current_manifest(&self) -> Commitment {
+        self.inner.lock().await.manifest
     }
     /// The peers whose credentials and frontiers stay whatever the bound on
     /// unconfigured peers: the contacts this device keeps.

@@ -17,7 +17,6 @@ fn chain(f: &Fixture, node: &PrivateKey, grants: Vec<ResourceGrant>) -> Credenti
     let user = PrivateKey::new();
     let (not_before, expires) = crate::tests::lifetime();
     let capability = |subject, kind, delegations| Capability {
-        manifest: f.app().definition().hash(),
         subject,
         kind,
         grants: grants.clone(),

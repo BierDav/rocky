@@ -16,7 +16,6 @@ use tempfile::TempDir;
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let capability = Capability {
-        manifest: [0; 32],
         subject: key.public_key(),
         kind: PrincipalKind::Node,
         grants: Vec::new(),

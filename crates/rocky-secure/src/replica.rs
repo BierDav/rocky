@@ -384,6 +384,9 @@ pub(super) struct Inner<A> {
     /// When each peer was last served since open, by a growing count; a
     /// peer not served since open counts as the least recent.
     served: (u64, BTreeMap<rocky_credentials::PeerId, u64>),
+    /// The generation each admitted session peer declared in its hello:
+    /// what it can admit. Chains name none.
+    peer_manifests: BTreeMap<rocky_credentials::PeerId, Commitment>,
     /// Verified owner-signed cuts of each coordinated log, in order.
     cuts: BTreeMap<rocky_core::Scope, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
@@ -652,7 +655,6 @@ pub(super) fn check_config(
         .credentials
         .verify_selectors(
             config.publisher,
-            manifest.hash(),
             config.node.public_key(),
             &config.revocations,
             now()?,
@@ -781,6 +783,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             verified_at: BTreeMap::new(),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
+            peer_manifests: BTreeMap::new(),
             cuts: BTreeMap::new(),
             #[cfg(test)]
             stage_fault: None,
@@ -1315,7 +1318,6 @@ impl<A: RowApplication> Inner<A> {
             .credentials
             .verify_selectors(
                 self.config.publisher,
-                self.manifest,
                 self.config.node.public_key(),
                 &self.config.revocations,
                 time,
@@ -1389,10 +1391,6 @@ impl<A: RowApplication> Inner<A> {
         if extension.scope.domain.app != manifest.app
             || !self.domains.contains(&extension.scope.domain.domain)
             || !self.tables.contains(&extension.scope.table)
-            || credentials
-                .0
-                .last()
-                .is_some_and(|root| root.capability.manifest != extension.manifest)
         {
             return Err(denied("wrong app/domain/table/manifest"));
         }
@@ -1404,7 +1402,6 @@ impl<A: RowApplication> Inner<A> {
             Some(tuple) => credentials
                 .verify_partition_author(
                     self.config.publisher,
-                    extension.manifest,
                     operation.header.public_key,
                     number,
                     extension.scope,
@@ -1416,7 +1413,6 @@ impl<A: RowApplication> Inner<A> {
             None => credentials
                 .verify_author(
                     self.config.publisher,
-                    extension.manifest,
                     operation.header.public_key,
                     number,
                     extension.scope.table,

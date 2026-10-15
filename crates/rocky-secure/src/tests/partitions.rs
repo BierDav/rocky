@@ -1,5 +1,4 @@
 use super::*;
-use rocky_core::RowApplication;
 use rocky_core::{
     DomainId, PartitionSelection, PartitionSelector, PartitionTuple, PartitionValue, RowIdentity,
     SchemaDefinition, SqlValue, TypedRows,
@@ -119,7 +118,7 @@ impl Fixture {
     ) -> EncryptedReplica<TypedRows> {
         let user = PrivateKey::new();
         let time = now().unwrap();
-        let root = Authority::owner(&self.publisher, self.app().manifest().hash())
+        let root = Authority::owner(&self.publisher)
             .issue_partition_terms(
                 user.public_key(),
                 vec![],

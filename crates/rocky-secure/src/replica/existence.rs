@@ -260,11 +260,6 @@ impl<A: RowApplication> Inner<A> {
         if scope.domain.app != self.definition.app
             || !self.domains.contains(&scope.domain.domain)
             || !self.existence_table(scope)
-            || statement
-                .credentials
-                .0
-                .last()
-                .is_some_and(|root| root.capability.manifest != statement.manifest)
         {
             return Err(denied(
                 "existence record outside an installed existence log",
@@ -283,7 +278,6 @@ impl<A: RowApplication> Inner<A> {
                 .credentials
                 .verify_partition_author(
                     self.config.publisher,
-                    statement.manifest,
                     record.signer,
                     statement.author,
                     scope,
@@ -297,7 +291,6 @@ impl<A: RowApplication> Inner<A> {
                 .credentials
                 .verify_author(
                     self.config.publisher,
-                    statement.manifest,
                     record.signer,
                     statement.author,
                     scope.table,

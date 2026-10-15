@@ -524,21 +524,14 @@ fn issued(
     grants_of: &str,
 ) -> Result<Credentials, Failure> {
     let creator = identity(root, "a")?;
-    let publisher_key = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
-    let manifest = SignedManifest::from_bytes(
-        &data_encoding::HEXLOWER
-            .decode(creator["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
-    )?;
+    let owner = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
     let revocations: rocky_sdk::credentials::RevocationSet =
         serde_json::from_value(creator["revocations"].clone())?;
     // The grants of an enrolled device's profile, without its keys.
     let model: CredentialChain =
         serde_json::from_value(identity(root, grants_of)?["credentials"].clone())?;
     let grants = model.0.first().ok_or("chain")?.capability.grants.clone();
-    let authority = Authority::owner(
-        &publisher_key,
-        manifest.verify(publisher_key.public_key())?.hash(),
-    );
+    let authority = Authority::owner(&owner);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -549,8 +542,7 @@ fn issued(
         (now, 3600, 300),
     )?;
     Ok(Credentials {
-        publisher: publisher_key.public_key(),
-        manifest,
+        publisher: owner.public_key(),
         revocations,
         chain: CredentialChain(vec![capability]),
     })
@@ -586,6 +578,10 @@ async fn supplied_credentials_install_without_an_enrollment() -> Result<(), Fail
         Ok(Supplied {
             mesh,
             domain,
+            manifest: SignedManifest::from_bytes(
+                &data_encoding::HEXLOWER
+                    .decode(creator["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
+            )?,
             credentials: issued(root, user, "model")?,
             keys: keys
                 .into_iter()

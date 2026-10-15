@@ -67,8 +67,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(denied("finalized horizon acknowledgment bound"));
         }
         for ack in &evidence.acks {
-            ack.verify(inner.config.publisher, signed.statement.manifest)
-                .map_err(credential)?;
+            ack.verify(inner.config.publisher).map_err(credential)?;
             if ack.horizon != signed.id().map_err(credential)?
                 || !signed
                     .statement
@@ -173,12 +172,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             None => self.admitted_horizon(scope).await?,
         };
         for ack in &acks {
-            let context = expected
-                .as_ref()
-                .ok_or_else(|| denied("acknowledgment has no horizon"))?;
+            if expected.is_none() {
+                return Err(denied("acknowledgment has no horizon"));
+            }
             let inner = self.inner.lock().await;
-            ack.verify(inner.config.publisher, context.statement.manifest)
-                .map_err(credential)?;
+            ack.verify(inner.config.publisher).map_err(credential)?;
             drop(inner);
             if expected.as_ref().is_none_or(|s| {
                 s.id().ok() != Some(ack.horizon)

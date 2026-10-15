@@ -1504,29 +1504,28 @@ async fn an_unpartitioned_checkpoint_preserves_other_tables_selector_grants() {
     let directory = TempDir::new().unwrap();
     let node = PrivateKey::new();
     let principal = PrivateKey::new();
-    let root =
-        crate::credentials::Authority::owner(&fixture.publisher, fixture.app().definition().hash())
-            .issue_partition_terms(
-                principal.public_key(),
-                fixture.full(),
-                vec![crate::credentials::PartitionGrant {
-                    domain: fixture.private.domain,
-                    table: fixture.private.table,
-                    selector: rocky_core::PartitionSelector(
-                        [(
-                            fixture.app().field("salary"),
-                            rocky_core::PartitionSelection::Any,
-                        )]
-                        .into(),
-                    ),
-                    rows: RowSelection::All,
-                    rights: [Right::Read].into(),
-                    fields: [fixture.app().field("salary")].into(),
-                }],
-                (1, Some(crate::credentials::AuthorRange::new(1, 2).unwrap())),
-                crate::tests::validity(),
-            )
-            .unwrap();
+    let root = crate::credentials::Authority::owner(&fixture.publisher)
+        .issue_partition_terms(
+            principal.public_key(),
+            fixture.full(),
+            vec![crate::credentials::PartitionGrant {
+                domain: fixture.private.domain,
+                table: fixture.private.table,
+                selector: rocky_core::PartitionSelector(
+                    [(
+                        fixture.app().field("salary"),
+                        rocky_core::PartitionSelection::Any,
+                    )]
+                    .into(),
+                ),
+                rows: RowSelection::All,
+                rights: [Right::Read].into(),
+                fields: [fixture.app().field("salary")].into_iter().collect(),
+            }],
+            (1, Some(crate::credentials::AuthorRange::new(1, 2).unwrap())),
+            crate::tests::validity(),
+        )
+        .unwrap();
     let mut config = fixture.config(&node, fixture.full(), &[fixture.public]);
     config.credentials = CredentialChain(vec![root])
         .complete(&principal, node.public_key(), 1)

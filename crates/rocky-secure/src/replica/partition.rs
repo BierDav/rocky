@@ -10,13 +10,12 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn resolve_chain_at(
         &self,
         chain: &CredentialChain,
-        manifest: Commitment,
         key: PublicKey,
         policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let (mut grants, selectors) = chain
-            .verify_selectors(self.config.publisher, manifest, key, policy, time)
+            .verify_selectors(self.config.publisher, key, policy, time)
             .map_err(credential)?;
         for (scope, tuple) in &self.partitions {
             for selector in &selectors {
@@ -33,14 +32,13 @@ impl<A: RowApplication> Inner<A> {
     pub(super) fn resolve_chain_scopes_at(
         &self,
         chain: &CredentialChain,
-        manifest: Commitment,
         key: PublicKey,
         policy: &RevocationSet,
         time: u64,
         scopes: &[ResourceScope],
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let (mut grants, selectors) = chain
-            .verify_selectors(self.config.publisher, manifest, key, policy, time)
+            .verify_selectors(self.config.publisher, key, policy, time)
             .map_err(credential)?;
         grants.retain(|grant| scopes.contains(&grant.scope));
         for scope in scopes {
@@ -64,7 +62,7 @@ impl<A: RowApplication> Inner<A> {
         policy: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        self.resolve_chain_at(chain, self.manifest, key, policy, time)
+        self.resolve_chain_at(chain, key, policy, time)
     }
     pub(super) fn check_authenticated_partition(
         &self,
@@ -226,7 +224,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .credentials
             .verify_partition_author(
                 inner.config.publisher,
-                inner.manifest,
                 author.key.public_key(),
                 author.number,
                 scope,
@@ -256,7 +253,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .credentials
             .verify_partition(
                 inner.config.publisher,
-                inner.manifest,
                 inner.config.node.public_key(),
                 scope,
                 &tuple,
@@ -527,7 +523,7 @@ fn custody_only(grants: &[rocky_core::ResourceGrant]) -> bool {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// `chain`'s grants on one concrete partition, under the policy of its generation.
+    /// `chain`'s grants on one concrete partition under the held revocations.
     pub(super) fn partition_grants(
         &self,
         chain: &CredentialChain,
@@ -535,19 +531,13 @@ impl<A: RowApplication> Inner<A> {
         scope: ResourceScope,
         tuple: &PartitionTuple,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let manifest = chain
-            .0
-            .last()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        let revocations = self.revocations_for(manifest, &self.config.revocations)?;
         chain
             .verify_partition(
                 self.config.publisher,
-                manifest,
                 key,
                 scope,
                 tuple,
-                revocations,
+                &self.config.revocations,
                 now()?,
             )
             .map_err(credential)
@@ -565,20 +555,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<(ResourceScope, PartitionTuple)>, Error> {
         let inner = self.inner.lock().await;
-        let manifest = credentials
-            .0
-            .last()
-            .map_or(inner.manifest, |root| root.capability.manifest);
-        // One chain verification per batch. A peer without custody, or of a
-        // generation this replica cannot verify, gets no offer.
-        let Ok(revocations) = inner.revocations_for(manifest, &inner.config.revocations) else {
-            return Ok(Vec::new());
-        };
+        // One chain verification per batch. A peer without custody gets no
+        // offer.
         let Ok((_, selectors)) = credentials.verify_selectors(
             inner.config.publisher,
-            manifest,
             peer,
-            revocations,
+            &inner.config.revocations,
             now()?,
         ) else {
             return Ok(Vec::new());

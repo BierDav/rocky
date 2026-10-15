@@ -310,7 +310,6 @@ impl RenewRequest {
         &self,
         audience: PublicKey,
         publisher: PublicKey,
-        manifest: Commitment,
         (time, skew): (u64, u64),
     ) -> Result<&Capability, Error> {
         if self.version != Self::VERSION
@@ -320,7 +319,7 @@ impl RenewRequest {
         {
             return Err(denied("invalid renewal request"));
         }
-        let identity = self.chain.provenance(publisher, manifest, self.node)?;
+        let identity = self.chain.provenance(publisher, self.node)?;
         // The identity's link follows the publisher or an issuer link.
         let granted = match self.chain.0.len().checked_sub(3) {
             None => true,
@@ -421,13 +420,9 @@ impl Renewal {
         time: u64,
         payload: &[u8],
     ) -> Result<Self, Error> {
-        request.chain.verify_selectors(
-            publisher,
-            authority.manifest,
-            request.node,
-            &revocations,
-            time,
-        )?;
+        request
+            .chain
+            .verify_selectors(publisher, request.node, &revocations, time)?;
         let capability = request
             .chain
             .0

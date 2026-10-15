@@ -67,14 +67,13 @@ impl World {
                     Right::Custody,
                 ]
                 .into(),
-                fields: [self.app.field("display_name")].into(),
+                fields: [self.app.field("display_name")].into_iter().collect(),
             })
             .collect();
         let user = PrivateKey::new();
         let deployment = PrivateKey::new();
         let extension = credentials::Extension::new(credentials::Extended::default())?;
         let capability = |subject, kind, delegations| Capability {
-            manifest: self.app.definition().hash(),
             subject,
             kind,
             grants: grants.clone(),

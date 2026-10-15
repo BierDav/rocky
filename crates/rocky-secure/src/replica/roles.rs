@@ -462,11 +462,7 @@ impl<A: RowApplication> Inner<A> {
         if peer == self.config.node.public_key() {
             return Err(denied("a replica cannot acknowledge itself"));
         }
-        if credentials
-            .0
-            .last()
-            .is_some_and(|root| self.known(root.capability.manifest).is_err())
-        {
+        if self.known(self.peer_manifest(peer)).is_err() {
             return Ok(());
         }
         let scopes: Vec<_> = frontiers.iter().map(|frontier| frontier.scope).collect();
@@ -619,9 +615,7 @@ impl<A: RowApplication> Inner<A> {
         self.authorize_peer(peer, credentials, scope)?;
         // A peer of an earlier generation is sent nothing it cannot admit:
         // a log stops at its first newer frame.
-        let reach = credentials.0.last().map_or(Ok(self.generation()), |root| {
-            self.generation_of(root.capability.manifest, true)
-        })?;
+        let reach = self.generation_of(self.peer_manifest(peer), true)?;
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }
@@ -1180,11 +1174,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         scopes: &[ResourceScope],
     ) -> Result<Vec<ResourceScope>, Error> {
         let inner = self.inner.lock().await;
-        if credentials
-            .0
-            .last()
-            .is_some_and(|root| inner.known(root.capability.manifest).is_err())
-        {
+        if inner.known(inner.peer_manifest(peer)).is_err() {
             return Ok(scopes.to_vec());
         }
         let grants = inner.verify_chain_scopes(credentials, peer, now()?, scopes)?;

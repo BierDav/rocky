@@ -576,7 +576,6 @@ fn certificate(identity: &PrivateKey, node: &PrivateKey) -> rocky_credentials::S
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     rocky_credentials::SignedCapability::sign(
         Capability {
-            manifest: [0; 32],
             subject: node.public_key(),
             kind: rocky_core::PrincipalKind::Node,
             grants: Vec::new(),

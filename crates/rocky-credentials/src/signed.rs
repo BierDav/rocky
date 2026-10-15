@@ -6,7 +6,7 @@ use crate::{
     RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
-use rocky_core::{ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
+use rocky_core::{AppId, ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
 use serde::{Deserialize, Serialize};
 
 /// Most bytes an issuer chain adds to an endorsed statement.
@@ -225,9 +225,10 @@ impl SignedTransition {
     }
 }
 
+/// One link of a chain. It names no generation: grants name tables and
+/// fields by name, so a chain holds in every generation of its domain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
-    pub manifest: Commitment,
     pub subject: PublicKey,
     pub kind: PrincipalKind,
     pub grants: Vec<ResourceGrant>,
@@ -247,6 +248,8 @@ impl Capability {
         Ok(self.extended()?.authors)
     }
 }
+/// The signing label of the current capability format; others are refused.
+const CAPABILITY_LABEL: &str = "rocky.capability.v2";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCapability {
     /// Portable assignment provenance; carries no partition tuples.
@@ -262,8 +265,7 @@ impl SignedCapability {
             PrincipalKind::Node => Purpose::NodeCertificate,
             _ => Purpose::Capability,
         };
-        let signature =
-            issuer.sign(purpose, &signing_bytes("rocky.capability.v1", &capability)?)?;
+        let signature = issuer.sign(purpose, &signing_bytes(CAPABILITY_LABEL, &capability)?)?;
         Ok(Self {
             author_binding: crate::AuthorBinding::sign(&capability, issuer)?,
             issuer: issuer.public_key()?,
@@ -273,7 +275,7 @@ impl SignedCapability {
     }
     pub fn id(&self) -> Result<Commitment, Error> {
         Ok(rocky_core::commitment(
-            "rocky.capability.id.v1",
+            "rocky.capability.id.v2",
             &encode(self)?,
         ))
     }
@@ -288,7 +290,7 @@ impl SignedCapability {
             || capability.not_before > time
             || capability.expires <= time
             || !self.issuer.verify(
-                &signing_bytes("rocky.capability.v1", capability)?,
+                &signing_bytes(CAPABILITY_LABEL, capability)?,
                 &self.signature,
             )
         {
@@ -308,12 +310,11 @@ impl CredentialChain {
     pub fn verify(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         subject: PublicKey,
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        self.check(publisher, manifest, subject, Some((revocations, time)))
+        self.check(publisher, subject, Some((revocations, time)))
     }
     /// Whether the publisher once delegated to the node `subject` through
     /// this chain, whatever the time and later revocations. It proves who a
@@ -322,10 +323,9 @@ impl CredentialChain {
     pub fn provenance(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         subject: PublicKey,
     ) -> Result<&Capability, Error> {
-        self.check(publisher, manifest, subject, None)?;
+        self.check(publisher, subject, None)?;
         self.0
             .iter()
             .rev()
@@ -336,11 +336,10 @@ impl CredentialChain {
     fn check(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         subject: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, manifest, current)?;
+        let leaf = self.links(publisher, current)?;
         if leaf.extended()?.node != Some(crate::PeerId::of(subject))
             || leaf.kind != PrincipalKind::Node
             || leaf.delegations != 0
@@ -358,12 +357,11 @@ impl CredentialChain {
     pub fn verify_reference_selectors(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         node: crate::PeerId,
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<crate::PartitionGrant>), Error> {
-        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
+        let leaf = self.links(publisher, Some((revocations, time)))?;
         let extension = leaf.extended()?;
         if leaf.kind != PrincipalKind::Node || leaf.delegations != 0 || extension.node != Some(node)
         {
@@ -374,18 +372,16 @@ impl CredentialChain {
     /// The issuer identity a chain of issuer links ends at: every link is
     /// signed by its parent's subject, the first by the publisher, and
     /// carries issuer authority. With `current`, each is valid at its time
-    /// and ended by no statement of its set. Manifests do not bind it.
+    /// and ended by no statement of its set.
     pub fn issuer(
         &self,
         publisher: PublicKey,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<PublicKey, Error> {
-        let manifest = self
-            .0
-            .first()
-            .map(|root| root.capability.manifest)
-            .ok_or_else(|| denied("an issuer chain needs a link"))?;
-        let leaf = self.links(publisher, manifest, current)?;
+        if self.0.is_empty() {
+            return Err(denied("an issuer chain needs a link"));
+        }
+        let leaf = self.links(publisher, current)?;
         if self
             .0
             .iter()
@@ -399,12 +395,10 @@ impl CredentialChain {
     /// parent's subject, narrows it in grants, validity, depth and author
     /// range, lives at most `MAX_CHAIN_LIFETIME` and, with `current`, is
     /// valid at its time and ended by no statement of its set. A link with
-    /// issuer authority may delegate any grant and author range, and names
-    /// no manifest.
+    /// issuer authority may delegate any grant and author range.
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         current: Option<(&RevocationSet, u64)>,
     ) -> Result<&Capability, Error> {
         if self.0.is_empty() || self.0.len() > MAX_CREDENTIAL_DEPTH {
@@ -425,7 +419,6 @@ impl CredentialChain {
             };
             let held = capability.grants.len() + extended.partitions.len();
             if signed.issuer != issuer
-                || (capability.manifest != manifest && !extended.issues)
                 || stale
                 || capability.not_before >= capability.expires
                 || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
@@ -433,13 +426,13 @@ impl CredentialChain {
                 || (held == 0 && !extended.issues)
                 || held > 64
                 || !signed.issuer.verify(
-                    &signing_bytes("rocky.capability.v1", capability)?,
+                    &signing_bytes(CAPABILITY_LABEL, capability)?,
                     &signed.signature,
                 )
             {
                 return Err(denied("invalid or revoked credential"));
             }
-            if capability.grants.iter().any(|grant| grant.fields.len() > 256 || matches!(&grant.rows, rocky_core::RowSelection::Only(rows) if rows.is_empty() || rows.len() > 256)) {
+            if capability.grants.iter().any(|grant| grant.fields.named() > 256 || matches!(&grant.rows, rocky_core::RowSelection::Only(rows) if rows.is_empty() || rows.len() > 256)) {
                 return Err(denied("credential resource quota"));
             }
             Self::shape(capability, &extended, parent.is_none())?;
@@ -506,19 +499,16 @@ impl CredentialChain {
         }
     }
     /// Verifies a node's number and returns its concrete grants for this table.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_author(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         signer: PublicKey,
         author: u32,
         table: Commitment,
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let (grants, partitions) =
-            self.verify_selectors(publisher, manifest, signer, revocations, time)?;
+        let (grants, partitions) = self.verify_selectors(publisher, signer, revocations, time)?;
         if self.author_number()? != author || partitions.iter().any(|grant| grant.table == table) {
             return Err(denied("author number mismatch or partition tuple required"));
         }
@@ -549,11 +539,10 @@ impl CredentialChain {
     pub fn verify_node_alias(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         node: crate::PeerId,
         alias: PublicKey,
     ) -> Result<(), Error> {
-        let leaf = self.links(publisher, manifest, None)?;
+        let leaf = self.links(publisher, None)?;
         if leaf.kind != PrincipalKind::Node
             || leaf.delegations != 0
             || leaf.subject != alias
@@ -583,19 +572,17 @@ impl CredentialChain {
 }
 
 /// Everything a device presents to use a domain, from any issuer: the
-/// pinned publisher, its signed manifest, the revocations it knows and the
-/// device's chain.
+/// pinned publisher, the revocations it knows and the device's chain. It
+/// names no generation; any generation of the domain admits it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Credentials {
     pub publisher: PublicKey,
-    pub manifest: SignedManifest,
     pub revocations: RevocationSet,
     pub chain: CredentialChain,
 }
 /// What verified credentials establish.
 #[derive(Clone, Debug)]
 pub struct Verified {
-    pub manifest: ApplicationManifest,
     /// The identity that holds the grants.
     pub principal: PublicKey,
     pub device: PublicKey,
@@ -605,20 +592,17 @@ pub struct Verified {
     pub grants: Vec<ResourceGrant>,
 }
 impl Credentials {
-    /// Verifies the whole set for `device` at `time`. Needs no database,
-    /// endpoint or issuer.
-    pub fn verify(&self, device: PublicKey, time: u64) -> Result<Verified, Error> {
-        let manifest = self.manifest.verify(self.publisher)?;
-        self.revocations.verify(self.publisher, manifest.app)?;
-        let grants = self.chain.verify(
-            self.publisher,
-            manifest.hash(),
-            device,
-            &self.revocations,
-            time,
-        )?;
+    /// Verifies the whole set for `device` of application `app` at `time`.
+    /// Needs no database, endpoint or issuer.
+    pub fn verify(&self, device: PublicKey, app: AppId, time: u64) -> Result<Verified, Error> {
+        self.revocations.verify(self.publisher, app)?;
+        let grants = self
+            .chain
+            .verify(self.publisher, device, &self.revocations, time)?;
+        if grants.iter().any(|grant| grant.scope.domain.app != app) {
+            return Err(denied("credentials for another application"));
+        }
         Ok(Verified {
-            manifest,
             principal: self
                 .chain
                 .principal()
@@ -634,5 +618,54 @@ impl Credentials {
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         decode_bounded(bytes, MAX_CREDENTIAL_BYTES + MAX_REVOCATION_SET_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PrivateKey;
+
+    #[test]
+    fn a_capability_of_the_earlier_format_is_refused_and_names_no_generation() {
+        let (publisher, user, node) = (PrivateKey::new(), PrivateKey::new(), PrivateKey::new());
+        let grant = ResourceGrant {
+            scope: rocky_core::ResourceScope {
+                domain: rocky_core::Scope {
+                    mesh: rocky_core::MeshId([1; 16]),
+                    app: AppId([2; 16]),
+                    domain: rocky_core::DomainId([3; 16]),
+                },
+                encryption: [4; 32],
+                table: [5; 32],
+            },
+            rows: rocky_core::RowSelection::All,
+            rights: [rocky_core::Right::Read].into(),
+            fields: rocky_core::FieldSelection::All,
+        };
+        let root = crate::Authority::owner(&publisher)
+            .issue(
+                user.public_key(),
+                vec![grant],
+                crate::AuthorRange::ALL,
+                (100, 1000, 0),
+            )
+            .unwrap();
+        let chain = crate::device_chain(root.clone(), &user, node.public_key(), 1).unwrap();
+        let revocations = RevocationSet::new();
+        assert!(
+            chain
+                .verify(publisher.public_key(), node.public_key(), &revocations, 200)
+                .is_ok()
+        );
+        let mut earlier = root;
+        earlier.signature =
+            publisher.sign(&signing_bytes("rocky.capability.v1", &earlier.capability).unwrap());
+        let earlier = crate::device_chain(earlier, &user, node.public_key(), 1).unwrap();
+        assert!(
+            earlier
+                .verify(publisher.public_key(), node.public_key(), &revocations, 200)
+                .is_err()
+        );
     }
 }

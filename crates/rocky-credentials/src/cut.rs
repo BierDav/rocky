@@ -123,7 +123,6 @@ impl SignedCut {
         &self,
         credentials: &CredentialChain,
         publisher: PublicKey,
-        manifest: Commitment,
         scopes: &[(ResourceScope, Option<&PartitionTuple>)],
     ) -> Result<(), Error> {
         self.verify()?;
@@ -137,11 +136,7 @@ impl SignedCut {
             return Ok(());
         }
         let revocations = RevocationSet::new();
-        let leaf = credentials.links(
-            publisher,
-            manifest,
-            Some((&revocations, self.statement.issued)),
-        )?;
+        let leaf = credentials.links(publisher, Some((&revocations, self.statement.issued)))?;
         let whole = |rows: &RowSelection, rights: &std::collections::BTreeSet<Right>| {
             *rows == RowSelection::All
                 && [Right::Read, Right::Insert, Right::Update, Right::Delete]
@@ -271,22 +266,12 @@ mod tests {
         let other = PrivateKey::new();
         let by_publisher = SignedCut::sign(statement(), &publisher).unwrap();
         by_publisher
-            .verify_owner(
-                &CredentialChain(Vec::new()),
-                publisher.public_key(),
-                [0; 32],
-                &[],
-            )
+            .verify_owner(&CredentialChain(Vec::new()), publisher.public_key(), &[])
             .unwrap();
         let by_other = SignedCut::sign(statement(), &other).unwrap();
         assert!(
             by_other
-                .verify_owner(
-                    &CredentialChain(Vec::new()),
-                    publisher.public_key(),
-                    [0; 32],
-                    &[],
-                )
+                .verify_owner(&CredentialChain(Vec::new()), publisher.public_key(), &[],)
                 .is_err()
         );
         let scope = |table| ResourceScope {
@@ -298,9 +283,9 @@ mod tests {
             scope,
             rows: RowSelection::All,
             rights: rights.iter().copied().collect(),
-            fields: Default::default(),
+            fields: rocky_core::FieldSelection::All,
         };
-        let authority = crate::Authority::owner(&publisher, [0; 32]);
+        let authority = crate::Authority::owner(&publisher);
         let all = [Right::Read, Right::Insert, Right::Update, Right::Delete];
         let chain = CredentialChain(vec![
             authority
@@ -313,7 +298,7 @@ mod tests {
                 .unwrap(),
         ]);
         let verify = |scopes: &[(ResourceScope, Option<&PartitionTuple>)]| {
-            by_other.verify_owner(&chain, publisher.public_key(), [0; 32], scopes)
+            by_other.verify_owner(&chain, publisher.public_key(), scopes)
         };
         verify(&[(scope(1), None)]).unwrap();
         assert!(verify(&[(scope(1), None), (scope(2), None)]).is_err());
@@ -344,7 +329,7 @@ mod tests {
                         ),
                         rows: RowSelection::All,
                         rights: all.into_iter().collect(),
-                        fields: Default::default(),
+                        fields: rocky_core::FieldSelection::All,
                     }],
                     (1, None),
                     (8, 100, 0),
@@ -353,7 +338,7 @@ mod tests {
         ]);
         let owner = |chain: &CredentialChain,
                      scopes: &[(ResourceScope, Option<&PartitionTuple>)]| {
-            by_other.verify_owner(chain, publisher.public_key(), [0; 32], scopes)
+            by_other.verify_owner(chain, publisher.public_key(), scopes)
         };
         owner(&selected, &[(partitioned, Some(&tuple))]).unwrap();
         assert!(owner(&selected, &[(partitioned, None)]).is_err());
@@ -363,7 +348,7 @@ mod tests {
         let expired = SignedCut::sign(later, &other).unwrap();
         assert!(
             expired
-                .verify_owner(&chain, publisher.public_key(), [0; 32], &[(scope(1), None)])
+                .verify_owner(&chain, publisher.public_key(), &[(scope(1), None)])
                 .is_err()
         );
     }

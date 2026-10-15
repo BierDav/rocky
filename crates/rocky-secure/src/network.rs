@@ -79,6 +79,8 @@ struct Hello {
     version: u32,
     node: PublicKey,
     challenge: [u8; 32],
+    /// The generation the sender runs; its chain names none.
+    manifest: Commitment,
     credentials: CredentialChain,
     exchange: [u8; 32],
 }
@@ -309,6 +311,7 @@ impl NativeSession {
             version,
             node: own,
             challenge,
+            manifest: replica.current_manifest().await,
             credentials,
             exchange,
         };
@@ -338,7 +341,9 @@ impl NativeSession {
         if side == Side::Acceptor {
             // An outsider is shown no chain: the acceptor speaks only once
             // the initiator's chain verified.
-            replica.admit_chain(peer.node, &peer.credentials).await?;
+            replica
+                .admit_peer(peer.node, &peer.credentials, peer.manifest)
+                .await?;
             write_frame(&mut stream, &local_bytes).await?;
         }
         let mut parts = [(hello.node, local_bytes), (peer.node, peer_bytes)];
@@ -351,7 +356,9 @@ impl NativeSession {
             return Err(denied(AUTHENTICATION_FAILED));
         }
         if side == Side::Initiator {
-            replica.admit_chain(peer.node, &peer.credentials).await?;
+            replica
+                .admit_peer(peer.node, &peer.credentials, peer.manifest)
+                .await?;
         }
         let shared = exchange_secret.shared(&peer.exchange).map_err(credential)?;
         let contact_key = rocky_core::commitment(

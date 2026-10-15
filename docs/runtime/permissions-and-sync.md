@@ -15,9 +15,10 @@ load executable code from a manifest.
 
 `SignedManifest`, `SignedCapability` and `SignedRevocation` live in
 [`rocky-credentials`](credentials.md) and use domain-separated Ed25519 signatures. CBOR must round-trip to the pinned canonical encoder;
-noncanonical/trailing input is rejected. Capabilities bind the manifest hash,
+noncanonical/trailing input is rejected. Capabilities bind the
 node public key, principal kind, validity interval and bounded
-resource grants. Delegation is publisher → user → optional deployment → node.
+resource grants, but no manifest: grants name tables and fields by name, so
+a chain holds in every generation. Delegation is publisher → user → optional deployment → node.
 Users may delegate to users; deployments cannot turn back into users; nodes
 cannot delegate. Every child narrows its parent's rows, fields, actions, validity
 and delegation budget. Each child grant must fit one complete parent grant.

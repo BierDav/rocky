@@ -2,6 +2,7 @@
 //! every boundary that admits a chain, not only where it was issued.
 use super::*;
 use crate::wire::{Extensions, author};
+use rocky_core::FieldSelection;
 
 /// Changes one dimension of a link.
 type Widen = dyn Fn(&mut Capability, &Fixture);
@@ -17,7 +18,6 @@ fn delegated(
     let user = PrivateKey::new();
     let deployment = PrivateKey::new();
     let root = Capability {
-        manifest: f.app().definition().hash(),
         subject: user.public_key(),
         kind: PrincipalKind::User,
         grants: held.to_vec(),
@@ -76,7 +76,9 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
             link.grants[0].rights.insert(Right::Delete);
         },
         &|link, f| {
-            link.grants[0].fields.insert(f.app().field("salary"));
+            if let FieldSelection::Only(fields) = &mut link.grants[0].fields {
+                fields.insert(f.app().field("salary"));
+            }
         },
         &|link, f| link.grants[0].scope = f.private,
         &|link, _| link.expires += 1,

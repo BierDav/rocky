@@ -105,7 +105,6 @@ impl CreationProof {
         rocky_credentials::AuthorBinding::verify_chain(
             &self.bindings,
             publisher,
-            manifest,
             table,
             id.author(),
             self.stamp.author.key()?,
@@ -734,7 +733,6 @@ impl<A: RowApplication> Inner<A> {
                 .credentials
                 .verify_partition_author(
                     self.config.publisher,
-                    self.manifest,
                     author.key.public_key(),
                     author.number,
                     scope,
@@ -988,7 +986,6 @@ impl<A: RowApplication> Inner<A> {
                 .ok_or_else(|| denied("follow partition missing"))?;
             let grants = author.credentials.verify_partition_author(
                 self.config.publisher,
-                self.manifest,
                 signer,
                 author.number,
                 destination,

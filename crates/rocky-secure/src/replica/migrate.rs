@@ -170,6 +170,39 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
+    /// Whether a table of `typed`, the authorized projection of the
+    /// installed schema, is not projected yet: a widened grant or an
+    /// adopted generation made it readable.
+    pub(super) async fn projection_grew(&self, typed: &Typed) -> Result<bool, Error> {
+        for table in &typed.tables {
+            let mut found = self
+                .conn
+                .query(
+                    "SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE",
+                    [table.table.sql_name.clone()],
+                )
+                .await?;
+            if found.next().await?.is_none() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    /// Records a plan that rebuilds the installed schema, inside the
+    /// caller's transaction, so that tables its grants now cover are
+    /// projected; a plan already pending covers them too.
+    pub(super) async fn record_growth(&self) -> Result<(), Error> {
+        if self.plan_record().await?.is_some() {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "INSERT INTO secure_projection_plan SELECT 1,descriptor,domain,readers,-1,X'' FROM secure_typed WHERE id=1",
+                (),
+            )
+            .await?;
+        Ok(())
+    }
     /// The pending plan's progress.
     pub(super) async fn plan_status(&self) -> Result<Option<ProjectionPlan>, Error> {
         let Some(record) = self.plan_record().await? else {

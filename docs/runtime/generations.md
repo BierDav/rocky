@@ -53,9 +53,9 @@ Network/coordinator calls never occur inside these storage transactions.
 manifests the replica holds, the baseline and bounded progress.
 
 The SDK issuer signs an additive upgrade when `Database::open` receives the new
-schema. A member fetches that exact schema/lineage from an issuer over its
-attached transport; while it reaches none, it opens at its generation and
-reports its application ahead. Issuer state is saved before replica activation,
+schema. A member fetches that exact schema/lineage from a device that runs it,
+issuers first, over its attached transport; while it reaches none, it opens at
+its generation and reports its application ahead. Issuer state is saved before replica activation,
 so reopening with the same schema continues after interruption. New collections
 do not silently expand member grants. SDK lineage is capped at 32 steps; secure
 runtime lineage at 64.
@@ -89,8 +89,9 @@ verification of publisher signatures from peers.
 ## Adopting newer generations
 
 A device that meets a newer generation adopts it whatever its application
-declares: it verifies the peer's lineage, is renewed into it and switches its
-open replica before any frame of it applies. An application older than its
+declares: it verifies the peer's lineage and switches its open replica before
+any frame of it applies. No issuer renews it: credentials name no
+generation. An application older than its
 database opens it unchanged. See [adopting generations](adopting-generations.md).
 
 ## Removing tables and fields
@@ -114,10 +115,12 @@ the table. Wherever the SDK turns a profile into grants or asks whether it
 reads a table (enrollment, renewal, revocation rotation, group delivery and
 horizons), a grant naming `items` in whole rows also names `item_categories`
 with the same read and write rights. Partition selectors on
-`items` select the same partitions of `item_categories`, and renewal widens a
-partition grant that covered a whole row to the fields later generations added.
-A partial replica holds the new table wherever it holds its group partition. A member renewing into the
-generation receives them. The followed table must follow none, and the entry
+`items` select the same partitions of `item_categories`. A grant without
+columns covers every field in every generation, so nothing widens fields.
+A partial replica holds the new table wherever it holds its group partition.
+A member that adopts the generation receives the new grants and keys with
+its next renewal, which it asks an issuer for once per such generation; until
+then it writes every table its chain names. The followed table must follow none, and the entry
 is declared with the table: changing it for an existing table is refused, since
 it would change what earlier grants mean.
 
@@ -185,13 +188,12 @@ earlier generation may lack and the table and field ids it named and removed.
 Removal and re-adding are read from them alone ([removal](removal.md)), and a
 device checks a step against its manifests where it holds both. A manifest of an
 earlier generation is kept only while a retained frame, a checkpoint, a
-horizon statement, an existence base or the credential chain of a
-retained frame or registered author names it. After a horizon finalizes,
+horizon statement or an existence base names it; credential chains name
+none. After a horizon finalizes,
 `EncryptedReplica::drop_unreferenced_generations` drops the others, and the
 SDK removes them from the saved lineage. Retained history stays verifiable
 by its transitions. A peer that still writes under a dropped generation
-presents a chain the replica places by its transition; its first frame is
-refused as unknown, and the device fetches the manifest from that peer
+declares it in its session hello; its first frame is refused as unknown, and the device fetches the manifest from that peer
 again before the frame applies, as for any
 [older generation](adopting-generations.md#older-generations).
 

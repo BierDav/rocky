@@ -245,7 +245,6 @@ impl Settings {
                 }
                 let envelope = GroupSecretEnvelope::seal_recorded(
                     &signer,
-                    domain.manifest().hash(),
                     record.address,
                     epoch.generation,
                     secret,

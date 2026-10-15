@@ -64,12 +64,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.flush()?;
         let grants = inner.verify_chain(credentials, peer, now()?)?;
         // A peer of an earlier generation is sent nothing it cannot admit.
-        let reach = credentials
-            .0
-            .last()
-            .map_or(Ok(inner.generation()), |root| {
-                inner.generation_of(root.capability.manifest, true)
-            })?;
+        let reach = inner.generation_of(inner.peer_manifest(peer), true)?;
         if scopes.is_empty()
             || scopes.len() > 64
             || byte_quota == 0

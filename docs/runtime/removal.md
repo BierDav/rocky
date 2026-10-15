@@ -51,7 +51,7 @@ In the activation transaction the replica:
   that adds it again can pull them again;
 - strips retired fields, and re-added ones stamped before their baseline,
   from every stored row and from the verified checkpoint base, which it
-  seals again under the generation its signer's credentials name;
+  seals again under the generation that removed them;
 - queues every scope with a new or earlier baseline to pull again.
 
 The [projection plan](generations.md#plan-backfill-and-switch) then

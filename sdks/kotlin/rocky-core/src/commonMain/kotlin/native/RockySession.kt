@@ -123,7 +123,10 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     )
     suspend fun session(): SessionStatus = status(client.call(request("session")))
 
-    /** Fresh credentials with the same grants from any issuer; a revoked device is refused. */
+    /**
+     * Fresh credentials from any issuer: the same grants, with tables a later generation grants like held ones.
+     * Adopting a generation needs none; a revoked device is refused.
+     */
     suspend fun renew(): SessionStatus = status(client.call(request("renew")))
     private fun status(result: JsonObject) = SessionStatus(
         result.text("principal"),

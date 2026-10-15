@@ -58,7 +58,7 @@ backlink and clock.
 
 Range pages, pushes on sessions and live links, and transfer pages carry the
 records their frames continue after. The file identity is
-`rocky.encrypted-replica.v21` and link handshake `rocky.link.v5`, as
+`rocky.encrypted-replica.v21` and link handshake `rocky.link.v6`, as
 [coordinated writes](coordinated-writes.md) set them; other versions are
 refused.
 

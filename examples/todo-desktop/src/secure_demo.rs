@@ -1,7 +1,8 @@
 //! Development employees composition over authenticated loopback links and an opaque relay.
 use employees_app::Employees;
 use rocky_core::{
-    Commitment, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowChange, RowSelection,
+    Commitment, FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right,
+    RowChange, RowSelection,
 };
 use rocky_secure::{
     Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet,
@@ -49,14 +50,14 @@ impl SecureDemo {
                     Right::Custody,
                 ]
                 .into(),
-                fields: fields.clone(),
+                fields: FieldSelection::Only(fields.clone()),
             })
             .collect();
         let editor_grants = vec![ResourceGrant {
             scope: scopes[0],
             rows: RowSelection::All,
             rights: [Right::Read, Right::Insert, Right::Update].into(),
-            fields: [app.field("display_name")].into(),
+            fields: FieldSelection::Only([app.field("display_name")].into()),
         }];
         let relay_grants = scopes
             .iter()
@@ -64,7 +65,7 @@ impl SecureDemo {
                 scope: *scope,
                 rows: RowSelection::All,
                 rights: [Right::Custody].into(),
-                fields: BTreeSet::new(),
+                fields: FieldSelection::Only(BTreeSet::new()),
             })
             .collect();
         let manifest = SignedManifest::sign(&app.definition(), &publisher).map_err(signing)?;
@@ -77,7 +78,6 @@ impl SecureDemo {
         let (not_before, expires) = (time.saturating_sub(DAY), time + 300 * DAY);
         let root = SignedCapability::sign(
             Capability {
-                manifest: app.definition().hash(),
                 subject: user.public_key(),
                 kind: PrincipalKind::User,
                 grants: full.clone(),
@@ -102,7 +102,6 @@ impl SecureDemo {
             let node = PrivateKey::from_bytes(&[index; 32]);
             let leaf = SignedCapability::sign(
                 Capability {
-                    manifest: app.definition().hash(),
                     subject: node.public_key(),
                     kind: PrincipalKind::Node,
                     grants,

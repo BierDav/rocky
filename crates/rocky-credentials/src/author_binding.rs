@@ -7,22 +7,23 @@ use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// The current author binding format; others are refused.
+const BINDING_VERSION: u8 = 2;
+
 /// A separately signed projection of assignment authority, revealing no tuples.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorBinding {
     version: u8,
-    manifest: Commitment,
     issuer: PublicKey,
     subject: PublicKey,
     kind: PrincipalKind,
     authors: Option<AuthorRange>,
     tables: BTreeSet<Commitment>,
-    /// Issuer authority: every table, whichever manifest it named.
+    /// Issuer authority: every table.
     issues: bool,
     signature: Signature,
 }
-const VERSION: u8 = 2;
 const LABEL: &str = "rocky.credentials.author-binding.v2";
 impl AuthorBinding {
     pub(crate) fn sign(
@@ -37,8 +38,7 @@ impl AuthorBinding {
             .chain(extended.partitions.iter().map(|grant| grant.table))
             .collect();
         let mut binding = Self {
-            version: VERSION,
-            manifest: capability.manifest,
+            version: BINDING_VERSION,
             issuer: issuer.public_key()?,
             subject: capability.subject,
             kind: capability.kind,
@@ -56,7 +56,6 @@ impl AuthorBinding {
             LABEL,
             &(
                 self.version,
-                self.manifest,
                 self.issuer,
                 self.subject,
                 self.kind,
@@ -70,7 +69,6 @@ impl AuthorBinding {
     pub fn verify_chain(
         chain: &[Self],
         publisher: PublicKey,
-        manifest: Commitment,
         table: Commitment,
         author: u32,
         signer: PublicKey,
@@ -87,8 +85,7 @@ impl AuthorBinding {
                 .authors
                 .ok_or_else(|| denied("author binding lacks range"))?;
             AuthorRange::new(assigned.first, assigned.last)?;
-            if binding.version != VERSION
-                || (binding.manifest != manifest && !binding.issues)
+            if binding.version != BINDING_VERSION
                 || binding.issuer != issuer
                 || !range.includes(&assigned)
                 || !(binding.issues || binding.tables.contains(&table))

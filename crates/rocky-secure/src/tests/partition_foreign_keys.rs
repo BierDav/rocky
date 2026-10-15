@@ -169,7 +169,7 @@ impl Fixture {
                 )
             })
             .collect();
-        let root = Authority::owner(&self.publisher, self.app().manifest().hash())
+        let root = Authority::owner(&self.publisher)
             .issue_partition_terms(
                 user.public_key(),
                 raw.clone(),

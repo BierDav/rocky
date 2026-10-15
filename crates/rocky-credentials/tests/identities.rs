@@ -54,26 +54,20 @@ impl Domain {
             },
             rows: RowSelection::All,
             rights: [Right::Read, Right::Insert].into(),
-            fields: BTreeSet::new(),
+            fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
         }
     }
     /// An issuer identity the owner appointed, with its issuer chain.
     fn issuer(&self, authors: AuthorRange) -> (FileIdentity, CredentialChain) {
         let identity = FileIdentity::new();
-        let link = Authority::owner(&self.owner, self.manifest.hash())
+        let link = Authority::owner(&self.owner)
             .issue_issuer(identity.key(), Some(authors), VALIDITY)
             .expect("issuer");
         (identity, CredentialChain(vec![link]))
     }
     fn verify(&self, chain: &CredentialChain, node: &PrivateKey, set: &RevocationSet) -> bool {
         chain
-            .verify(
-                self.publisher(),
-                self.manifest.hash(),
-                node.public_key(),
-                set,
-                NOW,
-            )
+            .verify(self.publisher(), node.public_key(), set, NOW)
             .is_ok()
     }
     fn revoke(&self, statement: impl FnOnce(&mut Revocation)) -> RevocationSet {
@@ -86,7 +80,7 @@ impl Domain {
             capabilities: BTreeSet::new(),
         };
         statement(&mut body);
-        let signed = Authority::owner(&self.owner, self.manifest.hash())
+        let signed = Authority::owner(&self.owner)
             .revoke(body)
             .expect("statement");
         RevocationSet::try_from(vec![signed]).expect("set")
@@ -154,7 +148,7 @@ fn a_file_identity_reopens_and_reserves_each_author_once() {
 fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     let domain = Domain::new();
     let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
-    let authority = Authority::issuer(&issuer.provider, &issuing, domain.manifest.hash());
+    let authority = Authority::issuer(&issuer.provider, &issuing);
     // The issuer grants a member identity a range and its grants; it signs
     // through its own chain, never with the publisher key.
     let member = FileIdentity::new();
@@ -180,13 +174,7 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
         assert!(domain.verify(chain, key, &set));
         assert_eq!(
             chain
-                .verify(
-                    domain.publisher(),
-                    domain.manifest.hash(),
-                    key.public_key(),
-                    &set,
-                    NOW,
-                )
+                .verify(domain.publisher(), key.public_key(), &set, NOW,)
                 .expect("grants"),
             vec![domain.grant()]
         );
@@ -205,7 +193,6 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
                 &member.provider,
                 (stranger.public_key(), 129),
                 (vec![wider], Vec::new()),
-                domain.manifest.hash(),
             )
             .is_ok_and(|chain| !domain.verify(&chain, &stranger, &set))
     );
@@ -225,8 +212,7 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
     );
     // A member holds no issuer authority: it neither appoints issuers nor
     // grants through an authority.
-    let member_authority =
-        Authority::issuer(&member.provider, &identity_chain, domain.manifest.hash());
+    let member_authority = Authority::issuer(&member.provider, &identity_chain);
     assert!(
         member_authority
             .issue(
@@ -243,7 +229,7 @@ fn issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer() {
 fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
     let domain = Domain::new();
     let member = FileIdentity::new();
-    let link = Authority::owner(&domain.owner, domain.manifest.hash())
+    let link = Authority::owner(&domain.owner)
         .issue_terms(
             member.key(),
             vec![domain.grant()],
@@ -294,7 +280,7 @@ fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
         identities: [domain.publisher()].into(),
         capabilities: BTreeSet::new(),
     };
-    let signed = Authority::owner(&domain.owner, domain.manifest.hash())
+    let signed = Authority::owner(&domain.owner)
         .revoke(owner)
         .expect("signed");
     assert!(
@@ -305,10 +291,10 @@ fn revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node() {
 }
 
 #[test]
-fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_publisher_key() {
+fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key() {
     let domain = Domain::new();
     let (issuer, issuing) = domain.issuer(AuthorRange::new(100, 199).expect("range"));
-    let authority = Authority::issuer(&issuer.provider, &issuing, domain.manifest.hash());
+    let authority = Authority::issuer(&issuer.provider, &issuing);
     let none = RevocationSet::new();
     // Before revocation the issuer endorses a manifest through its chain.
     let mut next = domain.manifest.clone();
@@ -367,16 +353,11 @@ fn a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_publisher_key
     // Every chain through it ends; another issuer renews its members.
     assert!(!domain.verify(&member_chain, &member_node, &revoked));
     let (other, other_chain) = domain.issuer(AuthorRange::new(200, 299).expect("range"));
-    let renewer = Authority::issuer(&other.provider, &other_chain, domain.manifest.hash());
+    let renewer = Authority::issuer(&other.provider, &other_chain);
     let (request, secret) =
         RenewRequest::sign(&member_node, other.key(), member_chain.clone(), NOW).expect("request");
     let prior = request
-        .verify(
-            other.key(),
-            domain.publisher(),
-            domain.manifest.hash(),
-            (NOW, 300),
-        )
+        .verify(other.key(), domain.publisher(), (NOW, 300))
         .expect("provenance")
         .clone();
     let renewal = Renewal::seal(

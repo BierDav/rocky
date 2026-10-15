@@ -4,6 +4,7 @@ use super::*;
 use crate::network::NativeSession;
 use crate::replica::checkpoint::Stage;
 use crate::wire::{Chain, INCOMPLETE_FRAME};
+use rocky_core::FieldSelection;
 
 type Replica = EncryptedReplica<Employees>;
 
@@ -23,7 +24,7 @@ fn widened(
             .scope(MeshId([(50 + base.len() + mesh) as u8; 16]), false);
         if narrow {
             grant.rights = [Right::Read].into();
-            grant.fields.clear();
+            grant.fields = FieldSelection::Only(Default::default());
         }
         grants.push(grant);
     }

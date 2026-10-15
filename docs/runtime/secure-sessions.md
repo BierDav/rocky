@@ -82,7 +82,7 @@ supplied at open. No call argument names a principal or a grant.
 | --- | --- |
 | `principal` | The user the credential chain delegates from: the login identity |
 | `node` | The device key that signs every operation |
-| `manifest` | The definition the credentials bind |
+| `manifest` | The definition the replica runs; credentials name none |
 | `revocations`, `revoked` | The digest and count of the live [revocations](revocations.md) the credentials were verified under |
 | `expires` | Earliest expiry in the chain |
 | `scopes` | The resource set asked for; each must be granted |
@@ -119,7 +119,10 @@ to later calls. Bytes already returned cannot be taken back.
 ## Peer sessions on links
 
 Peers authenticate with the [live link](live-links.md) handshake, signed under
-`rocky.link.v5`; any other version is refused. Every request runs as a
+`rocky.link.v6`; any other version is refused. Each hello declares the
+generation its sender runs, since a credential chain names none: a replica
+sends a peer only frames of generations it admits, and a sync that meets a
+newer one [adopts it](adopting-generations.md). Every request runs as a
 `NativeSession` on one of the link's request channels. Each session message is
 signed under `rocky.native-frame.v2` over the digest of the session binding,
 its sequence and the digest of its body, so signing hashes the same few bytes

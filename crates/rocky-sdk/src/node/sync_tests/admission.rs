@@ -25,7 +25,7 @@ async fn credentialed_strangers_over_the_link_budget_are_refused_and_a_configure
             // 64 devices of the domain, none of them a contact of A.
             let publisher = PrivateKey::from_bytes(&a.vault.get("identity")?);
             let grants = crate::enrollment::grants_of(&writer, &a.domain())?;
-            let authority = Authority::owner(&publisher, a.domain().manifest().hash());
+            let authority = Authority::owner(&publisher);
             let strangers = (0..64)
                 .map(|_| {
                     let (user, node) = (PrivateKey::new(), PrivateKey::new());

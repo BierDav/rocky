@@ -1,5 +1,4 @@
 use super::*;
-use rocky_core::RowApplication;
 use rocky_core::{
     DomainId, PartitionSelection, PartitionSelector, PartitionTuple, PartitionValue, RowIdentity,
     SchemaDefinition, SqlValue, TypedRows,

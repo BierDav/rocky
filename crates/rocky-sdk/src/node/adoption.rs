@@ -3,9 +3,10 @@
 use super::*;
 
 impl Node {
-    /// After a sync found `peer` on a newer generation: fetches, verifies
-    /// and saves it, then switches the replica to it before any of its
-    /// frames apply. Returns whether the database moved.
+    /// After a sync found `peer` on a newer generation: fetches it from
+    /// that peer, verifies and saves it, then switches the replica to it
+    /// before any of its frames apply. No issuer is involved. Returns
+    /// whether the database moved.
     pub(super) async fn adopt_newer(
         &self,
         transport: &dyn Transport,
@@ -19,7 +20,7 @@ impl Node {
         let mut settings = self.settings.lock().await;
         let mut draft = (**settings).clone();
         if !draft
-            .discover(&self.path, &self.vault, transport, peer, &addresses)
+            .discover(&self.path, &self.vault, transport, &addresses)
             .await?
         {
             return Ok(false);

@@ -60,7 +60,6 @@ pub(crate) fn self_certificate(
 ) -> rocky_credentials::SignedCapability {
     use rocky_credentials::{Capability, Extended, Extension, PeerId};
     let capability = Capability {
-        manifest: [0; 32],
         subject: key.public_key(),
         kind: rocky_core::PrincipalKind::Node,
         grants: Vec::new(),

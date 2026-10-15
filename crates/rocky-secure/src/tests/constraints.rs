@@ -130,14 +130,8 @@ impl Shop {
     }
     fn credentials(&self, node: &PrivateKey, number: u32) -> CredentialChain {
         let user = PrivateKey::new();
-        let manifest = self
-            .manifest
-            .verify(self.publisher.public_key())
-            .unwrap()
-            .hash();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
-            manifest,
             subject,
             kind,
             grants: self.grants(),

@@ -9,7 +9,7 @@ const NOW: u64 = 2_000_000_000;
 /// the statement times these tests use.
 fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
     let key = PrivateKey::new();
-    let link = Authority::owner(publisher, [0; 32])
+    let link = Authority::owner(publisher)
         .issue_issuer(key.public_key(), None, (NOW - 5 * DAY, 300 * DAY, DAY))
         .unwrap();
     (key, CredentialChain(vec![link]))
@@ -62,20 +62,16 @@ fn every_interleaving_of_merges_yields_one_digest() {
             order.swap(swap, k - 1);
         }
     }
-    let publisher_key = publisher.public_key();
+    let anchor = publisher.public_key();
     let mut each = |order: &[usize]| {
         let mut set = RevocationSet::new();
         for index in order {
-            set.merge(&single(&statements[*index]), publisher_key, APP, NOW)
+            set.merge(&single(&statements[*index]), anchor, APP, NOW)
                 .unwrap();
         }
         // Merging a set again, or a subset, adds nothing.
         let again = set.clone();
-        assert!(
-            set.merge(&again, publisher_key, APP, NOW)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(set.merge(&again, anchor, APP, NOW).unwrap().is_empty());
         digests.insert(set.digest(NOW).unwrap());
     };
     let count = order.len();
@@ -86,8 +82,8 @@ fn every_interleaving_of_merges_yields_one_digest() {
         let mut a = RevocationSet::try_from(left.to_vec()).unwrap();
         let mut b = RevocationSet::try_from(right.to_vec()).unwrap();
         let (a_copy, b_copy) = (a.clone(), b.clone());
-        a.merge(&b_copy, publisher_key, APP, NOW).unwrap();
-        b.merge(&a_copy, publisher_key, APP, NOW).unwrap();
+        a.merge(&b_copy, anchor, APP, NOW).unwrap();
+        b.merge(&a_copy, anchor, APP, NOW).unwrap();
         assert_eq!(a, b);
         digests.insert(a.digest(NOW).unwrap());
     }
@@ -176,7 +172,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
     );
     let member = {
         let key = PrivateKey::new();
-        let link = Authority::owner(&publisher, [0; 32])
+        let link = Authority::owner(&publisher)
             .issue_terms(
                 key.public_key(),
                 vec![rocky_core::ResourceGrant {
@@ -191,7 +187,7 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
                     },
                     rows: rocky_core::RowSelection::All,
                     rights: [rocky_core::Right::Read].into(),
-                    fields: BTreeSet::new(),
+                    fields: rocky_core::FieldSelection::Only(BTreeSet::new()),
                 }],
                 (2, None),
                 (NOW, DAY, 0),

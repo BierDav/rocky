@@ -1,8 +1,8 @@
 use super::*;
 use employees_app::Employees;
 use rocky_core::{
-    Commitment, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowChange, RowFields,
-    RowSelection, RowWrite,
+    Commitment, FieldSelection, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right,
+    RowChange, RowFields, RowSelection, RowWrite,
 };
 use std::collections::BTreeSet;
 use tempfile::TempDir;
@@ -124,7 +124,6 @@ impl Fixture {
         let user = PrivateKey::new();
         let deployment = PrivateKey::new();
         let capability = |subject, kind, delegations| Capability {
-            manifest: self.app().definition().hash(),
             subject,
             kind,
             grants: grants.clone(),
@@ -608,30 +607,22 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
     let key = PrivateKey::new();
     let chain = fixture.credentials(&key, fixture.full());
     let time = now().unwrap();
-    let verify = |chain: &CredentialChain, revocations: &RevocationSet, manifest| {
+    // A chain names no generation: it verifies under the publisher alone.
+    let verify = |chain: &CredentialChain, revocations: &RevocationSet| {
         chain.verify(
             fixture.publisher.public_key(),
-            manifest,
             key.public_key(),
             revocations,
             time,
         )
     };
-    assert!(verify(&chain, &fixture.policy, fixture.app().definition().hash()).is_ok());
-    assert!(verify(&chain, &fixture.policy, [0; 32]).is_err());
+    assert!(verify(&chain, &fixture.policy).is_ok());
     let mut tampered = chain.clone();
-    tampered.0[2].capability.grants[0].fields.insert([99; 32]);
-    assert!(
-        verify(
-            &tampered,
-            &fixture.policy,
-            fixture.app().definition().hash()
-        )
-        .is_err()
-    );
+    tampered.0[2].capability.grants[0].fields = FieldSelection::All;
+    assert!(verify(&tampered, &fixture.policy).is_err());
     let app = fixture.app().definition().app;
     let ended = revoking(&fixture.publisher, app, &[], &[chain.0[0].id().unwrap()]);
-    assert!(verify(&chain, &ended, fixture.app().definition().hash()).is_err());
+    assert!(verify(&chain, &ended).is_err());
     // A statement naming someone else leaves the chain current.
     let other = revoking(
         &fixture.publisher,
@@ -639,12 +630,11 @@ fn signatures_attenuation_expiry_revocation_and_cross_app_replay() {
         &[PrivateKey::new().public_key()],
         &[],
     );
-    assert!(verify(&chain, &other, fixture.app().definition().hash()).is_ok());
+    assert!(verify(&chain, &other).is_ok());
     assert!(
         chain
             .verify(
                 fixture.publisher.public_key(),
-                fixture.app().definition().hash(),
                 key.public_key(),
                 &fixture.policy,
                 u64::MAX
@@ -897,7 +887,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         &[fixture.app().field("display_name")],
     );
     let root = Capability {
-        manifest: fixture.app().definition().hash(),
         subject: user.public_key(),
         kind: PrincipalKind::User,
         grants: vec![narrow.clone()],
@@ -926,7 +915,9 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         let mut child = base.clone();
         match mutant {
             0 => {
-                child.grants[0].fields.insert(fixture.app().field("salary"));
+                if let FieldSelection::Only(fields) = &mut child.grants[0].fields {
+                    fields.insert(fixture.app().field("salary"));
+                }
             }
             1 => {
                 child.grants[0].rights.insert(Right::Delete);
@@ -944,7 +935,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
             chain
                 .verify(
                     fixture.publisher.public_key(),
-                    root.manifest,
                     node.public_key(),
                     &fixture.policy,
                     1
@@ -960,7 +950,6 @@ fn validly_signed_delegation_cannot_expand_rows_fields_actions_or_depth() {
         chain
             .verify(
                 fixture.publisher.public_key(),
-                fixture.app().definition().hash(),
                 node.public_key(),
                 &fixture.policy,
                 1

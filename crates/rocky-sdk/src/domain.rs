@@ -1,8 +1,8 @@
 //! Format-2 typed secure tables of a consumer schema in one domain.
 use crate::{Failure, schema::Schema};
 use rocky_core::{
-    ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
-    RowApplication, Scope, TypedRows,
+    ApplicationManifest, Commitment, DomainId, FieldSelection, LogicalSchema, MeshId,
+    ResourceScope, RowApplication, Scope, TypedRows,
 };
 use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,24 +150,14 @@ impl Domain {
             name,
         ))
     }
-    /// Partition grants as this generation reads them. A grant that named
-    /// every field of its table, apart from fields later generations added,
-    /// covers the whole row; and with the schema's `granted_like`, a
-    /// whole-row grant on a followed table also selects the same partitions
-    /// of the table following it, slot by slot.
+    /// Partition grants as this generation reads them: with the schema's
+    /// `granted_like`, a whole-row grant on a followed table also selects
+    /// the same partitions of the table following it, slot by slot.
     pub fn effective_partitions(
         &self,
         grants: &[rocky_credentials::PartitionGrant],
     ) -> Vec<rocky_credentials::PartitionGrant> {
         let logical = self.logical();
-        let resources = self.resources();
-        let fields = |name: &str| -> BTreeSet<Commitment> {
-            resources
-                .iter()
-                .find(|resource| resource.name == name)
-                .map(|resource| resource.columns.values().copied().collect())
-                .unwrap_or_default()
-        };
         let slots = |table: &rocky_core::LogicalTable| -> Vec<Commitment> {
             table
                 .partition_by
@@ -176,38 +166,16 @@ impl Domain {
                 .map(|column| logical.field_id(table, column))
                 .collect()
         };
-        let added = self.app.added();
-        let current: BTreeSet<Commitment> = resources
-            .iter()
-            .flat_map(|resource| resource.columns.values().copied())
-            .collect();
-        let table_name = |id: &Commitment| {
-            logical
-                .tables
-                .iter()
-                .find(|table| logical.table_id(table) == *id)
-                .map(|table| table.sql_name.clone())
-        };
-        // Tables and fields a later generation removed are dropped.
+        // Grants on tables a later generation removed are dropped.
         let grants: Vec<_> = grants
             .iter()
-            .filter(|grant| table_name(&grant.table).is_some())
-            .cloned()
-            .map(|mut grant| {
-                grant.fields.retain(|field| current.contains(field));
-                if let Some(name) = table_name(&grant.table) {
-                    let all = fields(&name);
-                    if !grant.fields.is_empty()
-                        && grant.fields.is_subset(&all)
-                        && all
-                            .iter()
-                            .all(|field| grant.fields.contains(field) || added.contains(field))
-                    {
-                        grant.fields = all;
-                    }
-                }
-                grant
+            .filter(|grant| {
+                logical
+                    .tables
+                    .iter()
+                    .any(|table| logical.table_id(table) == grant.table)
             })
+            .cloned()
             .collect();
         let mut all = grants.clone();
         for (name, like) in &self.granted_like {
@@ -222,7 +190,7 @@ impl Domain {
             for grant in grants.iter().filter(|grant| {
                 grant.table == parent_id
                     && grant.rows == rocky_core::RowSelection::All
-                    && grant.fields == fields(like)
+                    && grant.fields == FieldSelection::All
             }) {
                 let selector: BTreeMap<_, _> = grant
                     .selector
@@ -242,7 +210,7 @@ impl Domain {
                     selector: rocky_core::PartitionSelector(selector),
                     rows: rocky_core::RowSelection::All,
                     rights: grant.rights.clone(),
-                    fields: fields(name),
+                    fields: FieldSelection::All,
                 });
             }
         }

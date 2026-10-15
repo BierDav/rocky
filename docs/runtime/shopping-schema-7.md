@@ -58,8 +58,9 @@ every other device receives like any other.
    database. Items it adds, or edits it made before the trusted device
    migrated, read the default position `''` and sort first.
 
-Full and partial members keep their enrollment: renewal into version 7 grants
-them `item_categories` because it follows `items`. Partial members still hold
+Full and partial members keep their enrollment and adopt version 7 without an
+issuer; their next renewal grants them `item_categories` because it follows
+`items`. Partial members still hold
 only the lists shared with them.
 
 ## Evidence and limits

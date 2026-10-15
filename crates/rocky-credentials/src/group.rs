@@ -16,10 +16,10 @@ use std::collections::BTreeSet;
 pub const GROUP_SECRET_LEN: usize = 32;
 pub const MAX_GROUP_ENVELOPE_BYTES: usize = 128 * 1024;
 const SEALED_LEN: usize = GROUP_SECRET_LEN + SEAL_OVERHEAD;
-const ENVELOPE_VERSION: u32 = 2;
-const SIGNED: &str = "rocky.group-secret-envelope.v2";
-const CONTEXT: &str = "rocky.group-secret-envelope.context.v2";
-const WRAPPING: &str = "rocky.group-secret-envelope.key.v2";
+const ENVELOPE_VERSION: u32 = 3;
+const SIGNED: &str = "rocky.group-secret-envelope.v3";
+const CONTEXT: &str = "rocky.group-secret-envelope.context.v3";
+const WRAPPING: &str = "rocky.group-secret-envelope.key.v3";
 const DERIVATION: &[u8] = b"rocky.group-table-key.v1";
 
 fn hmac(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
@@ -102,7 +102,6 @@ pub struct GroupSecretEnvelope {
 #[serde(deny_unknown_fields)]
 struct Body {
     version: u32,
-    manifest: Commitment,
     group: Commitment,
     epoch: rocky_core::KeyEpoch,
     statements: Vec<Commitment>,
@@ -114,7 +113,6 @@ struct Body {
 #[derive(Serialize)]
 struct Context<'a> {
     version: u32,
-    manifest: &'a Commitment,
     group: &'a Commitment,
     epoch: rocky_core::KeyEpoch,
     statements: Vec<Commitment>,
@@ -128,7 +126,6 @@ impl Body {
             CONTEXT,
             &Context {
                 version: self.version,
-                manifest: &self.manifest,
                 group: &self.group,
                 epoch: self.epoch,
                 statements: self.statements.clone(),
@@ -166,7 +163,6 @@ impl GroupSecretEnvelope {
     /// Wraps one group epoch to each distinct recipient; refuses an empty set.
     pub fn seal_many(
         issuer: &PrivateKey,
-        manifest: Commitment,
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
@@ -177,30 +173,20 @@ impl GroupSecretEnvelope {
         }
         recipients
             .iter()
-            .map(|recipient| Self::seal(issuer, manifest, group, epoch, secret, *recipient))
+            .map(|recipient| Self::seal(issuer, group, epoch, secret, *recipient))
             .collect()
     }
     pub fn seal(
         issuer: &PrivateKey,
-        manifest: Commitment,
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
         recipient: PublicKey,
     ) -> Result<Self, Error> {
-        Self::seal_recorded(
-            issuer,
-            manifest,
-            group,
-            epoch,
-            secret,
-            recipient,
-            Vec::new(),
-        )
+        Self::seal_recorded(issuer, group, epoch, secret, recipient, Vec::new())
     }
     pub fn seal_recorded(
         issuer: &PrivateKey,
-        manifest: Commitment,
         group: Commitment,
         epoch: u64,
         secret: [u8; GROUP_SECRET_LEN],
@@ -210,7 +196,6 @@ impl GroupSecretEnvelope {
         let (ephemeral, shared) = agree(recipient)?;
         let mut body = Body {
             version: ENVELOPE_VERSION,
-            manifest,
             group,
             epoch: rocky_core::KeyEpoch::new(epoch, &secret),
             statements,
@@ -228,13 +213,11 @@ impl GroupSecretEnvelope {
     pub fn verify(
         &self,
         issuer: PublicKey,
-        manifest: Commitment,
         group: Commitment,
         epoch: rocky_core::KeyEpoch,
     ) -> Result<(), Error> {
         self.body.validate()?;
         if self.body.issuer != issuer
-            || self.body.manifest != manifest
             || self.body.group != group
             || self.body.epoch != epoch
             || !issuer.verify(&signing_bytes(SIGNED, &self.body)?, &self.signature)
@@ -249,11 +232,10 @@ impl GroupSecretEnvelope {
         &self,
         recipient: &PrivateKey,
         issuer: PublicKey,
-        manifest: Commitment,
         group: Commitment,
         epoch: rocky_core::KeyEpoch,
     ) -> Result<[u8; GROUP_SECRET_LEN], Error> {
-        self.verify(issuer, manifest, group, epoch)?;
+        self.verify(issuer, group, epoch)?;
         if recipient.public_key() != self.body.recipient {
             return Err(denied("group envelope names another recipient"));
         }

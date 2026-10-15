@@ -347,8 +347,7 @@ impl<A: RowApplication> Inner<A> {
                 .await?;
             if let Some(row) = rows.next().await? {
                 let ack: HorizonAck = decode(&row.get::<Vec<u8>>(0)?)?;
-                ack.verify(self.config.publisher, signed.statement.manifest)
-                    .map_err(credential)?;
+                ack.verify(self.config.publisher).map_err(credential)?;
                 if ack.node != peer.node || ack.horizon != signed.id().map_err(credential)? {
                     return Err(Error::Corrupt("horizon acknowledgment context".into()));
                 }
@@ -684,8 +683,7 @@ impl<A: RowApplication> Inner<A> {
         signed: &SignedHorizon,
         ack: &HorizonAck,
     ) -> Result<(), Error> {
-        ack.verify(self.config.publisher, signed.statement.manifest)
-            .map_err(credential)?;
+        ack.verify(self.config.publisher).map_err(credential)?;
         if ack.horizon != signed.id().map_err(credential)?
             || !signed
                 .statement

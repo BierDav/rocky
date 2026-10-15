@@ -134,7 +134,7 @@ to a member of the set leaves the set at the deadline. Kotlin uses a coordinatio
 in-process development. A development log loses its ledger at process exit.
 
 The encrypted file identity is `rocky.encrypted-replica.v21` and the live
-link handshake `rocky.link.v5`; other versions are refused.
+link handshake `rocky.link.v6`; other versions are refused.
 
 ## Limits
 

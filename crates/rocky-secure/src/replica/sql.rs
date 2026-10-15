@@ -317,7 +317,6 @@ impl<A: RowApplication> SecureSql<A> {
                 .credentials
                 .verify_partition_author(
                     inner.config.publisher,
-                    inner.manifest,
                     author.key.public_key(),
                     author.number,
                     scope,
@@ -330,7 +329,6 @@ impl<A: RowApplication> SecureSql<A> {
                 .credentials
                 .verify_author(
                     inner.config.publisher,
-                    inner.manifest,
                     author.key.public_key(),
                     author.number,
                     table.scope.table,

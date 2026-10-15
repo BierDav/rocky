@@ -5,7 +5,9 @@ use crate::{
     IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PublicKey,
     Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
 };
-use rocky_core::{Commitment, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection};
+use rocky_core::{
+    Commitment, FieldSelection, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,18 +49,21 @@ impl Grant {
                 "a grant names no right, or one that is not a collection's",
             ));
         }
-        let fields: BTreeSet<Commitment> = match &self.columns {
-            None => resource.columns.values().copied().collect(),
-            Some(names) => names
-                .iter()
-                .map(|name| {
-                    resource
-                        .columns
-                        .get(name)
-                        .copied()
-                        .ok_or_else(|| denied("a grant names an unknown column"))
-                })
-                .collect::<Result<_, _>>()?,
+        // Without columns the grant covers every field, in every generation.
+        let fields = match &self.columns {
+            None => FieldSelection::All,
+            Some(names) => FieldSelection::Only(
+                names
+                    .iter()
+                    .map(|name| {
+                        resource
+                            .columns
+                            .get(name)
+                            .copied()
+                            .ok_or_else(|| denied("a grant names an unknown column"))
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
         };
         Ok(ResourceGrant {
             scope: resource.scope,
@@ -88,16 +93,21 @@ impl Grant {
         if grant.rows != RowSelection::All {
             return None;
         }
-        let columns: BTreeSet<String> = resource
-            .columns
-            .iter()
-            .filter(|(_, field)| grant.fields.contains(*field))
-            .map(|(name, _)| name.clone())
-            .collect();
+        let columns = match &grant.fields {
+            FieldSelection::All => None,
+            FieldSelection::Only(fields) => Some(
+                resource
+                    .columns
+                    .iter()
+                    .filter(|(_, field)| fields.contains(*field))
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+            ),
+        };
         let described = Self {
             scope: resource.name.clone(),
             rights: grant.rights.clone(),
-            columns: (columns.len() != resource.columns.len()).then_some(columns),
+            columns,
         };
         (described.resolve(std::slice::from_ref(resource)).ok()? == *grant).then_some(described)
     }
@@ -282,36 +292,27 @@ fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
         && right.iter().all(|grant| left.contains(grant))
 }
 
-/// What an identity with issuer authority signs for one manifest: the
-/// owner's, whose key is the publisher key, or an issuer's through its
-/// chain of issuer links. The identity's provider signs; no key is copied.
+/// What an identity with issuer authority signs: the owner's, whose key is
+/// the publisher key, or an issuer's through its chain of issuer links. The
+/// identity's provider signs; no key is copied. What it signs holds in every
+/// generation of the domain.
 pub struct Authority<'a> {
     pub identity: &'a dyn IdentityProvider,
     /// The issuer links from the publisher to `identity`; empty for the owner.
     pub chain: &'a CredentialChain,
-    pub manifest: Commitment,
 }
 static OWNER: CredentialChain = CredentialChain(Vec::new());
 impl<'a> Authority<'a> {
     /// The owner: its identity key is the publisher key.
-    pub fn owner(identity: &'a dyn IdentityProvider, manifest: Commitment) -> Self {
+    pub fn owner(identity: &'a dyn IdentityProvider) -> Self {
         Self {
             identity,
             chain: &OWNER,
-            manifest,
         }
     }
     /// An issuer whose issuer links `chain` ends at `identity`.
-    pub fn issuer(
-        identity: &'a dyn IdentityProvider,
-        chain: &'a CredentialChain,
-        manifest: Commitment,
-    ) -> Self {
-        Self {
-            identity,
-            chain,
-            manifest,
-        }
+    pub fn issuer(identity: &'a dyn IdentityProvider, chain: &'a CredentialChain) -> Self {
+        Self { identity, chain }
     }
     /// The links a capability this authority signs follows.
     pub fn prefix(&self) -> &CredentialChain {
@@ -435,7 +436,6 @@ impl<'a> Authority<'a> {
         }
         let signed = SignedCapability::sign(
             Capability {
-                manifest: self.manifest,
                 subject,
                 kind: PrincipalKind::User,
                 grants,
@@ -458,10 +458,7 @@ impl<'a> Authority<'a> {
         revocations: &RevocationSet,
         validity: (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        if prior.manifest != self.manifest
-            || prior.kind != PrincipalKind::User
-            || revocations.revokes(&prior.subject)
-        {
+        if prior.kind != PrincipalKind::User || revocations.revokes(&prior.subject) {
             return Err(denied("invalid or revoked credential"));
         }
         if prior.delegations >= self.delegations()? {
@@ -553,18 +550,15 @@ impl CredentialChain {
             holder,
             (node, author),
             (last.grants.clone(), extended.partitions),
-            last.manifest,
         )
     }
-    /// As `certify`, with `grants` and `partitions` of the identity's, for
-    /// `manifest`: an issuer identity's certificate names what its node
-    /// holds, in whichever generation its node runs.
+    /// As `certify`, with `grants` and `partitions` of the identity's: an
+    /// issuer identity's certificate names what its node holds.
     pub fn certify_with(
         mut self,
         holder: &dyn IdentityProvider,
         (node, author): (PublicKey, u32),
         (grants, partitions): (Vec<ResourceGrant>, Vec<PartitionGrant>),
-        manifest: Commitment,
     ) -> Result<Self, Error> {
         let last = self.holder(holder)?;
         let authors = AuthorRange::new(author, author)?;
@@ -578,7 +572,6 @@ impl CredentialChain {
             ));
         }
         let leaf = Capability {
-            manifest,
             subject: node,
             kind: PrincipalKind::Node,
             delegations: 0,
@@ -631,7 +624,6 @@ impl CredentialChain {
             return Err(denied("delegation expands authority"));
         }
         let link = Capability {
-            manifest: parent.manifest,
             subject,
             kind,
             grants,

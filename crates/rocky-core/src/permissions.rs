@@ -48,20 +48,79 @@ impl RowSelection {
     }
 }
 
+/// The fields a grant covers. Field ids derive from names, so `All`
+/// covers every field the table has in any generation, added later
+/// included, and `Only` the named ones in every generation. Encoded as
+/// an optional set: none for `All`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    from = "Option<BTreeSet<Commitment>>",
+    into = "Option<BTreeSet<Commitment>>"
+)]
+pub enum FieldSelection {
+    All,
+    Only(BTreeSet<Commitment>),
+}
+impl FieldSelection {
+    pub fn contains(&self, field: &Commitment) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(fields) => fields.contains(field),
+        }
+    }
+    pub fn includes(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::All, _) => true,
+            (Self::Only(a), Self::Only(b)) => b.is_subset(a),
+            _ => false,
+        }
+    }
+    /// The number of named fields; none for `All`.
+    pub fn named(&self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Only(fields) => fields.len(),
+        }
+    }
+    /// Whether this selects no field at all, as custody does.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::Only(fields) if fields.is_empty())
+    }
+}
+impl From<Option<BTreeSet<Commitment>>> for FieldSelection {
+    fn from(fields: Option<BTreeSet<Commitment>>) -> Self {
+        fields.map_or(Self::All, Self::Only)
+    }
+}
+impl From<FieldSelection> for Option<BTreeSet<Commitment>> {
+    fn from(fields: FieldSelection) -> Self {
+        match fields {
+            FieldSelection::All => None,
+            FieldSelection::Only(fields) => Some(fields),
+        }
+    }
+}
+/// Collected field ids name exactly those fields.
+impl FromIterator<Commitment> for FieldSelection {
+    fn from_iter<I: IntoIterator<Item = Commitment>>(fields: I) -> Self {
+        Self::Only(fields.into_iter().collect())
+    }
+}
+
 /// Fields and rows stay paired inside each grant; permissions never form a cross product.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceGrant {
     pub scope: ResourceScope,
     pub rows: RowSelection,
     pub rights: BTreeSet<Right>,
-    pub fields: BTreeSet<Commitment>,
+    pub fields: FieldSelection,
 }
 impl ResourceGrant {
     pub fn includes(&self, other: &Self) -> bool {
         self.scope == other.scope
             && self.rows.includes(&other.rows)
             && other.rights.is_subset(&self.rights)
-            && other.fields.is_subset(&self.fields)
+            && self.fields.includes(&other.fields)
     }
     pub fn permits(&self, scope: ResourceScope, row: Commitment, right: Right) -> bool {
         self.scope == scope && self.rows.contains(&row) && self.rights.contains(&right)
@@ -210,7 +269,7 @@ mod tests {
             scope: scope(),
             rows: RowSelection::All,
             rights: rights.iter().copied().collect(),
-            fields: fields.iter().map(|field| [*field; 32]).collect(),
+            fields: FieldSelection::Only(fields.iter().map(|field| [*field; 32]).collect()),
         }
     }
     fn fields(values: &[(u8, &str)]) -> RowFields {
@@ -218,6 +277,24 @@ mod tests {
             .iter()
             .map(|(field, value)| ([*field; 32], value.as_bytes().to_vec()))
             .collect()
+    }
+
+    #[test]
+    fn an_every_field_grant_covers_fields_added_later() {
+        let insert = RowWrite::changed(RowChange {
+            scope: scope(),
+            row: [9; 32],
+            before: None,
+            after: Some(fields(&[(1, "a"), (7, "added later")])),
+        });
+        let every = ResourceGrant {
+            fields: FieldSelection::All,
+            ..grant(&[Right::Insert], &[])
+        };
+        assert!(insert.permitted_by(std::slice::from_ref(&every)));
+        assert!(!insert.permitted_by(&[grant(&[Right::Insert], &[1])]));
+        assert!(every.includes(&grant(&[Right::Insert], &[1, 7])));
+        assert!(!grant(&[Right::Insert], &[1, 7]).includes(&every));
     }
 
     #[test]

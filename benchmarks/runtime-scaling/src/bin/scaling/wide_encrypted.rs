@@ -27,18 +27,16 @@ fn config(
     scope: ResourceScope,
     field: Commitment,
 ) -> Result<SecureConfig, Failure> {
-    let hash = manifest.hash();
     let grant = ResourceGrant {
         scope,
         rows: RowSelection::All,
         rights: [Right::Read, Right::Insert, Right::Update, Right::Delete].into(),
-        fields: [field].into(),
+        fields: [field].into_iter().collect(),
     };
     let user = PrivateKey::new();
     let deployment = PrivateKey::new();
     let extension = credentials::Extension::new(credentials::Extended::default())?;
     let capability = |subject, kind, delegations| Capability {
-        manifest: hash,
         subject,
         kind,
         grants: vec![grant.clone()],
@@ -142,19 +140,16 @@ pub async fn run() -> Result<(), Failure> {
         for _ in 0..1000 {
             std::hint::black_box(credentials.verify(
                 publisher.public_key(),
-                manifest.hash(),
                 author.public_key(),
                 &policy,
                 time,
             )?);
         }
-        // Report pure verification separately from manifest hashing.
-        let hash = manifest.hash();
+        // Report pure verification separately; chains name no manifest.
         let pure = Instant::now();
         for _ in 0..1000 {
             std::hint::black_box(credentials.verify(
                 publisher.public_key(),
-                hash,
                 author.public_key(),
                 &policy,
                 time,

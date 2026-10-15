@@ -485,7 +485,6 @@ async fn wide_signed_definitions_are_cached_without_weakening_row_admission() {
         let deployment = PrivateKey::new();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
-            manifest: manifest.hash(),
             subject,
             kind,
             grants: f.full(),

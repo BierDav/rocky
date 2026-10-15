@@ -145,7 +145,6 @@ impl Erp {
         let user = PrivateKey::new();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
-            manifest: self.manifest_hash(),
             subject,
             kind,
             grants: grants.clone(),
@@ -181,7 +180,7 @@ impl Erp {
     ) -> (PrivateKey, CredentialChain) {
         let key = PrivateKey::new();
         let assigner = PrivateKey::new();
-        let issued = crate::credentials::Authority::owner(&self.publisher, self.manifest_hash())
+        let issued = crate::credentials::Authority::owner(&self.publisher)
             .issue_terms(
                 assigner.public_key(),
                 grants.clone(),

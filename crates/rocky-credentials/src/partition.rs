@@ -1,8 +1,8 @@
 //! Partition grants; no runtime or storage. Keys travel as group envelopes.
 use crate::{Error, PublicKey, denied};
 use rocky_core::{
-    Commitment, PartitionSelector, PartitionTuple, ResourceGrant, ResourceScope, Right,
-    RowSelection, Scope,
+    Commitment, FieldSelection, PartitionSelector, PartitionTuple, ResourceGrant, ResourceScope,
+    Right, RowSelection, Scope,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -16,7 +16,7 @@ pub struct PartitionGrant {
     pub selector: PartitionSelector,
     pub rows: RowSelection,
     pub rights: BTreeSet<Right>,
-    pub fields: BTreeSet<Commitment>,
+    pub fields: FieldSelection,
 }
 impl PartitionGrant {
     pub fn validate(&self) -> Result<(), Error> {
@@ -24,7 +24,7 @@ impl PartitionGrant {
             .validate()
             .map_err(|error| Error::Denied(error.to_string()))?;
         if self.rights.is_empty()
-            || self.fields.len() > 256
+            || self.fields.named() > 256
             || matches!(&self.rows, RowSelection::Only(rows) if rows.is_empty() || rows.len() > 256)
         {
             return Err(denied("partition grant quota or missing rights"));
@@ -39,7 +39,7 @@ impl PartitionGrant {
             && self.selector.includes(&other.selector)
             && self.rows.includes(&other.rows)
             && other.rights.is_subset(&self.rights)
-            && other.fields.is_subset(&self.fields)
+            && self.fields.includes(&other.fields)
     }
     /// A concrete grant only when the selector matches the authenticated tuple.
     pub fn resolve(
@@ -70,12 +70,11 @@ impl crate::CredentialChain {
     pub fn verify_selectors(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         subject: PublicKey,
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<(Vec<ResourceGrant>, Vec<PartitionGrant>), Error> {
-        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
+        let leaf = self.links(publisher, Some((revocations, time)))?;
         if leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.subject != subject
             || leaf.extended()?.node != Some(crate::PeerId::of(subject))
@@ -87,18 +86,16 @@ impl crate::CredentialChain {
     }
 
     /// Verifies a node chain and resolves its paired grants on this partition.
-    #[allow(clippy::too_many_arguments)]
     pub fn verify_partition(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         subject: PublicKey,
         scope: ResourceScope,
         tuple: &PartitionTuple,
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
+        let leaf = self.links(publisher, Some((revocations, time)))?;
         if leaf.extended()?.node != Some(crate::PeerId::of(subject))
             || leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.delegations != 0
@@ -112,7 +109,6 @@ impl crate::CredentialChain {
     pub fn verify_partition_author(
         &self,
         publisher: PublicKey,
-        manifest: Commitment,
         signer: PublicKey,
         author: u32,
         scope: ResourceScope,
@@ -120,7 +116,7 @@ impl crate::CredentialChain {
         revocations: &crate::RevocationSet,
         time: u64,
     ) -> Result<Vec<ResourceGrant>, Error> {
-        let leaf = self.links(publisher, manifest, Some((revocations, time)))?;
+        let leaf = self.links(publisher, Some((revocations, time)))?;
         if leaf.kind != rocky_core::PrincipalKind::Node
             || leaf.subject != signer
             || leaf.authors()?.and_then(|range| range.single()) != Some(author)
@@ -178,7 +174,7 @@ impl crate::CredentialChain {
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<Self, Error> {
         let root = self.0.first().ok_or_else(|| denied("credential depth"))?;
-        let parent = self.links(root.issuer, root.capability.manifest, None)?;
+        let parent = self.links(root.issuer, None)?;
         if parent.subject != holder.public_key()? {
             return Err(denied("partition delegator holds another key"));
         }
@@ -195,11 +191,10 @@ impl crate::CredentialChain {
                 not_before: time.saturating_sub(skew).max(parent.not_before),
                 expires: time.saturating_add(ttl).min(parent.expires),
                 extension: crate::Extension::new(extended)?,
-                ..parent.clone()
             },
             holder,
         )?);
-        chain.links(root.issuer, root.capability.manifest, None)?;
+        chain.links(root.issuer, None)?;
         Ok(chain)
     }
 }

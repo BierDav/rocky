@@ -31,7 +31,6 @@ impl Fixture {
         )
         .map_err(signing)?;
         let capability = |subject, kind, delegations| Capability {
-            manifest: manifest.hash(),
             subject,
             kind,
             grants: vec![ResourceGrant {
@@ -45,7 +44,7 @@ impl Fixture {
                     Right::Custody,
                 ]
                 .into(),
-                fields: [self.app().field("display_name")].into(),
+                fields: [self.app().field("display_name")].into_iter().collect(),
             }],
             not_before: lifetime().0,
             expires: lifetime().1,

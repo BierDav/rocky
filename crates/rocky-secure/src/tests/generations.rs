@@ -264,10 +264,8 @@ impl Lineage {
     }
     pub(super) fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
         let user = PrivateKey::new();
-        let manifest = self.definition(generation).hash();
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
-            manifest,
             subject,
             kind,
             grants: self.grants(generation),
@@ -461,13 +459,19 @@ async fn frames(
     target: &EncryptedReplica<TypedRows>,
     scope: ResourceScope,
 ) -> Vec<EncryptedFrame> {
-    let (node, credentials) = {
+    let (node, credentials, manifest) = {
         let inner = target.inner.lock().await;
         (
             inner.config.node.public_key(),
             inner.config.credentials.clone(),
+            inner.manifest,
         )
     };
+    // As the target's session hello declares its generation.
+    source
+        .admit_peer(node, &credentials, manifest)
+        .await
+        .unwrap();
     frames_as(source, node, &credentials, scope).await
 }
 /// Every frame a node presenting `credentials` may receive from `source`.

@@ -222,6 +222,11 @@ async fn a_table_granted_like_another_reaches_existing_members() -> Result<(), F
 
     let a = Device::new(Database::open(open(&a_dir, GRANTED, network("a")))?)?;
     let b = Device::new(Database::open(open(&b_dir, GRANTED, network("b")))?)?;
+    // Adopting renews nothing; the next sync asks the issuer once for the
+    // grant and key of the table that follows `items`.
+    let before = chain(&b_dir)?;
+    b.sync().await.expect("sync");
+    assert_ne!(chain(&b_dir)?, before);
     b.ok(json!({
         "type": "mutate",
         "handle": vec![5; 32],
@@ -671,6 +676,122 @@ async fn an_older_application_joins_at_the_households_generation() -> Result<(),
     b.close().await;
     let b = Device::new(Database::open(open(&b_dir, SCHEMA, network("b")))?)?;
     assert_eq!(generation(&b).await["current"]["schema"], 2);
+    b.close().await;
+    a.close().await;
+    Ok(())
+}
+
+/// The credential chain a device's identity holds.
+fn chain(directory: &Path) -> Result<Value, Failure> {
+    let identity: Value = serde_json::from_slice(&std::fs::read(directory.join("identity.json"))?)?;
+    Ok(identity["credentials"].clone())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_adopts_a_generation_from_another_member_with_no_issuer_reachable()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir, c_dir) = (
+        root.path().join("a"),
+        root.path().join("b"),
+        root.path().join("c"),
+    );
+    let a = Device::create(&a_dir, network("a"))?;
+    let b = Device::join(
+        &b_dir,
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    let c = Device::join(
+        &c_dir,
+        &a.invite().await,
+        Network::Owned(hub.connector("c")),
+    )?;
+    introduce(&a, &b).await;
+    introduce(&a, &c).await;
+    introduce(&b, &c).await;
+    let apples = c.add(1, "apples").await;
+    c.sync().await.expect("sync");
+    b.sync().await.expect("sync");
+    a.close().await;
+    // The issuer signs generation 2 and meets only `b` before it leaves.
+    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    a.set(2, &apples, "note", json!("fresh")).await;
+    // The first sync adopts generation 2, the second pulls its frames.
+    b.sync().await.expect("sync");
+    assert_eq!(generation(&b).await["current"]["schema"], 2);
+    b.sync().await.expect("sync");
+    assert_eq!(
+        rows(&b, "SELECT note FROM items WHERE title='apples'").await,
+        json!([[text("fresh")]])
+    );
+    a.close().await;
+
+    // `c`, its application at version 1, meets generation 2 through `b`
+    // alone and adopts it on its own: its chain stays as it was.
+    let before = chain(&c_dir)?;
+    let _ = c.sync().await;
+    let status = generation(&c).await;
+    assert_eq!(status["current"]["schema"], 2);
+    assert_eq!(status["application"], "behind");
+    assert_eq!(chain(&c_dir)?, before, "adopting renews nothing");
+    let bread = c.add(3, "bread").await;
+    let _ = c.sync().await;
+    assert_eq!(b.titles().await, ["apples", "bread"]);
+    assert_eq!(
+        rows(&c, "SELECT note FROM items WHERE title='apples'").await,
+        json!([[text("fresh")]])
+    );
+    // Updated, it writes the field generation 2 added under the same chain.
+    c.close().await;
+    let c = Device::new(Database::open(open(&c_dir, SECOND, network("c")))?)?;
+    assert_eq!(generation(&c).await["application"], "current");
+    c.set(4, &bread, "note", json!("rye")).await;
+    let _ = c.sync().await;
+    assert_eq!(
+        rows(&b, "SELECT note FROM items WHERE title='bread'").await,
+        json!([[text("rye")]])
+    );
+    assert_eq!(chain(&c_dir)?, before);
+    c.close().await;
+    b.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_created_before_a_schema_change_enrolls_a_device_after_it()
+-> Result<(), Failure> {
+    let root = common::identity::small_directory()?;
+    let hub = Arc::new(Hub::default());
+    let network = |name: &str| Some(Network::Owned(hub.connector(name)));
+    let (a_dir, b_dir) = (root.path().join("a"), root.path().join("b"));
+    let a = Device::create(&a_dir, network("a"))?;
+    let invitation = a.invite().await;
+    a.add(1, "apples").await;
+    a.close().await;
+    let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
+    assert_eq!(generation(&a).await["current"]["schema"], 2);
+    // The invitation names tables, not a generation: it enrolls into the
+    // one the issuer runs now.
+    let b = Device::new(Database::join(
+        open(&b_dir, SECOND, network("b")),
+        &invitation,
+    )?)?;
+    introduce(&a, &b).await;
+    b.sync().await.expect("sync");
+    let status = generation(&b).await;
+    assert_eq!(status["current"]["schema"], 2);
+    assert_eq!(status["application"], "current");
+    let bread = b.add(2, "bread").await;
+    b.set(3, &bread, "note", json!("rye")).await;
+    b.sync().await.expect("sync");
+    assert_eq!(a.titles().await, ["apples", "bread"]);
+    assert_eq!(
+        rows(&a, "SELECT note FROM items WHERE title='bread'").await,
+        json!([[text("rye")]])
+    );
     b.close().await;
     a.close().await;
     Ok(())

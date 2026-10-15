@@ -194,7 +194,7 @@ pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
     }
     identity
         .credentials
-        .provenance(inventory.publisher, manifest.hash(), inventory.node)?;
+        .provenance(inventory.publisher, inventory.node)?;
     Ok(Opened {
         id: HEXLOWER.encode(&rocky_core::commitment("rocky.backup.id.v1", &header)),
         inventory,

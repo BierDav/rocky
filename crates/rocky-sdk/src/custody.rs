@@ -49,7 +49,7 @@ impl CustodyPeer {
                 || !settings.keys.is_empty()
                 || settings.credentials.0.iter().any(|capability| {
                     capability.capability.grants.iter().any(|grant| {
-                        grant.rights != [Right::Custody].into() || !grant.fields.is_empty()
+                        grant.rights != [Right::Custody].into() || !grant.fields.is_none()
                     })
                 })
             {

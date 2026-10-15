@@ -18,13 +18,13 @@ endpoint: everything it does is keys and bytes.
   [Node author numbers](credential-primitives.md#principal-ranges-and-node-authors),
   issuer authority and partition selectors use a versioned capability extension.
   `rocky-secure` re-exports these types.
-- `Credentials { publisher, manifest, revocations, chain }::verify(device, time)`
-  checks a whole supplied set and returns the identity, grants, revocation
-  digest and expiry. Nothing needs to be contacted.
+- `Credentials { publisher, revocations, chain }::verify(device, app, time)`
+  checks a whole supplied set for one application and returns the identity,
+  grants, revocation digest and expiry. Nothing needs to be contacted.
 - `IdentityProvider` supplies an [identity](#identities): its public key,
   signatures and author numbers. `FileIdentityProvider` keeps one in a
   directory for tests and servers; a `PrivateKey` signs as itself.
-- `Authority { identity, chain, manifest }` is what an identity with issuer
+- `Authority { identity, chain }` is what an identity with issuer
   authority signs: `Authority::owner` for the owner, whose identity key is the
   publisher key, `Authority::issuer` for an issuer through its chain. It
   issues identity capabilities (`issue`, `issue_delegable`, `issue_terms`),
@@ -72,8 +72,8 @@ identity → node certificate. See
   authority names the grants its node holds.
 - **Issuer authority** is the extension's `issues` flag on an identity's
   link. Only the publisher's root or an issuer link sets it. Its holder may
-  grant any grant, partition and author range below it, and its link names
-  no manifest; delegations decrease strictly, so issuers nest at most six
+  grant any grant, partition and author range below it; delegations
+  decrease strictly, so issuers nest at most six
   deep and an issuer renews only identities below it.
 - **Endorsements** sign the domain's statements: manifests, transitions,
   horizon statements and discovery values carry an `Endorsement`, the
@@ -104,7 +104,14 @@ raw grants wherever a profile is accepted.
 In the SDK, an `issuer` also writes and a `custody` peer holds the reserved
 [issuer registry](issuer-registry.md); no other profile or raw grant names it.
 
-Every grant selects whole rows. With [typed commands](typed-commands.md), a
+Every grant selects whole rows. No capability names a generation's
+manifest: grants name tables and fields by their name-derived ids
+([decision 0067](../decisions/0067-names-are-identities.md)), so a chain
+holds in every generation and adopting one renews nothing
+([adopting generations](adopting-generations.md)). A grant's fields are
+`FieldSelection::All`, every field of the table in any generation, added
+later included, or `Only` the named ones; a profile or raw grant without
+`columns` grants `All`, custody `Only` none. With [typed commands](typed-commands.md), a
 writer also gets `Invoke` for the commands whose arguments are sealed for a
 collection it writes, and an issuer `Execute` for every command; each is
 paired with the command's manifest item. No profile holds `PublishSchema`;
@@ -293,6 +300,7 @@ revoke at the same time.
 | Author binding | 2 | `rocky.credentials.author-binding.v2`, with the link's `issues` flag |
 | Endorsement | | The signer's issuer links and signature in `SignedManifest` (`rocky.signed-manifest.v2`), `SignedTransition` (`rocky.signed-transition.v2`), `SignedHorizon` (`rocky.horizon-statement.v2`, horizon format 6) and `DiscoverySecret` (`rocky.discovery-secret.v2`) |
 | Contact URI | 2 | `issuer` and `enrollment_only` flags; `issuer` written only by issuers |
+| Capability | 2 | Signed under `rocky.capability.v2`, id `rocky.capability.id.v2`; no manifest; extension body 4 ([chain format](credential-primitives.md#chain-format)) |
 | Revocation statement and set | 3 | See [revocations](revocations.md#formats) |
 | `revoked.json` | 2 | The statement that revoked this device |
 

@@ -36,7 +36,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             .credentials
             .verify_node_alias(
                 inner.config.publisher,
-                inner.manifest,
                 rocky_credentials::PeerId::of(inner.config.node.public_key()),
                 key.public_key(),
             )

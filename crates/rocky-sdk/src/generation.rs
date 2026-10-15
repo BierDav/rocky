@@ -20,7 +20,7 @@ use rocky_secure::{GenerationStep, RevocationSet, SignedManifest, Upgrade};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
-/// Asks an issuer, on the renewal protocol, for the domain's generations.
+/// Asks a device, on the renewal protocol, for the domain's generations; every device answers.
 pub(crate) const OFFER: &[u8] = b"rocky.sdk.generations.v1\n";
 /// Earlier generations a domain keeps.
 const MAX_LINEAGE: usize = 32;
@@ -337,28 +337,40 @@ impl Settings {
         draft.schema = schema.clone();
         draft.manifest =
             HEXLOWER.encode(&SignedManifest::endorse(&after, &*identity, &links)?.to_bytes()?);
+        draft.issue_for_generation(vault, &domain)?;
+        draft.save(path)?;
+        *self = draft;
+        Ok(())
+    }
+    /// On an issuer, what a new generation needs locally: the first reader
+    /// key of each table it adds, derived from the registry key so that
+    /// issuers apart derive the same, and its own node certificate over
+    /// every table. No other device needs anything: chains name no
+    /// generation.
+    fn issue_for_generation(&mut self, vault: &Vault, domain: &Domain) -> Result<(), Failure> {
+        if !self.issuer() {
+            return Ok(());
+        }
         let registry = self.registry_key(vault)?;
         for (name, _) in domain.scopes() {
-            if !draft.keys.contains_key(name) {
+            if !self.keys.contains_key(name) {
                 let key = reader_key(&registry, self.domain, name);
                 let epoch = rocky_core::KeyEpoch::new(1, &key);
                 let role = key_role(name, epoch);
                 if vault.find(&role)?.is_none() {
                     vault.put(&role, &key)?;
                 }
-                let mut ids = draft
+                let mut ids = self
                     .revocations
                     .statements()
                     .map(|signed| signed.statement.id())
                     .collect::<Result<Vec<_>, _>>()?;
                 ids.sort_unstable();
-                draft.epoch_statements.insert(role, ids);
-                draft.keys.insert(name.to_owned(), vec![epoch]);
+                self.epoch_statements.insert(role, ids);
+                self.keys.insert(name.to_owned(), vec![epoch]);
             }
         }
-        draft.credentials = draft.issue_own(vault)?;
-        draft.save(path)?;
-        *self = draft;
+        self.credentials = self.issue_own(vault)?;
         Ok(())
     }
     /// The registry's current key: its highest epoch, the lowest of
@@ -377,6 +389,8 @@ impl Settings {
             .ok_or("an issuer holds the registry key")?;
         Ok(vault.get(&key_role(crate::domain::REGISTRY, epoch))?)
     }
+    /// Fetches the generation of `schema` from a device that runs it,
+    /// issuers first, and adopts it.
     async fn fetch_generation(
         &mut self,
         path: &Path,
@@ -386,17 +400,14 @@ impl Settings {
     ) -> Result<(), Failure> {
         self.resolve_saved_routes(transport).await;
         let mut failure: Failure = ServiceError::NoRoute {
-            peer: "an issuer",
+            peer: "a device at the generation",
             network: transport.kind().into(),
         }
         .into();
-        for (issuer, addresses) in self.issuer_routes(transport, None) {
+        for addresses in self.generation_routes(transport) {
             let attempt = async {
                 let offer = ask(transport, &addresses).await?;
-                let draft = self.adopt_offer(offer, Some(schema))?;
-                draft
-                    .renew_into(path, vault, transport, &[(issuer, addresses.clone())], self)
-                    .await
+                self.adopt_offer(offer, Some(schema))?.settle(path, vault)
             };
             match attempt.await {
                 Ok(draft) => {
@@ -409,16 +420,16 @@ impl Settings {
         Err(failure)
     }
     /// Moves this identity to the newer generation `peer` runs, whatever
-    /// schema the application declares: its offer is verified, and an
-    /// issuer, `peer` first, renews this device into it. Everything is
-    /// saved before the replica switches, which resumes after a crash.
-    /// Returns whether the generation was newer.
+    /// schema the application declares. Its offer is verified against
+    /// endorsements rooted at the publisher alone, so any device may supply
+    /// it and no issuer is contacted. Everything is saved before the replica
+    /// switches, which resumes after a crash. Returns whether the
+    /// generation was newer.
     pub(crate) async fn discover(
         &mut self,
         path: &Path,
         vault: &Vault,
         transport: &dyn Transport,
-        peer: rocky_credentials::PublicKey,
         addresses: &[String],
     ) -> Result<bool, Failure> {
         let offer = ask(transport, addresses).await?;
@@ -428,85 +439,34 @@ impl Settings {
         {
             return Ok(false);
         }
-        let draft = self.adopt_offer(offer, None)?;
-        self.resolve_saved_routes(transport).await;
-        let routes = self.issuer_routes(transport, Some((peer, addresses)));
-        if routes.is_empty() {
-            return Err(ServiceError::NoRoute {
-                peer: "an issuer",
-                network: transport.kind().into(),
-            }
-            .into());
-        }
-        let mut failure = None;
-        for route in &routes {
-            match draft
-                .clone()
-                .renew_into(path, vault, transport, std::slice::from_ref(route), self)
-                .await
-            {
-                Ok(adopted) => {
-                    *self = adopted;
-                    return Ok(true);
-                }
-                Err(error) => failure = Some(error),
-            }
-        }
-        Err(failure.unwrap_or_else(|| "no issuer renewed this device".into()))
+        *self = self.adopt_offer(offer, None)?.settle(path, vault)?;
+        Ok(true)
     }
-    /// Issuers with routes over `transport`, `first` ahead of the others
-    /// when it is one.
-    fn issuer_routes(
-        &self,
-        transport: &dyn Transport,
-        first: Option<(rocky_credentials::PublicKey, &[String])>,
-    ) -> Vec<(rocky_credentials::PublicKey, Vec<String>)> {
-        let mut routes = Vec::new();
-        if let Some((peer, addresses)) = first
-            && self.issuers.contains(&peer)
-            && !addresses.is_empty()
-        {
-            routes.push((peer, addresses.to_vec()));
-        }
-        for issuer in &self.issuers {
-            if routes.iter().any(|(known, _)| known == issuer) {
-                continue;
-            }
-            let addresses = self
-                .peers
-                .get(issuer)
-                .map(|contact| contact.addresses(transport.kind()))
-                .unwrap_or_default();
-            if !addresses.is_empty() {
-                routes.push((*issuer, addresses));
-            }
-        }
-        routes
+    /// This verified draft generation, with what an issuer derives for it,
+    /// saved.
+    fn settle(mut self, path: &Path, vault: &Vault) -> Result<Self, Failure> {
+        let domain = self.domain()?;
+        self.issue_for_generation(vault, &domain)?;
+        self.save(path)?;
+        Ok(self)
     }
-    /// This draft generation with credentials an issuer of `routes`
-    /// renewed into it, saved.
-    async fn renew_into(
-        mut self,
-        path: &Path,
-        vault: &Vault,
-        transport: &dyn Transport,
-        routes: &[(rocky_credentials::PublicKey, Vec<String>)],
-        previous: &Self,
-    ) -> Result<Self, Failure> {
-        let mut failure: Failure = "no issuer renewed this device".into();
-        for (issuer, addresses) in routes {
-            match self
-                .renew_into_generation(vault, transport, *issuer, addresses, previous)
-                .await
-            {
-                Ok(renewed) => {
-                    self.adopt(path, vault, &renewed)?;
-                    return Ok(self);
-                }
-                Err(error) => failure = error,
-            }
-        }
-        Err(failure)
+    /// Routes over `transport` to the issuers, then to every other saved
+    /// peer: any of them may serve the generations.
+    fn generation_routes(&self, transport: &dyn Transport) -> Vec<Vec<String>> {
+        let issuers = self
+            .issuers
+            .iter()
+            .filter_map(|issuer| self.peers.get(issuer));
+        let others = self
+            .peers
+            .iter()
+            .filter(|(peer, _)| !self.issuers.contains(peer))
+            .map(|(_, contact)| contact);
+        issuers
+            .chain(others)
+            .map(|contact| contact.addresses(transport.kind()))
+            .filter(|addresses| !addresses.is_empty())
+            .collect()
     }
     /// The signed steps a device's `reply` to [`OFFER`] and this identity
     /// hold: what a replica that lacks an older generation learns it from.

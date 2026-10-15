@@ -192,9 +192,9 @@ impl<A: RowApplication> Inner<A> {
         let sets = self
             .counted(id, "secure_checkpoint_rows", record.sets)
             .await?;
-        // It names the generation its signer's credentials name.
+        // It names the generation that removed the items.
         let mut statement = previous.statement.clone();
-        statement.definition = self.signing_definition(scope.table);
+        statement.definition = self.manifest;
         let generation = self.generation_of(statement.definition, false)?;
         statement.schema = generation.schema;
         statement.sequence = statement

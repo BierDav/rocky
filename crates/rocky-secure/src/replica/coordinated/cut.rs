@@ -397,23 +397,12 @@ impl<A: RowApplication> Inner<A> {
                 "the cut names a domain this replica holds nothing of",
             ));
         }
-        let manifest = evidence
-            .authority
-            .0
-            .first()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        self.known(manifest)?;
         let scopes: Vec<_> = scopes
             .iter()
             .map(|scope| (*scope, self.partitions.get(scope)))
             .collect();
         record
-            .verify_owner(
-                &evidence.authority,
-                self.config.publisher,
-                manifest,
-                &scopes,
-            )
+            .verify_owner(&evidence.authority, self.config.publisher, &scopes)
             .map_err(credential)
     }
     /// Verifies a record and its owner and stores it with its rollback,

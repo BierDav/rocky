@@ -427,8 +427,8 @@ impl<A: RowApplication> Inner<A> {
             Some(previous) => previous.generation,
         })
     }
-    /// Verifies a chain under the generation its root capability names and
-    /// the held revocations. Every generation shares the one set.
+    /// Verifies a chain under the held revocations. A chain names no
+    /// generation: every generation admits it.
     pub(crate) fn verify_chain(
         &self,
         chain: &CredentialChain,
@@ -445,12 +445,7 @@ impl<A: RowApplication> Inner<A> {
         time: u64,
         scopes: &[ResourceScope],
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let manifest = chain
-            .0
-            .last()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        let revocations = self.revocations_for(manifest, &self.config.revocations)?;
-        self.resolve_chain_scopes_at(chain, manifest, key, revocations, time, scopes)
+        self.resolve_chain_scopes_at(chain, key, &self.config.revocations, time, scopes)
     }
     /// `verify_chain` under `revocations`.
     pub(crate) fn verify_chain_with(
@@ -460,16 +455,11 @@ impl<A: RowApplication> Inner<A> {
         revocations: &RevocationSet,
         time: u64,
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
-        let manifest = chain
-            .0
-            .last()
-            .map_or(self.manifest, |root| root.capability.manifest);
-        let revocations = self.revocations_for(manifest, revocations)?;
-        self.resolve_chain_at(chain, manifest, key, revocations, time)
+        self.resolve_chain_at(chain, key, revocations, time)
     }
-    /// `revocations` once `manifest` names a recorded generation. A chain
-    /// needs only its generation's signed transition; frames under a
-    /// dropped generation fetch its manifest as they arrive.
+    /// `revocations` once `manifest`, of a frame or statement, names a
+    /// recorded generation; frames under a dropped generation fetch its
+    /// manifest as they arrive.
     pub(super) fn revocations_for<'a>(
         &self,
         manifest: Commitment,
@@ -716,39 +706,13 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(())
     }
-    /// Whether anything this replica retains names `manifest`: its own
-    /// credentials and registered authors' chains, a chain of a retained
-    /// frame, or a stored artifact holding the manifest's hash in canonical
-    /// or raw form. A stored row that merely contains those bytes keeps the
-    /// manifest too, which errs on keeping it.
+    /// Whether anything this replica retains names `manifest`: a stored
+    /// artifact holding the manifest's hash in canonical or raw form, such
+    /// as a retained frame's header. Chains name no generation. A stored
+    /// row that merely contains those bytes keeps the manifest too, which
+    /// errs on keeping it.
     async fn names_manifest(&self, manifest: Commitment) -> Result<bool, Error> {
-        let names = |chain: &CredentialChain| {
-            chain
-                .0
-                .iter()
-                .any(|link| link.capability.manifest == manifest)
-        };
-        if names(&self.config.credentials)
-            || self
-                .node_author
-                .iter()
-                .any(|author| names(author.chain.credentials()))
-        {
-            return Ok(true);
-        }
         let (canonical, raw) = (encode(&manifest)?, manifest.to_vec());
-        let framed = collect_rows(
-            self.conn
-                .query(
-                    "SELECT 1 FROM secure_chains c WHERE (instr(c.chain,?1)>0 OR instr(c.chain,?2)>0) AND EXISTS(SELECT 1 FROM secure_operations o WHERE o.chain=c.digest) LIMIT 1",
-                    [canonical.clone(), raw.clone()],
-                )
-                .await?,
-        )
-        .await?;
-        if !framed.is_empty() {
-            return Ok(true);
-        }
         for (table, column) in REFERENCES {
             let found = collect_rows(
                 self.conn

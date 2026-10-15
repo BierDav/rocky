@@ -228,14 +228,14 @@ mod tests {
             rocky_credentials::SignedManifest::sign(&manifest, &fixture.publisher).unwrap();
         let config = |node: &PrivateKey| {
             let user = PrivateKey::new();
-            let root = rocky_credentials::Authority::owner(&fixture.publisher, manifest.hash())
+            let root = rocky_credentials::Authority::owner(&fixture.publisher)
                 .issue_partition_terms(
                     user.public_key(),
                     vec![rocky_core::ResourceGrant {
                         scope: fixture.scope("products", 0),
                         rows: rocky_core::RowSelection::All,
                         rights: [rocky_core::Right::Read].into(),
-                        fields: Default::default(),
+                        fields: rocky_core::FieldSelection::Only(Default::default()),
                     }],
                     vec![],
                     (1, Some(rocky_credentials::AuthorRange::ALL)),

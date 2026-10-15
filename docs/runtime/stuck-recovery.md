@@ -115,7 +115,7 @@ the node's own running hash to `h_c`, checked before any of them applies.
 | --- | --- |
 | Encrypted replica | `rocky.encrypted-replica.v21` |
 | Checkpoint statement | 10 |
-| Live link | `rocky.link.v5` |
+| Live link | `rocky.link.v6` |
 | Coordinator store and snapshot | 5 |
 
 Every other version is refused.

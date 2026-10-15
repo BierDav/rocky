@@ -851,7 +851,7 @@ async fn a_partition_only_writer_obtains_authors_without_collection_wide_grants(
 }
 
 #[tokio::test]
-async fn a_member_with_a_delegated_grant_shares_without_the_publisher_key() {
+async fn a_member_with_a_delegated_grant_shares_without_issuer_authority() {
     let root = support::small_directory().unwrap();
     let issuer = Peer::create(&root.path().join("issuer"));
     issuer

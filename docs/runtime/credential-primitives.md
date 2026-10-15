@@ -25,7 +25,8 @@ included; the device does not become an issuer.
 | `invoke` | Submits the commands whose arguments are sealed for the collection |
 | `execute` | Executes the commands that read or write the collection |
 
-- Without `columns` a grant covers every column. Columns narrow writes; a
+- Without `columns` a grant covers every column, including those a later
+  generation adds. Columns narrow writes; a
   reader key still reveals whole rows, as [reader scopes](credentials.md#limits) do.
 - `invoke` and `execute` are refused on a collection no command uses, and
   `publish_schema` is no collection right. Unknown collections, columns and
@@ -137,6 +138,9 @@ Neither opening a database nor creating a row contacts an author assigner.
 
 ### Chain format
 
+A capability is signed under `rocky.capability.v2` and names no manifest: a
+chain holds in every generation of its domain. Grants select fields as
+`All`, every field in any generation, or `Only` named ones.
 `Capability.extension` is canonical CBOR of a version-4 body. Every field is
 explicit; missing fields, unknown fields, noncanonical bytes and other versions
 are refused.

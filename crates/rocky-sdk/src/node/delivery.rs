@@ -103,13 +103,7 @@ impl Node {
             return false;
         };
         chain
-            .verify_selectors(
-                settings.publisher,
-                self.domain().manifest().hash(),
-                node,
-                &settings.revocations,
-                time,
-            )
+            .verify_selectors(settings.publisher, node, &settings.revocations, time)
             .is_ok_and(|(grants, partitions)| {
                 grants
                     .iter()

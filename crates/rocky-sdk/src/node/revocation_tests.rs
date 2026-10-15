@@ -333,7 +333,6 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let secret = [245; 32];
     let envelope = rocky_credentials::GroupSecretEnvelope::seal(
         &PrivateKey::from_bytes(&node.vault.get("identity")?),
-        node.domain().manifest().hash(),
         record.address,
         1,
         secret,

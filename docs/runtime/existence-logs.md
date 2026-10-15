@@ -45,7 +45,7 @@ signs the CBOR statement under `rocky.existence-record.v2`; the commitment is
 | Field | Contract |
 | --- | --- |
 | `version` | 3, the sole current format; any other value is refused |
-| `manifest` | The admitted generation manifest the author's chain names |
+| `manifest` | The admitted generation manifest the record was written under |
 | `scope` | Domain, reader commitment and table |
 | `partition` | None for installed unpartitioned logs; partitioned logs remain deferred |
 | `id` | The incarnation identity (`RowIdentity`), never 0 |

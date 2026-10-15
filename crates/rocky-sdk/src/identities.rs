@@ -66,17 +66,16 @@ impl Settings {
     pub(crate) fn identity_links(&self) -> CredentialChain {
         self.credentials.delegable()
     }
-    /// What this issuer signs with for `domain`'s current manifest.
+    /// What this issuer signs with, in every generation of the domain.
     pub(crate) fn authority<'a>(
         &self,
         identity: &'a dyn IdentityProvider,
         links: &'a CredentialChain,
-        domain: &Domain,
     ) -> Result<Authority<'a>, Failure> {
         if !self.issuer() {
             return Err("only an issuer signs for the domain".into());
         }
-        Ok(Authority::issuer(identity, links, domain.manifest().hash()))
+        Ok(Authority::issuer(identity, links))
     }
     /// The numbers of `range`, an identity's, its nodes take: the first for
     /// a stored identity's one node; for a supplied one, which may certify
@@ -135,18 +134,12 @@ impl Settings {
         let chain = if issues {
             let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
             let partitions = crate::enrollment::whole_partitions(domain, &grants);
-            links.certify_with(
-                &*identity,
-                (node, author),
-                (grants, partitions),
-                domain.manifest().hash(),
-            )?
+            links.certify_with(&*identity, (node, author), (grants, partitions))?
         } else {
             links.certify(&*identity, node, author)?
         };
         chain.verify_selectors(
             self.publisher,
-            domain.manifest().hash(),
             node,
             &self.revocations,
             crate::enrollment::now()?,

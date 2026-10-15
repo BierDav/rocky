@@ -168,7 +168,6 @@ impl SignedCheckpoint {
                 .credentials
                 .verify_partition(
                     publisher,
-                    self.statement.definition,
                     self.node,
                     self.statement.scope,
                     tuple,
@@ -178,13 +177,7 @@ impl SignedCheckpoint {
                 .map_err(credential),
             None => self
                 .credentials
-                .verify_selectors(
-                    publisher,
-                    self.statement.definition,
-                    self.node,
-                    revocations,
-                    time,
-                )
+                .verify_selectors(publisher, self.node, revocations, time)
                 .map(|(grants, _)| grants)
                 .map_err(credential),
         }
@@ -275,16 +268,6 @@ impl SignedCheckpoint {
             return Err(denied("checkpoint horizon issue time is in the future"));
         }
         inner.admits(self.statement.definition)?;
-        if self
-            .credentials
-            .0
-            .last()
-            .is_some_and(|root| root.capability.manifest != self.statement.definition)
-        {
-            return Err(denied(
-                "checkpoint signer's credentials name another definition",
-            ));
-        }
         inner.check_authenticated_partition(
             self.statement.scope,
             self.statement.partition.as_ref(),
@@ -597,17 +580,6 @@ fn integer(value: u64) -> SqlValue {
 }
 
 impl<A: RowApplication> Inner<A> {
-    /// The definition the credentials that sign `table`'s checkpoints name.
-    pub(super) fn signing_definition(&self, _table: Commitment) -> Commitment {
-        let credentials = match self.node_author.as_ref() {
-            Some(author) => &author.credentials,
-            None => &self.config.credentials,
-        };
-        credentials
-            .0
-            .last()
-            .map_or(self.manifest, |root| root.capability.manifest)
-    }
     pub(super) fn sign_checkpoint(
         &self,
         statement: CheckpointStatement,

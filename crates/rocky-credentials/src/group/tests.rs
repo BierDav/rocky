@@ -63,12 +63,12 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
     let alice = PrivateKey::new();
     let bob = PrivateKey::new();
     let outsider = PrivateKey::new();
-    let (manifest, group) = ([9; 32], [4; 32]);
+    let group = [4; 32];
     let epoch = rocky_core::KeyEpoch::new(1, &[7; 32]);
     let next = rocky_core::KeyEpoch::new(2, &[7; 32]);
     let recipients = [alice.public_key(), bob.public_key()].into();
     let envelopes =
-        GroupSecretEnvelope::seal_many(&issuer, manifest, group, 1, [7; 32], &recipients).unwrap();
+        GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], &recipients).unwrap();
     assert_eq!(envelopes.len(), 2);
     for recipient in [&alice, &bob] {
         let envelope = envelopes
@@ -77,25 +77,19 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
             .unwrap();
         let decoded = GroupSecretEnvelope::from_bytes(&envelope.to_bytes().unwrap()).unwrap();
         assert_eq!((decoded.group(), decoded.epoch()), (group, epoch));
-        let open = |key: &PrivateKey, by: PublicKey, manifest, group, epoch| {
-            decoded.open(key, by, manifest, group, epoch)
-        };
+        let open =
+            |key: &PrivateKey, by: PublicKey, group, epoch| decoded.open(key, by, group, epoch);
         assert_eq!(
-            open(recipient, issuer.public_key(), manifest, group, epoch).unwrap(),
+            open(recipient, issuer.public_key(), group, epoch).unwrap(),
             [7; 32]
         );
-        assert!(open(&outsider, issuer.public_key(), manifest, group, epoch).is_err());
-        assert!(open(recipient, outsider.public_key(), manifest, group, epoch).is_err());
-        assert!(open(recipient, issuer.public_key(), [8; 32], group, epoch).is_err());
-        assert!(open(recipient, issuer.public_key(), manifest, [5; 32], epoch).is_err());
-        assert!(open(recipient, issuer.public_key(), manifest, group, next).is_err());
+        assert!(open(&outsider, issuer.public_key(), group, epoch).is_err());
+        assert!(open(recipient, outsider.public_key(), group, epoch).is_err());
+        assert!(open(recipient, issuer.public_key(), [5; 32], epoch).is_err());
+        assert!(open(recipient, issuer.public_key(), group, next).is_err());
         let mut tampered = decoded.clone();
         tampered.body.sealed[20] ^= 1;
-        assert!(
-            tampered
-                .verify(issuer.public_key(), manifest, group, epoch)
-                .is_err()
-        );
+        assert!(tampered.verify(issuer.public_key(), group, epoch).is_err());
         // A valid issuer signature cannot transplant existing ciphertext.
         for change in [
             |body: &mut Body| body.epoch.generation = 2,
@@ -110,7 +104,7 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
             let (group, epoch) = (tampered.body.group, tampered.body.epoch);
             assert!(
                 tampered
-                    .open(recipient, issuer.public_key(), manifest, group, epoch)
+                    .open(recipient, issuer.public_key(), group, epoch)
                     .is_err()
             );
         }
@@ -120,18 +114,12 @@ fn group_envelopes_open_only_for_the_pinned_recipient_group_and_epoch() {
         truncated.signature = issuer.sign(&signing_bytes(SIGNED, &truncated.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&truncated.to_bytes().unwrap()).is_err());
         let mut versioned = decoded.clone();
-        versioned.body.version = 1;
+        versioned.body.version = 2;
         versioned.signature = issuer.sign(&signing_bytes(SIGNED, &versioned.body).unwrap());
         assert!(GroupSecretEnvelope::from_bytes(&versioned.to_bytes().unwrap()).is_err());
     }
     assert_ne!(envelopes[0].body.ephemeral, envelopes[1].body.ephemeral);
-    assert!(
-        GroupSecretEnvelope::seal_many(&issuer, manifest, group, 1, [7; 32], &BTreeSet::new())
-            .is_err()
-    );
-    assert!(
-        GroupSecretEnvelope::seal(&issuer, manifest, group, 0, [7; 32], alice.public_key())
-            .is_err()
-    );
+    assert!(GroupSecretEnvelope::seal_many(&issuer, group, 1, [7; 32], &BTreeSet::new()).is_err());
+    assert!(GroupSecretEnvelope::seal(&issuer, group, 0, [7; 32], alice.public_key()).is_err());
     assert!(GroupSecretEnvelope::from_bytes(&[0; 5000]).is_err());
 }

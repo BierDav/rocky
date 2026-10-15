@@ -124,7 +124,7 @@ serves it to read-only participants; see
 | Checkpoint | Format 11 carries independent optional admitted and finalized declarations and bases, a required `moves` summary and the [coordinated binding](stuck-recovery.md#checkpoint-binding); an admitted cut is never treated as finalized |
 | Row frame | 8, with an optional authenticated partition tuple; signs creation witnesses, finalized basis and reuse proofs |
 | File identity | `rocky.encrypted-replica.v21` |
-| Live link handshake | `rocky.link.v5` |
+| Live link handshake | `rocky.link.v6` |
 | Recovery package | Cannot carry declarations/bases: declared-scope export/import is refused; file backups preserve them |
 
 Horizon statements accept only format 5, with an explicit existence-base list.

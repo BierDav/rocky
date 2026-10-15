@@ -11,6 +11,9 @@ through read-only views. Some uses need a second writable workspace:
 - following and writing a bookmark other than `main`, a shared branch;
 - a backend that serves several writable bookmarks of one domain.
 
+The sealed-fork variant of the same-device case, including the per-branch
+author log it needs, is [simultaneous branches](simultaneous_branches.md).
+
 ## Idea
 
 History stays the source of truth. Each additional workspace holds its own

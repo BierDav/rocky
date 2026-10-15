@@ -137,13 +137,13 @@ versions are tolerated belong to the application, not to Rocky.
 | 11 | [Removing strong commands](11-removing-strong-commands.md) | 9 | L | Commands and command-controlled tables are gone; the examples use coordinated writes |
 | 12 | ~~[Qualification](12-qualification.md)~~ | — | — | Skipped: not needed; phase 20 qualifies the shopping app on seals |
 | 13 | [Identities and domain credentials](13-identities-and-domain-credentials.md) | 10, 11 | L | Grants name identities; nodes sign under certificates; pseudonyms are gone; the publisher key stays with the owner; adopting a generation needs no issuer |
-| 14 | [Seals and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal and move `main`; devices follow bookmarks; late frames reach one generation forward |
+| 14 | [Seals, tips and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal tips; trusted identities open branches; devices follow and sync only their bookmark's tip; late frames walk `continue` seals; one coordinated log per tip |
 | 15 | [Lazy compaction](15-lazy-compaction.md) | 14 | L | Devices compact sealed generations on their own schedule; the horizon is gone |
 | 16 | [Kept seals and views](16-kept-seals-and-views.md) | 15 | L | Nodes keep configured seals; any connection reads a seal or bookmark through read-only views |
-| 17 | [Schema changes through seals](17-schema-changes-through-seals.md) | 16 | L | A schema change is a seal; transitions, baselines and both accepted limitations are gone |
-| 18 | [Drafts and sandboxes](18-drafts-and-sandboxes.md) | 17 | M | An issuer migrates and tests an unpublished seal, then publishes it by moving `main` |
-| 19 | [Recovery as a bookmark move](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck domain recovers with an owner seal and `main` move; cuts are gone |
-| 20 | [Seal qualification](20-seal-qualification.md) | 18, 19 | M | The shopping app compacts, keeps seals, publishes a draft and rolls back on real devices |
+| 17 | [Schema changes through seals](17-schema-changes-through-seals.md) | 16 | L | A schema change is a seal; a migration closes its tip; transitions, baselines and both accepted limitations are gone |
+| 18 | [Drafts and sandboxes](18-drafts-and-sandboxes.md) | 17 | M | An issuer migrates and tests an unpublished tip, then publishes it by moving `main` |
+| 19 | [Recovery as a bookmark move](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck tip recovers with an owner `close` seal and bookmark move; cuts are gone |
+| 20 | [Seal qualification](20-seal-qualification.md) | 18, 19 | M | The shopping app compacts, keeps seals, branches, publishes a draft and rolls back on real devices |
 
 ```mermaid
 flowchart LR
@@ -159,7 +159,7 @@ flowchart LR
     P9 --> P11["11 Removing strong commands (L)"]
     P10 --> P13["13 Identities and domain credentials (L)"]
     P11 --> P13
-    P13 --> P14["14 Seals and bookmarks (L)"]
+    P13 --> P14["14 Seals, tips and bookmarks (L)"]
     P14 --> P15["15 Lazy compaction (L)"]
     P15 --> P16["16 Kept seals and views (L)"]
     P16 --> P17["17 Schema changes through seals (L)"]
@@ -172,44 +172,51 @@ flowchart LR
 
 ## Generations as sealed forks
 
-Phases 13–20 reduce schema changes, compaction, drafts and recovery to one
-operation. Their briefs hold the details.
+Phases 13–20 reduce schema changes, compaction, branches, drafts and
+recovery to one operation. Their briefs hold the details.
 
 - **A domain** is the owner identity's key and the application. It owns
   members, credentials, grants by table and field name, reader key epochs
-  and the coordinated log, and never forks.
+  and the coordinator, and never forks. A separate test cluster is a
+  separate domain.
 - **Identities** hold permissions; an `IdentityProvider` supplies them, a
   passkey module later. Each node signs under its own key, certified by its
   identity, with an author number from the identity's range. Revoking an
   identity stops all its nodes. Pseudonyms are removed.
-- **A generation** is one schema and one stretch of history. **A seal** is
-  an issuer-signed statement that ends one at a per-author frontier and
-  names the successor's schema. It changes no row; devices compact sealed
-  generations whenever they choose. Applications call `seal()`; Rocky runs
-  no timer. Every device holds the complete seal graph.
-- **Bookmarks** are signed pointers to seals. `main` names the only writable
-  generation. Issuers move bookmarks forward; trusted nodes and the owner
-  may also move them backwards or sideways. Other devices follow a
-  bookmark, `main` by default. Divergent moves resolve to the lower digest;
-  the losing seal stays a branch.
-- **Late frames** beyond a frontier apply one generation forward along
-  `main`, unless the seal runs a migration or `main` left their line;
-  otherwise they return to their author as held changes.
-- **One live workspace** per domain holds `main`'s tables under their plain
-  names. The code keeps workspaces behind a boundary so that
+- **A tip** is an open generation: one schema and the frames written to
+  it. **A seal** ends a tip once, at a per-author frontier, and either
+  `continue`s into one successor tip or `close`s it. Trusted identities open
+  further tips on any seal, for branches and drafts. A seal changes no row;
+  devices compact sealed tips whenever they choose. Applications call
+  `seal()`; Rocky runs no timer. Every device holds the complete graph of
+  seals, tips and bookmarks.
+- **Bookmarks** are named, signed pointers to tips; Rocky defines none, and
+  an application follows the one it names, by convention `main`. Issuers
+  move bookmarks forward; trusted identities and the owner also create,
+  delete and move them backwards or sideways. Divergent moves of one
+  bookmark resolve to the lower digest.
+- **Peers on a branch.** A device writes only its followed bookmark's tip
+  and syncs that tip's frames only with peers following it, so a branch
+  costs the rest of the domain nothing. Each tip has its own coordinated
+  log, run by the trusted nodes that follow it.
+- **Late frames** beyond a frontier walk the `continue` seals to the open
+  tip and apply there field by field. A `close` stops them: they return as
+  held changes for the application to re-author.
+- **One live workspace** per domain holds the followed tip's tables under
+  their plain names. The code keeps workspaces behind a boundary so that
   [more](../ideas/additional_live_workspaces.md) can be added later.
 - **Kept seals** are configured per node and stored as history tables.
   Unlimited read-only views show any kept seal or bookmark with the live
   tables' names, for migrations, audits and debugging. A seal not kept is
   shallow: in the graph, without state.
-- **Drafts** are unpublished seals in the live workspace; a sandbox is a
+- **Drafts** are unpublished tips in the live workspace; a sandbox is a
   draft never published. Merging branches and rebasing are out of scope.
-- An inspection API shows developers the seal graph, bookmarks and kept
-  seals.
+- An inspection API shows developers the graph, bookmarks and kept seals.
 
-This supersedes, once the phases land, the settled items above on
-transitions, re-add baselines and the horizon's guarantees, the accepted
-limitations and [phase 10](10-stuck-recovery.md)'s cuts. Existence logs
+This supersedes, once the phases land, the settled items above on adopting
+on discovery, transitions, re-add baselines, the horizon's guarantees and
+the coordinator's single log per domain, the accepted limitations and
+[phase 10](10-stuck-recovery.md)'s cuts. Existence logs
 stay and are compacted at seals.
 
 ## Reserved decision records

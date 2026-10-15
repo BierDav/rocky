@@ -1,7 +1,7 @@
 # 18. Drafts and sandboxes
 
 Status: proposed; not started.
-Owner: `rocky-secure` unpublished seals; `rocky-sdk` and `sdks/kotlin` API.
+Owner: `rocky-secure` unpublished seals and tips; `rocky-sdk` and `sdks/kotlin` API.
 Depends on [phase 17](17-schema-changes-through-seals.md). Follow the
 [execution contract](README.md#agent-execution-contract). Shares decision
 record 0075.
@@ -14,31 +14,33 @@ Read [the generation model](README.md#generations-as-sealed-forks),
 
 An issuer should migrate and test a new schema on real data before anyone
 else sees it, and a developer should experiment on the domain without risk.
-After this phase both are an unpublished seal in the node's one live
-workspace.
+After this phase both are an unpublished tip in the node's one live
+workspace. A draft is private to one node; a shared branch is a published
+tip ([phase 14](14-seals-and-bookmarks.md)).
 
 ## Settled
 
-- **A draft is an unpublished seal.** `draft(schema)` seals the generation
-  `main` points to, without signing or offering it, and moves the node's
-  live workspace to the successor. The migration reads the parent through
+- **A draft is an unpublished tip.** `draft(schema)` seals the tip `main`
+  points to, with the kind [phase 17](17-schema-changes-through-seals.md)
+  requires, and opens a tip on that seal, neither signed nor offered, and
+  moves the node's live workspace there. The migration reads the parent through
   a read-only view and writes the successor; nothing leaves the node.
 - **While drafting, the node writes the draft.** Its own writes go there,
   not to `main`; other devices keep writing `main` and see nothing.
-- **Publishing moves `main`.** `publish()` signs the seal and the bookmark
-  move together and offers the draft's frames with them, as staged
+- **Publishing moves `main`.** `publish()` signs the seal, the tip and the
+  bookmark move together and offers the draft's frames with them, as staged
   migration publication does. Writes to `main` after the draft's frontier
   follow [phase 17](17-schema-changes-through-seals.md)'s late-frame rules.
 - **A sandbox is a draft never published.** `discard()` deletes the draft's
   frames and rebuilds the live workspace at `main`, which costs a rebuild
   proportional to the data.
-- **Refusals.** Every device refuses a frame naming an unpublished seal. A
-  draft whose parent is no longer `main` refuses `publish()` and can only be
-  discarded.
+- **Refusals.** Every device refuses a frame naming an unpublished tip. A
+  draft whose parent tip another issuer sealed refuses `publish()` and can
+  only be discarded.
 
 ## Ordered slices
 
-1. Unpublished seals and the live workspace on a draft.
+1. Unpublished seals and tips; the live workspace on a draft.
 2. Publishing as a seal and `main` move.
 3. Discarding and rebuilding at `main`.
 4. `draft`, `publish` and `discard` in `rocky-sdk`, the JSON API and Kotlin.

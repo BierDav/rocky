@@ -15,37 +15,41 @@ Read [the generation model](README.md#generations-as-sealed-forks),
 [removal](../runtime/removal.md) and
 [migrations at any size](07-migrations-at-any-size.md).
 
-After this phase a schema change is a seal whose successor has another
+After this phase a schema change is a seal whose successor tip has another
 schema. Generations no longer form a chain of transitions, and both
 [accepted limitations](README.md#accepted-limitations) are gone.
 
 ## Settled
 
-- **A schema change is a seal.** The seal names the successor's schema; an
-  issuer's migration runs as the successor's first signed writes, as in
-  [phase 7](07-migrations-at-any-size.md). It reads the parent through a
+- **A schema change is a seal.** Without migration steps, `continue`
+  names the successor's schema. With them, the issuer seals with `close`,
+  opens a tip with the new schema on that seal and moves the bookmark; the
+  migration runs as the new tip's first signed writes, as in
+  [phase 7](07-migrations-at-any-size.md), and reads the parent through a
   [read-only view](16-kept-seals-and-views.md) of the sealed parent.
-- **A migration admits no late frames.** When the seal runs migration steps,
-  every frame beyond its frontier returns to its author's device as a held
-  change, so nothing reaches the successor around the migration. A seal
-  without migration steps admits late frames field by field, as
+- **A migration admits no late frames.** Frames beyond a closing seal's
+  frontier return as held changes, so nothing reaches the new tip around
+  the migration. A `continue` seal admits late frames field by field, as
   [phase 14](14-seals-and-bookmarks.md) does for an unchanged schema.
 - **Additive switches touch no rows.** Adding a table or a nullable or
   defaulted field changes the installed schema in place; no shadow
   backfill, rebuild or observer notification. Removals and migrations keep
   the existing switch.
-- **Splits are divergent moves.** Issuers that sign different schemas, or
-  run one migration twice, move `main` from the same seal; the lower move
-  wins and the other seal stays a branch, its migration never merged.
+- **Splits are concurrent seals.** Issuers that seal one tip with
+  different schemas, or run one migration twice, resolve to the lower seal
+  or move digest; the other tip stays a branch, its migration never merged.
+- **Following, not discovery.** A device switches schema when its followed
+  bookmark reaches a tip with another schema, never because a peer runs
+  one.
 - **Removed:** signed transitions and their lineage, the lineage caps,
   learning older manifests, re-add baselines and the pull after a baseline.
-  A device needs the schemas of the generations it writes, keeps or reads
-  frames from. The removal impact report and confirmation of
+  A device needs the schemas of the tips it writes, keeps or reads frames
+  from. The removal impact report and confirmation of
   [phase 5](05-confirmed-rollouts.md) stay.
 
 ## Ordered slices
 
-1. The seal carries a schema; adoption switches to it.
+1. Seals and tips carry a schema; following switches to it.
 2. Migrations read through views; the migration rule for late frames.
 3. Additive switches in place.
 4. Removing transitions, lineage, manifest learning and baselines.
@@ -59,6 +63,8 @@ schema. Generations no longer form a chain of transitions, and both
 - An offline device's writes across an additive seal apply on every device.
 - Adding a nullable field to a table of 100,000 rows rewrites none of them.
 - Two issuers sign different schemas, or run the same migration, at once;
-  every device ends in one generation with no duplicated rows.
+  every device ends in one tip with no duplicated rows.
+- A device on `main` never fetches or installs the schema of a branch it
+  does not follow.
 - A name removed and added again in a later generation never receives a
   value written before its removal.

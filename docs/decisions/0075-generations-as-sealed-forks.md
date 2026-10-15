@@ -1,6 +1,7 @@
 # 0075: Generations as sealed forks
 
-Status: accepted design; phase 13 implemented, phases 14–19 to follow. Date: 2026-10-15.
+Status: accepted design; phase 13 implemented, phases 14–19 to follow. Date:
+2026-10-15; revised the same day for tips and branches.
 Covers [phases 13–19](../features_09/README.md#generations-as-sealed-forks)
 of features_09. Supersedes, as those phases land, the transitions and
 baselines of [0068](0068-adopting-newer-generations.md), the horizon's
@@ -23,7 +24,7 @@ no backup.
 
 A domain is the owner identity's key and the application. It owns members,
 credentials, grants by table and field name, reader key epochs and the
-coordinated log, and never forks.
+coordinator, and never forks.
 
 - **Identities hold permissions.** An identity is a signing key supplied by
   an `IdentityProvider`. The provider signs node certificates, revocations
@@ -54,33 +55,47 @@ coordinated log, and never forks.
   epochs only. A device verifies a publisher-rooted generation and adopts it
   without renewal.
 
-### Generations, seals and bookmarks
+### Tips, seals and bookmarks
 
-- **A generation** is one schema and one stretch of history. **A seal** is
-  an issuer-signed statement that ends a generation at a per-author frontier
-  and names the successor's schema; its digest identifies the successor. It
-  changes no row. Every device holds the complete seal graph.
-- **Bookmarks** are signed pointers to seals; `main` names the only writable
-  generation. Issuers move bookmarks forward; trusted nodes and the owner
-  may also move them backwards or sideways. Divergent moves from one seal
-  resolve to the lower move digest; the losing seal stays a branch. In a
-  coordinated domain every move of `main` is a log entry.
-- **Late frames** beyond a frontier apply one generation forward along
-  `main`, unless the seal runs a migration or `main` left their line; then
-  they return to their author as held changes.
+- **A tip** is an open generation: one schema and the frames written to it.
+  **A seal** is a signed statement that ends a tip once, at a per-author
+  frontier, and either `continue`s into one successor tip, identified by its
+  digest, or `close`s it. Concurrent seals of a tip resolve to the lower
+  digest. Trusted identities and the owner open further tips on any seal;
+  those take no late frames. A seal changes no row. Every device holds the
+  complete graph of seals, tips and bookmarks.
+- **Bookmarks** are named, signed pointers to tips. Rocky defines none; an
+  application follows the bookmark it names, by convention `main`. Issuers
+  move bookmarks forward; trusted identities and the owner also create,
+  delete and move them backwards or sideways. Divergent moves of one
+  bookmark from one tip resolve to the lower move digest.
+- **Peers on a branch.** A device writes only the tip its bookmark points
+  to and adopts only what it follows. Frames reach only devices following
+  their tip. A node's author log stays on one line of `continue` seals;
+  another line uses another node of the same identity.
+- **Coordination per tip.** Each tip has its own coordinated log, run by
+  the trusted nodes following it; seals of a coordinated tip and moves off
+  it are its log entries.
+- **Late frames** beyond a frontier walk the `continue` seals to the open
+  tip and apply there field by field. A `close`, or a move that leaves
+  their line, returns them as held changes, offered on every device that
+  holds and may read them.
 - **Compaction is local.** Devices finalize a sealed generation whenever
   they choose; the horizon is removed. Existence logs stay and are compacted
   at seals.
 - **Kept seals and views.** Nodes keep configured seals as history tables;
   read-only views show a kept seal or bookmark under the live tables' names.
-  One live workspace per domain holds `main`, behind a workspace boundary.
+  One live workspace per domain holds the followed tip, behind a workspace
+  boundary.
 - **A schema change is a seal.** Transitions, lineage, baselines and both
   [accepted limitations](../features_09/README.md#accepted-limitations) go:
-  a split schema or a twice-run migration is a divergent move.
-- **Drafts** are unpublished seals in the live workspace; publishing signs
-  the seal and moves `main`. A sandbox is a draft never published.
-- **Recovery** of a stuck domain is an owner seal at the retained prefix and
-  a `main` move; cuts go.
+  a split schema or a twice-run migration is a concurrent seal or a
+  divergent move. A migrating change `close`s its tip.
+- **Drafts** are unpublished tips in the live workspace; publishing signs
+  the seal, the tip and the move of `main`. A sandbox is a draft never
+  published.
+- **Recovery** of a stuck tip is an owner `close` seal at the retained
+  prefix and a bookmark move; cuts go.
 
 ## Consequences
 
@@ -94,6 +109,8 @@ coordinated log, and never forks.
   [deferred optimization](../optimizations_on_demand/cloned-node-detection.md).
 - Merging branches and rebasing are out of scope; a losing branch is kept,
   never joined.
+- A branch costs devices that do not follow it only its graph records. A
+  device switching lines consumes one author number per line and node.
 
 ## Alternatives rejected
 
@@ -104,3 +121,15 @@ coordinated log, and never forks.
   issuer is ever excluded and the key has no owner-held backup.
 - **Renew credentials per generation.** Keeps manifest-bound grants but
   makes every schema change depend on a reachable issuer.
+- **One implicit tip per seal.** Simpler, but nothing could ever be closed:
+  a migration or recovery would still take late writes.
+- **Tips created only explicitly.** Late frames would wait, possibly
+  forever, for a tip that may never open; the seal decides instead.
+- **Late frames only one generation forward.** Every branch would shorten
+  how long a device may stay offline.
+- **One coordinated log across tips.** A branch's commands would contend
+  with `main`'s head and load its trusted nodes.
+- **Branches by any identity.** Would need schema authority below issuers
+  and scope bases for partial readers; a separate domain is simpler.
+- **Per-branch author logs.** A format change to every frame and existence
+  record, where another node of the same identity needs none.

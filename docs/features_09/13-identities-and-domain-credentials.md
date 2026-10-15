@@ -75,8 +75,9 @@ prevent it.
   still counts nodes.
 - **Grants name tables and fields.** Names are identities
   ([phase 1](01-stable-identities.md)), so a grant holds in every
-  generation. Reader keys follow key epochs only; a generation never
-  rotates them.
+  generation. A grant without a column list covers every field of its
+  table, including fields a later schema adds. Reader keys follow key
+  epochs only; a generation never rotates them.
 - **No renewal on adoption.** A device verifies a publisher-rooted
   generation and adopts it on its own. `generation_pending` and the renewal
   step of adoption are removed.

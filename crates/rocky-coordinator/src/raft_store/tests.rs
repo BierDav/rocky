@@ -271,7 +271,10 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
         crate::machine::self_certified(
             genesis.id().unwrap(),
             crate::transport::nonce(),
-            Operation::Coordinated { scope, action },
+            Operation::Coordinated {
+                log: tip_log(scope),
+                action,
+            },
             key,
             time,
         )
@@ -291,7 +294,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         store.apply([entry]).await.unwrap().remove(0)
     }
-    let head = store.log_head(scope).await.unwrap();
+    let head = store.log_head(tip_log(scope)).await.unwrap();
     write(
         &mut store,
         request(
@@ -307,7 +310,7 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     )
     .await
     .unwrap();
-    let head = store.log_head(scope).await.unwrap();
+    let head = store.log_head(tip_log(scope)).await.unwrap();
     let append = request(
         &executor,
         Action::Append {
@@ -329,7 +332,12 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     let entries = store.try_get_log_entries(1..=2).await.unwrap();
     store.apply(entries).await.unwrap();
     assert_eq!(
-        store.log_head(scope).await.unwrap().pending.as_ref(),
+        store
+            .log_head(tip_log(scope))
+            .await
+            .unwrap()
+            .pending
+            .as_ref(),
         Some(pending)
     );
     assert_eq!(write(&mut store, append, 3, time).await.unwrap(), assigned);
@@ -353,12 +361,15 @@ async fn coordinated_pending_and_resolution_recover_from_logs_and_snapshot() {
     store.build_snapshot().await.unwrap();
     drop(store);
     store = Store::open(dir.path(), genesis, false, Limits::default()).unwrap();
-    assert_eq!(store.log_head(scope).await.unwrap().commit, 1);
+    assert_eq!(store.log_head(tip_log(scope)).await.unwrap().commit, 1);
     assert_eq!(
         write(&mut store, resolve, 5, time).await,
         Err(CoordinationError::StaleHead)
     );
-    assert_eq!(store.log_head(scope).await.unwrap().hashes.len(), 1);
+    assert_eq!(
+        store.log_head(tip_log(scope)).await.unwrap().hashes.len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -375,7 +386,10 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
         crate::machine::self_certified(
             genesis.id().unwrap(),
             crate::transport::nonce(),
-            Operation::Coordinated { scope, action },
+            Operation::Coordinated {
+                log: tip_log(scope),
+                action,
+            },
             key,
             time,
         )
@@ -390,14 +404,14 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
         store.save_committed(Some(entry.log_id)).await.unwrap();
         store.apply([entry]).await.unwrap().remove(0).unwrap()
     }
-    let head = store.log_head(scope).await.unwrap();
+    let head = store.log_head(tip_log(scope)).await.unwrap();
     let anchor = CutPoint {
         position: 0,
         running: head.genesis,
     };
     let record = SignedCut::sign(
         CutStatement {
-            log: scope,
+            log: tip_log(scope),
             sequence: 1,
             previous: None,
             verified: anchor,
@@ -417,16 +431,16 @@ async fn a_cut_survives_log_replay_and_snapshot_and_retries_identically() {
     let Outcome::Coordinated(LogResult::Cut { position: 1, .. }) = admitted else {
         panic!("cut {admitted:?}")
     };
-    let after = store.log_head(scope).await.unwrap();
+    let after = store.log_head(tip_log(scope)).await.unwrap();
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
     let entries = store.try_get_log_entries(1..=1).await.unwrap();
     store.apply(entries).await.unwrap();
-    assert_eq!(store.log_head(scope).await.unwrap(), after);
+    assert_eq!(store.log_head(tip_log(scope)).await.unwrap(), after);
     store.build_snapshot().await.unwrap();
     drop(store);
     store = Store::open(dir.path(), genesis.clone(), false, Limits::default()).unwrap();
-    let head = store.log_head(scope).await.unwrap();
+    let head = store.log_head(tip_log(scope)).await.unwrap();
     assert_eq!(head, after);
     let retained = head.cut.unwrap();
     assert_eq!(retained.digest, record.digest().unwrap());

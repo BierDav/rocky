@@ -6,7 +6,7 @@ use rocky_core::*;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Domain {
     scope: Scope,
-    coordinated: coordinated::Log,
+    coordinated: coordinated::Logs,
     /// Closed by its owner: the identity never reopens.
     closed: bool,
 }
@@ -14,7 +14,7 @@ impl Domain {
     fn new(scope: Scope, configuration: Configuration) -> Self {
         Self {
             scope,
-            coordinated: coordinated::Log::new(scope, configuration),
+            coordinated: coordinated::Logs::new(scope, configuration),
             closed: false,
         }
     }
@@ -72,7 +72,7 @@ impl State {
     /// still pending must be decided first.
     fn close(&mut self, scope: Scope) -> Result<(), CoordinationError> {
         let domain = self.domain(scope)?;
-        if domain.coordinated.head.pending.is_some() {
+        if domain.coordinated.pending().next().is_some() {
             return Err(CoordinationError::Denied);
         }
         domain.closed = true;

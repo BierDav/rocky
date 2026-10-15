@@ -3428,7 +3428,7 @@ impl Node {
                     .committed
                     .as_ref()
                     .map_or(0, |commit| commit.frames.len());
-                let committed = self.propose().await?;
+                let committed = self.propose(next.log).await?;
                 return Ok(json!({
                     "columns": staged.columns,
                     "rows": [],

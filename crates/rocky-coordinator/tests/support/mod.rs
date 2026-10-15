@@ -11,6 +11,13 @@ use std::{
 };
 use tempfile::TempDir;
 
+/// The log of the one tip these exercises coordinate in `scope`.
+pub fn log(scope: Scope) -> TipLog {
+    TipLog {
+        scope,
+        tip: TipId([9; 32]),
+    }
+}
 /// A node certificate its node signed itself: the node key is its own
 /// identity, which the controls these exercises sign trust.
 pub fn certificate(key: &PrivateKey) -> rocky_credentials::SignedCapability {
@@ -291,10 +298,10 @@ pub fn timestamp() -> u64 {
 }
 /// Joins `client` to `scope`'s log at its committed position.
 pub async fn join(client: &NetworkCoordinator, scope: Scope, sequence: u64) {
-    let head = client.coordinated_head(scope).await.unwrap();
+    let head = client.coordinated_head(log(scope)).await.unwrap();
     client
         .coordinated(
-            scope,
+            log(scope),
             rocky_coordinator::coordinated::Action::Join {
                 position: head.commit,
                 running_hash: head.running_hash,
@@ -311,7 +318,7 @@ pub async fn append(
     hash: u8,
     sequence: u64,
 ) -> rocky_coordinator::coordinated::Action {
-    let head = client.coordinated_head(scope).await.unwrap();
+    let head = client.coordinated_head(log(scope)).await.unwrap();
     rocky_coordinator::coordinated::Action::Append {
         expected: head.head,
         epoch: head.epoch,

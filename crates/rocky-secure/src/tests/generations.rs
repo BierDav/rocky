@@ -169,7 +169,7 @@ impl Lineage {
             .at_generation(generation, added)
             .unwrap()
     }
-    fn definition(&self, generation: u32) -> rocky_core::ApplicationManifest {
+    pub(super) fn definition(&self, generation: u32) -> rocky_core::ApplicationManifest {
         self.app(generation).manifest()
     }
     fn manifest(&self, generation: u32) -> SignedManifest {

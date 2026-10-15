@@ -463,7 +463,7 @@ impl<A: RowApplication> Inner<A> {
         // Members fence a coordinated write by its signed log position.
         if let Some(position) = membership.entry {
             use super::coordinated::cut::{Fence, fence};
-            match fence(self.held_cuts(scope.domain), position) {
+            match fence(self.held_cuts(self.tip_log(scope.domain)), position) {
                 Fence::Live => {}
                 Fence::Cut => {
                     self.reject(trigger.hash).await?;
@@ -579,7 +579,7 @@ impl<A: RowApplication> Inner<A> {
                         .iter()
                         .map(|(frame, _, _)| frame.id())
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.record_entry_frames(scope.domain, position, &ids)
+                    self.record_entry_frames(self.tip_log(scope.domain), position, &ids)
                         .await?;
                 }
                 Ok(Outcome::Applied)

@@ -15,8 +15,14 @@ pub const MAX_PUBLIC_DOMAINS: usize = 4096;
 pub enum Operation {
     Control(ControlCertificate),
     Coordinated {
-        scope: Scope,
+        log: TipLog,
         action: crate::coordinated::Action,
+    },
+    /// The domain's default minimum in-sync size, by the scope's authority
+    /// before the first join.
+    Configure {
+        scope: Scope,
+        minimum: usize,
     },
     Membership {
         voters: BTreeSet<u64>,
@@ -73,6 +79,14 @@ pub(crate) fn self_certificate(
         .expect("extension"),
     };
     rocky_credentials::SignedCapability::sign(capability, key).expect("certificate")
+}
+/// The one tip unit tests coordinate in `scope`.
+#[cfg(test)]
+pub(crate) fn tip_log(scope: Scope) -> TipLog {
+    TipLog {
+        scope,
+        tip: TipId([9; 32]),
+    }
 }
 /// A request of a node that presents its own certificate.
 #[cfg(test)]
@@ -140,7 +154,7 @@ impl Request {
     }
     fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
         bytes(
-            "rocky.coordination-request.v5",
+            "rocky.coordination-request.v6",
             &(
                 self.genesis,
                 self.key,
@@ -296,8 +310,16 @@ impl Metadata {
         }
         let time = request.time;
         match &request.operation {
-            Operation::Coordinated { scope, action } => {
-                self.log_authorized(*scope, action, request, time)
+            Operation::Coordinated { log, action } => {
+                self.log_authorized(*log, action, request, time)
+            }
+            Operation::Configure { scope, .. } => {
+                self.closure_authorized(request, *scope)?;
+                self.state
+                    .find(*scope)?
+                    .open()
+                    .then_some(())
+                    .ok_or(CoordinationError::Denied)
             }
             Operation::Control(c) => {
                 if c.issuer != request.key {
@@ -390,13 +412,11 @@ impl Metadata {
         let time = self.state.time;
         match &request.operation {
             Operation::Coordinated {
-                scope,
+                log,
                 action: crate::coordinated::Action::Head,
             } => {
-                self.log_authorized(*scope, &crate::coordinated::Action::Head, request, time)?;
-                Ok(Outcome::CoordinatedHead(Box::new(
-                    self.state.find(*scope)?.coordinated.head.clone(),
-                )))
+                self.log_authorized(*log, &crate::coordinated::Action::Head, request, time)?;
+                Ok(Outcome::CoordinatedHead(Box::new(self.log_head(*log)?)))
             }
             Operation::Usage => self.usage(request.key).map(Outcome::Usage),
             _ => Err(CoordinationError::Denied),
@@ -441,7 +461,8 @@ impl Metadata {
             Operation::Register(_) | Operation::Usage => return Some(request.key),
             Operation::Membership { .. } => return None,
             Operation::Control(certificate) => certificate.control.scope,
-            Operation::Close { scope } | Operation::Coordinated { scope, .. } => *scope,
+            Operation::Close { scope } | Operation::Configure { scope, .. } => *scope,
+            Operation::Coordinated { log, .. } => log.scope,
         };
         let certificate = self.controls.iter().find(|c| c.control.scope == scope)?;
         if certificate.issuer != request.key
@@ -589,20 +610,10 @@ impl Metadata {
             if old.issuer != certificate.issuer {
                 return Err(CoordinationError::Denied);
             }
-            if self
-                .state
-                .find(control.scope)?
-                .coordinated
-                .head
-                .pending
-                .is_some()
-                || self
-                    .state
-                    .find(control.scope)?
-                    .coordinated
-                    .head
-                    .members
-                    .iter()
+            let logs = &self.state.find(control.scope)?.coordinated;
+            if logs.pending().next().is_some()
+                || logs
+                    .members()
                     .any(|m| !control.trusted.contains(&m.identity))
             {
                 return Err(CoordinationError::Backpressure);
@@ -770,14 +781,18 @@ impl Metadata {
     }
     fn log_authorized(
         &self,
-        scope: Scope,
+        log: TipLog,
         action: &crate::coordinated::Action,
         request: &Request,
         time: u64,
     ) -> Result<(), CoordinationError> {
         use crate::coordinated::Action;
+        let scope = log.scope;
         match action {
-            Action::Configure { .. } => self.closure_authorized(request, scope),
+            // The authority or a trusted node relays a tip's opening.
+            Action::Configure { .. } => self
+                .closure_authorized(request, scope)
+                .or_else(|_| self.authorized(scope, request, time).map(|_| ())),
             // A trusted node or the authority submits; the authority signs.
             Action::Cut { record, .. } => {
                 let signer = rocky_credentials::SignedCut::from_bytes(record)
@@ -809,36 +824,46 @@ impl Metadata {
         }
         Ok(())
     }
-    pub(crate) fn pending_logs(&self) -> Vec<(Scope, crate::coordinated::Pending)> {
+    pub(crate) fn pending_logs(&self) -> Vec<(TipLog, crate::coordinated::Pending)> {
         self.state
             .domains
             .iter()
             .filter(|d| d.open())
-            .filter_map(|d| d.coordinated.head.pending.clone().map(|p| (d.scope, p)))
+            .flat_map(|d| {
+                d.coordinated.pending().map(|(tip, p)| {
+                    let log = TipLog {
+                        scope: d.scope,
+                        tip,
+                    };
+                    (log, p.clone())
+                })
+            })
             .collect()
     }
     pub(crate) fn log_head(
         &self,
-        scope: Scope,
+        log: TipLog,
     ) -> Result<crate::coordinated::Head, CoordinationError> {
-        Ok(self.state.find(scope)?.coordinated.head.clone())
+        Ok(self.state.find(log.scope)?.coordinated.head(log.tip))
     }
     fn coordinated(
         &mut self,
-        scope: Scope,
+        log: TipLog,
         action: &crate::coordinated::Action,
         request: &Request,
     ) -> Result<Outcome, CoordinationError> {
         use crate::coordinated::Action;
-        self.log_authorized(scope, action, request, self.state.time)?;
+        let scope = log.scope;
+        self.log_authorized(log, action, request, self.state.time)?;
         if matches!(action, Action::Head) {
             return self
-                .log_head(scope)
+                .log_head(log)
                 .map(Box::new)
                 .map(Outcome::CoordinatedHead);
         }
         let domain = self.state.find(scope)?;
-        let mut next = domain.coordinated.clone();
+        let mut next = domain.coordinated.working(request.key, log.tip, action)?;
+        let before = domain.coordinated.get(log.tip).map_or(0, |l| l.bytes());
         let result = match action {
             Action::Resolve {
                 pending,
@@ -853,18 +878,13 @@ impl Metadata {
                     self.authorized(scope, ack, ack.time)?;
                     if ack.operation
                         != (Operation::Coordinated {
-                            scope,
+                            log,
                             action: Action::Acknowledge {
                                 pending: pending.clone(),
                             },
                         })
                         || ack.time > pending.deadline
-                        || !domain
-                            .coordinated
-                            .head
-                            .members
-                            .iter()
-                            .any(|m| m.key == ack.key)
+                        || !next.head.members.iter().any(|m| m.key == ack.key)
                         || keys.contains(&ack.key)
                     {
                         return Err(CoordinationError::Denied);
@@ -881,7 +901,7 @@ impl Metadata {
                     .domains
                     .iter()
                     .filter(|d| self.issuer(d.scope) == Some(issuer))
-                    .map(|d| u64::from(d.coordinated.appends_in(minute)))
+                    .map(|d| d.coordinated.appends_in(minute))
                     .sum();
                 next.apply(
                     request.key,
@@ -890,7 +910,7 @@ impl Metadata {
                     appends < u64::from(crate::coordinated::APPENDS_PER_MINUTE),
                 )
             }
-            Action::Cut { record, authority } => next.cut(scope, record, authority),
+            Action::Cut { record, authority } => next.cut(log, record, authority),
             Action::Join { .. } => {
                 let joined = next.apply(request.key, action, self.state.time, true);
                 // The in-sync set counts nodes and remembers whose they are.
@@ -904,7 +924,7 @@ impl Metadata {
             }
             _ => next.apply(request.key, action, self.state.time, true),
         };
-        let growth = next.bytes().saturating_sub(domain.coordinated.bytes());
+        let growth = next.bytes().saturating_sub(before);
         if growth > self.tenant_available(scope)?
             || growth
                 > self
@@ -915,13 +935,24 @@ impl Metadata {
         {
             return Err(CoordinationError::Backpressure);
         }
-        self.state.domain(scope)?.coordinated = next;
+        self.state.domain(scope)?.coordinated.store(log.tip, next);
         result.map(Outcome::Coordinated)
     }
     fn transition(&mut self, request: &Request) -> Result<Outcome, CoordinationError> {
         let time = self.state.time;
         match &request.operation {
-            Operation::Coordinated { scope, action } => self.coordinated(*scope, action, request),
+            Operation::Coordinated { log, action } => self.coordinated(*log, action, request),
+            Operation::Configure { scope, minimum } => {
+                self.closure_authorized(request, *scope)?;
+                let domain = self.state.domain(*scope)?;
+                if !domain.open() {
+                    return Err(CoordinationError::Denied);
+                }
+                domain
+                    .coordinated
+                    .configure(*minimum)
+                    .map(Outcome::Coordinated)
+            }
             Operation::Control(certificate) => {
                 if certificate.issuer != request.key {
                     return Err(CoordinationError::Denied);
@@ -1004,3 +1035,6 @@ mod coordinated_tests;
 #[cfg(test)]
 #[path = "machine/cut_tests.rs"]
 mod cut_tests;
+#[cfg(test)]
+#[path = "machine/tip_tests.rs"]
+mod tip_tests;

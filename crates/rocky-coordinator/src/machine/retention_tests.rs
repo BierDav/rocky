@@ -90,7 +90,7 @@ impl Mesh {
     }
     fn head(&self, metadata: &mut Metadata, scope: Scope, time: u64) -> crate::coordinated::Head {
         let head = Operation::Coordinated {
-            scope,
+            log: tip_log(scope),
             action: Action::Head,
         };
         match self.apply(metadata, &self.executor, head, time) {
@@ -100,10 +100,10 @@ impl Mesh {
     }
     fn join(&self, scope: Scope, sequence: u64) -> Operation {
         Operation::Coordinated {
-            scope,
+            log: tip_log(scope),
             action: Action::Join {
                 position: 0,
-                running_hash: genesis(scope, [5; 16]),
+                running_hash: rocky_core::log_genesis(tip_log(scope), [5; 16]),
                 sequence,
             },
         }
@@ -195,7 +195,7 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
         Ok(Outcome::Closed)
     );
     let append = Operation::Coordinated {
-        scope,
+        log: tip_log(scope),
         action: Action::Append {
             expected: 0,
             epoch: head.epoch,

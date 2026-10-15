@@ -9,13 +9,22 @@ use crate::replica::{
 use rocky_coordinator::coordinated::MemoryLog;
 use rocky_core::{
     Append, CoordinationError, CoordinationFuture, DomainLog, LogHead, LogPending, LogResult,
-    NodeKey, Scope, SqlValue, TypedRows,
+    NodeKey, Scope, SqlValue, TipLog, TypedRows,
 };
 use std::sync::{Arc, Mutex as StdMutex};
 
 mod cuts;
+mod tips;
 
 type Replica = EncryptedReplica<TypedRows>;
+
+/// The log of the tip the fixtures' replicas follow: generation 3's.
+fn tip_log(lineage: &Lineage) -> TipLog {
+    TipLog {
+        scope: lineage.domain,
+        tip: rocky_credentials::genesis_tip(lineage.definition(3).hash()),
+    }
+}
 
 /// The in-process transport between trusted nodes.
 #[derive(Clone)]
@@ -95,27 +104,30 @@ impl DomainLog for Client {
     fn node(&self) -> NodeKey {
         self.inner.node()
     }
-    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
-        self.inner.log_head(scope)
+    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+        self.inner.configure(log, minimum)
+    }
+    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
+        self.inner.log_head(log)
     }
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running_hash: Commitment,
         sequence: u64,
     ) -> CoordinationFuture<'_, u64> {
-        self.inner.join(scope, position, running_hash, sequence)
+        self.inner.join(log, position, running_hash, sequence)
     }
-    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
-        self.inner.append(scope, append)
+    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
+        self.inner.append(log, append)
     }
-    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
         if !self.acknowledges {
             return Box::pin(async { Err(CoordinationError::Unavailable) });
         }
         Box::pin(async move {
-            let result = self.inner.acknowledge(scope, pending).await;
+            let result = self.inner.acknowledge(log, pending).await;
             if result.is_ok()
                 && let Some(observed) = &self.observed
             {
@@ -124,8 +136,8 @@ impl DomainLog for Client {
             result
         })
     }
-    fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
-        self.inner.cut(scope, cut)
+    fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+        self.inner.cut(log, cut)
     }
 }
 struct Peers {
@@ -149,7 +161,7 @@ impl EntryPeers for Peers {
                 .map_err(|error| Error::Rejected(error.to_string()))
         })
     }
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
             let nodes = self.mesh.nodes.lock().unwrap().clone();
             for peer in nodes
@@ -238,7 +250,7 @@ impl Fixture {
     async fn slot(&self, node: &(PrivateKey, Replica)) -> Result<Slot, CoordinatedError> {
         node.1
             .coordinated_slot(
-                self.lineage.domain,
+                tip_log(&self.lineage),
                 &self.mesh.client(&node.0),
                 &self.mesh.peers(&self.lineage, &node.0),
             )
@@ -282,7 +294,7 @@ impl Fixture {
     ) -> Result<crate::replica::CoordinatedCommit, CoordinatedError> {
         node.1
             .propose(
-                self.lineage.domain,
+                tip_log(&self.lineage),
                 &self.mesh.client(&node.0),
                 &self.mesh.peers(&self.lineage, &node.0),
             )
@@ -291,7 +303,7 @@ impl Fixture {
     async fn resolve(&self, node: &(PrivateKey, Replica)) -> crate::replica::CoordinatedStatus {
         node.1
             .resolve_coordinated(
-                self.lineage.domain,
+                tip_log(&self.lineage),
                 &self.mesh.client(&node.0),
                 &self.mesh.peers(&self.lineage, &node.0),
             )
@@ -350,7 +362,7 @@ fn numbered(count: usize) -> Vec<String> {
 #[tokio::test]
 async fn a_fresh_trusted_node_rebuilds_from_a_member_after_the_in_sync_set_is_lost() {
     let fixture = Fixture::new(1).await;
-    let domain = fixture.lineage.domain;
+    let domain = tip_log(&fixture.lineage);
     for _ in 0..MAX_CATCH_UP_ENTRIES + 1 {
         fixture.invoice(&fixture.alice, "retained").await;
     }
@@ -435,34 +447,37 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
         fn node(&self) -> NodeKey {
             self.0.node()
         }
-        fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+        fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+            self.0.configure(log, minimum)
+        }
+        fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
             Box::pin(async move {
-                let mut head = self.0.log_head(scope).await?;
+                let mut head = self.0.log_head(log).await?;
                 head.hashes.clear();
                 Ok(head)
             })
         }
         fn join(
             &self,
-            scope: Scope,
+            log: TipLog,
             position: u64,
             running: Commitment,
             sequence: u64,
         ) -> CoordinationFuture<'_, u64> {
-            self.0.join(scope, position, running, sequence)
+            self.0.join(log, position, running, sequence)
         }
-        fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
-            self.0.append(scope, append)
+        fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
+            self.0.append(log, append)
         }
         fn acknowledge(
             &self,
-            scope: Scope,
+            log: TipLog,
             pending: LogPending,
         ) -> CoordinationFuture<'_, LogResult> {
-            self.0.acknowledge(scope, pending)
+            self.0.acknowledge(log, pending)
         }
-        fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
-            self.0.cut(scope, cut)
+        fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+            self.0.cut(log, cut)
         }
     }
     fixture.mesh.add(&member_key, &member);
@@ -470,7 +485,7 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
     assert_eq!(
         node.1
             .coordinated_slot(
-                fixture.lineage.domain,
+                tip_log(&fixture.lineage),
                 &client,
                 &fixture.mesh.peers(&fixture.lineage, &node.0)
             )
@@ -480,7 +495,7 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
     assert!(invoices(&node.1).await.is_empty());
     assert_eq!(
         node.1
-            .coordinated_status(fixture.lineage.domain)
+            .coordinated_status(tip_log(&fixture.lineage))
             .await
             .unwrap()
             .position,
@@ -490,7 +505,7 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
         !fixture
             .mesh
             .log
-            .head(fixture.lineage.domain)
+            .head(tip_log(&fixture.lineage))
             .unwrap()
             .members
             .iter()
@@ -617,7 +632,7 @@ async fn concurrent_invoices_are_sequential_on_every_device_and_members_see_no_a
     assert!(held(&carol).await.is_disjoint(&lost));
     let status = alice
         .1
-        .coordinated_status(fixture.lineage.domain)
+        .coordinated_status(tip_log(&fixture.lineage))
         .await
         .unwrap();
     assert_eq!((status.position, status.undecided), (9, 0));
@@ -701,7 +716,7 @@ impl EntryPeers for Reconnecting {
             self.peers.store(node, entry).await
         })
     }
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         self.peers.committed(log, after)
     }
 }
@@ -719,7 +734,7 @@ async fn a_proposal_retries_storage_after_a_transient_link_failure() {
     let client = fixture.mesh.client(&alice.0);
     let committed = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        alice.1.propose(fixture.lineage.domain, &client, &peers),
+        alice.1.propose(tip_log(&fixture.lineage), &client, &peers),
     )
     .await
     .expect("storage must retry before the entry deadline")
@@ -744,7 +759,7 @@ async fn a_proposer_crashing_before_its_append_commits_it_after_restart() {
         fixture
             .alice
             .1
-            .coordinated_status(fixture.lineage.domain)
+            .coordinated_status(tip_log(&fixture.lineage))
             .await
             .unwrap()
             .undecided,
@@ -771,7 +786,7 @@ async fn crashes_before_acknowledging_never_leave_an_entry_true_on_one_node_only
         let proposal = fixture
             .alice
             .1
-            .propose(fixture.lineage.domain, &crashing, &peers);
+            .propose(tip_log(&fixture.lineage), &crashing, &peers);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), proposal)
                 .await
@@ -844,7 +859,7 @@ async fn a_node_that_missed_entries_proposes_only_after_catching_up() {
     for _ in 0..2 {
         fixture.invoice(alice, "alice").await;
     }
-    let head = fixture.mesh.log.head(fixture.lineage.domain).unwrap();
+    let head = fixture.mesh.log.head(tip_log(&fixture.lineage)).unwrap();
     assert_eq!((head.commit, head.members.len()), (3, 1));
     // Back, but no trusted peer can supply the entries yet: no slot.
     fixture.mesh.set(&bob.0, true, true);
@@ -920,7 +935,7 @@ impl EntryPeers for Linked {
             session.close().await
         })
     }
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
             let mut session = self.session().await?;
             let entries = session.committed_entries(log, after).await?;
@@ -934,7 +949,7 @@ impl EntryPeers for Linked {
 async fn entries_travel_over_live_links_and_catch_up_reads_their_positions() {
     let fixture = Fixture::new(2).await;
     let (alice, bob) = (&fixture.alice, &fixture.bob);
-    let domain = fixture.lineage.domain;
+    let domain = tip_log(&fixture.lineage);
     let end = |node: &(PrivateKey, Replica)| {
         (
             node.0.clone(),

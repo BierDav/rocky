@@ -19,10 +19,10 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         .await
         .unwrap();
     for client in [&first, &second] {
-        let head = client.coordinated_head(cluster.scope).await.unwrap();
+        let head = client.coordinated_head(log(cluster.scope)).await.unwrap();
         client
             .coordinated(
-                cluster.scope,
+                log(cluster.scope),
                 Action::Join {
                     position: head.commit,
                     running_hash: head.running_hash,
@@ -32,7 +32,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
             .await
             .unwrap();
     }
-    let head = first.coordinated_head(cluster.scope).await.unwrap();
+    let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let append = Action::Append {
         expected: 0,
         epoch: head.epoch,
@@ -41,8 +41,8 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         sequence: 2,
     };
     let (a, b) = tokio::join!(
-        first.coordinated(cluster.scope, append.clone()),
-        second.coordinated(cluster.scope, append)
+        first.coordinated(log(cluster.scope), append.clone()),
+        second.coordinated(log(cluster.scope), append)
     );
     assert!(matches!(
         (&a, &b),
@@ -55,7 +55,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         )
     ));
     let pending = first
-        .coordinated_head(cluster.scope)
+        .coordinated_head(log(cluster.scope))
         .await
         .unwrap()
         .pending
@@ -63,7 +63,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     assert_eq!(
         first
             .coordinated(
-                cluster.scope,
+                log(cluster.scope),
                 Action::Acknowledge {
                     pending: pending.clone()
                 }
@@ -78,7 +78,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     assert_eq!(
         second
             .coordinated(
-                cluster.scope,
+                log(cluster.scope),
                 Action::Acknowledge {
                     pending: pending.clone()
                 }
@@ -88,13 +88,17 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         Outcome::Coordinated(LogResult::Acknowledged)
     );
     assert_eq!(
-        first.coordinated_head(cluster.scope).await.unwrap().commit,
+        first
+            .coordinated_head(log(cluster.scope))
+            .await
+            .unwrap()
+            .commit,
         0
     );
     assert!(matches!(
         first
             .coordinated(
-                cluster.scope,
+                log(cluster.scope),
                 Action::Acknowledge {
                     pending: pending.clone()
                 }
@@ -105,18 +109,18 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     ));
     assert_eq!(
         second
-            .coordinated(cluster.scope, Action::Acknowledge { pending })
+            .coordinated(log(cluster.scope), Action::Acknowledge { pending })
             .await,
         Err(CoordinationError::StaleHead)
     );
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
     let leader = cluster.wait_leader(&admin).await;
-    let head = first.coordinated_head(cluster.scope).await.unwrap();
+    let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let before = admin.status(leader).await.unwrap();
     let assigned = first
         .coordinated(
-            cluster.scope,
+            log(cluster.scope),
             Action::Append {
                 expected: 1,
                 epoch: head.epoch,
@@ -133,7 +137,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     let pending = *pending;
     first
         .coordinated(
-            cluster.scope,
+            log(cluster.scope),
             Action::Acknowledge {
                 pending: pending.clone(),
             },
@@ -141,7 +145,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         .await
         .unwrap();
     second
-        .coordinated(cluster.scope, Action::Acknowledge { pending })
+        .coordinated(log(cluster.scope), Action::Acknowledge { pending })
         .await
         .unwrap();
     let after = admin.status(leader).await.unwrap();
@@ -151,10 +155,10 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         after.metrics.requests - before.metrics.requests
     );
     // Drive the production lazy timer; no application node sends a resolving call.
-    let head = first.coordinated_head(cluster.scope).await.unwrap();
+    let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     let assigned = first
         .coordinated(
-            cluster.scope,
+            log(cluster.scope),
             Action::Append {
                 expected: 2,
                 epoch: head.epoch,
@@ -170,12 +174,12 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
     };
     let pending = *pending;
     first
-        .coordinated(cluster.scope, Action::Acknowledge { pending })
+        .coordinated(log(cluster.scope), Action::Acknowledge { pending })
         .await
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let head = first.coordinated_head(cluster.scope).await.unwrap();
+            let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
             if head.pending.is_none() {
                 assert_eq!(head.commit, 3);
                 assert_eq!(head.members.len(), 1);
@@ -196,7 +200,7 @@ async fn coordinated_log_survives_leader_change_and_deadline_without_double_comm
         cluster.wait_online(id, &admin).await;
     }
     cluster.wait_leader(&admin).await;
-    let head = first.coordinated_head(cluster.scope).await.unwrap();
+    let head = first.coordinated_head(log(cluster.scope)).await.unwrap();
     assert_eq!(head.commit, 3);
     assert_eq!(head.hashes.len(), 3);
 }

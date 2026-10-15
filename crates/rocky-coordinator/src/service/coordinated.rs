@@ -22,9 +22,9 @@ impl VoterService {
                             Err(_) => return,
                         };
                         let mut next = None;
-                        for (scope, entry) in pending {
+                        for (log, entry) in pending {
                             if entry.deadline <= time {
-                                let _ = service.resolve_log(scope, entry).await;
+                                let _ = service.resolve_log(log, entry).await;
                             } else {
                                 next = Some(
                                     next.map_or(entry.deadline, |n: u64| n.min(entry.deadline)),
@@ -70,7 +70,7 @@ impl VoterService {
     }
     async fn resolve_log(
         &self,
-        scope: Scope,
+        log: TipLog,
         pending: crate::coordinated::Pending,
     ) -> Result<Outcome, CoordinationError> {
         let term = self.log_leader().await?;
@@ -78,10 +78,10 @@ impl VoterService {
             .acknowledgments
             .lock()
             .await
-            .get(&scope)
+            .get(&log)
             .filter(|a| a.term == term && a.pending == pending)
             .map_or_else(Vec::new, |a| a.requests.clone());
-        let head = self.store.log_head(scope).await?;
+        let head = self.store.log_head(log).await?;
         if head.pending.as_ref() != Some(&pending) {
             return Err(CoordinationError::StaleHead);
         }
@@ -97,7 +97,7 @@ impl VoterService {
             self.genesis.id()?,
             nonce(),
             Operation::Coordinated {
-                scope,
+                log,
                 action: crate::coordinated::Action::Resolve {
                     pending: pending.clone(),
                     acknowledgments,
@@ -118,8 +118,8 @@ impl VoterService {
         .data;
         if result.is_ok() {
             let mut acks = self.acknowledgments.lock().await;
-            if acks.get(&scope).is_some_and(|a| a.pending == pending) {
-                acks.remove(&scope);
+            if acks.get(&log).is_some_and(|a| a.pending == pending) {
+                acks.remove(&log);
             }
         }
         result
@@ -127,11 +127,11 @@ impl VoterService {
     pub(super) async fn acknowledge_log(
         &self,
         request: &Request,
-        scope: Scope,
+        log: TipLog,
         pending: &crate::coordinated::Pending,
     ) -> Result<Outcome, CoordinationError> {
         let term = self.log_leader().await?;
-        let head = self.store.log_head(scope).await?;
+        let head = self.store.log_head(log).await?;
         if head.pending.as_ref() != Some(pending) {
             return Err(CoordinationError::StaleHead);
         }
@@ -143,13 +143,11 @@ impl VoterService {
         }
         {
             let mut acks = self.acknowledgments.lock().await;
-            let entry = acks
-                .entry(scope)
-                .or_insert_with(|| VolatileAcknowledgments {
-                    term,
-                    pending: pending.clone(),
-                    requests: Vec::new(),
-                });
+            let entry = acks.entry(log).or_insert_with(|| VolatileAcknowledgments {
+                term,
+                pending: pending.clone(),
+                requests: Vec::new(),
+            });
             if entry.term != term || entry.pending != *pending {
                 *entry = VolatileAcknowledgments {
                     term,
@@ -161,7 +159,7 @@ impl VoterService {
                 entry.requests.push(request.clone());
             }
         }
-        match self.resolve_log(scope, pending.clone()).await {
+        match self.resolve_log(log, pending.clone()).await {
             Err(CoordinationError::Backpressure) => Ok(Outcome::Coordinated(
                 crate::coordinated::Result::Acknowledged,
             )),

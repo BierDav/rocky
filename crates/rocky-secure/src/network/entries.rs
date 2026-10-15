@@ -5,7 +5,7 @@
 //! `docs/runtime/coordinated-writes.md`.
 use super::*;
 use crate::replica::{CommittedEntry, CoordinatedEntry, MAX_CATCH_UP_ENTRIES};
-use rocky_core::{LogPending, Scope};
+use rocky_core::{LogPending, TipLog};
 
 /// Bytes of frames and voids in one store page; a larger frame goes alone.
 const PAGE_BYTES: usize = MAX_SECURE_FRAME / 2;
@@ -14,14 +14,14 @@ const PAGE_BYTES: usize = MAX_SECURE_FRAME / 2;
 pub(super) enum EntryMessage {
     /// One page of an assigned entry; the last one stores it.
     Store {
-        log: Scope,
+        log: TipLog,
         pending: LogPending,
         frames: Vec<EncryptedFrame>,
         voids: Vec<SignedVoid>,
         last: bool,
     },
     Committed {
-        log: Scope,
+        log: TipLog,
         after: u64,
     },
     /// Committed entries without frames.
@@ -30,7 +30,7 @@ pub(super) enum EntryMessage {
     },
 }
 /// An entry a peer is sending page by page.
-pub(super) type Receiving = (Scope, LogPending, Vec<EncryptedFrame>, Vec<SignedVoid>);
+pub(super) type Receiving = (TipLog, LogPending, Vec<EncryptedFrame>, Vec<SignedVoid>);
 
 impl NativeSession {
     /// Stores `entry` on the peer, which answers once it stored it durably
@@ -82,7 +82,7 @@ impl NativeSession {
     /// frames.
     pub async fn committed_entries(
         &mut self,
-        log: Scope,
+        log: TipLog,
         after: u64,
     ) -> Result<Vec<CommittedEntry>, Error> {
         self.send(EntryMessage::Committed { log, after }).await?;

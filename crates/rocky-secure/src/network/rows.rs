@@ -13,7 +13,7 @@ pub(super) enum RowMessage {
         after: Option<Hash>,
         quota: usize,
         /// Cut records the puller holds of each log of the scopes.
-        cuts: Vec<(rocky_core::Scope, u64)>,
+        cuts: Vec<(rocky_core::TipLog, u64)>,
     },
     Page {
         frames: Vec<EncryptedFrame>,
@@ -636,7 +636,7 @@ pub(super) async fn receive_cuts<A: RowApplication>(
     if cuts.iter().any(|cut| {
         !scopes
             .iter()
-            .any(|scope| scope.domain == cut.record.statement.log)
+            .any(|scope| scope.domain == cut.record.statement.log.scope)
     }) {
         return Err(denied("cut record outside the requested scopes"));
     }

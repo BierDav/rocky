@@ -49,7 +49,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// earlier cut and the prefix the previous one retained.
     pub async fn cut_proposal(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CutProposal, CoordinatedError> {
@@ -208,7 +208,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.discard_cut(log, digest).await?;
         Ok(entry)
     }
-    async fn discard_cut(&self, log: Scope, digest: Commitment) -> Result<(), Error> {
+    async fn discard_cut(&self, log: TipLog, digest: Commitment) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| {
             inner
@@ -222,7 +222,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.flush()
     }
-    async fn cut_submission(&self, log: Scope) -> Result<Option<CutEvidence>, Error> {
+    async fn cut_submission(&self, log: TipLog) -> Result<Option<CutEvidence>, Error> {
         let inner = self.inner.lock().await;
         let record = collect_rows(
             inner
@@ -244,7 +244,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// refused one is discarded and resolution goes on.
     pub(super) async fn retry_cut(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
     ) -> Result<(), CoordinatedError> {
         let Some(cut) = self.cut_submission(log).await? else {

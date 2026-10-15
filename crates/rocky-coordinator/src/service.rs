@@ -114,7 +114,7 @@ pub struct VoterService {
     /// Each tenant's share of `clients`; unregistered keys share one lane.
     lanes: std::sync::Mutex<HashMap<Option<PublicKey>, Arc<Semaphore>>>,
     fenced: AtomicBool,
-    acknowledgments: tokio::sync::Mutex<HashMap<Scope, VolatileAcknowledgments>>,
+    acknowledgments: tokio::sync::Mutex<HashMap<TipLog, VolatileAcknowledgments>>,
 }
 mod coordinated;
 use coordinated::VolatileAcknowledgments;
@@ -299,11 +299,11 @@ impl VoterService {
             }
             self.store.preflight(&request).await?;
             if let Operation::Coordinated {
-                scope,
+                log,
                 action: crate::coordinated::Action::Acknowledge { pending },
             } = &request.operation
             {
-                let outcome = self.acknowledge_log(&request, *scope, pending).await?;
+                let outcome = self.acknowledge_log(&request, *log, pending).await?;
                 let log = self
                     .raft
                     .metrics()

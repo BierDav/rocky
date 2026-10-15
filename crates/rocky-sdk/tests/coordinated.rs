@@ -22,6 +22,19 @@ fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a
 fn domain(device: &Device) -> rocky_core::Scope {
     serde_json::from_str(&device.database.scope()).expect("scope")
 }
+/// The log of the tip `device` follows.
+async fn tip_log(device: &Device) -> rocky_core::TipLog {
+    let status = device.ok(json!({"type": "coordinated"})).await;
+    let tip: [u8; 32] = data_encoding::HEXLOWER
+        .decode(status["tip"].as_str().expect("tip").as_bytes())
+        .expect("tip hex")
+        .try_into()
+        .expect("tip");
+    rocky_core::TipLog {
+        scope: domain(device),
+        tip: rocky_core::TipId(tip),
+    }
+}
 async fn node_key(device: &Device) -> rocky_sdk::credentials::PublicKey {
     let hex = device.node().await;
     let bytes: [u8; 32] = data_encoding::HEXLOWER
@@ -98,7 +111,7 @@ async fn invoice(device: &Device, handle: u8, log: &MemoryLog) -> Value {
     }
     panic!(
         "no invoice committed for handle {handle}: {last_error:?}; head: {:?}",
-        log.head(domain(device))
+        log.head(tip_log(device).await)
     )
 }
 /// The invoice numbers once every frame they depend on arrived by sync.
@@ -188,6 +201,15 @@ async fn trusted_devices_number_concurrent_invoices_without_gaps() -> Result<(),
         assert_eq!(status["position"], "6", "{status}");
         assert_eq!(keys(device).await, numbers);
     }
+    // Both follow one tip, whose log ordered every write; no other tip's has any.
+    let followed = tip_log(a).await;
+    assert_eq!(tip_log(b).await, followed);
+    assert_eq!(log.head(followed)?.commit, 6);
+    let other = rocky_core::TipLog {
+        scope: followed.scope,
+        tip: rocky_core::TipId([0; 32]),
+    };
+    assert_eq!(log.head(other)?.commit, 0);
     a.close().await;
     b.close().await;
     Ok(())

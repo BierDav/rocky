@@ -2,7 +2,7 @@
 //! over the node's live links, and entries it stores for other proposers are
 //! resolved in the background. See `docs/runtime/coordinated-writes.md`.
 use super::*;
-use rocky_core::{DomainLog, Scope};
+use rocky_core::{DomainLog, TipLog};
 use rocky_secure::{
     CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, ENTRY_DEADLINE,
     EntryPeers, PeerFuture, Slot,
@@ -40,7 +40,7 @@ impl EntryPeers for LinkPeers<'_> {
             session.close().await
         })
     }
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
             for handle in self.handles(None) {
                 let Ok(mut session) = handle.open().await else {
@@ -78,6 +78,7 @@ impl Coordinated {
             CoordinatedError::Aborted => ("aborted", true),
             CoordinatedError::Undecided => ("undecided", true),
             CoordinatedError::Behind => ("behind", true),
+            CoordinatedError::Unfollowed => ("unfollowed_tip", false),
             CoordinatedError::Refused(_) => ("rejected", false),
             CoordinatedError::Storage(_) => ("storage", true),
         }
@@ -91,7 +92,7 @@ fn coordinated(error: CoordinatedError) -> Failure {
 }
 
 impl Node {
-    /// Makes this device a trusted node of its domain's coordinated log, or
+    /// Makes this device a trusted node of its followed tip's coordinated log, or
     /// ends that with `None`. The log is the application's; Rocky never
     /// closes it.
     pub fn coordinate(self: &Arc<Self>, log: Option<Arc<dyn DomainLog>>) {
@@ -126,7 +127,7 @@ impl Node {
         let Ok(log) = self.log() else {
             return;
         };
-        let scope = self.domain().scope;
+        let scope = self.replica.followed_log(self.domain().scope).await;
         let until = tokio::time::Instant::now() + Duration::from_secs(2 * ENTRY_DEADLINE);
         let mut delay = Duration::from_millis(20);
         while tokio::time::Instant::now() < until {
@@ -147,17 +148,18 @@ impl Node {
     /// stored entries and catches up first.
     pub(super) async fn coordinated_slot(&self) -> Result<Slot, Failure> {
         let log = self.log()?;
+        let tip = self.replica.followed_log(self.domain().scope).await;
         self.replica
-            .coordinated_slot(self.domain().scope, log.as_ref(), &LinkPeers(self))
+            .coordinated_slot(tip, log.as_ref(), &LinkPeers(self))
             .await
             .map_err(coordinated)
     }
-    /// Drives this device's staged write to its decision.
-    pub(super) async fn propose(&self) -> Result<CoordinatedCommit, Failure> {
+    /// Drives this device's staged write of `tip`'s log to its decision.
+    pub(super) async fn propose(&self, tip: TipLog) -> Result<CoordinatedCommit, Failure> {
         let log = self.log()?;
         let proposed = self
             .replica
-            .propose(self.domain().scope, log.as_ref(), &LinkPeers(self))
+            .propose(tip, log.as_ref(), &LinkPeers(self))
             .await
             .map_err(coordinated);
         self.observations.touch();
@@ -166,7 +168,7 @@ impl Node {
     /// This device's position on its domain's log, after resolving what it
     /// stores; without a composed log only what it holds.
     pub(super) async fn coordinated_status(&self) -> Result<Value, Failure> {
-        let scope = self.domain().scope;
+        let scope = self.replica.followed_log(self.domain().scope).await;
         let status = match self.replica.domain_log() {
             Some(log) => self
                 .replica
@@ -177,6 +179,7 @@ impl Node {
         };
         Ok(json!({
             "trusted": self.replica.domain_log().is_some(),
+            "tip": HEXLOWER.encode(&scope.tip.0),
             "position": status.position.to_string(),
             "undecided": status.undecided,
         }))

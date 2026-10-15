@@ -423,7 +423,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(ScopeFrontier {
             scope,
-            cuts: self.held_cuts(scope.domain).len() as u64,
+            cuts: self.held_cuts(self.tip_log(scope.domain)).len() as u64,
             logs: logs
                 .into_iter()
                 .map(|(author, (held, applied))| FrontierLog {
@@ -631,7 +631,9 @@ impl<A: RowApplication> Inner<A> {
             behind: false,
             frontier: own.clone(),
             voids: vec![],
-            cuts: self.cuts_after(scope.domain, request.cuts).await?,
+            cuts: self
+                .cuts_after(self.tip_log(scope.domain), request.cuts)
+                .await?,
         };
         if let Some(id) = self.find_scope_id(scope).await? {
             for (log, horizon) in self.logs(id, None, true, MAX_CHECKPOINT_LOGS + 1).await? {

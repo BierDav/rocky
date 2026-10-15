@@ -1,7 +1,10 @@
-//! Metadata-only domain log. Storage acknowledgments are signed by trusted nodes.
+//! Metadata-only per-tip logs of a domain. Storage acknowledgments are
+//! signed by trusted nodes.
 use crate::{certified::encode, machine::Request};
 use p2panda_core::PublicKey;
-use rocky_core::{Commitment, CoordinationError, MAX_COUNTER, Scope, commitment};
+use rocky_core::{
+    Commitment, Configuration, CoordinationError, MAX_COUNTER, Scope, TipId, TipLog, commitment,
+};
 use rocky_credentials::{CutPoint, MAX_CUT_AUTHORITY_BYTES, SignedCut};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,11 +14,13 @@ pub const HASH_WINDOW: usize = 1024;
 pub const TRUSTED_NODES: usize = 32;
 pub const APPENDS_PER_MINUTE: u32 = 60;
 pub const ACKNOWLEDGMENT_DEADLINE: u64 = 30;
+/// Tip logs one domain holds.
+pub const TIP_LOGS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
     Head,
-    /// Owner policy; immutable after the first join.
+    /// The minimum the tip's opening names; immutable after the first join.
     Configure {
         minimum: usize,
     },
@@ -126,15 +131,16 @@ pub(crate) struct Log {
     appends: u32,
 }
 impl Log {
-    pub fn new(scope: Scope, configuration: [u8; 16]) -> Self {
+    pub fn new(log: TipLog, configuration: Configuration, minimum: usize) -> Self {
+        let genesis = rocky_core::log_genesis(log, configuration);
         Self {
             head: Head {
-                genesis: rocky_core::genesis(scope, configuration),
+                genesis,
                 epoch: 0,
-                minimum: 1,
+                minimum,
                 head: 0,
                 commit: 0,
-                running_hash: rocky_core::genesis(scope, configuration),
+                running_hash: genesis,
                 members: Vec::new(),
                 pending: None,
                 hashes: VecDeque::new(),
@@ -171,7 +177,7 @@ impl Log {
     /// same commit.
     pub fn cut(
         &mut self,
-        scope: Scope,
+        log: TipLog,
         record: &[u8],
         authority: &[u8],
     ) -> std::result::Result<Result, CoordinationError> {
@@ -187,7 +193,7 @@ impl Log {
             });
         }
         let statement = &signed.statement;
-        if statement.log != scope {
+        if statement.log != log {
             return Err(CoordinationError::Denied);
         }
         let (sequence, previous, floor) = match &self.head.cut {
@@ -458,6 +464,117 @@ impl Log {
     }
 }
 
+/// The tip logs of one domain and the minimum a new one starts with.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct Logs {
+    scope: Scope,
+    configuration: Configuration,
+    /// Owner policy for tips whose opening names none; immutable after the
+    /// domain's first join.
+    minimum: usize,
+    /// Oldest first.
+    logs: Vec<(TipId, Log)>,
+}
+impl Logs {
+    pub fn new(scope: Scope, configuration: Configuration) -> Self {
+        Self {
+            scope,
+            configuration,
+            minimum: 1,
+            logs: Vec::new(),
+        }
+    }
+    pub fn get(&self, tip: TipId) -> Option<&Log> {
+        self.logs
+            .iter()
+            .find(|(id, _)| *id == tip)
+            .map(|(_, log)| log)
+    }
+    pub fn get_mut(&mut self, tip: TipId) -> Option<&mut Log> {
+        self.logs
+            .iter_mut()
+            .find(|(id, _)| *id == tip)
+            .map(|(_, log)| log)
+    }
+    fn fresh(&self, tip: TipId) -> Log {
+        let log = TipLog {
+            scope: self.scope,
+            tip,
+        };
+        Log::new(log, self.configuration, self.minimum)
+    }
+    /// The head of `tip`'s log; an unopened one is at its genesis.
+    pub fn head(&self, tip: TipId) -> Head {
+        self.get(tip)
+            .map_or_else(|| self.fresh(tip).head, |log| log.head.clone())
+    }
+    /// Sets the domain's default minimum before any node joined a log.
+    pub fn configure(&mut self, minimum: usize) -> std::result::Result<Result, CoordinationError> {
+        if minimum == 0
+            || minimum > TRUSTED_NODES
+            || self.logs.iter().any(|(_, l)| l.head.epoch != 0)
+        {
+            return Err(CoordinationError::Configuration);
+        }
+        self.minimum = minimum;
+        Ok(Result::Configured)
+    }
+    /// A copy of `tip`'s log to apply `action` from `key` to; `store` keeps
+    /// it. Only a configuration, a join or a cut opens a log, within `TIP_LOGS`,
+    /// and a node is in sync on one tip of its domain.
+    pub fn working(
+        &self,
+        key: PublicKey,
+        tip: TipId,
+        action: &Action,
+    ) -> std::result::Result<Log, CoordinationError> {
+        if matches!(action, Action::Join { .. })
+            && self
+                .logs
+                .iter()
+                .any(|(id, log)| *id != tip && log.head.members.iter().any(|m| m.key == key))
+        {
+            return Err(CoordinationError::Denied);
+        }
+        if let Some(log) = self.get(tip) {
+            return Ok(log.clone());
+        }
+        match action {
+            Action::Configure { .. } | Action::Join { .. } | Action::Cut { .. } => {}
+            Action::Append { .. } => return Err(CoordinationError::Denied),
+            _ => return Err(CoordinationError::StaleHead),
+        }
+        if self.logs.len() >= TIP_LOGS {
+            return Err(CoordinationError::Backpressure);
+        }
+        Ok(self.fresh(tip))
+    }
+    pub fn store(&mut self, tip: TipId, log: Log) {
+        match self.get_mut(tip) {
+            Some(old) => *old = log,
+            None => self.logs.push((tip, log)),
+        }
+    }
+    pub fn pending(&self) -> impl Iterator<Item = (TipId, &Pending)> {
+        self.logs
+            .iter()
+            .filter_map(|(tip, log)| log.head.pending.as_ref().map(|p| (*tip, p)))
+    }
+    /// Every in-sync node of every tip.
+    pub fn members(&self) -> impl Iterator<Item = &Member> {
+        self.logs.iter().flat_map(|(_, log)| &log.head.members)
+    }
+    pub fn bytes(&self) -> usize {
+        self.logs.iter().map(|(_, log)| log.bytes()).sum()
+    }
+    pub fn appends_in(&self, minute: u64) -> u64 {
+        self.logs
+            .iter()
+            .map(|(_, log)| u64::from(log.appends_in(minute)))
+            .sum()
+    }
+}
+
 mod bytes {
     use serde::{Deserializer, Serializer, de::Visitor};
     pub fn serialize<S: Serializer>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
@@ -611,21 +728,15 @@ impl Head {
 pub struct MemoryLog {
     state: std::sync::Arc<std::sync::Mutex<MemoryLogs>>,
 }
+type Acknowledged = std::collections::BTreeMap<TipId, Vec<PublicKey>>;
 #[derive(Default)]
 struct MemoryLogs {
-    logs: std::collections::BTreeMap<[u8; 48], (Log, Vec<PublicKey>)>,
+    domains: std::collections::BTreeMap<Scope, (Logs, Acknowledged)>,
     /// Each domain's control authority, which signs its cuts.
-    owners: std::collections::BTreeMap<[u8; 48], PublicKey>,
+    owners: std::collections::BTreeMap<Scope, PublicKey>,
     /// Seconds added to the system clock.
     skew: u64,
     unavailable: bool,
-}
-fn scope_key(scope: Scope) -> [u8; 48] {
-    let mut key = [0; 48];
-    key[..16].copy_from_slice(&scope.mesh.0);
-    key[16..32].copy_from_slice(&scope.app.0);
-    key[32..].copy_from_slice(&scope.domain.0);
-    key
 }
 impl MemoryLog {
     pub fn new() -> Self {
@@ -638,21 +749,17 @@ impl MemoryLog {
             key,
         }
     }
-    /// Sets the owner's minimum before the first join.
+    /// Sets the owner's default minimum before the domain's first join.
     pub fn configure(
         &self,
         scope: Scope,
         minimum: usize,
     ) -> std::result::Result<(), CoordinationError> {
-        let owner = PublicKey::from_bytes(&[0; 32]).map_err(|_| CoordinationError::Corrupt)?;
-        self.with(scope, |log, _, time, _| {
-            log.apply(owner, &Action::Configure { minimum }, time, true)
-                .map(|_| ())
-        })
+        self.domain(scope, |logs, _, _, _| logs.configure(minimum).map(|_| ()))
     }
     /// Names `scope`'s control authority, the only signer of its cuts.
     pub fn set_owner(&self, scope: Scope, owner: PublicKey) {
-        self.lock().owners.insert(scope_key(scope), owner);
+        self.lock().owners.insert(scope, owner);
     }
     /// Moves this log's clock, so deadlines pass without sleeping.
     pub fn advance(&self, seconds: u64) {
@@ -662,20 +769,21 @@ impl MemoryLog {
     pub fn set_available(&self, available: bool) {
         self.lock().unavailable = !available;
     }
-    pub fn head(&self, scope: Scope) -> std::result::Result<Head, CoordinationError> {
-        self.with(scope, |log, _, _, _| Ok(log.head.clone()))
+    pub fn head(&self, log: TipLog) -> std::result::Result<Head, CoordinationError> {
+        self.domain(log.scope, |logs, _, _, _| Ok(logs.head(log.tip)))
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, MemoryLogs> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    fn with<T>(
+    /// Runs `f` on `scope`'s logs after resolving every passed deadline.
+    fn domain<T>(
         &self,
         scope: Scope,
         f: impl FnOnce(
-            &mut Log,
-            &mut Vec<PublicKey>,
+            &mut Logs,
+            &mut Acknowledged,
             u64,
             Option<PublicKey>,
         ) -> std::result::Result<T, CoordinationError>,
@@ -689,18 +797,44 @@ impl MemoryLog {
             .map_err(|_| CoordinationError::Corrupt)?
             .as_secs()
             + state.skew;
-        let owner = state.owners.get(&scope_key(scope)).copied();
-        let (log, acknowledged) = state
-            .logs
-            .entry(scope_key(scope))
-            .or_insert_with(|| (Log::new(scope, [0; 16]), Vec::new()));
-        if let Some(pending) = log.head.pending.clone()
-            && time >= pending.deadline
-        {
-            log.resolve(&pending, acknowledged, time)?;
-            acknowledged.clear();
+        let owner = state.owners.get(&scope).copied();
+        let (logs, acknowledged) = state
+            .domains
+            .entry(scope)
+            .or_insert_with(|| (Logs::new(scope, [0; 16]), Default::default()));
+        let due: Vec<_> = logs
+            .pending()
+            .filter(|(_, pending)| time >= pending.deadline)
+            .map(|(tip, pending)| (tip, pending.clone()))
+            .collect();
+        for (tip, pending) in due {
+            let acks = acknowledged.remove(&tip).unwrap_or_default();
+            if let Some(log) = logs.get_mut(tip) {
+                log.resolve(&pending, &acks, time)?;
+            }
         }
-        f(log, acknowledged, time, owner)
+        f(logs, acknowledged, time, owner)
+    }
+    /// Applies `action` from `key` to a working copy of `log` and keeps it.
+    fn with<T>(
+        &self,
+        log: TipLog,
+        key: PublicKey,
+        action: &Action,
+        f: impl FnOnce(
+            &mut Log,
+            &mut Vec<PublicKey>,
+            u64,
+            Option<PublicKey>,
+        ) -> std::result::Result<T, CoordinationError>,
+    ) -> std::result::Result<T, CoordinationError> {
+        self.domain(log.scope, |logs, acknowledged, time, owner| {
+            let mut working = logs.working(key, log.tip, action)?;
+            let acks = acknowledged.entry(log.tip).or_default();
+            let result = f(&mut working, acks, time, owner);
+            logs.store(log.tip, working);
+            result
+        })
     }
 }
 pub struct MemoryLogClient {
@@ -711,12 +845,21 @@ impl rocky_core::DomainLog for MemoryLogClient {
     fn node(&self) -> rocky_core::NodeKey {
         *self.key.as_bytes()
     }
-    fn log_head(&self, scope: Scope) -> rocky_core::CoordinationFuture<'_, rocky_core::LogHead> {
-        Box::pin(async move { self.logs.head(scope).map(|head| head.port()) })
+    fn log_head(&self, log: TipLog) -> rocky_core::CoordinationFuture<'_, rocky_core::LogHead> {
+        Box::pin(async move { self.logs.head(log).map(|head| head.port()) })
+    }
+    fn configure(&self, log: TipLog, minimum: usize) -> rocky_core::CoordinationFuture<'_, ()> {
+        Box::pin(async move {
+            let action = Action::Configure { minimum };
+            self.logs
+                .with(log, self.key, &action, |working, _, time, _| {
+                    working.apply(self.key, &action, time, true).map(|_| ())
+                })
+        })
     }
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running_hash: Commitment,
         sequence: u64,
@@ -727,9 +870,11 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 running_hash,
                 sequence,
             };
-            match self.logs.with(scope, |log, _, time, _| {
-                log.apply(self.key, &action, time, true)
-            })? {
+            match self
+                .logs
+                .with(log, self.key, &action, |working, _, time, _| {
+                    working.apply(self.key, &action, time, true)
+                })? {
                 Result::Joined { epoch } => Ok(epoch),
                 _ => Err(CoordinationError::Corrupt),
             }
@@ -737,7 +882,7 @@ impl rocky_core::DomainLog for MemoryLogClient {
     }
     fn append(
         &self,
-        scope: Scope,
+        log: TipLog,
         append: rocky_core::Append,
     ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogPending> {
         Box::pin(async move {
@@ -748,9 +893,11 @@ impl rocky_core::DomainLog for MemoryLogClient {
                 deadline: append.deadline,
                 sequence: append.sequence,
             };
-            match self.logs.with(scope, |log, _, time, _| {
-                log.apply(self.key, &action, time, true)
-            })? {
+            match self
+                .logs
+                .with(log, self.key, &action, |working, _, time, _| {
+                    working.apply(self.key, &action, time, true)
+                })? {
                 Result::Assigned(pending) => Ok(pending.port()),
                 _ => Err(CoordinationError::Corrupt),
             }
@@ -758,65 +905,79 @@ impl rocky_core::DomainLog for MemoryLogClient {
     }
     fn acknowledge(
         &self,
-        scope: Scope,
+        log: TipLog,
         pending: rocky_core::LogPending,
     ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
         Box::pin(async move {
             let pending = Pending::from_port(&pending)?;
-            self.logs.with(scope, |log, acknowledged, time, _| {
-                if log.head.pending.as_ref() != Some(&pending)
-                    || !log.head.members.iter().any(|m| m.key == self.key)
-                {
-                    return Err(CoordinationError::StaleHead);
-                }
-                if !acknowledged.contains(&self.key) {
-                    acknowledged.push(self.key);
-                }
-                match log.resolve(&pending, acknowledged, time) {
-                    Ok(Result::Committed {
-                        position,
-                        running_hash,
-                    }) => {
-                        acknowledged.clear();
-                        Ok(rocky_core::LogResult::Committed {
+            let action = Action::Acknowledge {
+                pending: pending.clone(),
+            };
+            self.logs
+                .with(log, self.key, &action, |working, acknowledged, time, _| {
+                    if working.head.pending.as_ref() != Some(&pending)
+                        || !working.head.members.iter().any(|m| m.key == self.key)
+                    {
+                        return Err(CoordinationError::StaleHead);
+                    }
+                    if !acknowledged.contains(&self.key) {
+                        acknowledged.push(self.key);
+                    }
+                    match working.resolve(&pending, acknowledged, time) {
+                        Ok(Result::Committed {
                             position,
                             running_hash,
-                        })
+                        }) => {
+                            acknowledged.clear();
+                            Ok(rocky_core::LogResult::Committed {
+                                position,
+                                running_hash,
+                            })
+                        }
+                        Ok(_) => Err(CoordinationError::Corrupt),
+                        Err(CoordinationError::Backpressure) => {
+                            Ok(rocky_core::LogResult::Acknowledged)
+                        }
+                        Err(error) => Err(error),
                     }
-                    Ok(_) => Err(CoordinationError::Corrupt),
-                    Err(CoordinationError::Backpressure) => Ok(rocky_core::LogResult::Acknowledged),
-                    Err(error) => Err(error),
-                }
-            })
+                })
         })
     }
     fn cut(
         &self,
-        scope: Scope,
+        log: TipLog,
         cut: rocky_core::LogCut,
     ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
         Box::pin(async move {
             let signer = SignedCut::from_bytes(&cut.record)
                 .map_err(|_| CoordinationError::Denied)?
                 .signer;
-            self.logs.with(scope, |log, acknowledged, _, owner| {
-                if owner != Some(signer) {
-                    return Err(CoordinationError::Denied);
-                }
-                match log.cut(scope, &cut.record, &cut.authority)? {
-                    Result::Cut {
-                        position,
-                        running_hash,
-                    } => {
-                        acknowledged.clear();
-                        Ok(rocky_core::LogResult::Committed {
+            let action = Action::Cut {
+                record: cut.record,
+                authority: cut.authority,
+            };
+            let Action::Cut { record, authority } = &action else {
+                return Err(CoordinationError::Corrupt);
+            };
+            self.logs
+                .with(log, self.key, &action, |working, acknowledged, _, owner| {
+                    if owner != Some(signer) {
+                        return Err(CoordinationError::Denied);
+                    }
+                    match working.cut(log, record, authority)? {
+                        Result::Cut {
                             position,
                             running_hash,
-                        })
+                        } => {
+                            acknowledged.clear();
+                            Ok(rocky_core::LogResult::Committed {
+                                position,
+                                running_hash,
+                            })
+                        }
+                        _ => Err(CoordinationError::Corrupt),
                     }
-                    _ => Err(CoordinationError::Corrupt),
-                }
-            })
+                })
         })
     }
 }

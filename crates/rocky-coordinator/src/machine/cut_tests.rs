@@ -28,9 +28,9 @@ impl Fixture {
         self.resolve(&pending, &[0, 1], T + 2).unwrap();
     }
     fn statement(&self, verified: u64, retained: u64) -> CutStatement {
-        let head = self.state.log_head(self.scope).unwrap();
+        let head = self.state.log_head(tip_log(self.scope)).unwrap();
         CutStatement {
-            log: self.scope,
+            log: tip_log(self.scope),
             sequence: 1,
             previous: None,
             verified: point(verified, running(&head, verified)),
@@ -48,7 +48,7 @@ fn an_owner_signed_cut_commits_after_the_exact_head_and_retries_identically() {
     for n in 1..=3 {
         f.commit(n + 1, n as u8);
     }
-    let before = f.state.log_head(f.scope).unwrap();
+    let before = f.state.log_head(tip_log(f.scope)).unwrap();
     let statement = f.statement(1, 2);
     let by_node = SignedCut::sign(statement.clone(), &f.nodes[0]).unwrap();
     assert_eq!(
@@ -66,7 +66,7 @@ fn an_owner_signed_cut_commits_after_the_exact_head_and_retries_identically() {
             running_hash: expected,
         })
     );
-    let head = f.state.log_head(f.scope).unwrap();
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
     assert_eq!((head.commit, head.head), (4, 4));
     assert_eq!(head.epoch, before.epoch + 1);
     assert!(head.members.is_empty());
@@ -91,7 +91,7 @@ fn an_owner_signed_cut_commits_after_the_exact_head_and_retries_identically() {
         f.run(0, cut(&other), T + 4),
         Err(CoordinationError::StaleHead)
     );
-    assert_eq!(f.state.log_head(f.scope).unwrap(), head);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap(), head);
     // Nothing appends until a node joins the cut head; then at a+2.
     let append = Action::Append {
         expected: 4,
@@ -151,7 +151,7 @@ fn cut_admission_refuses_unchained_points_stale_heads_and_abandoned_cuts() {
     f.resolve(&pending, &[0, 1], T + 3).unwrap();
     let first = SignedCut::sign(f.statement(0, 2), &f.owner).unwrap();
     f.run(0, cut(&first), T + 4).unwrap();
-    let running_hash = f.state.log_head(f.scope).unwrap().running_hash;
+    let running_hash = f.state.log_head(tip_log(f.scope)).unwrap().running_hash;
     for (node, sequence) in [(0, 6), (1, 2)] {
         let join = Action::Join {
             position: 5,
@@ -178,7 +178,7 @@ fn cut_admission_refuses_unchained_points_stale_heads_and_abandoned_cuts() {
         f.run(0, cut(&record), T + 5),
         Ok(Outcome::Coordinated(LogResult::Cut { position: 7, .. }))
     ));
-    let head = f.state.log_head(f.scope).unwrap();
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
     assert_eq!(head.cut.unwrap().sequence, 2);
 }
 
@@ -189,7 +189,7 @@ fn positions_before_the_window_are_endorsed_only_from_the_genesis_anchor() {
         app: AppId([2; 16]),
         domain: DomainId([3; 16]),
     };
-    let mut log = Log::new(scope, [4; 16]);
+    let mut log = Log::new(tip_log(scope), [4; 16], 1);
     let commit = HASH_WINDOW as u64 + 10;
     let mut runnings = vec![log.head.genesis];
     for position in 1..=commit {
@@ -209,7 +209,7 @@ fn positions_before_the_window_are_endorsed_only_from_the_genesis_anchor() {
     log.head.running_hash = runnings[commit as usize];
     let owner = PrivateKey::new();
     let statement = |verified: u64, retained: u64| CutStatement {
-        log: scope,
+        log: tip_log(scope),
         sequence: 1,
         previous: None,
         verified: point(verified, runnings[verified as usize]),
@@ -220,7 +220,7 @@ fn positions_before_the_window_are_endorsed_only_from_the_genesis_anchor() {
     };
     let admit = |log: &mut Log, statement| {
         let record = SignedCut::sign(statement, &owner).unwrap();
-        log.cut(scope, &record.to_bytes().unwrap(), &[])
+        log.cut(tip_log(scope), &record.to_bytes().unwrap(), &[])
     };
     // Before the window, only the genesis anchor is a verified point.
     let mut probe = log.clone();
@@ -231,7 +231,7 @@ fn positions_before_the_window_are_endorsed_only_from_the_genesis_anchor() {
     let oversized = SignedCut::sign(statement(0, 5), &owner).unwrap();
     assert_eq!(
         probe.cut(
-            scope,
+            tip_log(scope),
             &oversized.to_bytes().unwrap(),
             &vec![0; 8 * 1024 + 1]
         ),

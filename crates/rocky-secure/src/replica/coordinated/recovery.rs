@@ -8,7 +8,7 @@ impl<A: RowApplication> Inner<A> {
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
-        log: Scope,
+        log: TipLog,
         after: u64,
     ) -> Result<Vec<CommittedEntry>, Error> {
         let staged = self.staged().await?;
@@ -31,7 +31,7 @@ impl<A: RowApplication> Inner<A> {
                 };
                 cursor = hash.clone();
                 let frame = self.stored_frame(header.clone(), body.clone()).await?;
-                if frame.scope()?.domain != log || staged.contains(&frame.id()?) {
+                if frame.scope()?.domain != log.scope || staged.contains(&frame.id()?) {
                     continue;
                 }
                 let operation = frame.operation()?;
@@ -72,7 +72,7 @@ impl<A: RowApplication> Inner<A> {
                         || other.members != membership.members
                         || other.entry != Some(position)
                         || usize::from(other.index) != index
-                        || member.scope()?.domain != log
+                        || member.scope()?.domain != log.scope
                     {
                         return Err(denied("recovery bundle members disagree"));
                     }

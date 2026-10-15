@@ -398,7 +398,7 @@ pub(super) struct Inner<A> {
     /// what it can admit. Chains name none.
     pub(super) peer_tips: BTreeMap<rocky_credentials::PeerId, TipId>,
     /// Verified owner-signed cuts of each coordinated log, in order.
-    cuts: BTreeMap<rocky_core::Scope, Vec<coordinated::cut::HeldCut>>,
+    cuts: BTreeMap<rocky_core::TipLog, Vec<coordinated::cut::HeldCut>>,
     #[cfg(test)]
     stage_fault: Option<(checkpoint::Stage, usize)>,
     /// Fails after the cut rollback step with this number commits.

@@ -383,7 +383,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(ScopeFrontier {
             scope,
-            cuts: self.held_cuts(scope.domain).len() as u64,
+            cuts: self.held_cuts(self.tip_log(scope.domain)).len() as u64,
             logs,
         })
     }

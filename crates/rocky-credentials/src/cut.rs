@@ -6,7 +6,7 @@ use crate::{
 };
 use rocky_core::{
     Commitment, MAX_COUNTER, PartitionTuple, PrincipalKind, ResourceScope, Right, RowSelection,
-    Scope,
+    TipLog,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +23,7 @@ pub struct CutPoint {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CutStatement {
-    pub log: Scope,
+    pub log: TipLog,
     /// This log's cut count, from 1.
     pub sequence: u64,
     /// The digest of the previous cut.
@@ -71,7 +71,7 @@ pub struct SignedCut {
 }
 impl SignedCut {
     fn bytes(statement: &CutStatement, signer: PublicKey) -> Result<Vec<u8>, Error> {
-        signing_bytes("rocky.coordinated-cut.v1", &(statement, signer))
+        signing_bytes("rocky.coordinated-cut.v2", &(statement, signer))
     }
     pub fn sign(statement: CutStatement, owner: &PrivateKey) -> Result<Self, Error> {
         statement.validate()?;
@@ -128,7 +128,7 @@ impl SignedCut {
         self.verify()?;
         if scopes
             .iter()
-            .any(|(scope, _)| scope.domain != self.statement.log)
+            .any(|(scope, _)| scope.domain != self.statement.log.scope)
         {
             return Err(denied("cut authority names another domain"));
         }
@@ -182,10 +182,13 @@ mod tests {
             running: [byte; 32],
         };
         CutStatement {
-            log: Scope {
-                mesh: rocky_core::MeshId([1; 16]),
-                app: rocky_core::AppId([2; 16]),
-                domain: rocky_core::DomainId([3; 16]),
+            log: TipLog {
+                scope: rocky_core::Scope {
+                    mesh: rocky_core::MeshId([1; 16]),
+                    app: rocky_core::AppId([2; 16]),
+                    domain: rocky_core::DomainId([3; 16]),
+                },
+                tip: rocky_core::TipId([4; 32]),
             },
             sequence: 1,
             previous: None,
@@ -275,7 +278,7 @@ mod tests {
                 .is_err()
         );
         let scope = |table| ResourceScope {
-            domain: statement().log,
+            domain: statement().log.scope,
             table: [table; 32],
             encryption: [0; 32],
         };
@@ -315,14 +318,14 @@ mod tests {
             .unwrap()
         };
         let tuple = PartitionTuple::new([(column, value("north"))]).unwrap();
-        let partitioned = tuple.scope(statement().log, [3; 32]).unwrap();
+        let partitioned = tuple.scope(statement().log.scope, [3; 32]).unwrap();
         let selected = CredentialChain(vec![
             authority
                 .issue_partition_terms(
                     other.public_key(),
                     vec![grant(scope(1), &all)],
                     vec![crate::PartitionGrant {
-                        domain: statement().log,
+                        domain: statement().log.scope,
                         table: [3; 32],
                         selector: rocky_core::PartitionSelector(
                             [(column, rocky_core::PartitionSelection::Any)].into(),

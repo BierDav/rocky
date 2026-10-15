@@ -1,10 +1,12 @@
-//! Coordinated writes: ordinary bundles a domain's coordinated log orders.
+//! Coordinated writes: ordinary bundles a tip's coordinated log orders.
 //! Every in-sync trusted node stores an entry before it commits; nothing of
 //! it leaves a node before it commits, and an aborted entry is voided. See
 //! `docs/runtime/coordinated-writes.md` and decision 0072.
 use super::checkpoint::hash_of;
 use super::*;
-use rocky_core::{Append, DomainLog, LogHead, LogPending, LogResult, Scope, coordinated_chain};
+use rocky_core::{
+    Append, DomainLog, LogHead, LogPending, LogResult, Scope, TipLog, coordinated_chain,
+};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -44,27 +46,20 @@ pub(super) struct Trusted {
     deciding: Mutex<()>,
     /// Logs whose staged write this process proposes next; resolution
     /// drives only staged writes a restart left behind.
-    proposing: std::sync::Mutex<BTreeSet<[u8; 48]>>,
-}
-fn log_key(log: Scope) -> [u8; 48] {
-    let mut key = [0; 48];
-    key[..16].copy_from_slice(&log.mesh.0);
-    key[16..32].copy_from_slice(&log.app.0);
-    key[32..].copy_from_slice(&log.domain.0);
-    key
+    proposing: std::sync::Mutex<BTreeSet<TipLog>>,
 }
 impl Trusted {
-    fn proposing(&self) -> std::sync::MutexGuard<'_, BTreeSet<[u8; 48]>> {
+    fn proposing(&self) -> std::sync::MutexGuard<'_, BTreeSet<TipLog>> {
         self.proposing
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     /// Marks `log`'s next staged write as this process's to propose.
-    pub(super) fn begin_proposal(&self, log: Scope) {
-        self.proposing().insert(log_key(log));
+    pub(super) fn begin_proposal(&self, log: TipLog) {
+        self.proposing().insert(log);
     }
-    pub(super) fn end_proposal(&self, log: Scope) {
-        self.proposing().remove(&log_key(log));
+    pub(super) fn end_proposal(&self, log: TipLog) {
+        self.proposing().remove(&log);
     }
 }
 impl Default for Trusted {
@@ -82,7 +77,7 @@ impl Default for Trusted {
 /// every committed entry and is in the in-sync set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
-    pub log: Scope,
+    pub log: TipLog,
     /// The commit index the write is computed on; it is appended after it.
     pub expected: u64,
     pub epoch: u64,
@@ -90,7 +85,7 @@ pub struct Slot {
 /// An assigned entry as a proposer sends it to the in-sync set.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoordinatedEntry {
-    pub log: Scope,
+    pub log: TipLog,
     pub pending: LogPending,
     pub frames: Vec<EncryptedFrame>,
     /// Void records consuming the positions before the frames.
@@ -133,6 +128,9 @@ pub enum CoordinatedError {
     Undecided,
     /// Committed entries are missing locally and no peer supplied them.
     Behind,
+    /// This node does not follow the log's tip: only trusted nodes that
+    /// follow a tip write through its log.
+    Unfollowed,
     /// The coordinator refused the call.
     Refused(rocky_core::CoordinationError),
     Storage(Error),
@@ -176,15 +174,15 @@ pub trait EntryPeers: Send + Sync {
     fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()>;
     /// Entry evidence after `position` from any reachable device.
     /// The receiver checks every hash against the coordinator before use.
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>>;
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>>;
 }
 
 /// The hash an entry is appended under: its log, position and frames.
-pub fn entry_hash(log: Scope, position: u64, ids: &[Hash]) -> Result<Commitment, Error> {
+pub fn entry_hash(log: TipLog, position: u64, ids: &[Hash]) -> Result<Commitment, Error> {
     let mut ids: Vec<[u8; 32]> = ids.iter().map(|id| *id.as_bytes()).collect();
     ids.sort_unstable();
     Ok(rocky_core::commitment(
-        "rocky.coordinated-entry.v1",
+        "rocky.coordinated-entry.v2",
         &encode(&(log, position, ids))?,
     ))
 }
@@ -232,10 +230,17 @@ fn ids_of(frames: &[EncryptedFrame]) -> Result<Vec<Hash>, Error> {
 }
 
 impl<A: RowApplication> Inner<A> {
+    /// The log of `domain`'s tip this replica follows.
+    pub(in crate::replica) fn tip_log(&self, domain: Scope) -> TipLog {
+        TipLog {
+            scope: domain,
+            tip: self.tip,
+        }
+    }
     /// Position, running hash, genesis and last sequence of `log`.
     async fn log_state(
         &self,
-        log: Scope,
+        log: TipLog,
     ) -> Result<(u64, Option<Commitment>, Option<Commitment>, u64), Error> {
         let record = collect_rows(
             self.conn
@@ -271,7 +276,7 @@ impl<A: RowApplication> Inner<A> {
         ))
     }
     /// Records the coordinator's genesis anchor, including after commits.
-    async fn learn_genesis(&self, log: Scope, head: &LogHead) -> Result<(), Error> {
+    async fn learn_genesis(&self, log: TipLog, head: &LogHead) -> Result<(), Error> {
         self.conn
             .execute(
                 "INSERT INTO secure_coordinated VALUES(?1,0,?2,?2,0) ON CONFLICT(log) DO UPDATE SET running=COALESCE(running,?2),genesis=COALESCE(genesis,?2) WHERE position=0",
@@ -282,7 +287,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Allocates the next join or append sequence inside the caller's
     /// transaction; it is durable before the coordinator sees it.
-    async fn next_sequence(&self, log: Scope) -> Result<u64, Error> {
+    async fn next_sequence(&self, log: TipLog) -> Result<u64, Error> {
         let (_, _, _, previous) = self.log_state(log).await?;
         let sequence = rocky_core::next_request_sequence(previous, now()?)
             .map_err(Error::Protocol)?
@@ -298,7 +303,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         Ok(sequence)
     }
-    async fn entries(&self, log: Scope, states: &[&str]) -> Result<Vec<Entry>, Error> {
+    async fn entries(&self, log: TipLog, states: &[&str]) -> Result<Vec<Entry>, Error> {
         let placeholders = vec!["?"; states.len()].join(",");
         let mut values = vec![SqlValue::Blob(encode(&log)?)];
         values.extend(states.iter().map(|state| SqlValue::Text((*state).into())));
@@ -376,6 +381,9 @@ impl<A: RowApplication> Inner<A> {
         transaction: Commitment,
         frames: &[EncryptedFrame],
     ) -> Result<(), Error> {
+        if slot.log != self.tip_log(slot.log.scope) {
+            return Err(denied("the followed tip moved since the coordinated slot"));
+        }
         let (position, _, _, _) = self.log_state(slot.log).await?;
         if position != slot.expected {
             return Err(denied("the coordinated slot is stale"));
@@ -415,7 +423,7 @@ impl<A: RowApplication> Inner<A> {
             .await?;
         self.record_entry_frames(slot.log, entry, &ids).await?;
         for frame in frames {
-            if frame.scope()?.domain != slot.log {
+            if frame.scope()?.domain != slot.log.scope {
                 return Err(denied("a coordinated write stays in its log's domain"));
             }
             self.conn
@@ -448,7 +456,7 @@ impl<A: RowApplication> Inner<A> {
     /// replica's. Returns the running hash after it.
     async fn commit_entry(
         &self,
-        log: Scope,
+        log: TipLog,
         position: u64,
         hash: Commitment,
         ids: &[Hash],
@@ -511,7 +519,7 @@ impl<A: RowApplication> Inner<A> {
     async fn record(
         &self,
         sql: &str,
-        log: Scope,
+        log: TipLog,
         hash: Commitment,
         value: Vec<u8>,
     ) -> Result<(), Error> {
@@ -535,15 +543,22 @@ impl<A: RowApplication> Inner<A> {
 }
 
 impl<A: RowApplication> EncryptedReplica<A> {
+    /// The log of `domain`'s tip this replica follows.
+    pub async fn followed_log(&self, domain: Scope) -> TipLog {
+        self.inner.lock().await.tip_log(domain)
+    }
     /// Decides this replica's undecided entries of `log`, applies those
     /// committed, catches up from `peers` and joins the in-sync set. The
     /// slot is the position the next coordinated write is staged at.
     pub async fn coordinated_slot(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<Slot, CoordinatedError> {
+        if log != self.followed_log(log.scope).await {
+            return Err(CoordinatedError::Unfollowed);
+        }
         let _deciding = self.domain_log.deciding.lock().await;
         let status = self.resolve(log, coordinator, peers).await?;
         if status.undecided > 0 {
@@ -585,7 +600,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     /// Refuses a slot while a committed entry's frames wait for dependencies.
-    async fn require_applied(&self, log: Scope) -> Result<(), CoordinatedError> {
+    async fn require_applied(&self, log: TipLog) -> Result<(), CoordinatedError> {
         let inner = self.inner.lock().await;
         for entry in inner.entries(log, &["committed"]).await? {
             let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
@@ -604,7 +619,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// commit. An abort voids it and rolls its effects back.
     pub async fn propose(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedCommit, CoordinatedError> {
@@ -615,7 +630,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     async fn propose_staged(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedCommit, CoordinatedError> {
@@ -691,7 +706,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// then acknowledges it; returns its frames and whether it committed.
     async fn send_own(
         &self,
-        log: Scope,
+        log: TipLog,
         pending: &LogPending,
         ids: &[Hash],
         coordinator: &dyn DomainLog,
@@ -734,7 +749,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// its deadline. A lost coordinator leaves it undecided.
     async fn await_decision(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
         pending: &LogPending,
@@ -757,7 +772,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             delay = (delay * 2).min(std::time::Duration::from_millis(500));
         }
     }
-    async fn assign(&self, log: Scope, entry: &Entry, pending: &LogPending) -> Result<(), Error> {
+    async fn assign(&self, log: TipLog, entry: &Entry, pending: &LogPending) -> Result<(), Error> {
         if pending.hash != entry.hash || pending.position != entry.position {
             return Err(Error::Corrupt(
                 "the coordinator assigned another entry".into(),
@@ -776,7 +791,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })?;
         inner.flush()
     }
-    async fn commit_own(&self, log: Scope, entry: &Entry, ids: &[Hash]) -> Result<(), Error> {
+    async fn commit_own(&self, log: TipLog, entry: &Entry, ids: &[Hash]) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         transaction!(inner, |inner| {
             inner
@@ -787,7 +802,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         inner.flush()
     }
     /// Voids an own entry that never committed and rolls its effects back.
-    async fn abort_own(&self, log: Scope, entry: &Entry) -> Result<(), Error> {
+    async fn abort_own(&self, log: TipLog, entry: &Entry) -> Result<(), Error> {
         let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
         let bundle = entry
             .bundle
@@ -823,6 +838,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
         entry: CoordinatedEntry,
         coordinator: &dyn DomainLog,
     ) -> Result<LogResult, CoordinatedError> {
+        // An entry reaches only the nodes of its tip's log.
+        if entry.log != self.followed_log(entry.log.scope).await {
+            return Err(CoordinatedError::Unfollowed);
+        }
         let pending = &entry.pending;
         let ids = ids_of(&entry.frames)?;
         if entry.frames.is_empty()
@@ -834,7 +853,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for frame in &entry.frames {
             frame.operation()?;
             frame.chain()?;
-            if frame.scope()?.domain != entry.log {
+            if frame.scope()?.domain != entry.log.scope {
                 return Err(denied("a coordinated entry stays in its log's domain").into());
             }
         }
@@ -887,7 +906,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// entries are fetched from `peers` first.
     pub async fn resolve_coordinated(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedStatus, CoordinatedError> {
@@ -896,7 +915,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     async fn resolve(
         &self,
-        log: Scope,
+        log: TipLog,
         coordinator: &dyn DomainLog,
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedStatus, CoordinatedError> {
@@ -912,7 +931,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let me = coordinator.node();
         // A staged entry whose append a restart lost: its first outcome
         // decides. One this process proposes next is left to `propose`.
-        let proposing = self.domain_log.proposing().contains(&log_key(log));
+        let proposing = self.domain_log.proposing().contains(&log);
         let staged = match proposing {
             true => Vec::new(),
             false => self.inner.lock().await.entries(log, &["staged"]).await?,
@@ -989,7 +1008,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.coordinated_status(log).await.map_err(Into::into)
     }
     /// Applies one committed entry this replica stores or proposed.
-    async fn apply_committed(&self, log: Scope, entry: &Entry) -> Result<(), CoordinatedError> {
+    async fn apply_committed(&self, log: TipLog, entry: &Entry) -> Result<(), CoordinatedError> {
         {
             let inner = self.inner.lock().await;
             let (position, _, _, _) = inner.log_state(log).await?;
@@ -1047,7 +1066,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
     /// position through `through`, verified against the head.
     async fn catch_up(
         &self,
-        log: Scope,
+        log: TipLog,
         head: &LogHead,
         peers: &dyn EntryPeers,
         through: u64,
@@ -1146,7 +1165,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
-        log: Scope,
+        log: TipLog,
         after: u64,
     ) -> Result<Vec<CommittedEntry>, Error> {
         let mut inner = self.inner.lock().await;
@@ -1203,7 +1222,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             });
             before = Some(commitment_of(running)?);
         }
-        if entries.is_empty() {
+        // Retained bundles name no tip yet: they are taken as the followed one's.
+        if entries.is_empty() && log == inner.tip_log(log.scope) {
             entries = inner
                 .recovered_entries(peer, credentials, log, after)
                 .await?;
@@ -1216,7 +1236,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(entries)
     }
     /// This replica's progress on `log`.
-    pub async fn coordinated_status(&self, log: Scope) -> Result<CoordinatedStatus, Error> {
+    pub async fn coordinated_status(&self, log: TipLog) -> Result<CoordinatedStatus, Error> {
         let inner = self.inner.lock().await;
         let (position, _, _, _) = inner.log_state(log).await?;
         Ok(CoordinatedStatus {

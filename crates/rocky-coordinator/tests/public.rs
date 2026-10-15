@@ -11,7 +11,7 @@ use rocky_coordinator::{
 };
 use rocky_core::*;
 use std::{sync::Arc, time::Duration};
-use support::{append, join, membership_after_election, public::*};
+use support::{append, join, log, membership_after_election, public::*};
 
 fn limits() -> Limits {
     Limits {
@@ -53,12 +53,12 @@ async fn commit(
     action: Action,
 ) -> Result<u64, CoordinationError> {
     let Outcome::Coordinated(LogResult::Assigned(pending)) =
-        client.coordinated(scope, action).await?
+        client.coordinated(log(scope), action).await?
     else {
         return Err(CoordinationError::Corrupt);
     };
     match client
-        .coordinated(scope, Action::Acknowledge { pending: *pending })
+        .coordinated(log(scope), Action::Acknowledge { pending: *pending })
         .await?
     {
         Outcome::Coordinated(LogResult::Committed { position, .. }) => Ok(position),
@@ -81,14 +81,14 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     // Cross-tenant log calls, controls and registrations fail.
     let b_on_a = b.client(&cluster, &b.executor).await;
     assert_eq!(
-        b_on_a.coordinated_head(sa).await,
+        b_on_a.coordinated_head(log(sa)).await,
         Err(CoordinationError::Denied)
     );
-    let head = a_exec.coordinated_head(sa).await.unwrap();
+    let head = a_exec.coordinated_head(log(sa)).await.unwrap();
     assert_eq!(
         b_on_a
             .coordinated(
-                sa,
+                log(sa),
                 Action::Join {
                     position: head.commit,
                     running_hash: head.running_hash,
@@ -136,7 +136,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     )
     .unwrap();
     assert_eq!(
-        tcp.coordinated_head(sa).await,
+        tcp.coordinated_head(log(sa)).await,
         Err(CoordinationError::Unavailable)
     );
 
@@ -151,7 +151,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     join(&a_alt, sa, 1).await;
     let second = append(&a_alt, sa, 2, 2).await;
     let Outcome::Coordinated(LogResult::Assigned(pending)) =
-        a_alt.coordinated(sa, second).await.unwrap()
+        a_alt.coordinated(log(sa), second).await.unwrap()
     else {
         panic!("assignment")
     };
@@ -159,7 +159,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     assert_eq!(
         a_alt
             .coordinated(
-                sa,
+                log(sa),
                 Action::Acknowledge {
                     pending: (*pending).clone()
                 }
@@ -170,7 +170,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     );
     assert!(matches!(
         a_exec
-            .coordinated(sa, Action::Acknowledge { pending: *pending })
+            .coordinated(log(sa), Action::Acknowledge { pending: *pending })
             .await
             .unwrap(),
         Outcome::Coordinated(LogResult::Committed { position: 2, .. })
@@ -220,7 +220,7 @@ async fn tenants_register_isolated_domains_and_cannot_starve_each_other() {
     let flood: Vec<_> = (0..64)
         .map(|n| {
             let client = flooders[n % 4].clone();
-            tokio::spawn(async move { client.coordinated_head(sa).await.map(|_| ()) })
+            tokio::spawn(async move { client.coordinated_head(log(sa)).await.map(|_| ()) })
         })
         .collect();
     let started = tokio::time::Instant::now();
@@ -289,7 +289,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     cluster.wait_online(leader, &admin).await;
 
     // Quorum outage: no authoritative answer, no fabricated success.
-    let before = exec.coordinated_head(scope).await.unwrap();
+    let before = exec.coordinated_head(log(scope)).await.unwrap();
     let pending = append(&exec, scope, 3, 4).await;
     let survivor = cluster.wait_leader(&admin).await;
     let down: Vec<u64> = (1..=3).filter(|id| *id != survivor).collect();
@@ -297,11 +297,11 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
         cluster.stop(*id);
     }
     assert_eq!(
-        exec.coordinated(scope, pending.clone()).await,
+        exec.coordinated(log(scope), pending.clone()).await,
         Err(CoordinationError::Unavailable)
     );
     assert_eq!(
-        exec.coordinated_head(scope).await,
+        exec.coordinated_head(log(scope)).await,
         Err(CoordinationError::Unavailable)
     );
     // Controlled restart of every voter preserves the log.
@@ -316,7 +316,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     // `Unavailable` was unknown, not failure: the survivor's log may hold
     // the append. Retrying the same append yields its one assignment.
     assert_eq!(
-        exec.coordinated_head(scope).await.unwrap().commit,
+        exec.coordinated_head(log(scope)).await.unwrap().commit,
         before.commit
     );
     assert_eq!(commit(&exec, scope, pending).await, Ok(before.commit + 1));
@@ -330,7 +330,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     cluster.wait_online(3, &admin).await;
     let fourth = append(&exec, scope, 4, 5).await;
     commit(&exec, scope, fourth).await.unwrap();
-    let latest = exec.coordinated_head(scope).await.unwrap();
+    let latest = exec.coordinated_head(log(scope)).await.unwrap();
     let committed = admin
         .status(cluster.wait_leader(&admin).await)
         .await
@@ -413,7 +413,7 @@ async fn outages_and_restarts_keep_state_and_restore_is_fenced() {
     // Voter 3 now votes with current state: with voter 1 down, 2 and 3 serve.
     cluster.stop(1);
     cluster.wait_leader(&admin).await;
-    assert_eq!(exec.coordinated_head(scope).await.unwrap(), latest);
+    assert_eq!(exec.coordinated_head(log(scope)).await.unwrap(), latest);
     let fifth = append(&exec, scope, 5, 6).await;
     commit(&exec, scope, fifth).await.unwrap();
 }
@@ -441,7 +441,7 @@ async fn a_completely_restored_service_stays_fenced() {
     // Nobody may vote, so nothing answers: recovery of a whole service is an
     // explicit new configuration, never a silent rollback.
     assert_eq!(
-        exec.coordinated_head(scope).await,
+        exec.coordinated_head(log(scope)).await,
         Err(CoordinationError::Unavailable)
     );
     for id in 1..=3 {
@@ -478,7 +478,7 @@ async fn owner_closure_ends_the_log_and_frees_only_open_quota() {
     owner.close_domain(first, [9; 32]).await.unwrap();
     let action = append(&executor, first, 1, 2).await;
     assert_eq!(
-        executor.coordinated(first, action).await,
+        executor.coordinated(log(first), action).await,
         Err(CoordinationError::Denied)
     );
     let usage = owner.usage().await.unwrap();

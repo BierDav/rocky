@@ -102,7 +102,7 @@ impl<A: RowApplication> Inner<A> {
         }
         // Nothing is sealed over a base holding abandoned effects.
         self.ensure_cut_clean(scope).await?;
-        if self.cut_pending(scope.domain).await? {
+        if self.cut_pending(self.tip_log(scope.domain)).await? {
             return Err(denied("a cut of the scope's log is rolling back"));
         }
         if let Some(id) = self.find_scope_id(scope).await?
@@ -285,7 +285,7 @@ impl<A: RowApplication> Inner<A> {
         record: Record,
     ) -> Result<Step, Error> {
         // A cut admitted since the capture may abandon what it replayed.
-        if self.cut_pending(scope.domain).await? {
+        if self.cut_pending(self.tip_log(scope.domain)).await? {
             transaction!(self, |inner| {
                 inner
                     .conn

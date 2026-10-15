@@ -21,7 +21,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     join(&alice, cluster.scope, 1).await;
     let first = append(&alice, cluster.scope, 1, 2).await;
     let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
-        .coordinated(cluster.scope, first.clone())
+        .coordinated(log(cluster.scope), first.clone())
         .await
         .unwrap()
     else {
@@ -30,7 +30,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     // A retried append returns its first answer; another with its sequence conflicts.
     assert_eq!(
         alice
-            .coordinated(cluster.scope, first.clone())
+            .coordinated(log(cluster.scope), first.clone())
             .await
             .unwrap(),
         Outcome::Coordinated(LogResult::Assigned(pending.clone()))
@@ -48,7 +48,7 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     assert_eq!(
         alice
             .coordinated(
-                cluster.scope,
+                log(cluster.scope),
                 Action::Append {
                     expected,
                     epoch,
@@ -62,7 +62,10 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     );
     assert!(matches!(
         alice
-            .coordinated(cluster.scope, Action::Acknowledge { pending: *pending })
+            .coordinated(
+                log(cluster.scope),
+                Action::Acknowledge { pending: *pending }
+            )
             .await
             .unwrap(),
         Outcome::Coordinated(LogResult::Committed { position: 1, .. })
@@ -71,7 +74,10 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     cluster.stop(leader);
     let next = cluster.wait_leader(&admin).await;
     assert_ne!(next, leader);
-    let head = alternate.coordinated_head(cluster.scope).await.unwrap();
+    let head = alternate
+        .coordinated_head(log(cluster.scope))
+        .await
+        .unwrap();
     assert_eq!((head.commit, head.hashes.len()), (1, 1));
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
@@ -141,7 +147,10 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     }
     cluster.wait_leader(&admin).await;
     assert_eq!(
-        alternate.coordinated_head(cluster.scope).await.unwrap(),
+        alternate
+            .coordinated_head(log(cluster.scope))
+            .await
+            .unwrap(),
         head
     );
     let mut invalid = cluster.app_control(2);
@@ -167,14 +176,18 @@ async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
         .await
         .unwrap();
     assert_eq!(
-        alice.coordinated_head(cluster.scope).await.unwrap().commit,
+        alice
+            .coordinated_head(log(cluster.scope))
+            .await
+            .unwrap()
+            .commit,
         1
     );
     for id in 1..=3 {
         cluster.stop(id);
     }
     assert_eq!(
-        alternate.coordinated_head(cluster.scope).await,
+        alternate.coordinated_head(log(cluster.scope)).await,
         Err(CoordinationError::Unavailable)
     );
     // A surviving provisioning marker prevents a missing store from becoming genesis again.
@@ -208,15 +221,15 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     .enumerate()
     {
         let leader = cluster.wait_leader(&admin).await;
-        let before = alice.coordinated_head(cluster.scope).await.unwrap();
+        let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
         let action = append(&alice, cluster.scope, index as u8 + 1, index as u64 + 2).await;
         cluster.arm(leader, stage);
-        let _ = alice.coordinated(cluster.scope, action.clone()).await;
+        let _ = alice.coordinated(log(cluster.scope), action.clone()).await;
         cluster.wait_exit(leader).await;
         cluster.wait_leader(&admin).await;
         // The retry answers what the crashed call may have applied, once.
         let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
-            .coordinated(cluster.scope, action.clone())
+            .coordinated(log(cluster.scope), action.clone())
             .await
             .unwrap()
         else {
@@ -225,14 +238,17 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         assert_eq!(pending.position, before.commit + 1, "{stage}");
         assert_eq!(
             alice
-                .coordinated(cluster.scope, action.clone())
+                .coordinated(log(cluster.scope), action.clone())
                 .await
                 .unwrap(),
             Outcome::Coordinated(LogResult::Assigned(pending.clone()))
         );
         assert!(matches!(
             alice
-                .coordinated(cluster.scope, Action::Acknowledge { pending: *pending })
+                .coordinated(
+                    log(cluster.scope),
+                    Action::Acknowledge { pending: *pending }
+                )
                 .await
                 .unwrap(),
             Outcome::Coordinated(LogResult::Committed { .. })
@@ -240,7 +256,11 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
         assert_eq!(
-            alice.coordinated_head(cluster.scope).await.unwrap().commit,
+            alice
+                .coordinated_head(log(cluster.scope))
+                .await
+                .unwrap()
+                .commit,
             before.commit + 1,
             "{stage}"
         );
@@ -248,14 +268,17 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     }
     for stage in ["snapshot.before_rename", "snapshot.after_sync"] {
         let leader = cluster.wait_leader(&admin).await;
-        let before = alice.coordinated_head(cluster.scope).await.unwrap();
+        let before = alice.coordinated_head(log(cluster.scope)).await.unwrap();
         cluster.arm(leader, stage);
         let _ = admin.snapshot(leader).await;
         cluster.wait_exit(leader).await;
         cluster.wait_leader(&admin).await;
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
-        assert_eq!(alice.coordinated_head(cluster.scope).await.unwrap(), before);
+        assert_eq!(
+            alice.coordinated_head(log(cluster.scope)).await.unwrap(),
+            before
+        );
     }
     let leader = cluster.wait_leader(&admin).await;
     let lagging = if leader == 1 { 2 } else { 1 };
@@ -265,7 +288,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     let last = last.unwrap();
     for _ in 0..80 {
         alice
-            .coordinated(cluster.scope, last.clone())
+            .coordinated(log(cluster.scope), last.clone())
             .await
             .unwrap();
     }

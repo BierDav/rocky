@@ -224,7 +224,10 @@ impl Service {
         self.apply(
             metadata,
             key,
-            Operation::Coordinated { scope, action },
+            Operation::Coordinated {
+                log: tip_log(scope),
+                action,
+            },
             time,
         )
     }
@@ -235,7 +238,7 @@ impl Service {
         scope: Scope,
     ) -> crate::coordinated::Head {
         let head = Operation::Coordinated {
-            scope,
+            log: tip_log(scope),
             action: Action::Head,
         };
         match self.read(metadata, key, head) {
@@ -279,14 +282,14 @@ fn tenants_register_isolated_domains_without_reaching_each_other() {
     // registration of its application.
     let head = service.head(&m, &a.executor, sa);
     let log_head = Operation::Coordinated {
-        scope: sa,
+        log: tip_log(sa),
         action: Action::Head,
     };
     for (key, operation) in [
         (
             &b.executor,
             Operation::Coordinated {
-                scope: sa,
+                log: tip_log(sa),
                 action: Action::Join {
                     position: head.commit,
                     running_hash: head.running_hash,
@@ -597,7 +600,7 @@ fn a_shared_device_key_uses_each_requested_tenants_own_budget() {
             service.genesis.id().unwrap(),
             nonce(),
             Operation::Coordinated {
-                scope,
+                log: tip_log(scope),
                 action: Action::Head,
             },
             &b.executor,

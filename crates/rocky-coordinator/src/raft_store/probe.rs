@@ -153,7 +153,10 @@ impl Probe {
         scope: Scope,
         action: Action,
     ) -> Result<Outcome, CoordinationError> {
-        let operation = Operation::Coordinated { scope, action };
+        let operation = Operation::Coordinated {
+            log: tip_log(scope),
+            action,
+        };
         self.run(now, vec![(self.executor.clone(), operation)])
             .await
             .remove(0)
@@ -178,7 +181,7 @@ impl Probe {
         let sequence = self.next(d);
         let join = Action::Join {
             position: 0,
-            running_hash: genesis(scope, [5; 16]),
+            running_hash: rocky_core::log_genesis(tip_log(scope), [5; 16]),
             sequence,
         };
         self.log(now, scope, join).await.unwrap();
@@ -193,7 +196,7 @@ impl Probe {
             }
             let scope = self.domains[d].scope;
             for n in 0..ENTRIES {
-                let head = self.store().log_head(scope).await.unwrap();
+                let head = self.store().log_head(tip_log(scope)).await.unwrap();
                 let sequence = self.next(d);
                 let append = Action::Append {
                     expected: head.head,
@@ -214,7 +217,7 @@ impl Probe {
                     self.genesis.id().unwrap(),
                     nonce(),
                     Operation::Coordinated {
-                        scope,
+                        log: tip_log(scope),
                         action: Action::Acknowledge {
                             pending: pending.clone(),
                         },
@@ -224,7 +227,7 @@ impl Probe {
                 )
                 .unwrap();
                 let resolve = Operation::Coordinated {
-                    scope,
+                    log: tip_log(scope),
                     action: Action::Resolve {
                         pending,
                         acknowledgments: vec![acknowledgment],

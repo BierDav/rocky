@@ -140,18 +140,18 @@ pub(in crate::replica) enum Admission {
 }
 /// The rollback of one admitted cut.
 struct Work {
-    log: Scope,
+    log: TipLog,
     sequence: u64,
     step: i64,
     cursor: Option<Vec<u8>>,
 }
 
 impl<A: RowApplication> Inner<A> {
-    pub(in crate::replica) fn held_cuts(&self, log: Scope) -> &[HeldCut] {
+    pub(in crate::replica) fn held_cuts(&self, log: TipLog) -> &[HeldCut] {
         self.cuts.get(&log).map_or(&[], Vec::as_slice)
     }
     pub(in crate::replica) async fn load_cuts(&mut self) -> Result<(), Error> {
-        let mut cuts: BTreeMap<Scope, Vec<HeldCut>> = BTreeMap::new();
+        let mut cuts: BTreeMap<TipLog, Vec<HeldCut>> = BTreeMap::new();
         for record in rows(
             &self.conn,
             "SELECT record FROM secure_cuts ORDER BY log,sequence",
@@ -173,7 +173,7 @@ impl<A: RowApplication> Inner<A> {
     /// The scopes of `log`'s domain this replica stores or holds a key of.
     pub(in crate::replica) async fn log_scopes(
         &self,
-        log: Scope,
+        log: TipLog,
     ) -> Result<Vec<ResourceScope>, Error> {
         let mut scopes = BTreeSet::new();
         for record in rows(&self.conn, "SELECT scope FROM secure_scope_state").await? {
@@ -181,7 +181,7 @@ impl<A: RowApplication> Inner<A> {
                 return Err(Error::Corrupt("scope state".into()));
             };
             let scope: ResourceScope = decode(bytes)?;
-            if scope.domain == log {
+            if scope.domain == log.scope {
                 scopes.insert(scope);
             }
         }
@@ -190,7 +190,7 @@ impl<A: RowApplication> Inner<A> {
                 .keys
                 .iter()
                 .map(|key| key.scope)
-                .filter(|scope| scope.domain == log),
+                .filter(|scope| scope.domain == log.scope),
         );
         Ok(scopes.into_iter().collect())
     }
@@ -211,7 +211,7 @@ impl<A: RowApplication> Inner<A> {
     /// that many.
     pub(in crate::replica) async fn cuts_after(
         &self,
-        log: Scope,
+        log: TipLog,
         held: u64,
     ) -> Result<Vec<CutEvidence>, Error> {
         let mut cuts = Vec::new();
@@ -242,7 +242,7 @@ impl<A: RowApplication> Inner<A> {
     /// Notes the log position of frames of a coordinated write.
     pub(in crate::replica) async fn record_entry_frames(
         &self,
-        log: Scope,
+        log: TipLog,
         position: u64,
         ids: &[Hash],
     ) -> Result<(), Error> {
@@ -355,7 +355,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         match classify(
             &statement.coordinated,
-            self.held_cuts(statement.scope.domain),
+            self.held_cuts(self.tip_log(statement.scope.domain)),
         ) {
             Base::Clean => Ok(()),
             Base::Tainted => Err(Error::Rejected(
@@ -384,7 +384,7 @@ impl<A: RowApplication> Inner<A> {
             None => (0, 0),
         };
         let highest = self.highest_entry(id, (after, through), floor).await?;
-        Ok(binding(self.held_cuts(scope.domain), highest))
+        Ok(binding(self.held_cuts(self.tip_log(scope.domain)), highest))
     }
     /// Verifies a record's signature and that its signer is the owner of
     /// every scope of its domain this replica holds.
@@ -468,7 +468,7 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Whether a cut of `log` still has rollback work: no checkpoint of its
     /// scopes begins or seals meanwhile.
-    pub(in crate::replica) async fn cut_pending(&self, log: Scope) -> Result<bool, Error> {
+    pub(in crate::replica) async fn cut_pending(&self, log: TipLog) -> Result<bool, Error> {
         let mut found = self
             .conn
             .query("SELECT 1 FROM secure_cut_work WHERE log=?", [encode(&log)?])
@@ -716,14 +716,14 @@ impl<A: RowApplication> Inner<A> {
         Ok(true)
     }
     /// The held cut whose retained prefix ends at `position`, if one does.
-    pub(in crate::replica) fn cut_after(&self, log: Scope, position: u64) -> Option<HeldCut> {
+    pub(in crate::replica) fn cut_after(&self, log: TipLog, position: u64) -> Option<HeldCut> {
         self.held_cuts(log)
             .iter()
             .find(|cut| cut.statement.retained.position == position)
             .cloned()
     }
     /// The next held cut whose retained prefix ends after `position`.
-    pub(in crate::replica) fn next_cut(&self, log: Scope, position: u64) -> Option<HeldCut> {
+    pub(in crate::replica) fn next_cut(&self, log: TipLog, position: u64) -> Option<HeldCut> {
         self.held_cuts(log)
             .iter()
             .find(|cut| cut.statement.retained.position > position)
@@ -809,7 +809,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(())
     }
     /// The cut records of `log` this replica holds.
-    pub async fn cuts(&self, log: Scope) -> Result<Vec<CutEvidence>, Error> {
+    pub async fn cuts(&self, log: TipLog) -> Result<Vec<CutEvidence>, Error> {
         let inner = self.inner.lock().await;
         let mut all = Vec::new();
         loop {
@@ -821,9 +821,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         }
     }
     /// How many cut records this replica holds of each log of `scopes`.
-    pub async fn held_cut_counts(&self, scopes: &[ResourceScope]) -> Vec<(Scope, u64)> {
+    pub async fn held_cut_counts(&self, scopes: &[ResourceScope]) -> Vec<(TipLog, u64)> {
         let inner = self.inner.lock().await;
-        let logs: BTreeSet<Scope> = scopes.iter().map(|scope| scope.domain).collect();
+        let logs: BTreeSet<TipLog> = scopes
+            .iter()
+            .map(|scope| inner.tip_log(scope.domain))
+            .collect();
         logs.into_iter()
             .map(|log| (log, inner.held_cuts(log).len() as u64))
             .collect()
@@ -833,10 +836,13 @@ impl<A: RowApplication> EncryptedReplica<A> {
     pub async fn cuts_for(
         &self,
         scopes: &[ResourceScope],
-        held: &[(Scope, u64)],
+        held: &[(TipLog, u64)],
     ) -> Result<Vec<CutEvidence>, Error> {
         let inner = self.inner.lock().await;
-        let logs: BTreeSet<Scope> = scopes.iter().map(|scope| scope.domain).collect();
+        let logs: BTreeSet<TipLog> = scopes
+            .iter()
+            .map(|scope| inner.tip_log(scope.domain))
+            .collect();
         let mut cuts = Vec::new();
         for log in logs {
             let count = held
@@ -873,7 +879,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
 /// the hashes from `running` at `position` must chain to the cut's retained
 /// running hash. Returns the verified hash of every position through it.
 pub(in crate::replica) async fn endorsed_hashes(
-    log: Scope,
+    log: TipLog,
     cut: &HeldCut,
     (position, running): (u64, Commitment),
     peers: &dyn EntryPeers,
@@ -925,10 +931,13 @@ mod tests {
         HeldCut {
             digest: [byte; 32],
             statement: CutStatement {
-                log: Scope {
-                    mesh: rocky_core::MeshId([1; 16]),
-                    app: rocky_core::AppId([2; 16]),
-                    domain: rocky_core::DomainId([3; 16]),
+                log: TipLog {
+                    scope: Scope {
+                        mesh: rocky_core::MeshId([1; 16]),
+                        app: rocky_core::AppId([2; 16]),
+                        domain: rocky_core::DomainId([3; 16]),
+                    },
+                    tip: rocky_core::TipId([4; 32]),
                 },
                 sequence: 1,
                 previous: None,

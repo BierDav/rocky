@@ -152,27 +152,43 @@ impl NetworkCoordinator {
         .await
         .map_err(|_| CoordinationError::Unavailable)?
     }
-    /// Metadata-only log call. Join/append sequences must be durably increasing per domain/node.
+    /// Metadata-only log call. Join/append sequences must be durably increasing per log/node.
     pub async fn coordinated(
         &self,
-        scope: Scope,
+        log: TipLog,
         action: crate::coordinated::Action,
     ) -> Result<Outcome, CoordinationError> {
         self.call(
             crate::transport::nonce(),
-            Operation::Coordinated { scope, action },
+            Operation::Coordinated { log, action },
         )
         .await
     }
     pub async fn coordinated_head(
         &self,
-        scope: Scope,
+        log: TipLog,
     ) -> Result<crate::coordinated::Head, CoordinationError> {
         match self
-            .coordinated(scope, crate::coordinated::Action::Head)
+            .coordinated(log, crate::coordinated::Action::Head)
             .await?
         {
             Outcome::CoordinatedHead(head) => Ok(*head),
+            _ => Err(CoordinationError::Corrupt),
+        }
+    }
+    /// The authority's default minimum in-sync size for `scope`'s tips,
+    /// before any node joined one.
+    pub async fn configure(
+        &self,
+        scope: Scope,
+        minimum: usize,
+        id: Commitment,
+    ) -> Result<(), CoordinationError> {
+        match self
+            .call(id, Operation::Configure { scope, minimum })
+            .await?
+        {
+            Outcome::Coordinated(crate::coordinated::Result::Configured) => Ok(()),
             _ => Err(CoordinationError::Corrupt),
         }
     }
@@ -270,12 +286,23 @@ impl DomainLog for NetworkCoordinator {
     fn node(&self) -> NodeKey {
         *self.key.public_key().as_bytes()
     }
-    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
-        Box::pin(async move { Ok(self.coordinated_head(scope).await?.port()) })
+    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
+        Box::pin(async move { Ok(self.coordinated_head(log).await?.port()) })
+    }
+    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+        Box::pin(async move {
+            match self
+                .coordinated(log, crate::coordinated::Action::Configure { minimum })
+                .await?
+            {
+                Outcome::Coordinated(crate::coordinated::Result::Configured) => Ok(()),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
     }
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running_hash: Commitment,
         sequence: u64,
@@ -286,13 +313,13 @@ impl DomainLog for NetworkCoordinator {
                 running_hash,
                 sequence,
             };
-            match self.coordinated(scope, action).await? {
+            match self.coordinated(log, action).await? {
                 Outcome::Coordinated(crate::coordinated::Result::Joined { epoch }) => Ok(epoch),
                 _ => Err(CoordinationError::Corrupt),
             }
         })
     }
-    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
+    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
         Box::pin(async move {
             let action = crate::coordinated::Action::Append {
                 expected: append.expected,
@@ -301,7 +328,7 @@ impl DomainLog for NetworkCoordinator {
                 deadline: append.deadline,
                 sequence: append.sequence,
             };
-            match self.coordinated(scope, action).await? {
+            match self.coordinated(log, action).await? {
                 Outcome::Coordinated(crate::coordinated::Result::Assigned(pending)) => {
                     Ok(pending.port())
                 }
@@ -309,11 +336,11 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
-    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
         Box::pin(async move {
             let pending = crate::coordinated::Pending::from_port(&pending)?;
             match self
-                .coordinated(scope, crate::coordinated::Action::Acknowledge { pending })
+                .coordinated(log, crate::coordinated::Action::Acknowledge { pending })
                 .await?
             {
                 Outcome::Coordinated(crate::coordinated::Result::Acknowledged) => {
@@ -330,13 +357,13 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
-    fn cut(&self, scope: Scope, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
+    fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult> {
         Box::pin(async move {
             let action = crate::coordinated::Action::Cut {
                 record: cut.record,
                 authority: cut.authority,
             };
-            match self.coordinated(scope, action).await? {
+            match self.coordinated(log, action).await? {
                 Outcome::Coordinated(crate::coordinated::Result::Cut {
                     position,
                     running_hash,

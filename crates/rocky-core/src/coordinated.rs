@@ -1,12 +1,20 @@
-//! The metadata port of a domain's coordinated log: the order and commit of
+//! The metadata port of a tip's coordinated log: the order and commit of
 //! entries trusted nodes store, never their data. See
 //! `docs/runtime/coordinated-log.md` and `docs/runtime/coordinated-writes.md`.
-use crate::{Commitment, CoordinationFuture, Scope, commitment};
+use crate::{Commitment, Configuration, CoordinationFuture, Scope, TipId, commitment};
 
 /// A trusted node's key as its 32 bytes.
 pub type NodeKey = [u8; 32];
 
-/// The one assigned, uncommitted entry of a domain.
+/// One coordinated log: a domain's log of one tip.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct TipLog {
+    pub scope: Scope,
+    pub tip: TipId,
+}
+/// The one assigned, uncommitted entry of a log.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LogPending {
     pub proposer: NodeKey,
@@ -21,7 +29,7 @@ pub struct LogMember {
     pub key: NodeKey,
     pub acknowledged: u64,
 }
-/// A domain's log metadata as the coordinator holds it.
+/// A tip's log metadata as the coordinator holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogHead {
     /// The authenticated anchor before the first entry.
@@ -71,27 +79,30 @@ pub enum LogResult {
     },
 }
 
-/// Trusted-node calls of a coordinated log. Calls occur outside storage
-/// transactions; join and append sequences increase durably per domain
-/// and node, and a retried call repeats its sequence and arguments.
+/// Trusted-node calls of a domain's per-tip coordinated logs. Calls occur
+/// outside storage transactions; join and append sequences increase durably
+/// per log and node, and a retried call repeats its sequence and arguments.
 pub trait DomainLog: Send + Sync {
     /// This client's node key.
     fn node(&self) -> NodeKey;
-    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead>;
+    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead>;
+    /// Sets the minimum in-sync size a tip's opening names; refused after
+    /// the log's first join.
+    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()>;
     /// Enters the in-sync set at the current committed position and hash.
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running_hash: Commitment,
         sequence: u64,
     ) -> CoordinationFuture<'_, u64>;
-    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending>;
+    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending>;
     /// Promises that this node durably stored the exact pending entry.
-    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult>;
+    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult>;
     /// Submits an owner-signed cut of the exact current head. A retry of the
     /// retained record returns the same commit.
-    fn cut(&self, scope: Scope, cut: LogCut) -> CoordinationFuture<'_, LogResult>;
+    fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Append {
@@ -100,6 +111,13 @@ pub struct Append {
     pub hash: Commitment,
     pub deadline: u64,
     pub sequence: u64,
+}
+
+/// The anchor before the first entry of `log`.
+pub fn log_genesis(log: TipLog, configuration: Configuration) -> Commitment {
+    let mut bytes = crate::genesis(log.scope, configuration).to_vec();
+    bytes.extend_from_slice(&log.tip.0);
+    commitment("rocky.coordinated-genesis.v1", &bytes)
 }
 
 /// The running hash after committing `hash` at `position`.

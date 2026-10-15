@@ -72,7 +72,7 @@ impl Fixture {
         };
         fixture.run_owner(Action::Configure { minimum }, T).unwrap();
         for n in 0..2 {
-            let head = fixture.state.log_head(scope).unwrap();
+            let head = fixture.state.log_head(tip_log(scope)).unwrap();
             fixture
                 .run(
                     n,
@@ -92,7 +92,7 @@ impl Fixture {
             self.state.genesis.id().unwrap(),
             crate::transport::nonce(),
             Operation::Coordinated {
-                scope: self.scope,
+                log: tip_log(self.scope),
                 action,
             },
             key,
@@ -118,7 +118,7 @@ impl Fixture {
         self.state.apply_at(time, &request)
     }
     pub(super) fn append(&mut self, n: usize, sequence: u64, hash: u8) -> Pending {
-        let head = self.state.log_head(self.scope).unwrap();
+        let head = self.state.log_head(tip_log(self.scope)).unwrap();
         match self
             .run(
                 n,
@@ -169,7 +169,7 @@ impl Fixture {
 #[test]
 fn competing_appends_retries_and_exact_signed_acknowledgments() {
     let mut f = Fixture::new(1, Limits::default());
-    let head = f.state.log_head(f.scope).unwrap();
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
     let append = Action::Append {
         expected: 0,
         epoch: head.epoch,
@@ -183,12 +183,12 @@ fn competing_appends_retries_and_exact_signed_acknowledgments() {
         Err(CoordinationError::StaleHead)
     );
     assert_eq!(f.run(0, append.clone(), T).unwrap(), first);
-    let pending = f.state.log_head(f.scope).unwrap().pending.unwrap();
+    let pending = f.state.log_head(tip_log(f.scope)).unwrap().pending.unwrap();
     assert_eq!(
         f.resolve(&pending, &[0], T + 2),
         Err(CoordinationError::Backpressure)
     );
-    assert_eq!(f.state.log_head(f.scope).unwrap().commit, 0);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().commit, 0);
     let mut wrong = pending.clone();
     wrong.hash = [9; 32];
     let ack = f.request(&f.nodes[1], Action::Acknowledge { pending: wrong }, T + 1);
@@ -216,7 +216,7 @@ fn competing_appends_retries_and_exact_signed_acknowledgments() {
         f.resolve(&pending, &[0, 1], T + 3),
         Err(CoordinationError::StaleHead)
     );
-    assert_eq!(f.state.log_head(f.scope).unwrap().commit, 1);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().commit, 1);
     assert_eq!(
         f.run(
             0,
@@ -236,7 +236,7 @@ fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
         let mut f = Fixture::new(minimum, Limits::default());
         let pending = f.append(0, 2, 7);
         let result = f.resolve(&pending, &[0], T + 10).unwrap();
-        let head = f.state.log_head(f.scope).unwrap();
+        let head = f.state.log_head(tip_log(f.scope)).unwrap();
         assert_eq!(head.members.len(), 1);
         if minimum == 1 {
             assert!(matches!(
@@ -249,7 +249,7 @@ fn deadlines_evict_missing_nodes_and_minimum_prevents_success() {
                     1,
                     Action::Join {
                         position: 0,
-                        running_hash: rocky_core::genesis(f.scope, [4; 16]),
+                        running_hash: rocky_core::log_genesis(tip_log(f.scope), [4; 16]),
                         sequence: 3
                     },
                     T + 11
@@ -296,7 +296,7 @@ fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
     );
     f.state = decode(&encode(&f.state).unwrap()).unwrap();
     assert_eq!(
-        f.state.log_head(f.scope).unwrap().pending,
+        f.state.log_head(tip_log(f.scope)).unwrap().pending,
         Some(pending.clone())
     );
     assert_eq!(
@@ -312,12 +312,12 @@ fn serialized_leader_recovery_keeps_pending_but_requires_new_acknowledgments() {
         f.resolve(&pending, &[0, 1], T + 3),
         Err(CoordinationError::StaleHead)
     );
-    assert_eq!(f.state.log_head(f.scope).unwrap().hashes.len(), 1);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().hashes.len(), 1);
 }
 #[test]
 fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
     let mut f = Fixture::new(1, Limits::default());
-    let h = f.state.log_head(f.scope).unwrap();
+    let h = f.state.log_head(tip_log(f.scope)).unwrap();
     assert_eq!(
         f.run(
             0,
@@ -353,7 +353,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
         ),
         Ok(Outcome::Coordinated(LogResult::Assigned(_)))
     ));
-    let h = f.state.log_head(f.scope).unwrap();
+    let h = f.state.log_head(tip_log(f.scope)).unwrap();
     assert_eq!(
         f.run(
             0,
@@ -369,7 +369,7 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
         Err(CoordinationError::Backpressure)
     );
     f.state.state.limits.tenant_bytes = f.state.tenant_used(f.owner.public_key()).unwrap();
-    let before = f.state.log_head(f.scope).unwrap();
+    let before = f.state.log_head(tip_log(f.scope)).unwrap();
     let request = f.request(
         &f.nodes[0],
         Action::Append {
@@ -393,11 +393,11 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
         }))
     ));
     // Reserved capacity prevents a fully admitted domain from getting stuck on commit.
-    assert_eq!(f.state.log_head(f.scope).unwrap().commit, 61);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().commit, 61);
     f.state.state.domain(f.scope).unwrap().coordinated =
-        crate::coordinated::Log::new(f.scope, [4; 16]);
+        crate::coordinated::Logs::new(f.scope, [4; 16]);
     f.state.state.limits.tenant_bytes = 4096;
-    let head = f.state.log_head(f.scope).unwrap();
+    let head = f.state.log_head(tip_log(f.scope)).unwrap();
     assert_eq!(
         f.run(
             0,
@@ -410,7 +410,13 @@ fn tenant_rate_deadline_and_byte_budgets_fail_closed() {
         ),
         Err(CoordinationError::Backpressure)
     );
-    assert!(f.state.log_head(f.scope).unwrap().members.is_empty());
+    assert!(
+        f.state
+            .log_head(tip_log(f.scope))
+            .unwrap()
+            .members
+            .is_empty()
+    );
 }
 
 #[test]
@@ -418,7 +424,11 @@ fn hash_window_is_bounded_and_encoded_domain_footprint_is_measured() {
     let f = Fixture::new(1, Limits::default());
     let domain = f.state.state.find(f.scope).unwrap();
     let initial = encode(&(domain, &f.state.controls[0])).unwrap().len();
-    let mut log = domain.coordinated.clone();
+    let mut log = domain
+        .coordinated
+        .get(tip_log(f.scope).tip)
+        .unwrap()
+        .clone();
     for position in 1..=1025_u64 {
         let time = T + position * 60;
         let action = Action::Append {
@@ -473,7 +483,7 @@ fn deadline_resolution_uses_authority_at_the_signed_storage_acknowledgment() {
             ..
         }))
     ));
-    assert_eq!(f.state.log_head(f.scope).unwrap().members.len(), 1);
+    assert_eq!(f.state.log_head(tip_log(f.scope)).unwrap().members.len(), 1);
     let request = f.request(&f.owner, Action::Head, T + 11);
     assert_eq!(f.state.read(&request), Err(CoordinationError::Denied));
 }
@@ -483,9 +493,10 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     let mut f = Fixture::new(1, Limits::default());
     let head = f.request(&f.owner, Action::Head, T);
     assert_eq!(f.state.read(&head), Err(CoordinationError::Denied));
+    // A trusted node relays a tip's opening, never after the first join.
     assert_eq!(
         f.run(0, Action::Configure { minimum: 1 }, T),
-        Err(CoordinationError::Denied)
+        Err(CoordinationError::Configuration)
     );
     let mut control = f.state.controls[0].control.clone();
     control.revision = 2;
@@ -568,7 +579,10 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
         f.state.apply_at(T + 2, &close),
         Err(CoordinationError::Denied)
     );
-    assert_eq!(f.state.log_head(f.scope).unwrap().pending, Some(pending));
+    assert_eq!(
+        f.state.log_head(tip_log(f.scope)).unwrap().pending,
+        Some(pending)
+    );
 }
 
 /// `identity`'s certificate for the node `node`.
@@ -619,7 +633,7 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
             genesis,
             crate::transport::nonce(),
             Operation::Coordinated {
-                scope,
+                log: tip_log(scope),
                 action: Action::Join {
                     position: head.commit,
                     running_hash: head.running_hash,
@@ -634,11 +648,11 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     // Two nodes of the trusted identity join; the set counts them apart.
     let (first, second) = (PrivateKey::new(), PrivateKey::new());
     for node in [&first, &second] {
-        let head = f.state.log_head(scope).unwrap();
+        let head = f.state.log_head(tip_log(scope)).unwrap();
         let request = join(head, node, Some(certificate(&identity, node)));
         f.state.apply_at(T, &request).unwrap();
     }
-    let members = f.state.log_head(scope).unwrap().members;
+    let members = f.state.log_head(tip_log(scope)).unwrap().members;
     assert_eq!(members.len(), 4);
     for node in [&first, &second] {
         let member = members.iter().find(|m| m.key == node.public_key()).unwrap();
@@ -647,7 +661,7 @@ fn controls_trust_identities_whose_certified_nodes_join_as_nodes() {
     // No certificate, another identity's, or one for another node.
     let stranger = PrivateKey::new();
     let other = PrivateKey::new();
-    let head = f.state.log_head(scope).unwrap();
+    let head = f.state.log_head(tip_log(scope)).unwrap();
     for request in [
         join(head.clone(), &stranger, None),
         join(

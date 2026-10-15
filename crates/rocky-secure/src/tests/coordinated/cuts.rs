@@ -22,7 +22,7 @@ fn sign_cut(lineage: &Lineage, head: &LogHead, verified: u64, retained: u64) -> 
     };
     let record = SignedCut::sign(
         CutStatement {
-            log: lineage.domain,
+            log: tip_log(lineage),
             sequence: 1,
             previous: None,
             verified: point(verified),
@@ -42,7 +42,7 @@ fn sign_cut(lineage: &Lineage, head: &LogHead, verified: u64, retained: u64) -> 
 async fn submit(mesh: &Mesh, lineage: &Lineage, node: &PrivateKey, cut: &CutEvidence) -> u64 {
     match mesh
         .client(node)
-        .cut(lineage.domain, cut.to_log().unwrap())
+        .cut(tip_log(lineage), cut.to_log().unwrap())
         .await
         .unwrap()
     {
@@ -77,7 +77,7 @@ async fn abandoned_frames(replica: &Replica) -> i64 {
     }
 }
 fn domain_head(mesh: &Mesh, lineage: &Lineage) -> LogHead {
-    mesh.log.head(lineage.domain).unwrap().port()
+    mesh.log.head(tip_log(lineage)).unwrap().port()
 }
 
 /// Entry 1 reached every member and entry 2 only `carol`; then the whole
@@ -145,7 +145,7 @@ impl Stuck {
         assert_eq!(
             f.alice
                 .1
-                .coordinated_status(f.lineage.domain)
+                .coordinated_status(tip_log(&f.lineage))
                 .await
                 .unwrap()
                 .position,
@@ -166,7 +166,7 @@ async fn without_a_copy_appends_stay_refused_until_the_owner_cuts_then_continue_
     assert_eq!(
         f.mesh
             .client(&f.alice.0)
-            .cut(f.lineage.domain, forged.to_log().unwrap())
+            .cut(tip_log(&f.lineage), forged.to_log().unwrap())
             .await,
         Err(CoordinationError::Denied)
     );
@@ -186,7 +186,7 @@ async fn without_a_copy_appends_stay_refused_until_the_owner_cuts_then_continue_
     sync(&f.lineage, &f.alice.1, &f.bob.1, &f.bob.0).await;
     assert_eq!(rows(&f.bob.1).await, rows(&f.alice.1).await);
     assert_eq!(
-        f.bob.1.cuts(f.lineage.domain).await.unwrap(),
+        f.bob.1.cuts(tip_log(&f.lineage)).await.unwrap(),
         std::slice::from_ref(&stuck.cut)
     );
 }
@@ -338,7 +338,7 @@ async fn a_crash_after_any_rollback_step_resumes_on_reopen_to_the_same_rows() {
             "readmitted after step {step}"
         );
         assert_eq!(
-            replica.cuts(f.lineage.domain).await.unwrap(),
+            replica.cuts(tip_log(&f.lineage)).await.unwrap(),
             std::slice::from_ref(&stuck.cut)
         );
     }
@@ -351,7 +351,7 @@ impl EntryPeers for Tampered {
     fn store<'a>(&'a self, node: PublicKey, entry: &'a CoordinatedEntry) -> PeerFuture<'a, ()> {
         self.0.store(node, entry)
     }
-    fn committed(&self, log: Scope, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
+    fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
             let mut entries = self.0.committed(log, after).await?;
             for entry in &mut entries {
@@ -373,30 +373,33 @@ impl DomainLog for Trimmed {
     fn node(&self) -> NodeKey {
         self.0.node()
     }
-    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
+    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+        self.0.configure(log, minimum)
+    }
+    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
         Box::pin(async move {
-            let mut head = self.0.log_head(scope).await?;
+            let mut head = self.0.log_head(log).await?;
             head.hashes = head.hashes.split_off(head.hashes.len() - 1);
             Ok(head)
         })
     }
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running: Commitment,
         sequence: u64,
     ) -> CoordinationFuture<'_, u64> {
-        self.0.join(scope, position, running, sequence)
+        self.0.join(log, position, running, sequence)
     }
-    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
-        self.0.append(scope, append)
+    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
+        self.0.append(log, append)
     }
-    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
-        self.0.acknowledge(scope, pending)
+    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        self.0.acknowledge(log, pending)
     }
-    fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
-        self.0.cut(scope, cut)
+    fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+        self.0.cut(log, cut)
     }
 }
 
@@ -429,7 +432,7 @@ async fn a_gap_before_the_window_is_endorsed_by_the_cut_and_a_tampered_entry_is_
     assert_eq!(submit(&mesh, &lineage, &tampered_key, &cut).await, 4);
     let slot = tampered
         .coordinated_slot(
-            lineage.domain,
+            tip_log(&lineage),
             &Trimmed(mesh.log.client(tampered_key.public_key())),
             &Tampered(mesh.peers(&lineage, &tampered_key)),
         )
@@ -440,7 +443,7 @@ async fn a_gap_before_the_window_is_endorsed_by_the_cut_and_a_tampered_entry_is_
     let fresh = open(&lineage, &dir, "fresh", &key).await;
     let slot = fresh
         .coordinated_slot(
-            lineage.domain,
+            tip_log(&lineage),
             &Trimmed(mesh.log.client(key.public_key())),
             &mesh.peers(&lineage, &key),
         )
@@ -578,7 +581,7 @@ async fn a_proposed_cut_is_signed_submitted_once_and_never_reuses_a_position() {
     let (client, peers) = (f.mesh.client(key), f.mesh.peers(&f.lineage, key));
     // Collection first: the proposal retains what dave still holds.
     let proposal = fresh
-        .cut_proposal(f.lineage.domain, &client, &peers)
+        .cut_proposal(tip_log(&f.lineage), &client, &peers)
         .await
         .unwrap();
     let mut expected = stuck.cut.record.statement.clone();
@@ -607,7 +610,7 @@ async fn a_proposed_cut_is_signed_submitted_once_and_never_reuses_a_position() {
     f.mesh.log.set_available(true);
     assert_eq!(f.resolve(&f.alice).await.position, 3);
     assert_eq!(
-        fresh.cuts(f.lineage.domain).await.unwrap(),
+        fresh.cuts(tip_log(&f.lineage)).await.unwrap(),
         std::slice::from_ref(&cut)
     );
     assert_eq!(submissions(fresh).await, 0);
@@ -654,7 +657,7 @@ async fn a_proposer_whose_base_holds_an_abandoned_entry_fails_closed() {
     let (client, peers) = (f.mesh.client(&carol.0), f.mesh.peers(&f.lineage, &carol.0));
     let proposal = carol
         .1
-        .cut_proposal(f.lineage.domain, &client, &peers)
+        .cut_proposal(tip_log(&f.lineage), &client, &peers)
         .await
         .unwrap();
     assert_eq!(proposal.statement.retained.position, 1);
@@ -694,27 +697,30 @@ impl DomainLog for LostReply {
     fn node(&self) -> NodeKey {
         self.0.node()
     }
-    fn log_head(&self, scope: Scope) -> CoordinationFuture<'_, LogHead> {
-        self.0.log_head(scope)
+    fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
+        self.0.configure(log, minimum)
+    }
+    fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
+        self.0.log_head(log)
     }
     fn join(
         &self,
-        scope: Scope,
+        log: TipLog,
         position: u64,
         running: Commitment,
         sequence: u64,
     ) -> CoordinationFuture<'_, u64> {
-        self.0.join(scope, position, running, sequence)
+        self.0.join(log, position, running, sequence)
     }
-    fn append(&self, scope: Scope, append: Append) -> CoordinationFuture<'_, LogPending> {
-        self.0.append(scope, append)
+    fn append(&self, log: TipLog, append: Append) -> CoordinationFuture<'_, LogPending> {
+        self.0.append(log, append)
     }
-    fn acknowledge(&self, scope: Scope, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
-        self.0.acknowledge(scope, pending)
+    fn acknowledge(&self, log: TipLog, pending: LogPending) -> CoordinationFuture<'_, LogResult> {
+        self.0.acknowledge(log, pending)
     }
-    fn cut(&self, scope: Scope, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
+    fn cut(&self, log: TipLog, cut: rocky_core::LogCut) -> CoordinationFuture<'_, LogResult> {
         Box::pin(async move {
-            self.0.cut(scope, cut).await?;
+            self.0.cut(log, cut).await?;
             Err(CoordinationError::Unavailable)
         })
     }
@@ -727,7 +733,7 @@ async fn a_cut_whose_reply_is_lost_is_admitted_once_on_the_next_resolution() {
     let (key, fresh) = &f.alice;
     let lost = LostReply(f.mesh.client(key));
     let proposal = fresh
-        .cut_proposal(f.lineage.domain, &lost, &f.mesh.peers(&f.lineage, key))
+        .cut_proposal(tip_log(&f.lineage), &lost, &f.mesh.peers(&f.lineage, key))
         .await
         .unwrap();
     let cut = proposal
@@ -739,11 +745,11 @@ async fn a_cut_whose_reply_is_lost_is_admitted_once_on_the_next_resolution() {
     );
     // Admitted at the coordinator, undecided here until it is sent again.
     assert_eq!(domain_head(&f.mesh, &f.lineage).commit, 3);
-    assert!(fresh.cuts(f.lineage.domain).await.unwrap().is_empty());
+    assert!(fresh.cuts(tip_log(&f.lineage)).await.unwrap().is_empty());
     assert_eq!(submissions(fresh).await, 1);
     assert_eq!(f.resolve(&f.alice).await.position, 3);
     assert_eq!(
-        fresh.cuts(f.lineage.domain).await.unwrap(),
+        fresh.cuts(tip_log(&f.lineage)).await.unwrap(),
         std::slice::from_ref(&cut)
     );
     assert_eq!(submissions(fresh).await, 0);

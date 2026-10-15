@@ -1,5 +1,8 @@
 # Phase 14 evidence
 
+Lanes record their evidence in their own sections; the orchestrator merges
+them and closes the phase.
+
 ## Lane S — seals, tips, bookmarks and late frames
 
 ### Slice 1: statements and formats
@@ -122,3 +125,101 @@ were corrected and passed in this final run. E2E, Kotlin/Android/iOS and native
 packaging qualification were not run; no Kotlin or native ABI source changed.
 These checks qualify this lane's Rust behavior, not the remaining coordinated
 terminal-entry integration, SDK developer surfaces or phase 17 schema changes.
+
+## Lane L: one coordinated log per tip (slice 4)
+
+Guides: [coordinated log](../runtime/coordinated-log.md),
+[coordinated writes](../runtime/coordinated-writes.md),
+[coordinator retention](../runtime/coordinator-retention.md),
+[public coordination](../runtime/public-coordination.md) and
+[stuck recovery](../runtime/stuck-recovery.md).
+
+### Contracts
+
+- `rocky_core::TipLog { scope, tip: TipId }` identifies every coordinated
+  log: coordinator state and requests, the `DomainLog` port, rocky-secure
+  storage (`secure_coordinated`, `secure_entries`, `secure_cuts`,
+  `secure_entry_frames`, `secure_cut_submissions`), `Slot.log`,
+  `CoordinatedEntry.log`, `EntryPeers::committed`, `entry_hash`, the entry
+  wire and `CutStatement.log`. `rocky_core::log_genesis(log, configuration)`
+  anchors each tip's log.
+- `DomainLog` gains `configure(log, minimum)` and `seal(log, LogTerminal)`;
+  `LogHead` gains `terminal: Option<LogTerminal>`;
+  `LogTerminal { digest, continuation: Option<TipId> }` carries the opaque
+  digest of a seal or a bookmark move and the continuation tip.
+  `CoordinationError::Sealed` refuses everything after a terminal entry.
+- Coordinator: `Operation::Coordinated { log: TipLog, action }`,
+  `Operation::Configure { scope, minimum }` for the domain's default minimum
+  (`NetworkCoordinator::configure`), `Action::Configure` per tip by the
+  authority or a trusted node before the first join, `Action::Seal { terminal }`
+  by the authority or a trusted node. `TIP_LOGS = 8` open logs per domain
+  (`Backpressure` beyond), `ENDED_LOGS = 8` retained ended ones (earliest
+  dropped). A node is in sync on one open tip per domain (`Denied`).
+  `MemoryLog::configure(scope, minimum)` sets the default; `MemoryLog::head`
+  takes a `TipLog`.
+- rocky-secure: lane S's `followed_tip()` decides every log;
+  `followed_log(domain)`, `seal_log(log, terminal, coordinator, peers)`;
+  `CoordinatedError::{Unfollowed, Sealed}`; entry state `carried`; the
+  internal `Inner::tip_log(domain)` used by cut fencing, checkpoint bindings
+  and cut sync in `bundle.rs`, `roles.rs`, `tips.rs`, `checkpoint/create.rs` and
+  `network/rows.rs`. `held.rs`: `void_bundle(transaction, hold)` now holds
+  the voided bundle itself when `hold`.
+- SDK: JSON codes `unfollowed_tip` and `sealed` (not retryable);
+  `coordinated` status adds `tip` (hex). `Node::propose` takes the slot's
+  log.
+- Forwarding: no coordinated command forwarding exists (phase 11 removed it;
+  only enrollment forwarding remains, which carries no coordinated write).
+  Nothing routes one tip's write elsewhere: slots, stores and member
+  recovery serve only the followed tip's log, and a store of another tip's
+  entry is refused `Unfollowed` before anything is kept or acknowledged.
+
+### Formats
+
+| Format | Version |
+| --- | --- |
+| Coordinator store and snapshot | 8 |
+| Coordinator request signature | `rocky.coordination-request.v6` |
+| Cut statement signature | `rocky.coordinated-cut.v2` |
+| Entry hash | `rocky.coordinated-entry.v2` |
+| Log genesis anchor (new) | `rocky.coordinated-genesis.v1` |
+| Encrypted replica file identity | `rocky.encrypted-replica.v23`, shared with lane S |
+| Live link handshake | `rocky.link.v7`, shared with lane S |
+
+Lane S moved the replica file and link to the same versions; the merged
+result bumps each once.
+
+### Completion-gate tests
+
+| Gate | Tests |
+| --- | --- |
+| A write on `dev` commits through `dev`'s log; `main`'s set sees none | `rocky-coordinator machine::tip_tests::a_tips_writes_commit_through_its_own_log_and_followers`; `rocky-secure tests::coordinated::tips::a_dev_tips_write_commits_through_its_own_log_and_main_sees_no_entry`; `rocky-sdk::coordinated` checks the followed tip's log holds all six writes and another tip's none |
+| Committed before a seal is part of the continuation; a pending one retries there once | `tests::coordinated::tips::a_pending_write_at_a_seal_retries_in_the_continuation_and_commits_once` (the proposer reopens at generation 4, the continuation, and its write commits as entry 1 there) |
+| After a terminal entry the log refuses appends | `machine::tip_tests::a_terminal_entry_aborts_the_pending_one_and_ends_the_log`; the secure seal test above (`Sealed` slots, repeated and diverging seals) |
+| A pending write at a `close` is held | `tests::coordinated::tips::a_pending_write_at_a_close_is_rolled_back_and_held` |
+| A tip no trusted node follows refuses coordinated writes | `machine::tip_tests::a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded`; `Unfollowed` in the dev tip test |
+| Bounded logs | the test above (open logs) and `machine::tip_tests::ended_logs_are_retained_up_to_their_bound_and_open_none` |
+
+### Verification
+
+`./scripts/lint` and `./scripts/check` pass on 2026-10-15: 167 unit tests
+(budget 10 s) and 918 integration tests in 139 s (budget 300 s). In that
+loaded run the rocky-secure tip tests took 1.2–1.5 s each (budget 2 s) and
+the coordinator's `tip_tests` 12–13 ms, which the integration filter now
+names. Kotlin and the shopping check were not run; this lane changes no
+Kotlin code.
+
+### Limits
+
+- Until the lanes merge, a replica follows the tip of its current manifest,
+  and member recovery takes held bundles as the followed tip's; frames do not
+  name their tip yet.
+- A carried write keeps the log position its frames signed in the sealed
+  tip; members cannot rebuild its entry evidence, and a cut of the
+  continuation could misjudge its fence. Cuts go in a later phase.
+- The coordinator admits the first terminal entry of a log; devices resolve
+  concurrent seals by the lower digest. Callers submit the digest to the
+  coordinator before publishing a coordinated tip's seal or move and treat
+  `Sealed` as having lost.
+- A domain retains 8 ended logs; an older ended tip's log reads as unopened
+  again. Devices never write a sealed tip, which their graph records.
+- Kotlin and the JSON API expose no seal call yet (slice 5).

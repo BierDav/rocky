@@ -131,10 +131,10 @@ Revocation is an authority fact, independent of links or networking controls.
 | `Revocation` | `app`, `issuer` (the signing identity), `time`, `nodes`, `identities`, `capabilities`; ID `rocky.revocation.id.v3` |
 | `SignedRevocation` | The signer's issuer `chain`, empty for the owner, and its signature `rocky.revocation.v3`; at most 8 KiB |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
-| Live link handshake | `rocky.link.v6`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
+| Live link handshake | `rocky.link.v7`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
 | Checkpoint statement | Format 12, `revocations` digest of its signer |
 | Horizon statement | Format 6, `revocations` digest of its declaring issuer, endorsed by the owner or an issuer |
-| Encrypted replica | `rocky.encrypted-replica.v22`; `secure_metadata.revocations` |
+| Encrypted replica | `rocky.encrypted-replica.v23`; `secure_metadata.revocations` |
 
 ## Qualification
 

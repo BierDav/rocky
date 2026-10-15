@@ -1,8 +1,8 @@
 # Coordinated writes
 
 Writes that must not race, such as sequential invoice numbers or a request
-decided once, are ordinary bundles that the domain's
-[coordinated log](coordinated-log.md) orders. A coordinated write becomes
+decided once, are ordinary bundles that the
+[coordinated log](coordinated-log.md) of the tip they are written to orders. A coordinated write becomes
 true only once every trusted node of the in-sync set stored it durably;
 nothing of it leaves a node before then, and an aborted one is voided. No
 split brain is possible: a node outside the set catches up before it writes
@@ -13,7 +13,7 @@ records why.
 
 | Role | What it does |
 | --- | --- |
-| Trusted node | A device whose node key the domain's control certificate lists. It composes the log, proposes, stores others' entries and acknowledges them |
+| Trusted node | A device whose identity the domain's control certificate lists. It composes the logs and, in the log of the tip it follows, proposes, stores others' entries and acknowledges them |
 | Member | Any other device. It receives committed entries by ordinary sync and never calls the coordinator |
 | Coordinator | Orders entries and decides commit or abort. It holds metadata only: no frame, row or application rule |
 
@@ -23,21 +23,24 @@ of a table coordinated keep that discipline themselves.
 
 ## One write
 
-1. **Slot.** `EncryptedReplica::coordinated_slot` decides what this node
-   stores, catches up from trusted peers, joins the in-sync set and returns
-   the commit index `c` the write is computed on.
+1. **Slot.** `EncryptedReplica::coordinated_slot(followed_log(domain))`
+   decides what this node stores, catches up from trusted peers, joins the
+   in-sync set of the followed tip's log and returns the commit index `c`
+   the write is computed on. Any other tip's log is refused `Unfollowed`.
 2. **Stage.** The application runs its SQL transaction on that committed
    state; `SecureSql::commit_coordinated(handle, slot)` commits it as one
    ordinary bundle in one local transaction, flushed. Its frames carry the
    log position `c+1` in their bundle membership and stay unsent: range,
    transfer, push, checkpoint and recovery paths skip or refuse them.
-3. **Append.** `propose` appends the entry hash at `c+1`. The hash commits
-   to the log, the position and the bundle's frame ids, so it is not inside
+3. **Append.** `propose` appends the entry hash at `c+1`. The hash
+   (`rocky.coordinated-entry.v2`) commits to the tip's log, the position and
+   the bundle's frame ids, so it is not inside
    the frames it covers; a node holding every member recomputes it.
 4. **Store, then acknowledge.** The proposer sends the entry, with the void
    records its frames continue after, to every other in-sync node. Each
    stores it durably and unapplied, then acknowledges it itself; the
-   proposer acknowledges last. While the entry remains pending, the proposer
+   proposer acknowledges last. A node stores only entries of the tip it
+   follows, so a branch's writes never reach other tips' trusted nodes. While the entry remains pending, the proposer
    retries storage with bounded backoff, so a replaced live link can recover
    before the existing deadline.
 5. **Commit, then publish.** Once every in-sync node acknowledged, the
@@ -63,12 +66,34 @@ has rolled the local effects back; ordinary writes are unaffected.
 | `Aborted` | `aborted` | The deadline passed without enough acknowledgments; voided everywhere |
 | `Undecided` | `undecided` | The coordinator was lost after assignment; the effects stay unsent until resolution decides |
 | `Behind` | `behind` | Committed entries are missing and no trusted peer supplied them yet |
+| `Unfollowed` | `unfollowed_tip` | This node does not follow the log's tip; a tip no trusted node follows takes no coordinated write |
+| `Sealed` | `sealed` | A seal or bookmark move ended the followed tip's log, or a `close` ended a pending write, now held |
 | `Refused` | `rejected` | The coordinator refused the call |
 
 An abort voids the proposer's never-offered frames with
 [void records](held-changes.md#void-records) and rebuilds their scopes from
 the checkpoint base and retained frames. Unsent bundles that saw its
 effects are held as [held changes](held-changes.md) for the application.
+
+## Seals and moves
+
+`EncryptedReplica::seal_log(log, LogTerminal { digest, continuation },
+coordinator, peers)` ends a tip's log with the digest of a seal of the tip or
+a bookmark move off it, then decides this node's entries. Entries committed
+before it are the sealed state, and every node catches up through them. A
+pending entry the terminal entry aborted is decided by its proposer:
+
+- With a continuation, the write moves unsent into the continuation tip's
+  log. Once the node follows that tip, it is appended there as the first
+  entry, which is the state it was computed on, and commits once. Until then
+  `propose` returns `Undecided`. Another node that stored it discards it.
+- After a `close`, or when the continuation already took a write, it is
+  voided, rolled back and returned as a [held change](held-changes.md):
+  `Sealed`.
+
+Slots on an ended log fail `Sealed`. Rocky builds no seal or move statement
+here; the caller submits its digest before publishing the statement and
+treats `Sealed` as having lost.
 
 ## Recovery
 
@@ -114,10 +139,10 @@ window; see [stuck recovery](stuck-recovery.md).
 
 | Surface | Calls |
 | --- | --- |
-| Rust | `EncryptedReplica::{coordinated_slot, propose, store_entry, resolve_coordinated, committed_entries, coordinated_status, set_domain_log}`, `SecureSql::commit_coordinated`, the `EntryPeers` transport port and the `rocky_core::DomainLog` metadata port |
+| Rust | `EncryptedReplica::{followed_tip, followed_log, coordinated_slot, propose, store_entry, resolve_coordinated, seal_log, committed_entries, coordinated_status, set_domain_log}`, `SecureSql::commit_coordinated`, the `EntryPeers` transport port and the `rocky_core::DomainLog` metadata port |
 | Coordinator | `NetworkCoordinator` implements `DomainLog`; `rocky_coordinator::coordinated::MemoryLog` runs the same log machine in one process |
 | Live links | `NativeSession::{store_entry, committed_entries}`; a store is paged and its chains carried as for pushes |
-| SDK | `Open::coordination` accepts `Coordination::Composed(Arc<dyn DomainLog>)` or `Coordination::Service(bundle)`; `Database::coordinate(log)` changes the composed log after open. A service database composes its log itself. SQL `BEGIN` and `COMMIT` with `"coordinated": true`; `coordinated` reports `trusted`, `position` and `undecided` |
+| SDK | `Open::coordination` accepts `Coordination::Composed(Arc<dyn DomainLog>)` or `Coordination::Service(bundle)`; `Database::coordinate(log)` changes the composed log after open. A service database composes its log itself. SQL `BEGIN` and `COMMIT` with `"coordinated": true`, through the followed tip's log; `coordinated` reports `trusted`, `tip` (hex), `position` and `undecided` |
 | Kotlin | `RockySession.coordinated { query(...); execute(...) }` returns `CoordinatedCommit(position, hash, value)`; `coordinatedStatus()`. Failures are `RockyException` with the codes above |
 
 ```kotlin
@@ -133,8 +158,9 @@ The SDK sends entries only over open live links: a trusted node without one
 to a member of the set leaves the set at the deadline. Kotlin uses a coordination service, or attaches `DevelopmentLog` for
 in-process development. A development log loses its ledger at process exit.
 
-The encrypted file identity is `rocky.encrypted-replica.v21` and the live
-link handshake `rocky.link.v6`; other versions are refused.
+The encrypted file identity is `rocky.encrypted-replica.v23` and the live
+link handshake `rocky.link.v7`; entries, catch-up requests and cut counts name
+their tip's log. Other versions are refused.
 
 ## Limits
 
@@ -143,6 +169,11 @@ link handshake `rocky.link.v6`; other versions are refused.
 - An offered frame of another log that depends on an aborted entry's row
   waits for its void and then applies on the rolled-back state.
 - One undecided own entry per log; checkpoints of its scopes wait for it.
+- A write carried into a continuation keeps the log position its frames
+  signed; members cannot rebuild its entry evidence from bundles, so catch-up
+  needs a trusted node's committed index for it.
+- Until frames name their tip, a replica follows the tip of its current
+  manifest and takes the bundles it holds as that tip's.
 - Commit is decided against the coordinator's window; older positions need
   an owner-signed [recovery cut](stuck-recovery.md).
 

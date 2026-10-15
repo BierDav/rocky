@@ -1,7 +1,7 @@
 # Bounded coordinator metadata
 
 The coordinator retains generic tenant controls and the
-[coordinated domain log](coordinated-log.md). It holds no application rows,
+[coordinated logs](coordinated-log.md) of each domain's tips. It holds no application rows,
 command results, receipt evidence or external-effect state. Applications keep
 their decisions as ordinary rows, ordered by [coordinated writes](coordinated-writes.md).
 
@@ -15,8 +15,9 @@ and concurrent client lanes. A service's genesis must reserve disjoint tenant
 budgets. Saturation returns an explicit quota/backpressure failure; it never
 evicts another tenant's live state to report success.
 
-Each domain log keeps trusted in-sync membership, one pending entry, the committed
-head/running hash and the last 1,024 committed entry hashes. Node request identities
+Each tip's log keeps trusted in-sync membership, one pending entry, the committed
+head/running hash and the last 1,024 committed entry hashes. A domain holds at
+most 8 open tip logs and retains the 8 latest ended ones. Node request identities
 are monotone, with one retained first outcome per node. An older identity is
 retired; changing inputs at the last identity conflicts. The coordinator reserves
 the bounded log footprint at admission, so committing a staged entry cannot fail
@@ -52,8 +53,8 @@ history. Lost in-sync sets recover by collection or an owner-signed cut
 
 Controls, log transitions and resolved outcomes are Raft-replicated. Partial
 storage acknowledgments are leader memory and are collected again after election;
-resolution entries carry the proofs voters verify. Files/snapshots use format 6,
-controls `rocky.control.v2`, bootstrap signatures `rocky.genesis.v2`, and service
+resolution entries carry the proofs voters verify. Files/snapshots use format 8,
+controls `rocky.control.v3`, bootstrap signatures `rocky.genesis.v2`, and service
 bundles format 2. Other formats are refused, without migrations or alternate readers.
 
 [Public coordination](public-coordination.md) describes composition and owner

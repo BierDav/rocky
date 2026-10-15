@@ -61,7 +61,7 @@ relays them with frames.
 ## Checkpoint binding
 
 A checkpoint statement (format 11) records `coordinated: { cuts, cut,
-highest }`: the number and digest of the applied cuts of its domain's log and
+highest }`: the number and digest of the applied cuts of its tip's log and
 the highest entry position among the frames it covers. Against the held cuts
 it is clean when, for every held cut it did not apply, `highest ≤ c`; a cut
 count with another digest is another history and taints it. A binding naming
@@ -113,9 +113,10 @@ the node's own running hash to `h_c`, checked before any of them applies.
 
 | Format | Identity |
 | --- | --- |
-| Encrypted replica | `rocky.encrypted-replica.v21` |
+| Encrypted replica | `rocky.encrypted-replica.v23` |
 | Checkpoint statement | 10 |
-| Live link | `rocky.link.v6` |
-| Coordinator store and snapshot | 5 |
+| Live link | `rocky.link.v7` |
+| Cut statement | `rocky.coordinated-cut.v2`, naming its tip's log |
+| Coordinator store and snapshot | 8 |
 
 Every other version is refused.

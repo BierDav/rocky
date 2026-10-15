@@ -342,10 +342,11 @@ impl Database {
             .await??;
         Ok(NetworkService::new(&self.shared, id))
     }
-    /// Makes this device a trusted node of its domain's coordinated log, so
-    /// it may make and store coordinated writes; `None` ends that. The log
-    /// is the application's and is never closed by Rocky. A database
-    /// composed with a coordination service uses that service's log.
+    /// Makes this device a trusted node of its domain's coordinated logs,
+    /// so it may make and store coordinated writes through the log of the
+    /// tip it follows; `None` ends that. The log is the application's and
+    /// is never closed by Rocky. A database composed with a coordination
+    /// service uses that service's log.
     pub async fn coordinate(
         &self,
         log: Option<Arc<dyn rocky_core::DomainLog>>,

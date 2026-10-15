@@ -789,8 +789,9 @@ impl Metadata {
         use crate::coordinated::Action;
         let scope = log.scope;
         match action {
-            // The authority or a trusted node relays a tip's opening.
-            Action::Configure { .. } => self
+            // The authority or a trusted node relays a tip's opening, seal
+            // or bookmark move.
+            Action::Configure { .. } | Action::Seal { .. } => self
                 .closure_authorized(request, scope)
                 .or_else(|_| self.authorized(scope, request, time).map(|_| ())),
             // A trusted node or the authority submits; the authority signs.
@@ -911,6 +912,7 @@ impl Metadata {
                 )
             }
             Action::Cut { record, authority } => next.cut(log, record, authority),
+            Action::Seal { terminal } => next.seal(*terminal),
             Action::Join { .. } => {
                 let joined = next.apply(request.key, action, self.state.time, true);
                 // The in-sync set counts nodes and remembers whose they are.

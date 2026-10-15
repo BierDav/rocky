@@ -79,6 +79,7 @@ impl Coordinated {
             CoordinatedError::Undecided => ("undecided", true),
             CoordinatedError::Behind => ("behind", true),
             CoordinatedError::Unfollowed => ("unfollowed_tip", false),
+            CoordinatedError::Sealed => ("sealed", false),
             CoordinatedError::Refused(_) => ("rejected", false),
             CoordinatedError::Storage(_) => ("storage", true),
         }

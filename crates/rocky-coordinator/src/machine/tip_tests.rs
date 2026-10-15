@@ -2,8 +2,9 @@
 //! trusted nodes that follow it, and the domain bounds how many it holds.
 use super::coordinated_tests::{Fixture, T};
 use super::*;
-use crate::coordinated::{Action, Result as LogResult, TIP_LOGS};
+use crate::coordinated::{Action, ENDED_LOGS, Result as LogResult, TIP_LOGS};
 use p2panda_core::PrivateKey;
+use rocky_core::LogTerminal;
 
 fn dev() -> TipId {
     TipId([7; 32])
@@ -176,4 +177,113 @@ fn a_tip_no_trusted_node_follows_refuses_writes_and_logs_are_bounded() {
         f.apply_on(&f.owner.clone(), orphan, Action::Configure { minimum: 1 }),
         Err(CoordinationError::Backpressure)
     );
+}
+
+fn sealing(digest: u8, continuation: Option<TipId>) -> Action {
+    Action::Seal {
+        terminal: LogTerminal {
+            digest: [digest; 32],
+            continuation,
+        },
+    }
+}
+
+#[test]
+fn a_terminal_entry_aborts_the_pending_one_and_ends_the_log() {
+    let mut f = Fixture::new(1, Limits::default());
+    let main = tip_log(f.scope);
+    let nodes = f.nodes.clone();
+    let first = f.append(0, 2, 1);
+    f.resolve(&first, &[0, 1], T + 2).unwrap();
+    let pending = f.append(1, 2, 2);
+    let committed = f.apply_on(&nodes[0], main, sealing(9, Some(dev())));
+    let Ok(Outcome::Coordinated(LogResult::Committed {
+        position,
+        running_hash,
+    })) = committed
+    else {
+        panic!("{committed:?}")
+    };
+    // It took the pending entry's position; the sealed state is entry 1.
+    assert_eq!(position, pending.position);
+    let head = f.state.log_head(main).unwrap();
+    assert_eq!(
+        (head.commit, head.pending, head.members.len()),
+        (2, None, 0)
+    );
+    assert_eq!(head.hashes.back(), Some(&[9; 32]));
+    assert_eq!(
+        head.terminal,
+        Some(LogTerminal {
+            digest: [9; 32],
+            continuation: Some(dev()),
+        })
+    );
+    // A retry answers alike; neither another seal nor a move diverges.
+    assert_eq!(
+        f.apply_on(&nodes[1], main, sealing(9, Some(dev()))),
+        Ok(Outcome::Coordinated(LogResult::Committed {
+            position,
+            running_hash
+        }))
+    );
+    assert_eq!(
+        f.apply_on(&nodes[1], main, sealing(8, None)),
+        Err(CoordinationError::Sealed)
+    );
+    // Its acknowledgments no longer resolve anything.
+    assert!(f.resolve(&pending, &[0, 1], T + 3).is_err());
+    for action in [
+        Action::Append {
+            expected: 2,
+            epoch: head.epoch,
+            hash: [3; 32],
+            deadline: T + 10,
+            sequence: 3,
+        },
+        Action::Join {
+            position: 2,
+            running_hash,
+            sequence: 4,
+        },
+    ] {
+        assert_eq!(
+            f.apply_on(&nodes[0], main, action),
+            Err(CoordinationError::Sealed)
+        );
+    }
+    assert_eq!(
+        f.apply_on(&f.owner.clone(), main, Action::Configure { minimum: 1 }),
+        Err(CoordinationError::Sealed)
+    );
+    // Its nodes follow the continuation.
+    let next = TipLog {
+        scope: f.scope,
+        tip: dev(),
+    };
+    join(&mut f, &nodes[0], next).unwrap();
+}
+
+#[test]
+fn ended_logs_are_retained_up_to_their_bound_and_open_none() {
+    let mut f = Fixture::new(1, Limits::default());
+    let (owner, scope) = (f.owner.clone(), f.scope);
+    let log = |byte: u8| TipLog {
+        scope,
+        tip: TipId([byte; 32]),
+    };
+    for byte in 0..=ENDED_LOGS as u8 {
+        f.apply_on(&owner, log(byte), sealing(byte, None)).unwrap();
+    }
+    // The earliest ended log is dropped; the rest still report their end.
+    assert_eq!(f.state.log_head(log(0)).unwrap().terminal, None);
+    for byte in 1..=ENDED_LOGS as u8 {
+        let head = f.state.log_head(log(byte)).unwrap();
+        assert_eq!(head.terminal.map(|t| t.digest), Some([byte; 32]));
+    }
+    // Ended logs leave room for every open one.
+    for byte in 100..99 + TIP_LOGS as u8 {
+        f.apply_on(&owner, log(byte), Action::Configure { minimum: 1 })
+            .unwrap();
+    }
 }

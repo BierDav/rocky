@@ -78,3 +78,147 @@ async fn a_dev_tips_write_commits_through_its_own_log_and_main_sees_no_entry() {
         Err(CoordinatedError::Unfollowed)
     );
 }
+
+/// The tip a `continue` seal of `main` opens: generation 4's, which a
+/// device reopened at generation 4 follows.
+fn continuation(lineage: &Lineage) -> rocky_core::TipId {
+    rocky_credentials::genesis_tip(lineage.definition(4).hash())
+}
+/// Alice commits invoice 0001, then stages 0002, which bob stores without
+/// acknowledging while bob seals `main` with `terminal`. Returns alice's
+/// outcome of the pending write and the seal's position.
+async fn seal_while_pending(
+    fixture: &Fixture,
+    terminal: rocky_core::LogTerminal,
+) -> (
+    Result<crate::replica::CoordinatedCommit, CoordinatedError>,
+    u64,
+) {
+    let (alice, bob) = (&fixture.alice, &fixture.bob);
+    fixture.invoice(alice, "before").await;
+    let slot = fixture.slot(alice).await.unwrap();
+    fixture.stage(alice, slot, "pending").await.unwrap();
+    fixture.mesh.set(&bob.0, true, false);
+    let main = tip_log(&fixture.lineage);
+    let (pending, sealed) = tokio::join!(fixture.propose(alice), async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        bob.1
+            .seal_log(
+                main,
+                terminal,
+                &fixture.mesh.client(&bob.0),
+                &fixture.mesh.peers(&fixture.lineage, &bob.0),
+            )
+            .await
+    });
+    fixture.mesh.set(&bob.0, true, true);
+    (pending, sealed.unwrap())
+}
+
+#[tokio::test]
+async fn a_pending_write_at_a_seal_retries_in_the_continuation_and_commits_once() {
+    let fixture = Fixture::new(1).await;
+    let main = tip_log(&fixture.lineage);
+    let next = TipLog {
+        scope: fixture.lineage.domain,
+        tip: continuation(&fixture.lineage),
+    };
+    let terminal = rocky_core::LogTerminal {
+        digest: [7; 32],
+        continuation: Some(next.tip),
+    };
+    let (pending, position) = seal_while_pending(&fixture, terminal).await;
+    // Alice follows `main` still: the write waits unsent for the continuation.
+    assert!(
+        matches!(pending, Err(CoordinatedError::Undecided)),
+        "{pending:?}"
+    );
+    assert_eq!(position, 2);
+    let head = fixture.mesh.log.head(main).unwrap();
+    assert_eq!((head.commit, head.terminal), (2, Some(terminal)));
+    // Entry 1, committed before the seal, is the sealed state on both.
+    for node in [&fixture.alice, &fixture.bob] {
+        let status = fixture.resolve(node).await;
+        assert_eq!((status.position, status.undecided), (1, 0));
+        assert_eq!(
+            fixture.slot(node).await.map(|_| ()),
+            Err(CoordinatedError::Sealed)
+        );
+    }
+    assert_eq!(invoices(&fixture.bob.1).await, numbered(1));
+    assert_eq!(
+        fixture
+            .alice
+            .1
+            .coordinated_status(next)
+            .await
+            .unwrap()
+            .undecided,
+        1
+    );
+    // A retried seal answers alike; nothing else ends the log again.
+    let bob = &fixture.bob;
+    let (client, peers) = (
+        fixture.mesh.client(&bob.0),
+        fixture.mesh.peers(&fixture.lineage, &bob.0),
+    );
+    assert_eq!(bob.1.seal_log(main, terminal, &client, &peers).await, Ok(2));
+    let moved = rocky_core::LogTerminal {
+        digest: [8; 32],
+        continuation: None,
+    };
+    assert_eq!(
+        bob.1.seal_log(main, moved, &client, &peers).await,
+        Err(CoordinatedError::Sealed)
+    );
+    // Following the continuation, alice's write commits there, once.
+    let Fixture {
+        lineage,
+        dir,
+        mesh,
+        alice: (key, replica),
+        bob,
+    } = fixture;
+    mesh.nodes
+        .lock()
+        .unwrap()
+        .retain(|peer| peer.key.public_key() != key.public_key());
+    drop(replica);
+    let path = dir.path().join("alice.db");
+    let alice = lineage
+        .open(&path, &key, 4, Some(lineage.upgrade(1, 4)))
+        .await
+        .unwrap();
+    mesh.add(&key, &alice);
+    assert_eq!(alice.followed_log(lineage.domain).await, next);
+    let status = alice
+        .resolve_coordinated(next, &mesh.client(&key), &mesh.peers(&lineage, &key))
+        .await
+        .unwrap();
+    assert_eq!((status.position, status.undecided), (1, 0));
+    let head = mesh.log.head(next).unwrap();
+    assert_eq!((head.commit, head.members.len()), (1, 1));
+    assert_eq!(mesh.log.head(main).unwrap().commit, 2);
+    assert_eq!(invoices(&alice).await, numbered(2));
+    drop(bob);
+}
+
+#[tokio::test]
+async fn a_pending_write_at_a_close_is_rolled_back_and_held() {
+    let fixture = Fixture::new(1).await;
+    let terminal = rocky_core::LogTerminal {
+        digest: [7; 32],
+        continuation: None,
+    };
+    let (pending, position) = seal_while_pending(&fixture, terminal).await;
+    assert!(
+        matches!(pending, Err(CoordinatedError::Sealed)),
+        "{pending:?}"
+    );
+    assert_eq!(position, 2);
+    let alice = &fixture.alice.1;
+    assert_eq!(invoices(alice).await, numbered(1));
+    let held = alice.held_changes().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(fixture.resolve(&fixture.alice).await.undecided, 0);
+}

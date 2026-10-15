@@ -342,9 +342,14 @@ impl<A: RowApplication> Inner<A> {
     }
     /// Voids this device's unoffered bundle `transaction` inside the
     /// caller's transaction, as an aborted coordinated entry is; unoffered
-    /// bundles that saw its effects are held. Fails when a frame of it was
-    /// offered.
-    pub(super) async fn void_bundle(&self, transaction: Commitment) -> Result<(), Error> {
+    /// bundles that saw its effects are held, and with `hold` the bundle
+    /// itself, as a coordinated write a tip's close ended is. Fails when a
+    /// frame of it was offered.
+    pub(super) async fn void_bundle(
+        &self,
+        transaction: Commitment,
+        hold: bool,
+    ) -> Result<(), Error> {
         let frames = self.unoffered().await?;
         let bundles = whole_bundles(&frames);
         if !bundles.contains_key(transaction.as_slice()) {
@@ -354,7 +359,7 @@ impl<A: RowApplication> Inner<A> {
             &frames,
             &bundles,
             BTreeSet::from([transaction.to_vec()]),
-            false,
+            hold,
         )
         .await?;
         Ok(())

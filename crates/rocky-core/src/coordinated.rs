@@ -14,6 +14,15 @@ pub struct TipLog {
     pub scope: Scope,
     pub tip: TipId,
 }
+/// The entry that ends a tip's log: a seal of the tip or a bookmark move off
+/// it, as an opaque statement digest. A pending entry it aborts retries in
+/// `continuation`'s log, or is held without one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LogTerminal {
+    pub digest: Commitment,
+    pub continuation: Option<TipId>,
+}
+
 /// The one assigned, uncommitted entry of a log.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LogPending {
@@ -46,6 +55,8 @@ pub struct LogHead {
     pub hashes: Vec<Commitment>,
     /// The latest owner-signed cut, retained so no device must explain it.
     pub cut: Option<LogCut>,
+    /// The committed entry at `commit` that ended the log; none while open.
+    pub terminal: Option<LogTerminal>,
 }
 /// An owner-signed cut as the coordinator retains it: the encoded signed
 /// record, whose digest is its entry hash, and the owner's credential chain
@@ -103,6 +114,10 @@ pub trait DomainLog: Send + Sync {
     /// Submits an owner-signed cut of the exact current head. A retry of the
     /// retained record returns the same commit.
     fn cut(&self, log: TipLog, cut: LogCut) -> CoordinationFuture<'_, LogResult>;
+    /// Commits the terminal entry that ends the log, aborting a pending
+    /// entry. A retry of the committed terminal returns the same commit;
+    /// another one is refused with `Sealed`.
+    fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Append {

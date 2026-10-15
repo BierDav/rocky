@@ -376,6 +376,13 @@ impl DomainLog for Trimmed {
     fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
         self.0.configure(log, minimum)
     }
+    fn seal(
+        &self,
+        log: TipLog,
+        terminal: rocky_core::LogTerminal,
+    ) -> CoordinationFuture<'_, LogResult> {
+        self.0.seal(log, terminal)
+    }
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
         Box::pin(async move {
             let mut head = self.0.log_head(log).await?;
@@ -699,6 +706,13 @@ impl DomainLog for LostReply {
     }
     fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
         self.0.configure(log, minimum)
+    }
+    fn seal(
+        &self,
+        log: TipLog,
+        terminal: rocky_core::LogTerminal,
+    ) -> CoordinationFuture<'_, LogResult> {
+        self.0.seal(log, terminal)
     }
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
         self.0.log_head(log)

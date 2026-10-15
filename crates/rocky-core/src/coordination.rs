@@ -27,6 +27,8 @@ pub enum CoordinationError {
     Backpressure,
     /// A persisted or wire format this build refuses to migrate.
     UnsupportedFormat,
+    /// The tip's log ended with a terminal entry and takes no other.
+    Sealed,
 }
 impl std::fmt::Display for CoordinationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

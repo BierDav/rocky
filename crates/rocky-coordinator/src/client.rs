@@ -375,4 +375,21 @@ impl DomainLog for NetworkCoordinator {
             }
         })
     }
+    fn seal(&self, log: TipLog, terminal: LogTerminal) -> CoordinationFuture<'_, LogResult> {
+        Box::pin(async move {
+            match self
+                .coordinated(log, crate::coordinated::Action::Seal { terminal })
+                .await?
+            {
+                Outcome::Coordinated(crate::coordinated::Result::Committed {
+                    position,
+                    running_hash,
+                }) => Ok(LogResult::Committed {
+                    position,
+                    running_hash,
+                }),
+                _ => Err(CoordinationError::Corrupt),
+            }
+        })
+    }
 }

@@ -39,7 +39,7 @@ filter = '''
     | (package(rocky-secure) & test(/^network::link::integration_tests::/))
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
-    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests))::/))
+    | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests|tip_tests))::/))
     | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))

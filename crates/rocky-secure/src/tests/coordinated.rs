@@ -107,6 +107,13 @@ impl DomainLog for Client {
     fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
         self.inner.configure(log, minimum)
     }
+    fn seal(
+        &self,
+        log: TipLog,
+        terminal: rocky_core::LogTerminal,
+    ) -> CoordinationFuture<'_, LogResult> {
+        self.inner.seal(log, terminal)
+    }
     fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
         self.inner.log_head(log)
     }
@@ -449,6 +456,13 @@ async fn a_missing_copy_or_a_gap_outside_the_hash_window_never_rejoins() {
         }
         fn configure(&self, log: TipLog, minimum: usize) -> CoordinationFuture<'_, ()> {
             self.0.configure(log, minimum)
+        }
+        fn seal(
+            &self,
+            log: TipLog,
+            terminal: rocky_core::LogTerminal,
+        ) -> CoordinationFuture<'_, LogResult> {
+            self.0.seal(log, terminal)
         }
         fn log_head(&self, log: TipLog) -> CoordinationFuture<'_, LogHead> {
             Box::pin(async move {

@@ -13,8 +13,10 @@ use std::pin::Pin;
 pub(super) mod cut;
 pub(super) mod proposal;
 mod recovery;
+mod terminal;
 pub use cut::{CutEvidence, CutRefusal, MAX_PAGE_CUTS};
 pub use proposal::{BaseReport, CutProposal};
+use terminal::settled;
 
 pub(super) const SCHEMA: &[&str] = &[
     // Per log: the committed position and running hash this replica holds,
@@ -131,6 +133,9 @@ pub enum CoordinatedError {
     /// This node does not follow the log's tip: only trusted nodes that
     /// follow a tip write through its log.
     Unfollowed,
+    /// A seal or bookmark move ended the log. A write it aborted after a
+    /// `close` is rolled back and held for the application.
+    Sealed,
     /// The coordinator refused the call.
     Refused(rocky_core::CoordinationError),
     Storage(Error),
@@ -154,6 +159,7 @@ fn coordination(error: rocky_core::CoordinationError) -> CoordinatedError {
     match error {
         C::Unavailable | C::CoordinationStateLost => CoordinatedError::Unavailable,
         C::StaleHead | C::StaleEpoch => CoordinatedError::Conflict,
+        C::Sealed => CoordinatedError::Sealed,
         other => CoordinatedError::Refused(other),
     }
 }
@@ -389,7 +395,7 @@ impl<A: RowApplication> Inner<A> {
             return Err(denied("the coordinated slot is stale"));
         }
         if !self
-            .entries(slot.log, &["staged", "assigned"])
+            .entries(slot.log, &["staged", "assigned", "carried"])
             .await?
             .is_empty()
         {
@@ -565,6 +571,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(CoordinatedError::Undecided);
         }
         let mut head = coordinator.log_head(log).await.map_err(coordination)?;
+        if head.terminal.is_some() {
+            return Err(CoordinatedError::Sealed);
+        }
         if head.pending.is_some() {
             return Err(CoordinatedError::Conflict);
         }
@@ -650,6 +659,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     self.assign(log, &entry, &pending).await?;
                     entry.pending = Some(pending);
                 }
+                Err(rocky_core::CoordinationError::Sealed) => {
+                    return self.ended_own(log, &entry, coordinator, peers).await;
+                }
                 Err(error) => {
                     // Never sent and never acknowledged: it cannot commit.
                     self.abort_own(log, &entry).await?;
@@ -696,6 +708,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 })
             }
             Decision::Aborted => {
+                if self.ended(log, &entry, coordinator).await? {
+                    return self.ended_own(log, &entry, coordinator, peers).await;
+                }
                 self.abort_own(log, &entry).await?;
                 Err(CoordinatedError::Aborted)
             }
@@ -803,6 +818,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
     }
     /// Voids an own entry that never committed and rolls its effects back.
     async fn abort_own(&self, log: TipLog, entry: &Entry) -> Result<(), Error> {
+        self.void_own(log, entry, false).await
+    }
+    /// Voids an own entry and rolls its effects back; with `hold` its
+    /// bundle is held for the application to re-author.
+    async fn void_own(&self, log: TipLog, entry: &Entry, hold: bool) -> Result<(), Error> {
         let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
         let bundle = entry
             .bundle
@@ -817,7 +837,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     inner.conn.execute(sql, [id.as_bytes().to_vec()]).await?;
                 }
             }
-            inner.void_bundle(bundle).await?;
+            inner.void_bundle(bundle, hold).await?;
             inner
                 .conn
                 .execute(
@@ -943,8 +963,16 @@ impl<A: RowApplication> EncryptedReplica<A> {
             match coordinator.append(log, append).await {
                 Ok(pending) => self.assign(log, &entry, &pending).await?,
                 Err(error) if coordination(error.clone()) == CoordinatedError::Unavailable => {}
+                Err(rocky_core::CoordinationError::Sealed) => {
+                    settled(self.ended_own(log, &entry, coordinator, peers).await)?;
+                }
                 Err(_) => self.abort_own(log, &entry).await?,
             }
+        }
+        // A write a seal carried here retries once this node follows the tip.
+        let carried = self.inner.lock().await.entries(log, &["carried"]).await?;
+        if !proposing && !carried.is_empty() {
+            settled(self.retry_carried(log, coordinator, peers).await)?;
         }
         let head = coordinator.log_head(log).await.map_err(coordination)?;
         let mut caught_up = false;
@@ -975,7 +1003,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     }
                 }
                 Decision::Aborted if entry.state == "assigned" => {
-                    self.abort_own(log, &entry).await?;
+                    if head.terminal.is_some() && head.commit == entry.position {
+                        settled(self.ended_own(log, &entry, coordinator, peers).await)?;
+                    } else {
+                        self.abort_own(log, &entry).await?;
+                    }
                 }
                 Decision::Aborted => {
                     let mut inner = self.inner.lock().await;
@@ -1001,9 +1033,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 Decision::Unknown => {}
             }
         }
+        // A terminal entry is metadata no device holds; the sealed state
+        // ends before it.
+        let through = head.commit - u64::from(head.terminal.is_some());
         let (position, _, _, _) = self.inner.lock().await.log_state(log).await?;
-        if position < head.commit {
-            self.catch_up(log, &head, peers, head.commit).await?;
+        if position < through {
+            self.catch_up(log, &head, peers, through).await?;
         }
         self.coordinated_status(log).await.map_err(Into::into)
     }
@@ -1242,7 +1277,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         Ok(CoordinatedStatus {
             position,
             undecided: inner
-                .entries(log, &["staged", "assigned", "stored"])
+                .entries(log, &["staged", "assigned", "stored", "carried"])
                 .await?
                 .len(),
         })

@@ -3,7 +3,8 @@
 use crate::{certified::encode, machine::Request};
 use p2panda_core::PublicKey;
 use rocky_core::{
-    Commitment, Configuration, CoordinationError, MAX_COUNTER, Scope, TipId, TipLog, commitment,
+    Commitment, Configuration, CoordinationError, LogTerminal, MAX_COUNTER, Scope, TipId, TipLog,
+    commitment,
 };
 use rocky_credentials::{CutPoint, MAX_CUT_AUTHORITY_BYTES, SignedCut};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,10 @@ pub const HASH_WINDOW: usize = 1024;
 pub const TRUSTED_NODES: usize = 32;
 pub const APPENDS_PER_MINUTE: u32 = 60;
 pub const ACKNOWLEDGMENT_DEADLINE: u64 = 30;
-/// Tip logs one domain holds.
+/// Open tip logs one domain holds.
 pub const TIP_LOGS: usize = 8;
+/// Ended tip logs one domain retains; the earliest ended is dropped beyond.
+pub const ENDED_LOGS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Action {
@@ -53,6 +56,11 @@ pub enum Action {
         #[serde(with = "bytes")]
         authority: Vec<u8>,
     },
+    /// The terminal entry: a seal of the tip or a bookmark move off it. A
+    /// trusted node or the authority submits it.
+    Seal {
+        terminal: LogTerminal,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pending {
@@ -83,6 +91,8 @@ pub struct Head {
     pub hashes: VecDeque<Commitment>,
     /// The latest admitted cut; its digest is the entry hash at `position`.
     pub cut: Option<Box<Cut>>,
+    /// The entry at `commit` that ended the log.
+    pub terminal: Option<LogTerminal>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Cut {
@@ -145,11 +155,16 @@ impl Log {
                 pending: None,
                 hashes: VecDeque::new(),
                 cut: None,
+                terminal: None,
             },
             retries: Vec::new(),
             minute: 0,
             appends: 0,
         }
+    }
+    /// Whether no terminal entry ended the log.
+    pub fn open(&self) -> bool {
+        self.head.terminal.is_none()
     }
     pub fn appends_in(&self, minute: u64) -> u32 {
         if self.minute == minute {
@@ -181,6 +196,9 @@ impl Log {
         record: &[u8],
         authority: &[u8],
     ) -> std::result::Result<Result, CoordinationError> {
+        if self.head.terminal.is_some() {
+            return Err(CoordinationError::Sealed);
+        }
         let signed = SignedCut::from_bytes(record).map_err(|_| CoordinationError::Denied)?;
         if authority.len() > MAX_CUT_AUTHORITY_BYTES {
             return Err(CoordinationError::Denied);
@@ -241,6 +259,51 @@ impl Log {
             running_hash,
         }));
         Ok(Result::Cut {
+            position,
+            running_hash,
+        })
+    }
+    /// Commits `terminal` at `commit+1`, aborting the pending entry, and
+    /// ends the log: it keeps no in-sync set and takes no other entry. A
+    /// retry of the same terminal answers the same commit.
+    pub fn seal(
+        &mut self,
+        terminal: LogTerminal,
+    ) -> std::result::Result<Result, CoordinationError> {
+        if let Some(ended) = &self.head.terminal {
+            return match *ended == terminal {
+                true => Ok(Result::Committed {
+                    position: self.head.commit,
+                    running_hash: self.head.running_hash,
+                }),
+                false => Err(CoordinationError::Sealed),
+            };
+        }
+        let epoch = self
+            .head
+            .epoch
+            .checked_add(1)
+            .ok_or(CoordinationError::StaleEpoch)?;
+        let position = self
+            .head
+            .commit
+            .checked_add(1)
+            .filter(|p| *p <= MAX_COUNTER)
+            .ok_or(CoordinationError::StaleHead)?;
+        let running_hash =
+            rocky_core::coordinated_chain(self.head.running_hash, position, terminal.digest);
+        self.head.pending = None;
+        self.head.members.clear();
+        self.head.epoch = epoch;
+        self.head.head = position;
+        self.head.commit = position;
+        self.head.running_hash = running_hash;
+        self.head.hashes.push_back(terminal.digest);
+        if self.head.hashes.len() > HASH_WINDOW {
+            self.head.hashes.pop_front();
+        }
+        self.head.terminal = Some(terminal);
+        Ok(Result::Committed {
             position,
             running_hash,
         })
@@ -321,6 +384,9 @@ impl Log {
         time: u64,
         tenant_admits: bool,
     ) -> std::result::Result<Result, CoordinationError> {
+        if self.head.terminal.is_some() {
+            return Err(CoordinationError::Sealed);
+        }
         match action {
             Action::Configure { minimum } => {
                 if self.head.epoch != 0 || *minimum == 0 || *minimum > TRUSTED_NODES {
@@ -520,8 +586,8 @@ impl Logs {
         Ok(Result::Configured)
     }
     /// A copy of `tip`'s log to apply `action` from `key` to; `store` keeps
-    /// it. Only a configuration, a join or a cut opens a log, within `TIP_LOGS`,
-    /// and a node is in sync on one tip of its domain.
+    /// it. Only a configuration, a join, a cut or a seal opens a log, within
+    /// `TIP_LOGS` open ones, and a node is in sync on one tip of its domain.
     pub fn working(
         &self,
         key: PublicKey,
@@ -532,7 +598,7 @@ impl Logs {
             && self
                 .logs
                 .iter()
-                .any(|(id, log)| *id != tip && log.head.members.iter().any(|m| m.key == key))
+                .any(|(id, log)| *id != tip && log.head.member(key))
         {
             return Err(CoordinationError::Denied);
         }
@@ -540,19 +606,33 @@ impl Logs {
             return Ok(log.clone());
         }
         match action {
+            // An unopened tip's seal ends it at once.
+            Action::Seal { .. } => return Ok(self.fresh(tip)),
             Action::Configure { .. } | Action::Join { .. } | Action::Cut { .. } => {}
             Action::Append { .. } => return Err(CoordinationError::Denied),
             _ => return Err(CoordinationError::StaleHead),
         }
-        if self.logs.len() >= TIP_LOGS {
+        if self.logs.iter().filter(|(_, l)| l.open()).count() >= TIP_LOGS {
             return Err(CoordinationError::Backpressure);
         }
         Ok(self.fresh(tip))
     }
+    /// Keeps `log` as `tip`'s. A log that just ended moves last, and the
+    /// earliest ended ones beyond `ENDED_LOGS` are dropped.
     pub fn store(&mut self, tip: TipId, log: Log) {
-        match self.get_mut(tip) {
-            Some(old) => *old = log,
+        let index = self.logs.iter().position(|(id, _)| *id == tip);
+        match index {
+            Some(index) if self.logs[index].1.open() && !log.open() => {
+                self.logs.remove(index);
+                self.logs.push((tip, log));
+            }
+            Some(index) => self.logs[index].1 = log,
             None => self.logs.push((tip, log)),
+        }
+        while self.logs.iter().filter(|(_, l)| !l.open()).count() > ENDED_LOGS {
+            if let Some(index) = self.logs.iter().position(|(_, l)| !l.open()) {
+                self.logs.remove(index);
+            }
         }
     }
     pub fn pending(&self) -> impl Iterator<Item = (TipId, &Pending)> {
@@ -669,6 +749,12 @@ mod hashes {
     }
 }
 
+impl Head {
+    pub fn member(&self, key: PublicKey) -> bool {
+        self.members.iter().any(|m| m.key == key)
+    }
+}
+
 /// Conversions between this log's types and the `rocky_core` port.
 impl Pending {
     pub fn port(&self) -> rocky_core::LogPending {
@@ -716,6 +802,7 @@ impl Head {
                 record: cut.record.clone(),
                 authority: cut.authority.clone(),
             }),
+            terminal: self.terminal,
         }
     }
 }
@@ -978,6 +1065,33 @@ impl rocky_core::DomainLog for MemoryLogClient {
                         _ => Err(CoordinationError::Corrupt),
                     }
                 })
+        })
+    }
+    fn seal(
+        &self,
+        log: TipLog,
+        terminal: LogTerminal,
+    ) -> rocky_core::CoordinationFuture<'_, rocky_core::LogResult> {
+        Box::pin(async move {
+            let action = Action::Seal { terminal };
+            self.logs.with(
+                log,
+                self.key,
+                &action,
+                |working, acknowledged, _, _| match working.seal(terminal)? {
+                    Result::Committed {
+                        position,
+                        running_hash,
+                    } => {
+                        acknowledged.clear();
+                        Ok(rocky_core::LogResult::Committed {
+                            position,
+                            running_hash,
+                        })
+                    }
+                    _ => Err(CoordinationError::Corrupt),
+                },
+            )
         })
     }
 }

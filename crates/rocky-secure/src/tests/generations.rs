@@ -263,7 +263,15 @@ impl Lineage {
             .collect()
     }
     pub(super) fn credentials(&self, generation: u32, node: &PrivateKey) -> CredentialChain {
-        let user = PrivateKey::new();
+        self.certified(generation, &PrivateKey::new(), node)
+    }
+    /// `credentials` of a node `user`'s identity certified.
+    pub(super) fn certified(
+        &self,
+        generation: u32,
+        user: &PrivateKey,
+        node: &PrivateKey,
+    ) -> CredentialChain {
         let (not_before, expires) = crate::tests::lifetime();
         let capability = |subject, kind, delegations| Capability {
             subject,
@@ -293,7 +301,7 @@ impl Lineage {
                 &self.publisher,
             )
             .unwrap(),
-            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), &user)
+            SignedCapability::sign(capability(node.public_key(), PrincipalKind::Node, 0), user)
                 .unwrap(),
         ])
     }
@@ -345,13 +353,30 @@ impl Lineage {
         generation: u32,
         upgrade: Option<Upgrade>,
     ) -> Result<EncryptedReplica<TypedRows>, Error> {
-        let replica = EncryptedReplica::open_upgrading(
-            path,
-            self.app(generation),
-            self.config(generation, node),
-            upgrade,
-        )
-        .await?;
+        self.open_with(path, self.config(generation, node), generation, upgrade)
+            .await
+    }
+    /// `open` for a node `identity` certified, which enrolls line nodes.
+    pub(super) async fn open_certified(
+        &self,
+        path: &std::path::Path,
+        (identity, node): (&PrivateKey, &PrivateKey),
+        generation: u32,
+        upgrade: Option<Upgrade>,
+    ) -> Result<EncryptedReplica<TypedRows>, Error> {
+        let mut config = self.config(generation, node);
+        config.credentials = self.certified(generation, identity, node);
+        self.open_with(path, config, generation, upgrade).await
+    }
+    async fn open_with(
+        &self,
+        path: &std::path::Path,
+        config: SecureConfig,
+        generation: u32,
+        upgrade: Option<Upgrade>,
+    ) -> Result<EncryptedReplica<TypedRows>, Error> {
+        let replica =
+            EncryptedReplica::open_upgrading(path, self.app(generation), config, upgrade).await?;
         replica
             .install_tables(
                 self.schema(generation),

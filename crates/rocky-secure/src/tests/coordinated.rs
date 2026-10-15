@@ -14,6 +14,7 @@ use rocky_core::{
 use std::sync::{Arc, Mutex as StdMutex};
 
 mod cuts;
+mod seals;
 mod tips;
 
 type Replica = EncryptedReplica<TypedRows>;
@@ -171,10 +172,21 @@ impl EntryPeers for Peers {
     fn committed(&self, log: TipLog, after: u64) -> PeerFuture<'_, Vec<CommittedEntry>> {
         Box::pin(async move {
             let nodes = self.mesh.nodes.lock().unwrap().clone();
+            // A live link's handshake claims the requester's followed tip.
+            let me = nodes.iter().find(|peer| peer.key.public_key() == self.me);
+            let tip = match me {
+                Some(me) => Some(me.replica.followed_tip().await),
+                None => None,
+            };
             for peer in nodes
                 .iter()
                 .filter(|peer| peer.reachable && peer.key.public_key() != self.me)
             {
+                if let Some(tip) = tip {
+                    peer.replica
+                        .admit_peer(self.me, &self.credentials, tip)
+                        .await?;
+                }
                 let entries = peer
                     .replica
                     .committed_entries(self.me, &self.credentials, log, after)

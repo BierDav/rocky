@@ -107,3 +107,18 @@ The row-cost test passed with 10 and 10,000 stored rows: no row bytes changed
 and SQLite metadata write counts matched. Its isolated integration-budget
 confirmation was 683 ms on the shared host. This is a deterministic work-count
 regression, not a claim of identical wall-clock measurements.
+
+### Final workspace verification
+
+`./scripts/lint` passed. `./scripts/check` passed workspace Clippy, 167 unit
+checks and 938 integration checks: 697 workspace tests plus 241 SDK tests without
+default features. Both tier suites and their per-test confirmations met their
+budgets; the integration suite took 134.58 seconds. The existing re-add test's
+3-second exception was retained, with its updated name; its isolated confirmation
+was 1.87 seconds. No new budget exception was added.
+
+The earlier authority-invalidation, cross-tip offer and fixture-close failures
+were corrected and passed in this final run. E2E, Kotlin/Android/iOS and native
+packaging qualification were not run; no Kotlin or native ABI source changed.
+These checks qualify this lane's Rust behavior, not the remaining coordinated
+terminal-entry integration, SDK developer surfaces or phase 17 schema changes.

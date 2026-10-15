@@ -3,7 +3,7 @@
 Status: in progress. Slices 1–6 are implemented and merged, with
 [evidence](14-seals-and-bookmarks-evidence.md); the
 [merge's open items](14-seals-and-bookmarks-evidence.md#open-after-the-merge)
-remain.
+remain; slice 7 is open.
 Revised 2026-10-15 for tips and branches.
 Owner: `rocky-credentials` seal, tip and bookmark statements; `rocky-secure`
 admission, sync and late frames; `rocky-coordinator` per-tip logs;
@@ -36,12 +36,15 @@ amount, whatever the domain holds. Compaction follows in
 - **The seal.** An issuer or trusted identity with whole-scope authority
   signs a statement naming the tip it ends, that tip's frontier as a
   sequence mark per author, and either `continue(schema)` or `close`. A tip
-  is sealed once; concurrent seals of one tip resolve to the lower seal
-  digest on every device, and the other has no effect. `continue` opens the
+  is sealed once; concurrent seals of one tip
+  [resolve by authority](#races-resolve-by-authority) on every device, and
+  the other has no effect. `continue` opens the
   one successor tip, identified by the seal's digest; until phase 17 its
   schema is the parent's.
 - **Opening tips.** Trusted identities and the owner open further tips on
-  any seal, for branches and drafts. Such a tip starts from the sealed state
+  any seal they hold, for branches: one whose state they keep, pulled as a
+  checkpoint, or seal now from their live state. Such a tip starts from the
+  sealed state
   and never takes late frames. Its opening names the minimum in-sync size of
   its coordinated log, by default the domain's. A dev branch from current
   data is one action: seal the followed tip with `continue`, move its
@@ -57,8 +60,16 @@ amount, whatever the domain holds. Compaction follows in
 - **Who moves.** Issuers move a bookmark forward along `continue` seals.
   Trusted identities and the owner also create and delete bookmarks and move
   them backwards or sideways. Two moves of one bookmark from the same tip
-  resolve to the lower move digest on every device. A device without this
-  authority never moves a bookmark.
+  resolve by authority on every device. A device without this authority
+  never moves a bookmark.
+- **Races resolve by authority.** Of concurrent seals of one tip, or moves
+  of one bookmark from one tip, the owner's wins, then a trusted
+  identity's, then an issuer's; among equals the lower digest wins.
+  Revoking an identity removes its seals and moves from resolution, and
+  every device resolves again; writes on a tip that loses this way return
+  as held changes. An issuer that varies its statements for a lower digest
+  still beats honest issuers until it is revoked; this is an
+  [accepted limitation](README.md#accepted-limitations).
 - **Following.** A device writes only the tip its followed bookmark points
   to; a bookmark on a sealed tip is read-only until it moves. It adopts what
   it follows, never what a peer runs: frames of a tip it does not follow are
@@ -99,7 +110,9 @@ amount, whatever the domain holds. Compaction follows in
   reports the followed bookmark and tip, operations since the last seal, the
   evidence compaction would release and each device's last seen frontier.
 - **Inspection for developers.** An API returns the graph, bookmarks with
-  their moves, and which tips and seals each node follows or keeps. It is a
+  their moves, and which tips and seals each node follows or keeps. A
+  bookmark's losing moves and the tips they lead to are listed as
+  `main/1`, `main/2`, in the manner of jj; they stay branches. It is a
   debugging and development tool, not an application feature.
 
 ## Ordered slices
@@ -117,6 +130,8 @@ amount, whatever the domain holds. Compaction follows in
    inspection in `rocky-sdk`, the JSON API and Kotlin.
 6. Guides: a seals, tips and bookmarks guide replacing the horizon's place
    in the docs index.
+7. Resolution by authority before digest, resolving again on revocation,
+   and losing moves in inspection; the guide's races section.
 
 ## Completion gate
 
@@ -127,6 +142,10 @@ amount, whatever the domain holds. Compaction follows in
   changes on every device holding them; one re-authoring converges.
 - Two issuers seal one tip at once; every device ends on the lower seal's
   continuation with the same rows.
+- An issuer moves `main` forward while the owner moves it back; every
+  device ends on the owner's move whatever their digests, and inspection
+  lists the issuer's as `main/1`. Revoking an issuer whose seal won makes
+  every device follow the next winner.
 - A trusted node opens a branch tip on `main`'s latest seal and points `dev`
   at it. Two devices follow `dev` and write; devices on `main` receive none
   of its frames. One switches back to `main`, drops `dev`, and its writes

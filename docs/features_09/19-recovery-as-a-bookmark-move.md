@@ -1,6 +1,7 @@
-# 19. Recovery as a bookmark move
+# 19. Recovery as a seal
 
-Status: proposed; not started.
+Status: proposed; not started. Revised 2026-10-15: one owner `continue`
+seal replaces the `close`, opening and bookmark move.
 Owner: `rocky-coordinator` log entries; `rocky-secure` coordinated recovery;
 `rocky-sdk` recovery flow. Depends on [phase 10](10-stuck-recovery.md) and
 [phase 14](14-seals-and-bookmarks.md). Follow the
@@ -17,20 +18,28 @@ Read [the generation model](README.md#generations-as-sealed-forks),
 owner-signed cut that every device keeps in a chain beside the log.
 [Phase 14](14-seals-and-bookmarks.md) already moves bookmarks backwards
 and returns abandoned writes as held changes. After this phase a stuck tip
-recovers the same way and the cut mechanism is gone. Each tip has its own
+recovers with one owner seal and the cut mechanism is gone. Each tip has its own
 coordinated log, so only the stuck tip's log is involved.
 
 ## Settled
 
 - **Collect first** stays as in phase 10.
-- **The owner closes at the retained prefix.** When no in-sync node of a
-  tip can append, the domain owner seals that tip with `close` at the
-  retained prefix `c`, opens a tip on the seal and moves the tip's
-  bookmarks there; the coordinator commits the seal in the stuck tip's log
-  and its in-sync set empties. Entries after `c` are beyond the frontier.
-- **Abandoned entries are not late frames.** A frame of an abandoned log
-  position never applies in the new generation; its author's device
-  receives it back as a held change.
+- **One owner `continue` seal.** When no in-sync node of a tip can append,
+  the domain owner seals that tip with `continue`. Its frontier is, per
+  author, what collection retrieved. It also lists the abandoned
+  coordinated entries, the log positions after the retained prefix `c`, by
+  author and position. Only the owner may sign such a list.
+- **Ordinary writes are untouched.** Frames beyond the frontier walk to the
+  continuation as late frames, as after any `continue` seal. Bookmarks on
+  the tip follow the seal; no move is needed.
+- **Abandoned entries are not late frames.** A listed frame never applies
+  in the continuation; its author's device receives it back as a held
+  change.
+- **The coordinator.** An owner seal is the one terminal entry the
+  coordinator commits without the in-sync set. It ends the stuck log; the
+  continuation's log starts with an empty in-sync set that trusted nodes
+  refill lazily as they return. Owner seals outrank every other seal of the
+  tip ([phase 14](14-seals-and-bookmarks.md)).
 - **Rollback stays.** A device that applied abandoned entries rebuilds at
   the new generation's base, through [phase 15](15-lazy-compaction.md)'s
   finalization.
@@ -39,15 +48,18 @@ coordinated log, so only the stuck tip's log is involved.
 
 ## Ordered slices
 
-1. The owner's `close` seal, tip and bookmark moves at the coordinator and
-   on every device.
+1. The owner's `continue` seal with abandoned entries, at the coordinator
+   and on every device.
 2. Abandoned frames as held changes; rollback through the new base.
 3. Removing cuts, their formats and their tests.
 4. Guides: stuck recovery, coordinated log; decision 0074 superseded.
 
 ## Completion gate
 
-- [Phase 10](10-stuck-recovery.md)'s gate passes with an owner `close`
-  seal and bookmark move in place of a cut.
+- [Phase 10](10-stuck-recovery.md)'s gate passes with an owner seal in
+  place of a cut.
+- Ordinary writes made after the retained prefix on the stuck tip apply on
+  every device after recovery; only the abandoned coordinated entries
+  return, as held changes, to their authors.
 - Recovering a stuck branch tip leaves `main`'s log untouched.
 - No cut record, chain or taint remains in code or formats.

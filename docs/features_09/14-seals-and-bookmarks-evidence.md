@@ -415,7 +415,9 @@ and E2E were not run on the merge.
 - The SDK cannot grant a trusted identity, so through it only the owner
   opens tips and moves bookmarks backwards or sideways; the gate's trusted
   node branch and rollback are proven in `rocky-secure` only.
-- The e2e `a_migration_of_100000_rows_converges_on_every_member` failure from
-  wave 2 was neither rerun alone nor compared with its parent.
+- The e2e `a_migration_of_100000_rows_converges_on_every_member` fails alone
+  ("the member did not converge" within 64 syncs) on the merge and at
+  `znpwrnrx`, and passes at `xlsrtkrk`: lane S wave 1 regressed it. The test
+  uses an explicit generation upgrade without a tip graph.
 - `devices_never_online_together_converge_via_keyless_custody` remains a
   load-dependent flake.

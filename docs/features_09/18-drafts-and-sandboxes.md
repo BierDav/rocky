@@ -1,6 +1,10 @@
 # 18. Drafts and sandboxes
 
-Status: proposed; not started.
+Status: skipped (2026-10-15). Drafts are not needed: a developer tries a
+change on a dev branch, and an issuer publishes by sealing `main` and
+migrating, offline if it should be ready at publication
+([phase 17](17-schema-changes-through-seals.md)). Every tip is synced to
+its followers; none is unpublished. The brief is kept for reference only.
 Owner: `rocky-secure` unpublished seals and tips; `rocky-sdk` and `sdks/kotlin` API.
 Depends on [phase 17](17-schema-changes-through-seals.md). Follow the
 [execution contract](README.md#agent-execution-contract). Shares decision

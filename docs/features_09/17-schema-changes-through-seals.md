@@ -36,8 +36,22 @@ schema. Generations no longer form a chain of transitions, and both
   backfill, rebuild or observer notification. Removals and migrations keep
   the existing switch.
 - **Splits are concurrent seals.** Issuers that seal one tip with
-  different schemas, or run one migration twice, resolve to the lower seal
-  or move digest; the other tip stays a branch, its migration never merged.
+  different schemas, or run one migration twice, resolve
+  [by authority, then digest](14-seals-and-bookmarks.md); the other tip
+  stays a branch, its migration never merged.
+- **Trying, then publishing.** A developer tries a schema change and its
+  migration on a dev branch. Nothing of the branch is reused: to publish, an
+  issuer seals `main` forward and runs the migration on that fresh parent.
+  To have the migration ready when the seal becomes public, it migrates
+  with networking disabled and publishes the seal, opening, move and
+  migration bundles together when it reconnects, as
+  [staged publication](../decisions/0071-staged-migration-publication.md)
+  does. Writes others make to `main` meanwhile follow the late-frame rules.
+- **Old apps across a migration.** An older device's writes across a
+  closing seal return as held changes. Re-authoring them is the developer's
+  burden: an app kept forward compatible, a trusted node that re-authors
+  them, holding them until the app updates, or an update forced before the
+  change. Rocky does not choose.
 - **Following, not discovery.** A device switches schema when its followed
   bookmark reaches a tip with another schema, never because a peer runs
   one.
@@ -64,6 +78,9 @@ schema. Generations no longer form a chain of transitions, and both
 - Adding a nullable field to a table of 100,000 rows rewrites none of them.
 - Two issuers sign different schemas, or run the same migration, at once;
   every device ends in one tip with no duplicated rows.
+- An issuer seals and migrates offline while other devices write `main`;
+  on reconnecting, every device on `main` moves to the new schema with the
+  migration's rows, and the writes made meanwhile return as held changes.
 - A device on `main` never fetches or installs the schema of a branch it
   does not follow.
 - A name removed and added again in a later generation never receives a

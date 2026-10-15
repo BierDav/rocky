@@ -17,8 +17,8 @@ Two different wants are easy to confuse:
   writes another schema, while the rest keep writing `main`. Each device is
   still on exactly one generation; only the domain spans two.
 - **One node on two branches (A).** The same node writes `main` and a dev
-  branch at once — the "sandbox or draft on the same device that keeps
-  working on `main`" case of
+  branch at once — the "dev branch on the same device that keeps working
+  on `main`" case of
   [additional live workspaces](additional_live_workspaces.md).
 
 B needs no second workspace; [phase 14](../features_09/14-seals-and-bookmarks.md)

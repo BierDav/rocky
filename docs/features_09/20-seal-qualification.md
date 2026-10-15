@@ -2,7 +2,7 @@
 
 Status: proposed; not started.
 Owner: `examples/shoppinglist-app` and its qualification harness. Depends on
-[phases 18](18-drafts-and-sandboxes.md) and
+[phases 17](17-schema-changes-through-seals.md) and
 [19](19-recovery-as-a-bookmark-move.md). Follow the
 [execution contract](README.md#agent-execution-contract).
 
@@ -13,8 +13,8 @@ Read [the generation model](README.md#generations-as-sealed-forks),
 [shopping qualification](../runtime/shopping-qualification.md).
 
 This phase qualifies the shopping app on seals with real app versions on
-real devices: compaction, kept seals, branches, drafts, splits and
-rollback.
+real devices: compaction, kept seals, branches, offline migration, splits
+and rollback.
 
 ## Settled
 
@@ -29,18 +29,21 @@ rollback.
   latest seal and points `dev` at it. The member desktop selects `dev`;
   both write, and a coordinated write runs through `dev`'s log. The phone
   sees nothing. The member switches back to `main` and drops `dev`.
-- **Schema 8 by draft.** The trusted desktop drafts schema 8 with a
-  migration, tests it and publishes. The offline member's writes come back
-  as held changes and its app re-authors them.
+- **Schema 8 tried, then published.** The trusted desktop tries schema 8
+  and its migration on a dev branch. It then seals `main` and migrates with
+  networking disabled, and publishes on reconnecting. The offline member's
+  writes come back as held changes and its app re-authors them.
 - **Split and rollback.** Two issuers publish different schemas at once;
-  the household ends on one. The trusted desktop then moves `main` back one
-  seal, and every device follows.
+  the household ends on one, and inspection lists the other as `main/1`.
+  An issuer moves `main` forward while the owner moves it back one seal;
+  every device follows the owner.
 
 ## Ordered slices
 
 1. Seal policy in the shopping app; compaction and kept seals.
 2. The bookmark selector; a dev branch with switching and local drop.
-3. Schema 8 through a draft; held changes on the member.
+3. Schema 8 tried on a branch and published offline; held changes on the
+   member.
 4. Concurrent publication and rollback.
 5. Device qualification on desktop and Android.
 

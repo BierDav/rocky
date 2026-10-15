@@ -5,6 +5,8 @@ coordinator knows the commit index, but no reachable trusted node holds it.
 [Coordinated writes](coordinated-writes.md#catch-up) first collect the missing
 entries from any device that still holds them. What no device holds is
 abandoned only by an owner-signed cut ([decision 0074](../decisions/0074-owner-signed-recovery-cuts.md)).
+[Phase 19](../features_09/19-recovery-as-a-bookmark-move.md) replaces the cut
+with one owner `continue` seal that lists the abandoned entries.
 
 ## The cut
 

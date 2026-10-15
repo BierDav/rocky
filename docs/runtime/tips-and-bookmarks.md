@@ -85,7 +85,9 @@ identities also create and delete bookmarks and move them backwards or
 sideways. Such a move off an open tip closes it in the same batch, so it is
 made on a device following that tip. The line's writes since the common seal
 return as held changes on every device holding them. Two moves of one bookmark
-from the same tip resolve to the lower digest. A call whose statements the
+from the same tip resolve to the lower digest; slice 7 of
+[phase 14](../features_09/14-seals-and-bookmarks.md) ranks the owner, trusted
+identities and issuers before the digest. A call whose statements the
 graph would not resolve to, such as a move losing to a lower digest, is
 refused instead of published.
 

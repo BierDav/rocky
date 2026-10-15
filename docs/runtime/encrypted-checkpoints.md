@@ -4,6 +4,8 @@
 [checkpoints](checkpoints.md). Finalizing rows at an issuer-signed cut is in
 [mergeable horizon](mergeable-horizon.md); the statement and rationale are at the
 [end](#the-signed-statement).
+[Phase 15](../features_09/15-lazy-compaction.md) places checkpoints only at
+seals and lists them in the tip graph.
 
 A scope keeps its stored rows, a signed checkpoint of them, and the operations
 after a per-log *horizon*. This guide is for an application or transport author

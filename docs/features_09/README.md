@@ -7,8 +7,9 @@ evidence records its verification. Phase 10 is partial: collection and owner-sig
 cuts work in `rocky-coordinator` and `rocky-secure`, without the SDK, Kotlin
 API or guides ([evidence](10-stuck-recovery-evidence.md));
 [phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phase 12 is
-skipped. Phases 14–20 replace generations' transitions, the mergeable horizon
-and recovery cuts with [sealed forks](#generations-as-sealed-forks).
+and 18 are skipped. Phase 14 is in progress. Phases 14–17, 19 and 20 replace
+generations' transitions, the mergeable horizon and recovery cuts with
+[sealed forks](#generations-as-sealed-forks).
 [features_08](../features_08/README.md) is history, not a competing next-work
 authority.
 
@@ -24,7 +25,10 @@ still sync:
 - **Old apps keep working on what is unchanged.** An app older than its
   database keeps reading and writing every table and field the new schema
   kept. Its code that touches removed items fails with ordinary SQL errors;
-  the application tells the user to update.
+  the application tells the user to update. Across a migrating change, which
+  closes its tip, an offline device's writes return as held changes; the
+  developer keeps the app forward compatible, re-authors them on a trusted
+  node, holds them until the app updates or forces the update first.
 - **Nothing incompatible is sent silently.** Local changes made before the
   migration that touch removed items are held, not sent. A newer app version
   re-authors them as new writes, or drops them.
@@ -120,6 +124,25 @@ versions are tolerated belong to the application, not to Rocky.
   ([decision 0071](../decisions/0071-staged-migration-publication.md)).
   [Phase 17](17-schema-changes-through-seals.md) removes this limitation.
 
+From [phase 14](14-seals-and-bookmarks.md) on, sealed forks accept these:
+
+- **A frontier may never fill.** A seal names a frontier its sealer need not
+  hold. If every holder of frames through it quits, no device builds,
+  keeps or compacts that seal's state; the owner's
+  [recovery](19-recovery-as-a-bookmark-move.md) is the way out. Rocky
+  requires no full node.
+- **A malicious issuer can win races.** It can vary a statement until its
+  digest is lower and so beat honest issuers' concurrent seals and moves,
+  though never a trusted identity's or the owner's. Revoking it removes its
+  statements; the owner then recovers one branch.
+- **A branch works when its trusted nodes are online.** Peers sync a tip
+  only with peers following it, and its coordinated log is run by its own
+  trusted nodes.
+- **A device may rebootstrap.** Uncoordinated seals can lose late; a device
+  that compacted at a losing seal rebuilds at the winner. Its own writes
+  follow the usual late-frame and held-change rules; Rocky never re-authors
+  them.
+
 ## Phases
 
 | Phase | Brief | Depends on | Size | Required result |
@@ -137,13 +160,13 @@ versions are tolerated belong to the application, not to Rocky.
 | 11 | [Removing strong commands](11-removing-strong-commands.md) | 9 | L | Commands and command-controlled tables are gone; the examples use coordinated writes |
 | 12 | ~~[Qualification](12-qualification.md)~~ | — | — | Skipped: not needed; phase 20 qualifies the shopping app on seals |
 | 13 | [Identities and domain credentials](13-identities-and-domain-credentials.md) | 10, 11 | L | Grants name identities; nodes sign under certificates; pseudonyms are gone; the publisher key stays with the owner; adopting a generation needs no issuer |
-| 14 | [Seals, tips and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal tips; trusted identities open branches; devices follow and sync only their bookmark's tip; late frames walk `continue` seals; one coordinated log per tip |
-| 15 | [Lazy compaction](15-lazy-compaction.md) | 14 | L | Devices compact sealed generations on their own schedule; the horizon is gone |
-| 16 | [Kept seals and views](16-kept-seals-and-views.md) | 15 | L | Nodes keep configured seals; any connection reads a seal or bookmark through read-only views |
+| 14 | [Seals, tips and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal tips; trusted identities open branches; devices follow and sync only their bookmark's tip; late frames walk `continue` seals; one coordinated log per tip; races resolve by authority, then digest |
+| 15 | [Lazy compaction](15-lazy-compaction.md) | 14 | L | Devices compact final seals on their own schedule; checkpoints sit at seals in the graph; the horizon is gone |
+| 16 | [Kept seals and views](16-kept-seals-and-views.md) | 15 | L | Nodes keep configured seals; branches open on held seals; any connection reads a seal or bookmark through read-only views |
 | 17 | [Schema changes through seals](17-schema-changes-through-seals.md) | 16 | L | A schema change is a seal; a migration closes its tip; transitions, baselines and both accepted limitations are gone |
-| 18 | [Drafts and sandboxes](18-drafts-and-sandboxes.md) | 17 | M | An issuer migrates and tests an unpublished tip, then publishes it by moving `main` |
-| 19 | [Recovery as a bookmark move](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck tip recovers with an owner `close` seal and bookmark move; cuts are gone |
-| 20 | [Seal qualification](20-seal-qualification.md) | 18, 19 | M | The shopping app compacts, keeps seals, branches, publishes a draft and rolls back on real devices |
+| 18 | ~~[Drafts and sandboxes](18-drafts-and-sandboxes.md)~~ | — | — | Skipped: a branch tries, a seal of `main` publishes |
+| 19 | [Recovery as a seal](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck tip recovers with one owner `continue` seal that excludes abandoned entries; cuts are gone |
+| 20 | [Seal qualification](20-seal-qualification.md) | 17, 19 | M | The shopping app compacts, keeps seals, branches, migrates offline and rolls back on real devices |
 
 ```mermaid
 flowchart LR
@@ -163,16 +186,15 @@ flowchart LR
     P14 --> P15["15 Lazy compaction (L)"]
     P15 --> P16["16 Kept seals and views (L)"]
     P16 --> P17["17 Schema changes through seals (L)"]
-    P17 --> P18["18 Drafts and sandboxes (M)"]
-    P10 --> P19["19 Recovery as a bookmark move (M)"]
+    P10 --> P19["19 Recovery as a seal (M)"]
     P14 --> P19
-    P18 --> P20["20 Seal qualification (M)"]
+    P17 --> P20["20 Seal qualification (M)"]
     P19 --> P20
 ```
 
 ## Generations as sealed forks
 
-Phases 13–20 reduce schema changes, compaction, branches, drafts and
+Phases 13–17, 19 and 20 reduce schema changes, compaction, branches and
 recovery to one operation. Their briefs hold the details.
 
 - **A domain** is the owner identity's key and the application. It owns
@@ -193,8 +215,12 @@ recovery to one operation. Their briefs hold the details.
 - **Bookmarks** are named, signed pointers to tips; Rocky defines none, and
   an application follows the one it names, by convention `main`. Issuers
   move bookmarks forward; trusted identities and the owner also create,
-  delete and move them backwards or sideways. Divergent moves of one
-  bookmark resolve to the lower digest.
+  delete and move them backwards or sideways.
+- **Races resolve by authority.** Concurrent seals of a tip, or moves of a
+  bookmark from one tip, resolve to the owner's, then a trusted identity's,
+  then an issuer's, and among equals to the lower digest. Revoking an
+  identity removes its statements and resolves again. Inspection lists the
+  losers as `main/1`, `main/2`, in the manner of jj; they stay branches.
 - **Peers on a branch.** A device writes only its followed bookmark's tip
   and syncs that tip's frames only with peers following it, so a branch
   costs the rest of the domain nothing. Each tip has its own coordinated
@@ -205,18 +231,36 @@ recovery to one operation. Their briefs hold the details.
 - **One live workspace** per domain holds the followed tip's tables under
   their plain names. The code keeps workspaces behind a boundary so that
   [more](../ideas/additional_live_workspaces.md) can be added later.
+- **Compaction is final only at a final seal.** A seal committed in its
+  tip's coordinated log cannot lose and may be compacted at once. Elsewhere
+  each `compact` call names how many latest seals it leaves uncompacted; a
+  device that compacted at a seal that later loses rebootstraps.
+- **Checkpoints sit at seals.** A checkpoint is a seal's state, signed by an
+  issuer; its record (seal, signer, digest, size) is part of the graph and
+  its body moves on request. A rebootstrapping device imports one, else
+  replays frames, else waits for the owner's recovery.
 - **Kept seals** are configured per node and stored as history tables.
   Unlimited read-only views show any kept seal or bookmark with the live
   tables' names, for migrations, audits and debugging. A seal not kept is
   shallow: in the graph, without state.
-- **Drafts** are unpublished tips in the live workspace; a sandbox is a
-  draft never published. Merging branches and rebasing are out of scope.
-- An inspection API shows developers the graph, bookmarks and kept seals.
+- **Branches open on held seals,** whose state the node holds: a kept seal,
+  a checkpoint it pulled, or a seal it makes now from its live state.
+  Keeping the latest seal is the developer's choice.
+- **Trying and publishing.** There are no drafts: every tip is synced to
+  its followers, and a tip without a bookmark is simply not followed. A
+  developer tries a change on a dev branch. To publish, an issuer seals
+  `main` forward and runs the migration on that fresh parent, offline if it
+  should be ready when the seal becomes public; nothing of the branch is
+  reused. Merging branches and rebasing are out of scope.
+- **Recovery is a seal.** The owner recovers a stuck tip with one
+  `continue` seal that excludes the abandoned coordinated entries.
+- An inspection API shows developers the graph, bookmarks, kept seals and
+  checkpoints.
 
 This supersedes, once the phases land, the settled items above on adopting
 on discovery, transitions, re-add baselines, the horizon's guarantees and
-the coordinator's single log per domain, the accepted limitations and
-[phase 10](10-stuck-recovery.md)'s cuts. Existence logs
+the coordinator's single log per domain, the first two accepted limitations
+and [phase 10](10-stuck-recovery.md)'s cuts. Existence logs
 stay and are compacted at seals.
 
 ## Reserved decision records
@@ -231,11 +275,19 @@ stay and are compacted at seals.
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-strong-commands.md) |
 | 0074 | 10 | [Owner-signed recovery cuts](../decisions/0074-owner-signed-recovery-cuts.md) |
-| 0075 | 13–19 | [Generations as sealed forks](../decisions/0075-generations-as-sealed-forks.md) |
+| 0075 | 13–17, 19 | [Generations as sealed forks](../decisions/0075-generations-as-sealed-forks.md) |
 
 ## Open questions
 
-None at the moment; each brief settles its own details.
+- **How members see a final seal.** [Phase 15](15-lazy-compaction.md)
+  treats a seal committed in its tip's log as final. Today the graph, not
+  the log, decides between seals: trusted nodes end the log first, but any
+  seal of an ended log is admitted, because members cannot verify the
+  coordinator's decision
+  ([evidence](14-seals-and-bookmarks-evidence.md#integration-terminal-seals-in-the-graph)).
+  Finality needs evidence members verify, such as the in-sync set's
+  acknowledgments of the terminal entry, and a rule for an owner seal that
+  arrives after it. Settle this before phase 15's first slice.
 
 ## Agent execution contract
 

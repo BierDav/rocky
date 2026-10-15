@@ -7,7 +7,7 @@ domain one live workspace: the writable live tables of the bookmark a node
 follows, stored with history in one file. Every other seal is reachable
 through read-only views. Some uses need a second writable workspace:
 
-- a sandbox or draft on the same device that keeps working on `main`;
+- a dev branch on the same device that keeps working on `main`;
 - following and writing a bookmark other than `main`, a shared branch;
 - a backend that serves several writable bookmarks of one domain.
 

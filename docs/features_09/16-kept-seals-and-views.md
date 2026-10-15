@@ -34,6 +34,12 @@ shaped exactly like the live tables.
   the node follows. A node keeps a seal only
   once it holds every frame through its frontier; before that the seal is
   shallow there.
+- **Held seals.** A node holds a seal whose state it has: a kept seal, a
+  checkpoint it imported, or a seal it just made from its live state.
+  Branches open and bookmarks are followed only onto held seals; a node
+  pulls the state from a peer that keeps the seal, or seals now. Keeping
+  the latest seal is optional and the developer's choice; the guide
+  recommends it for nodes that open branches.
 - **History tables.** Each application table has one history table. A
   change to a live row writes its previous version there, in the same
   transaction, while a kept seal still needs it. A kept seal's state is the
@@ -52,7 +58,7 @@ shaped exactly like the live tables.
 ## Ordered slices
 
 1. The workspace boundary in `rocky-secure`, with one workspace.
-2. Kept-seal configuration and history tables.
+2. Kept-seal configuration, history tables and held seals.
 3. Frozen copies for removals and migrations.
 4. Seal- and bookmark-bound read-only connections in `rocky-storage`,
    `rocky-sdk` and Kotlin, including the Room profile.
@@ -67,6 +73,8 @@ shaped exactly like the live tables.
 - A seal before a field's removal still shows the field.
 - A seal learned before its frames arrived is reported shallow until they
   do.
+- Opening a branch on a seal the node does not hold is refused; after it
+  pulls the seal's state from a node that keeps it, the same call succeeds.
 - Writes through a read-only connection fail with SQLite's read-only error.
 - Switching from `main` to a branch two seals back and returning costs
   time proportional to the rows changed since that seal, not to the table.

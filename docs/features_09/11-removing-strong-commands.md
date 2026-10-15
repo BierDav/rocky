@@ -1,6 +1,6 @@
 # 11. Removing strong commands
 
-Status: in progress; acceptance not met. See [evidence](11-removing-strong-commands-evidence.md).
+Status: implemented. See [evidence](11-removing-strong-commands-evidence.md).
 Owner: `rocky-core` definitions and classes; `rocky-secure` command modules;
 `rocky-coordinator` command operations; `rocky-sdk`; `sdks/kotlin`; the
 shopping and market examples. Depends on [phase 9](09-coordinated-writes.md).

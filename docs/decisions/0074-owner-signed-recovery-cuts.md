@@ -159,7 +159,7 @@ Faults are injected at step boundaries; deadlines use the paused clock.
    phase 7, so replica and link identities change once.
 4. Proposal, SDK native operation, Kotlin, guides and evidence.
 
-Phase 11 does not depend on this; phase 12 needs it.
+Phase 11 does not depend on this.
 
 ### Open decisions
 

@@ -214,4 +214,4 @@ Counts describe this copy's active stored rows, not retained signed history or
 other devices. Approval does not prevent concurrent issuers from signing other
 schemas; existing lineage admission rules still govern them. The UI has not
 been manually exercised, and no mobile or real-network rollout qualification
-is claimed. Phase 12 owns the full shopping removal rollout across app versions.
+is claimed. The full shopping removal rollout across app versions is unqualified; phase 12 was skipped.

@@ -4,7 +4,9 @@ Status: proposed; not started.
 Owner: `rocky-credentials` chains, grants and revocations; `rocky-secure`
 admission; `rocky-coordinator` control certificates; `rocky-sdk` and
 `sdks/kotlin` enrollment, adoption and identity port. Depends on
-[phase 10](10-stuck-recovery.md) and [phase 11](11-removing-strong-commands.md).
+[phase 10](10-stuck-recovery.md)'s implemented cuts, whose SDK and Kotlin
+surface [phase 19](19-recovery-as-a-bookmark-move.md) supersedes, and
+[phase 11](11-removing-strong-commands.md).
 Follow the [execution contract](README.md#agent-execution-contract). Takes
 decision record 0075.
 

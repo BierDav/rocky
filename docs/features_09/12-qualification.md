@@ -1,6 +1,8 @@
 # 12. Qualification
 
-Status: proposed; not started.
+Status: skipped (2026-10-15). This qualification is not needed;
+[phase 20](20-seal-qualification.md) qualifies the shopping app on seals.
+The brief is kept for reference only.
 Owner: `examples/shoppinglist-app` and its qualification harness. Depends on
 [phases 4](04-held-changes.md), [5](05-confirmed-rollouts.md),
 [7](07-migrations-at-any-size.md), [10](10-stuck-recovery.md) and

@@ -1,8 +1,9 @@
 # Phase 11 removal evidence
 
-Status: in progress; final acceptance checks pending. Work remains in
-`xlvvwknokokz`, based on `woxunxwp`, in workspace `rocky-02`.
-No Phase 10 recovery implementation was imported.
+Status: implemented. The phase was merged with phase 10's owner-signed cuts
+and passes every check on the merged tree; see
+[merged verification](#merged-verification). The earlier sections record the
+removal as done on its own line, before phase 10 joined it.
 
 ## Implementation and takeover
 
@@ -122,15 +123,45 @@ commitlint: zllmttwwuyrz: the message is empty
 It was reproduced by executing commitlint against `trunk()..woxunxwp` without
 rewriting that ancestor. The current change's own description passes.
 
-## Pending completion
+## Scope
 
-- Finish the final Kotlin check/publication, then execute the shopping gate and
-  its concurrent-decision acceptance test.
-- Run package tests on final source and complete `./scripts/check`; native
-  checks and `./scripts/check --unit` now pass. Finish
-  `./scripts/lint` and `./scripts/check`; record exact final outcomes.
-- Compare any unresolved check failures with `woxunxwp` and report limitations.
+Ordinary coordinated writes do not depend on phase 10. A production
+coordinator deployment needs a current signed bundle.
 
-There is no Phase 10 implementation dependency for ordinary coordinated writes.
-Owner-signed cuts and recovery beyond the hash window remain explicitly outside
-this change. A production coordinator deployment needs a current signed bundle.
+## Merged verification
+
+The removal line was merged with phase 10's cut chain on 2026-10-15
+(`ktunkwqp`). Both lines had bumped the same formats on their own, so the
+merged formats take the next version: Raft store and snapshot 6, link
+handshake `rocky.link.v5`, encrypted replica `rocky.encrypted-replica.v21`,
+checkpoint 11, `rocky.coordination-request.v4` and `rocky/coordinator/3`.
+
+The final check of the removal line had left two failures, both fixed in
+`vpozokso`:
+
+- `rocky-coordinator::shopping_bundle the_retired_provider_bundle_is_refused`:
+  `TrustBundle::from_json` accepted any format. It now refuses all but the
+  current one.
+- `todo-desktop secure_demo::tests::desktop_native_composition_keeps_salary_from_editor_and_relay`:
+  the demo authored two scopes in one frame. It now authors one frame per
+  scope, and the editor renames after syncing the admin's row.
+
+On the merged tree:
+
+| Command | Result |
+| --- | --- |
+| `./scripts/lint` | PASS |
+| `./scripts/check` | Formatting, clippy, unit (166) and integration (901) tests pass; one test went over budget, see below |
+| `./scripts/check --integration` after the budget exception | PASS, 901 tests |
+| `sdks/kotlin/gradlew -p sdks/kotlin check --max-workers=1` | PASS, 4m57s |
+| `sdks/kotlin/gradlew -p sdks/kotlin publishToMavenLocal --max-workers=1` | PASS |
+| `./examples/shoppinglist-app/check` | PASS: 58 JVM and 25 Android tests, `ApprovalsTest` included, desktop and Android builds |
+| `scripts/commitlint --jj 'trunk()..@'` | PASS after abandoning the empty, undescribed ancestor `zllmttwwuyrz` |
+
+`rocky-sdk::removal devices_that_reach_a_readded_field_by_different_steps_agree_on_it`
+measured 1.98s alone before the merge and 2.01–2.07s after it, against the 2 s
+integration budget. It has a dated exception in `.config/test-tiers.toml`.
+The shopping check needed a clean `examples/shoppinglist-app/build` and the
+extracted Android AARs removed, as the app's README describes. The incremental
+cache had kept the pre-removal SDK.
+

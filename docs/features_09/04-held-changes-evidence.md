@@ -121,4 +121,4 @@ conflicting first admissions remain author forks. Existence records of held
 creations remain. Recovery packages do not carry voids or held images and
 reject incomplete frame closure; backup/range/checkpoint paths are distinct.
 Long-running void retention bounds and exhaustive power-loss fault sweeps
-remain unproven. No Phase 12 shopping removal qualification is claimed.
+remain unproven. No shopping removal qualification is claimed; phase 12 was skipped.

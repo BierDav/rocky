@@ -70,7 +70,7 @@ The inherited Phase 9 repairs remain mixed into `zlrwrvzz`; their ownership and
 qualification must be resolved before declaring Phase 5 complete. No test sleeps,
 retries, assertions, deadlines, tiers or format versions were changed here.
 Manual dialog interaction, mobile and real-network rollout qualification remain
-unproven. Phase 12 owns the full shopping rollout across application versions.
+unproven. The full shopping rollout across application versions is unqualified; phase 12 was skipped.
 
 ## Subsequent split verification (2026-10-15)
 

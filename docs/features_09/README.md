@@ -1,19 +1,15 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1, 2, 3, 4, 6, 7, 8 and 9 are
-implemented, with [accepted limitations](#accepted-limitations); phases 5 and
-10 are in progress. Phase 8 implementation is recorded in its
-[evidence](08-coordinated-log-evidence.md) and phase 9 in its
-[evidence](09-coordinated-writes-evidence.md). Phase 10 has a
-[partial collection slice](10-stuck-recovery-evidence.md); owner-signed cuts
-remain unimplemented. Phases 13–20 replace generations' transitions, the
-mergeable horizon and recovery cuts with
-[sealed forks](#generations-as-sealed-forks). [features_08](../features_08/README.md)
-is history, not a competing next-work authority.
-
-[Phase 5 confirmed rollouts](05-confirmed-rollouts.md) are implemented and
-pass their rollout gates and full workspace verification after isolating the
-Phase 9 invoice repair. See [Phase 5 evidence](05-confirmed-rollouts-evidence.md).
+Status: accepted roadmap (2026-10-14). Phases 1–9 and 11 are implemented,
+with [accepted limitations](#accepted-limitations); each phase's evidence
+records its verification. Phase 10 is partial: collection and owner-signed
+cuts work in `rocky-coordinator` and `rocky-secure`, without the SDK, Kotlin
+API or guides ([evidence](10-stuck-recovery-evidence.md));
+[phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phase 12 is
+skipped. Phases 13–20 replace generations' transitions, the mergeable horizon
+and recovery cuts with [sealed forks](#generations-as-sealed-forks).
+[features_08](../features_08/README.md) is history, not a competing next-work
+authority.
 
 ## Destination
 
@@ -138,7 +134,7 @@ versions are tolerated belong to the application, not to Rocky.
 | 9 | [Coordinated writes](09-coordinated-writes.md) | 4, 8 | L | Trusted nodes make race-free writes as ordinary bundles, without split brain |
 | 10 | [Stuck recovery](10-stuck-recovery.md) | 9 | M | A stuck domain recovers what any device holds; the owner signs the rest away |
 | 11 | [Removing strong commands](11-removing-strong-commands.md) | 9 | L | Commands and command-controlled tables are gone; the examples use coordinated writes |
-| 12 | [Qualification](12-qualification.md) | 4, 5, 7, 10, 11 | M | The shopping app removes `items.category` while an older desktop keeps syncing |
+| 12 | ~~[Qualification](12-qualification.md)~~ | — | — | Skipped: not needed; phase 20 qualifies the shopping app on seals |
 | 13 | [Identities and domain credentials](13-identities-and-domain-credentials.md) | 10, 11 | L | Grants name identities; nodes sign under certificates; pseudonyms are gone; the publisher key stays with the owner; adopting a generation needs no issuer |
 | 14 | [Seals and bookmarks](14-seals-and-bookmarks.md) | 13 | L | Issuers seal and move `main`; devices follow bookmarks; late frames reach one generation forward |
 | 15 | [Lazy compaction](15-lazy-compaction.md) | 14 | L | Devices compact sealed generations on their own schedule; the horizon is gone |
@@ -146,7 +142,7 @@ versions are tolerated belong to the application, not to Rocky.
 | 17 | [Schema changes through seals](17-schema-changes-through-seals.md) | 16 | L | A schema change is a seal; transitions, baselines and both accepted limitations are gone |
 | 18 | [Drafts and sandboxes](18-drafts-and-sandboxes.md) | 17 | M | An issuer migrates and tests an unpublished seal, then publishes it by moving `main` |
 | 19 | [Recovery as a bookmark move](19-recovery-as-a-bookmark-move.md) | 10, 14 | M | A stuck domain recovers with an owner seal and `main` move; cuts are gone |
-| 20 | [Seal qualification](20-seal-qualification.md) | 12, 18, 19 | M | The shopping app compacts, keeps seals, publishes a draft and rolls back on real devices |
+| 20 | [Seal qualification](20-seal-qualification.md) | 18, 19 | M | The shopping app compacts, keeps seals, publishes a draft and rolls back on real devices |
 
 ```mermaid
 flowchart LR
@@ -160,11 +156,6 @@ flowchart LR
     P4 --> P9
     P9 --> P10["10 Stuck recovery (M)"]
     P9 --> P11["11 Removing strong commands (L)"]
-    P4 --> P12["12 Qualification (M)"]
-    P5 --> P12
-    P7 --> P12
-    P10 --> P12
-    P11 --> P12
     P10 --> P13["13 Identities and domain credentials (L)"]
     P11 --> P13
     P13 --> P14["14 Seals and bookmarks (L)"]
@@ -174,8 +165,7 @@ flowchart LR
     P17 --> P18["18 Drafts and sandboxes (M)"]
     P10 --> P19["19 Recovery as a bookmark move (M)"]
     P14 --> P19
-    P12 --> P20["20 Seal qualification (M)"]
-    P18 --> P20
+    P18 --> P20["20 Seal qualification (M)"]
     P19 --> P20
 ```
 

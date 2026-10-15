@@ -85,6 +85,8 @@ pub trait Application {
 
 mod coordination;
 pub use coordination::*;
+mod tip;
+pub use tip::TipId;
 
 mod partition_groups;
 pub use partition_groups::{GroupAddress, PartitionGroup};

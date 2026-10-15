@@ -1,210 +1,192 @@
 # Phase 13 evidence
 
-## Lane B — author ranges and node signing
+Status: implemented, with the [limits](#limits) below. Three lanes built the
+phase in parallel on one base and were merged into one line: B (slice 5,
+author ranges and node signing), A (slices 2–4, identities, the owner's key
+and revocation) and C (slice 6, credentials without a manifest and adoption
+without renewal). Slice 1 is [decision 0075](../decisions/0075-generations-as-sealed-forks.md);
+slice 7 is the guides listed below.
 
-Scope: brief slice 5. This lane removes table author keys, request/assignment
-messages and APIs, sealed device bindings, issuer-registry mapping rows and the
-principal/revocation variants that represented them. It retains principal author
-ranges and partition capability extensions.
-
-### Contracts for integration
-
-- `AuthorRange`, `MAX_AUTHOR`, `Extended` and `Extension` now live in
-  `rocky-credentials/src/extension.rs` and remain re-exported at the crate root.
-- `Authority::issue` and `issue_delegable` take an explicit `AuthorRange`
-  before the validity argument; raw issuers must allocate disjoint ranges.
-- `CredentialChain::complete(holder, node, author)`,
-  `complete_with_alias(holder, node, node, author)` and
-  `device_chain(root, holder, node, author)` require an explicit number.
-  A node leaf's `Extended.authors` is exactly `[author, author]`; the granting
-  principal's range must contain it. Its subject and signing key are the node.
-  Lane A's node certificate should take over this field and allocate distinct
-  numbers within the identity's granted range.
-- `author_number()` returns the leaf's one number. `verify_author` and
-  `verify_partition_author` now verify node leaves. A node can sign every table
-  in its grants with the same key and number. The secure runtime persists its
-  node-to-number binding atomically with accepted chains/existence/checkpoints,
-  refuses conflicting leaves and preserves the binding across reopen.
-- SDK grants and ordinary enrollment reserve up to 1,024 available numbers by default;
-  explicit `authors` chooses a count. The creator uses 1 and starts allocation
-  at 2; issuer invitations split the unallocated range. Registry capability
-  entries include the principal range; re-granting a recorded principal reuses
-  it. Non-issuer delegators persist outgoing principal ranges locally and reuse
-  them after reopen. Default grants retain half of a small free range for later
-  recipients. Allocation is saved before returning credentials. Self-enrollment and
-  provider-owned certificate allocation remain lane A's contract.
-- Kotlin and native JSON no longer expose table-author setup or lookup calls.
-  Row allocation needs an open SQL transaction and the numbered node credential.
-- Generation manifest handling, adoption renewal and publisher-key distribution
-  are retained for lanes C and A respectively.
-
-### Current formats
-
-Every changed format advances once; integration must resolve overlapping bumps
-to these values rather than incrementing them again.
-
-| Format | Before | Current |
-| --- | --- | --- |
-| Capability extension | 3 | 4 |
-| Portable author binding and label | 1 | 2 |
-| Revocation signature/ID labels | 2 | 3 |
-| Encrypted frame `ROW_FORMAT` | 8 | 9 |
-| Existence record `EXISTENCE_FORMAT` | 2 | 3 |
-| Existence signature/hash labels | 1 | 2 |
-| Checkpoint `CHECKPOINT_FORMAT` | 11 | 12 |
-| Encrypted replica file identity | 21 | 22 |
-| SDK `identity.json` | 16 | 17 |
-
-Other versions are refused. There is no migration, fallback or old decoder.
-
-### Verification
-
-- `cargo test -p rocky-credentials --locked`: passed 35 unit and 13 integration
-  tests in the initial credential run. Coverage includes two node leaves of one
-  principal, table grants, range attenuation, forged out-of-range leaves,
-  partition selectors and extension-version refusal.
-- `cargo test -p rocky-sdk --no-default-features --test author_ranges --test
-  credentials --test partitions --locked`: passed 1 new range/offline/reopen test,
-  6 credential tests and 3 partition tests. The new test took 0.25 s in that run.
-- `cargo test -p rocky-secure --lib --locked`: passed 235 tests, with 9 ignored
-  measurements/helpers, in 34.00 s. The two-node regression checks both tables,
-  signatures and non-colliding IDs, and rejects a changed number through frame
-  receipt, renewal and checkpoint import after reopen. Existing existence-log,
-  partition, checkpoint, held-change and generation tests use node signatures.
-- The mixed-grant checkpoint regression passes: an ordinary table checkpoint
-  preserves selector grants for other tables. The delivery regression that uses
-  that checkpoint also passes.
-- The Rust SQL driver suite passes 11 tests, with one deliberately ignored tier
-  case. Its fixtures now allocate IDs instead of assuming per-table numbers.
-- The final targeted SDK regression run passes 44 tests across composition,
-  grants, group secrets, peers, registry, registry revocation and shared lists.
-  Delegation coverage reopens a non-issuer delegator before narrowing a grant
-  and verifies that the recipient retains its node number.
-- `sdks/kotlin/gradlew -p sdks/kotlin check`: passed again with the final native
-  libraries, including JVM, Room, schema qualification, packaged consumers and
-  iOS simulator checks (2m 18s).
-- `./examples/shoppinglist-app/check`: passed with this lane's staged Maven
-  artifacts: hand/Room required-schema parity, all 58 JVM tests, Android test
-  compilation, desktop build and Android build. A generated copy under `target/`
-  and `-Dmaven.repo.local=<lane staging repository>` isolated this consumer from
-  concurrent lanes' Maven-local publications; tracked app configuration is unchanged.
-- `./scripts/lint`: passed.
-- `NEXTEST_TEST_THREADS=4 ./scripts/check`: passed clippy, 165 unit tests and
-  897 integration tests across the workspace and SDK without default features.
-  The integration tier took 154.93 s (90.18 s after load normalization), within
-  its 300 s budget. An earlier unrestricted run during native builds hit three
-  runtime retention timeouts; all three pass in 0.89–1.43 s with four concurrent
-  tests, with unchanged limits. No assertion failures remain.
-- A source audit over `crates/`, `sdks/` and `examples/`, including their
-  qualification trees and excluding generated/build output, finds no removed
-  key/type/RPC names (`pseudonym`, `SealedDevice`, `register_row_author`).
-
-Limits: the separate e2e tier and doc tests were not run. These checks do not
-qualify lane A's identity-provider allocation or the final merged phase.
-
-## Lane A — identities, node certificates, the owner's key and revocation
-
-Scope: brief slices 2, 3 and 4, on top of lane B. Guides:
-[credentials](../runtime/credentials.md#identities),
-[credential primitives](../runtime/credential-primitives.md#principal-ranges-and-node-authors),
+Guides: [credentials](../runtime/credentials.md),
+[credential primitives](../runtime/credential-primitives.md),
 [revocations](../runtime/revocations.md),
-[SDK enrollment](../runtime/sdk-enrollment.md#identities),
 [issuer registry](../runtime/issuer-registry.md),
+[existence logs](../runtime/existence-logs.md),
+[SDK enrollment](../runtime/sdk-enrollment.md),
+[adopting generations](../runtime/adopting-generations.md),
 [public coordination](../runtime/public-coordination.md) and
-[coordinated log](../runtime/coordinated-log.md).
+[coordinated log](../runtime/coordinated-log.md). Ideas updated:
+[one identity](../ideas/03_one_identity_and_passkeys.md),
+[pseudonym rotation](../ideas/pseudonym_rotation.md) (obsolete) and
+[partitioned existence logs](../ideas/partitioned_existence_logs.md).
 
-### Contracts for integration
+## Contracts
+
+### Identities and node certificates
 
 - `IdentityProvider` (`public_key`, `sign(purpose, message)`,
-  `reserve_author(range)`) supplies identities; `FileIdentityProvider`
-  keeps one in a directory, and a `PrivateKey` signs as itself. SDK
-  `Open.identity`, `Database::device_of`, `Database::enroll_identity`;
-  native `NativeIdentityProvider`, `file_identity`,
-  `NativeDatabase.enroll_identity` and an `identity` argument on the other
-  constructors and `prepare_device`; Kotlin `IdentityProvider`,
-  `FileIdentityProvider`, `RockyDatabase.enrollIdentity` and `identity`
-  parameters, `RockySession.revokeIdentity`.
-- `Authority { identity, chain, manifest }`: `Authority::owner` for the owner,
-  whose identity key is the publisher key, `Authority::issuer` through issuer
-  links. `issue_issuer` grants issuer authority (extension field `issues`);
-  issuer links name no manifest and may grant any grant and range below them.
-  `CredentialChain::certify`/`certify_with` take over lane B's node leaf: the
-  subject is the node, with exactly one number of the identity's range.
+  `reserve_author(range)`) supplies identities and never returns a private
+  key. `FileIdentityProvider` keeps one in a directory; a `PrivateKey` signs
+  as itself. SDK `Open.identity`, `Database::device_of` and
+  `Database::enroll_identity`; native `NativeIdentityProvider`,
+  `file_identity` and `NativeDatabase.enroll_identity`; Kotlin
+  `IdentityProvider`, `FileIdentityProvider`, `RockyDatabase.enrollIdentity`
+  and `RockySession.revokeIdentity`.
+- A chain runs publisher → issuer identities → identity → node.
+  `CredentialChain::certify`/`certify_with` sign the node certificate: the
+  node is its subject and signing key, with exactly one author number of the
+  identity's range, and it adds no rights. A stored identity's one node
+  takes its range's first number; nodes of a supplied identity reserve from
+  the bottom of its range (at most 256, half of it) through the provider.
+- The node key signs every frame, existence record and checkpoint. Table
+  author keys, pseudonym requests and assignments, sealed device bindings,
+  their registry rows and revocation variants are gone. Grants and ordinary
+  enrollment reserve up to 1,024 author numbers by default.
+
+### The owner's key, issuers and revocation
+
+- `Authority { identity, chain }`: `Authority::owner` for the owner, whose
+  identity key is the publisher key, and `Authority::issuer` through issuer
+  links (`issue_issuer`, extension field `issues`). No issuer, invitation or
+  pair request carries the publisher key.
 - `Endorsement` (the signer's issuer links and signature) signs
-  `SignedManifest`, `SignedTransition`, `SignedHorizon` and `DiscoverySecret`;
-  `verify` is authenticity, `verify_current` also needs a signer no held
-  statement ended. Adopting a generation met for the first time uses it.
-- `SignedRevocation::sign(statement, identity, chain)`; `Revocation` names
-  `nodes`, `identities` and `capabilities`, signed by `issuer`, the identity.
-  `RevocationSet::revoking_holder` tells a node's own revocation from its
-  issuer's. SDK `revoke` takes `node` or `identity`; the intent's `Rotation`
-  lists `nodes`.
-- Coordinator: `DomainControl.trusted` lists identities; `Request` carries the
-  node `certificate` (`SignedCapability::certifies`); in-sync `Member`s record
-  their `identity`; `NetworkCoordinator::certify` sets the certificate.
-- A generation's chain is placed by its leaf's manifest in `rocky-secure`, not
-  its root's. Lane C's removal of `Capability.manifest` drops the issuer-link
-  exemption in `CredentialChain::links` and `AuthorBinding::verify_chain`.
-- Node numbers: a stored identity's one node takes its range's first number;
-  nodes of a supplied identity reserve from the bottom of its range (at most
-  256, half of it) through the provider, and that node's `Minting` starts
-  above them.
+  `SignedManifest`, `SignedTransition`, `SignedHorizon` and
+  `DiscoverySecret`. `verify` checks authenticity; `verify_current` also
+  needs a signer no held statement ended, and adopting a generation met for
+  the first time uses it.
+- `Revocation` names `nodes`, `identities` and `capabilities`; revoking an
+  identity ends every chain through it. SDK `revoke` takes `node` or
+  `identity`.
+- Coordinator: `DomainControl.trusted` lists identities; a `Request` carries
+  the node certificate (`SignedCapability::certifies`); in-sync members
+  record their identity and still count as nodes.
 
-### Formats
+### Credentials without a manifest
 
-Values resolve with lane B's to these; none advances twice.
+- `Capability` names no manifest. `Credentials { publisher, revocations,
+  chain }::verify(device, app, time)` refuses grants for another
+  application; no chain verifier, cut, horizon acknowledgement or renewal
+  request takes a manifest.
+- `FieldSelection { All, Only }` (`rocky-core`): a grant without columns
+  covers every field of its table in any generation, added ones included.
+- The session `Hello` declares the sender's generation. The replica
+  remembers it per peer (at most 1,024) and uses it for what the peer is
+  sent and whether it is newer; a chain no longer decides it.
+- Adoption verifies an offer from any device, issuers first, and settles it
+  locally: `renew_into`, `renew_into_generation`, `issuer_routes` and
+  `generation_pending` are removed. An issuer that adopts derives the new
+  tables' first reader keys from the registry key and certifies its node
+  again. A failed adoption fails that peer's sync. A checkpoint, envelope
+  or frame of an unknown generation leads to adoption the same way.
+- Ordinary renewal stays for expiry, key epochs and tables a generation
+  grants like held ones; a member asks for it once per such generation, and
+  the renewal attaches the new table: projection, partitions and
+  subscriptions.
+- A readable projection grows when grants widen over an unchanged schema:
+  the replica records a projection plan of the installed schema, which
+  rebuilds it with the added tables.
+
+## Formats
+
+Each changed format advanced once across the three lanes; every other
+version is refused, with no migration or fallback.
 
 | Format | Current |
 | --- | --- |
-| Capability extension (`issues` added) | 4 |
-| Author binding (`issues` added) | 2 |
-| Revocation ID and signature labels; set entries carry the issuer chain | 3; at most 8 KiB each |
-| SDK `identity.json` (`identity`, `stored_identity`, rotation `nodes`) | 17 |
+| Capability signature and id labels | `rocky.capability.v2`, `rocky.capability.id.v2` |
+| Capability extension (`authors`, `node`, `partitions`, `issues`) | 4 |
+| Author binding (no manifest, `issues`) | 2 |
+| Revocation ID and signature labels | 3 |
+| Group secret envelope | 3 |
+| Encrypted frame `ROW_FORMAT` | 9 |
+| Existence record `EXISTENCE_FORMAT`; signature and hash labels | 3; 2 |
+| Checkpoint `CHECKPOINT_FORMAT` | 12 |
+| Encrypted replica file identity | 22 |
+| SDK `identity.json` | 17 |
 | Invitation URI | 5 |
-| Pair request labels; enrollment carries the issuer chain, no key | 3 |
-| Renewal answer, signed by the answering identity with its issuer chain | 4 |
+| Pair request labels | 3 |
+| Renewal answer | 4 |
 | Identity request and answer | 1 |
 | Signed manifest and transition labels | 2 |
-| Horizon statement (`HORIZON_FORMAT`) | 6 |
+| Horizon statement `HORIZON_FORMAT` | 6 |
 | Discovery secret label | 2 |
-| Coordinator control label, request label, Raft `FORMAT` | 3, 5, 7 |
+| Live link handshake | `rocky.link.v6` |
+| Coordinator control, request, Raft `FORMAT` | 3, 5, 7 |
 
-### Verification
+## Completion gate
 
-- `cargo test -p rocky-credentials --test identities`: three nodes of one
-  identity certify themselves with distinct numbers and no issuer; a
-  certificate adds no rights and keeps the range; revoking an identity stops
-  all three nodes, revoking one node certificate only that node; a revoked
-  issuer's manifest no longer verifies as current while what it signed
-  before stays authentic; another issuer renews its members; the owner is
-  never revoked. 41–72 ms each.
-- `cargo test -p rocky-sdk --test identities`: two further nodes join from a
-  node of the identity with no issuer reachable and read its rows, a
-  stranger's provider is refused; revoking one node makes it alone report
-  `revoked`, revoking the identity stops the other two, unrecorded ones
-  included (0.83 s and 1.09 s alone). `--test credentials`: a paired issuer
-  holds no copy of the publisher key.
-- `cargo test -p rocky-coordinator`: a control trusting an identity admits
-  its certified nodes as separate in-sync members, refuses a missing,
-  foreign or misbound certificate, and waits to drop an identity in sync.
-- `./scripts/lint` and `NEXTEST_TEST_THREADS=4 ./scripts/check`: passed, 668
-  and 239 tests. `./sdks/native/check`: passed.
-  `sdks/kotlin/gradlew -p sdks/kotlin check`: passed, with `IdentityTest`
-  (enrollIdentity, revokeIdentity) and the iOS simulator tests.
-- `./examples/shoppinglist-app/check`: passed, 58 JVM tests and both app
-  builds, against this lane's SDK published to a lane-local
-  `-Dmaven.repo.local` given through `KOTLIN_CLI_JAVA_OPTIONS`.
+| Gate item | Tests |
+| --- | --- |
+| A second node of an enrolled identity joins without an issuer, writes every table it is granted under its own key and number, and its rows never collide with the first node's | `rocky-sdk` `identities::further_nodes_of_an_identity_join_without_an_issuer`; `rocky-credentials` `identities::issuers_grant_identities_whose_nodes_certify_themselves_without_an_issuer`; `rocky-secure` `tests::sql::two_nodes_of_one_principal_write_every_table_and_refuse_number_changes`; `rocky-sdk` `author_ranges::supplied_numbered_node_writes_offline_reopens_and_keeps_its_granted_range` |
+| No pseudonym key, request, assignment or registry record remains in code or formats | Source audit below; `rocky-credentials` `signed::tests::a_capability_of_the_earlier_format_is_refused_and_names_no_generation` and `credentials::ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused` |
+| Revoking an identity stops all three of its nodes; revoking one node certificate stops only that node | `rocky-sdk` `identities::revoking_a_node_stops_it_alone_and_revoking_the_identity_stops_all_its_nodes`; `rocky-credentials` `identities::revoking_an_identity_stops_all_its_nodes_and_a_certificate_only_its_node` |
+| A revoked issuer can no longer sign a manifest, seal or bookmark move, and no device it paired holds the publisher key | `rocky-credentials` `identities::a_revoked_issuer_signs_nothing_that_verifies_and_never_held_the_owners_key`; `rocky-sdk` `credentials::an_issuer_device_enrolls_and_renews_while_the_creator_is_closed` |
+| A member adopts a newer generation while no issuer is reachable and keeps writing every table it is granted | `rocky-sdk` `generations::a_member_adopts_a_generation_from_another_member_with_no_issuer_reachable` |
+| An invitation created before a schema change enrolls a device after it | `rocky-sdk` `generations::an_invitation_created_before_a_schema_change_enrolls_a_device_after_it` |
 
-- `cargo nextest run -p rocky-sdk -p rocky-credentials -p rocky-secure -p
-  rocky-coordinator`, every tier except the 100,000-row migration: 615 of
-  616 passed.
+Related: `generations::a_table_granted_like_another_reaches_existing_members`
+(a widening renewal grows the projection),
+`migrations::an_issuer_without_a_partitions_key_keeps_the_households_generation`
+(a checkpoint of a newer generation leads to adoption),
+`shared_lists::a_cut_orders_items_and_links_categories_for_an_enrolled_writer`
+(a table granted like a held one is held in its group partition) and
+`rocky-coordinator` `controls_trust_identities_whose_certified_nodes_join_as_nodes`.
 
-Limits: `scripts/check --e2e` was not run; the package run above covers these
-crates' e2e tests except the 100,000-row migration. Of them, the e2e test
-`a_registered_service_domain_commits_ordinary_rows_and_closes` now commits
-through identity-trusted controls but fails its last assertion: a coordinated
-`BEGIN` after closing the domain still succeeds, since it only reads the head.
-On the base commit it failed earlier, and this does not involve identities. Further nodes of an issuer identity sign
-and revoke but hand out no ranges; a non-owner issuer's own expiry grows
-only when an issuer above it renews it. Lane C's adoption without renewal is
-not part of these checks.
+## Merged verification
+
+On the merged tree, lane C rebased onto lane A and lane B below both:
+
+- `./scripts/lint`: passed.
+- `NEXTEST_TEST_THREADS=4 ./scripts/check`: passed clippy, 167 unit tests
+  and 911 integration tests (670 across the workspace, 241 for `rocky-sdk`
+  without default features). The integration tier took 147.3 s of its
+  300 s budget. Two gate tests ran past 2 s under that load and pass alone in
+  0.82 s (`a_member_adopts_a_generation_from_another_member_with_no_issuer_reachable`)
+  and 0.93 s (`further_nodes_of_an_identity_join_without_an_issuer`).
+- `cargo nextest run -p rocky-core -p rocky-credentials -p rocky-coordinator
+  -p rocky-secure`, every tier: 386 passed.
+- `cargo nextest run -p rocky-sdk -E 'not test(100000)'`, every tier: 290
+  of 291 passed; the failure is the `service` test under [limits](#limits).
+- `./sdks/native/check`: passed.
+- `sdks/kotlin/gradlew -p sdks/kotlin check`: passed (3 m 50 s), including
+  `IdentityTest` and the iOS simulator tests.
+- `./examples/shoppinglist-app/check`: passed, required-schema parity, 58 JVM
+  tests and both app builds, against this tree's SDK published to a
+  workspace-local Maven repository (`-Dmaven.repo.local` through
+  `KOTLIN_CLI_JAVA_OPTIONS`); the build's traces resolve Rocky from it.
+- Source audit: `rg -i 'pseudonym|generation_pending|publisher_key|renew_into'`
+  over `crates/`, `sdks/`, `examples/` and `docs/runtime/` finds nothing;
+  neither do `SealedDevice` or `register_row_author`.
+
+The merge removed the manifest from lane A's issuer links, authorities and
+node certificates, kept its endorsement and revoked-signer checks on
+adoption and its comparison of offers by manifest hash, and replaced its
+placement of a chain's generation by the leaf's manifest with the
+generation the session declares. It also fixed three regressions lane C
+left: a widening renewal over an unchanged schema now grows the projection
+through a plan and holds the new table in its group partitions, and a
+checkpoint or envelope of a newer generation leads to adoption as a frame
+does.
+
+The 100,000-row migration
+(`migrations::a_migration_of_100000_rows_converges_on_every_member`) times
+out at 60 s under the default nextest profile, as before this phase, and
+passes under `--profile e2e` in 454 s. Not run: `./scripts/check --e2e` as
+a whole and the doc tests.
+
+## Limits
+
+- Seals and bookmark moves do not exist before
+  [phase 14](14-seals-and-bookmarks.md). Today a revoked issuer can sign no
+  manifest, transition, horizon statement or discovery value that verifies
+  as current; seals and moves will use the same `Endorsement`.
+- A table that a generation grants like a held one needs an issuer once:
+  its grant and its own reader key come with a renewal, which only an issuer
+  answers. Until then the member writes every table its chain names.
+- Further nodes of an issuer identity sign and revoke but hand out no
+  ranges; a non-owner issuer's own expiry grows only when an issuer above it
+  renews it.
+- `rocky-sdk` `service::a_registered_service_domain_commits_ordinary_rows_and_closes`
+  fails its last assertion on every lane and on `p13-b`: a coordinated
+  `BEGIN` after closing the domain still succeeds. It does not involve
+  identities.

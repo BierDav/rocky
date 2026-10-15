@@ -1,54 +1,31 @@
 # Rotating author pseudonyms
 
-Status: obsolete; [phase 13](../features_09/13-identities-and-domain-credentials.md)
-removes pseudonyms.
+Status: obsolete. [Phase 13](../features_09/13-identities-and-domain-credentials.md)
+removed pseudonyms
+([decision 0075](../decisions/0075-generations-as-sealed-forks.md)); there is
+nothing left to rotate.
 
-## Background
+## What replaced them
 
-A table that is referenced from another scope
-exposes an existence log to every device of the domain: one record per row
-created or deleted, without column values. Each record and each row `id` names
-its author. To keep that from naming a device, the author is a pseudonym: a
-signing key and an author number that the issuer assigns per device and table.
+Permissions belong to [identities](../runtime/credentials.md#identities).
+Each node signs every frame, existence record and checkpoint with its own
+node key, under a certificate its identity signed, and creates rows under
+one author number from its identity's range
+([node authors](../runtime/credential-primitives.md#principal-ranges-and-node-authors)).
+A node needs no issuer to write any table it is granted, and nodes of one
+identity never collide.
 
-## Problem
+## Consequence
 
-A pseudonym that never changes can be linked to a person once and then
-followed indefinitely:
+Frames and [existence logs](../runtime/existence-logs.md) name their node to
+every device of the domain that can see them, so a reader can link a node's
+activity across tables and partitions. Rocky does not hide it within a
+domain. An application whose data must not be linked keeps it in a separate
+domain.
 
-- A colleague who knows that Anna created one customer reads her author number
-  from that row's `id`, and with it all her activity in that table.
-- In a small team, timing alone can identify a person.
+## Rejected
 
-## Idea
-
-A device replaces its pseudonym regularly, so that a link only holds for one
-period.
-
-- The issuer assigns a fresh signing key and author number, for example with
-  each key epoch or at each credential renewal.
-- Rows created earlier keep their `id`. Only new rows carry the new author
-  number.
-- Only the issuer can connect the pseudonyms of one device, so accountability
-  is kept.
-
-## Cost
-
-- Every pseudonym leaves one permanent number per partition it wrote to: the
-  highest sequence receivers have seen from it. More rotation means more of
-  these.
-- Author numbers are consumed and never reused. The bit split of the `id`
-  bounds how often a domain can rotate.
-- A device needs to reach an issuer to rotate. Issuing several pseudonyms in
-  advance would let an offline device rotate by itself.
-
-## Open
-
-- The period: per key epoch, per renewal, or per time span.
-- Whether an old pseudonym is closed with a signed statement, so that a stolen
-  old key cannot create rows.
-- Whether rotation should also be per partition. That would hide that the same
-  device writes to two partitions, but the issuer cannot enumerate partitions
-  behind a selector such as "any warehouse".
-- This is pseudonymisation, not anonymity. Whether it satisfies a works council
-  or data-protection review is a legal question outside this design.
+Rotating per-table keys and numbers would need an issuer per node, table and
+period, which defeats self-enrollment and adoption without an issuer, and
+would only pseudonymise, not anonymise. A cloned node key stays a
+[deferred optimization](../optimizations_on_demand/cloned-node-detection.md).

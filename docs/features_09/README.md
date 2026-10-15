@@ -1,12 +1,13 @@
 # features_09: evolving schemas without limits
 
-Status: accepted roadmap (2026-10-14). Phases 1–9 and 11 are implemented,
-with [accepted limitations](#accepted-limitations); each phase's evidence
-records its verification. Phase 10 is partial: collection and owner-signed
+Status: accepted roadmap (2026-10-14). Phases 1–9, 11 and 13 are
+implemented, with [accepted limitations](#accepted-limitations) and
+[phase 13's own](13-identities-and-domain-credentials.md); each phase's
+evidence records its verification. Phase 10 is partial: collection and owner-signed
 cuts work in `rocky-coordinator` and `rocky-secure`, without the SDK, Kotlin
 API or guides ([evidence](10-stuck-recovery-evidence.md));
 [phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phase 12 is
-skipped. Phases 13–20 replace generations' transitions, the mergeable horizon
+skipped. Phases 14–20 replace generations' transitions, the mergeable horizon
 and recovery cuts with [sealed forks](#generations-as-sealed-forks).
 [features_08](../features_08/README.md) is history, not a competing next-work
 authority.

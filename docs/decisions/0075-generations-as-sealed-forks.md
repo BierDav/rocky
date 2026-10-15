@@ -1,6 +1,6 @@
 # 0075: Generations as sealed forks
 
-Status: accepted design; phase 13 in progress. Date: 2026-10-15.
+Status: accepted design; phase 13 implemented, phases 14–19 to follow. Date: 2026-10-15.
 Covers [phases 13–19](../features_09/README.md#generations-as-sealed-forks)
 of features_09. Supersedes, as those phases land, the transitions and
 baselines of [0068](0068-adopting-newer-generations.md), the horizon's

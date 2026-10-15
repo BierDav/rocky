@@ -35,6 +35,9 @@ impl<A: RowApplication> Inner<A> {
                     continue;
                 }
                 let operation = frame.operation()?;
+                if operation.header.extensions.tip != log.tip {
+                    continue;
+                }
                 if self
                     .opening_key(frame.scope()?, operation.header.extensions.generation)
                     .is_none()
@@ -73,6 +76,7 @@ impl<A: RowApplication> Inner<A> {
                         || other.entry != Some(position)
                         || usize::from(other.index) != index
                         || member.scope()?.domain != log.scope
+                        || member.operation()?.header.extensions.tip != log.tip
                     {
                         return Err(denied("recovery bundle members disagree"));
                     }

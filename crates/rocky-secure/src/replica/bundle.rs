@@ -460,10 +460,15 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Outcome, Error> {
         let author = trigger.header.public_key;
         let scope = trigger.header.extensions.scope;
+        // A coordinated write's frames sign their position in their tip's log.
+        let log = rocky_core::TipLog {
+            scope: scope.domain,
+            tip: trigger.header.extensions.tip,
+        };
         // Members fence a coordinated write by its signed log position.
         if let Some(position) = membership.entry {
             use super::coordinated::cut::{Fence, fence};
-            match fence(self.held_cuts(self.tip_log(scope.domain)), position) {
+            match fence(self.held_cuts(log), position) {
                 Fence::Live => {}
                 Fence::Cut => {
                     self.reject(trigger.hash).await?;
@@ -579,8 +584,7 @@ impl<A: RowApplication> Inner<A> {
                         .iter()
                         .map(|(frame, _, _)| frame.id())
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.record_entry_frames(self.tip_log(scope.domain), position, &ids)
-                        .await?;
+                    self.record_entry_frames(log, position, &ids).await?;
                 }
                 Ok(Outcome::Applied)
             }

@@ -567,6 +567,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(CoordinatedError::Unfollowed);
         }
         let _deciding = self.domain_log.deciding.lock().await;
+        if self.inner.lock().await.log_state(log).await?.0 == 0 {
+            self.hold_sealed_entries(log, coordinator, peers).await?;
+        }
         let status = self.resolve(log, coordinator, peers).await?;
         if status.undecided > 0 {
             return Err(CoordinatedError::Undecided);
@@ -579,6 +582,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Err(CoordinatedError::Conflict);
         }
         let (position, running, _, _) = self.inner.lock().await.log_state(log).await?;
+        // The coordinator drops only ended logs: one that forgot entries
+        // this node holds ended, though its seal has not arrived yet.
+        if head.epoch == 0 && position > head.commit {
+            return Err(CoordinatedError::Sealed);
+        }
         if position != head.commit || running != Some(head.running_hash) {
             return Err(CoordinatedError::Behind);
         }
@@ -611,7 +619,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         })
     }
     /// Refuses a slot while a committed entry's frames wait for dependencies.
-    async fn require_applied(&self, log: TipLog) -> Result<(), CoordinatedError> {
+    pub(super) async fn require_applied(&self, log: TipLog) -> Result<(), CoordinatedError> {
         let inner = self.inner.lock().await;
         for entry in inner.entries(log, &["committed"]).await? {
             let ids: Vec<Hash> = decode_bounded(&entry.frames, MAX_SECURE_BYTES)?;
@@ -933,9 +941,12 @@ impl<A: RowApplication> EncryptedReplica<A> {
         peers: &dyn EntryPeers,
     ) -> Result<CoordinatedStatus, CoordinatedError> {
         let _deciding = self.domain_log.deciding.lock().await;
+        if self.inner.lock().await.log_state(log).await?.0 == 0 {
+            self.hold_sealed_entries(log, coordinator, peers).await?;
+        }
         self.resolve(log, coordinator, peers).await
     }
-    async fn resolve(
+    pub(super) async fn resolve(
         &self,
         log: TipLog,
         coordinator: &dyn DomainLog,
@@ -1259,8 +1270,8 @@ impl<A: RowApplication> EncryptedReplica<A> {
             });
             before = Some(commitment_of(running)?);
         }
-        // Retained bundles name no tip yet: they are taken as the followed one's.
-        if entries.is_empty() && log == inner.tip_log(log.scope) {
+        // Members rebuild evidence from retained bundles of the log's tip.
+        if entries.is_empty() {
             entries = inner
                 .recovered_entries(peer, credentials, log, after)
                 .await?;

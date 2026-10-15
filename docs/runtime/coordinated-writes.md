@@ -101,8 +101,11 @@ and it never joins a log with a smaller one.
 
 `EncryptedReplica::seal_log(log, terminal, coordinator, peers)` ends a log
 directly and decides this node's entries. Entries committed before the
-terminal entry are the sealed state, and every node catches up through them;
-their frames beyond the seal's frontier walk on as late frames. A pending
+terminal entry are the sealed state; their frames beyond the seal's frontier
+walk on as late frames. A continuation's log starts at zero, so before a
+node takes anything of it, at its first slot or resolution there, it decides
+its entries of the sealed tip's log and catches up and applies every one
+committed before the terminal entry; otherwise it is `Behind`. A pending
 entry the terminal entry aborted is decided by its proposer:
 
 - With a continuation, the write moves unsent into the log of the
@@ -191,11 +194,19 @@ their tip's log. Other versions are refused.
 - An offered frame of another log that depends on an aborted entry's row
   waits for its void and then applies on the rolled-back state.
 - One undecided own entry per log; checkpoints of its scopes wait for it.
-- A write carried into a continuation keeps the log position its frames
-  signed; members cannot rebuild its entry evidence from bundles, so catch-up
-  needs a trusted node's committed index for it.
-- Until frames name their tip, a replica follows the tip of its current
-  manifest and takes the bundles it holds as that tip's.
+- A write carried into a continuation keeps its frames' tip and log
+  position, the sealed tip's; members cannot rebuild its entry evidence from
+  bundles, so catch-up needs a trusted node's committed index for it.
+- Members fence and rebuild entry evidence by the tip each frame names.
+- The coordinator keeps 8 ended logs per domain; an older one reads as
+  unopened. A node holding committed entries of it refuses its slots
+  `Sealed`; one that held none could join it again until its seal arrives.
+- Only a continuation's own sealed parent log is caught up, while that log
+  is retained, and a branch tip's log checks nothing of the log its opening
+  seal ended: a trusted node must hold that sealed state before it writes.
+- Only the followed tip's log, and the sealed log it continues, are
+  resolved: an own write a crash left undecided on a tip the node left for
+  another line stays unsent, with its effects.
 - Commit is decided against the coordinator's window; older positions need
   an owner-signed [recovery cut](stuck-recovery.md).
 

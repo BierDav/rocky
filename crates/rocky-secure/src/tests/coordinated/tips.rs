@@ -222,3 +222,31 @@ async fn a_pending_write_at_a_close_is_rolled_back_and_held() {
     assert_eq!(held.len(), 1, "{held:?}");
     assert_eq!(fixture.resolve(&fixture.alice).await.undecided, 0);
 }
+
+#[tokio::test]
+async fn a_node_holding_entries_of_a_dropped_ended_log_never_rejoins_it() {
+    let fixture = Fixture::new(1).await;
+    fixture.invoice(&fixture.alice, "before").await;
+    let main = tip_log(&fixture.lineage);
+    let client = fixture.mesh.client(&fixture.bob.0);
+    let end = |byte: u8| rocky_core::LogTerminal {
+        digest: [byte; 32],
+        continuation: None,
+    };
+    client.seal(main, end(1)).await.unwrap();
+    // Later ended logs push `main`'s out of the coordinator's retention.
+    for byte in 0..=rocky_coordinator::coordinated::ENDED_LOGS as u8 {
+        let other = TipLog {
+            scope: main.scope,
+            tip: rocky_core::TipId([byte; 32]),
+        };
+        client.seal(other, end(byte)).await.unwrap();
+    }
+    let head = fixture.mesh.log.head(main).unwrap();
+    assert_eq!((head.commit, head.terminal), (0, None));
+    assert_eq!(
+        fixture.slot(&fixture.alice).await.map(|_| ()),
+        Err(CoordinatedError::Sealed)
+    );
+    assert_eq!(fixture.mesh.log.head(main).unwrap().members.len(), 0);
+}

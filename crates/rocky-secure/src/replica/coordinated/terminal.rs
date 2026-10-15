@@ -38,6 +38,49 @@ impl<A: RowApplication> EncryptedReplica<A> {
             Err(error) => Err(error),
         }
     }
+    /// Before this node takes anything of a continuation's log, it holds and
+    /// applied every entry the sealed tip's log committed before its
+    /// terminal one: the state the continuation's writes compute on. An
+    /// unopened parent log, or one the coordinator dropped, has nothing to
+    /// verify.
+    pub(super) async fn hold_sealed_entries(
+        &self,
+        log: TipLog,
+        coordinator: &dyn DomainLog,
+        peers: &dyn EntryPeers,
+    ) -> Result<(), CoordinatedError> {
+        let parent = {
+            let inner = self.inner.lock().await;
+            let mut parent = None;
+            if let Some(graph) = inner.graphs.get(&log.scope) {
+                for seal in &graph.seals {
+                    if seal.successor().map_err(credential)? == Some(log.tip) {
+                        parent = Some(seal.statement.tip);
+                    }
+                }
+            }
+            parent
+        };
+        let Some(tip) = parent else {
+            return Ok(());
+        };
+        let parent = TipLog {
+            scope: log.scope,
+            tip,
+        };
+        let head = coordinator.log_head(parent).await.map_err(coordination)?;
+        if head.terminal.is_none() {
+            return Ok(());
+        }
+        let through = head.commit.saturating_sub(1);
+        if self.inner.lock().await.log_state(parent).await?.0 < through {
+            Box::pin(self.resolve(parent, coordinator, peers)).await?;
+            if self.inner.lock().await.log_state(parent).await?.0 < through {
+                return Err(CoordinatedError::Behind);
+            }
+        }
+        self.require_applied(parent).await
+    }
     /// Whether a terminal entry took `entry`'s position.
     pub(super) async fn ended(
         &self,
@@ -175,6 +218,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         self.inner.lock().await.learn_genesis(log, &head).await?;
         let me = coordinator.node();
         if !head.member(&me) {
+            self.hold_sealed_entries(log, coordinator, peers).await?;
             self.configure_line(log, &head, coordinator).await?;
             let sequence = {
                 let mut inner = self.inner.lock().await;

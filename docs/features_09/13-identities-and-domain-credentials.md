@@ -1,6 +1,7 @@
 # 13. Identities and domain credentials
 
-Status: proposed; not started.
+Status: in progress; slice 1 (decision record
+[0075](../decisions/0075-generations-as-sealed-forks.md)) done.
 Owner: `rocky-credentials` chains, grants and revocations; `rocky-secure`
 admission; `rocky-coordinator` control certificates; `rocky-sdk` and
 `sdks/kotlin` enrollment, adoption and identity port. Depends on

@@ -51,9 +51,9 @@ naturally holds.
 Numbers 0001 to 0036 other than these were folded into the guides below and are
 not reused. 0038 is reserved for row moves. 0048 to 0059 are reserved for
 [features_07](../features_07/README.md#reserved-decision-records); the next
-unreserved record is 0074; 0064 remains reserved for
-[features_08](../features_08/README.md#reserved-decision-records) and 0068 to
-0073 for [features_09](../features_09/README.md#reserved-decision-records).
+unreserved record is 0076; 0064 remains reserved for
+[features_08](../features_08/README.md#reserved-decision-records) and 0067 to
+0075 for [features_09](../features_09/README.md#reserved-decision-records).
 
 ## Rationale by topic
 
@@ -97,6 +97,7 @@ unreserved record is 0074; 0064 remains reserved for
 
 | Stuck coordinated recovery, removal of strong commands | [0073](0073-stuck-recovery-and-strong-commands.md) |
 | Owner-signed recovery cuts, history fencing, checkpoint binding | [0074](0074-owner-signed-recovery-cuts.md) |
+| Generations as sealed forks; identities, node certificates, bookmarks | [0075](0075-generations-as-sealed-forks.md) |
 
 ## Writing a record
 

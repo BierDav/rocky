@@ -223,7 +223,7 @@ stay and are compacted at seals.
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
 | 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-strong-commands.md) |
 | 0074 | 10 | [Owner-signed recovery cuts](../decisions/0074-owner-signed-recovery-cuts.md) |
-| 0075 | 13–19 | Generations as sealed forks |
+| 0075 | 13–19 | [Generations as sealed forks](../decisions/0075-generations-as-sealed-forks.md) |
 
 ## Open questions
 

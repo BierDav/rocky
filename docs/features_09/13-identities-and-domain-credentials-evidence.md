@@ -101,3 +101,110 @@ Other versions are refused. There is no migration, fallback or old decoder.
 
 Limits: the separate e2e tier and doc tests were not run. These checks do not
 qualify lane A's identity-provider allocation or the final merged phase.
+
+## Lane A — identities, node certificates, the owner's key and revocation
+
+Scope: brief slices 2, 3 and 4, on top of lane B. Guides:
+[credentials](../runtime/credentials.md#identities),
+[credential primitives](../runtime/credential-primitives.md#principal-ranges-and-node-authors),
+[revocations](../runtime/revocations.md),
+[SDK enrollment](../runtime/sdk-enrollment.md#identities),
+[issuer registry](../runtime/issuer-registry.md),
+[public coordination](../runtime/public-coordination.md) and
+[coordinated log](../runtime/coordinated-log.md).
+
+### Contracts for integration
+
+- `IdentityProvider` (`public_key`, `sign(purpose, message)`,
+  `reserve_author(range)`) supplies identities; `FileIdentityProvider`
+  keeps one in a directory, and a `PrivateKey` signs as itself. SDK
+  `Open.identity`, `Database::device_of`, `Database::enroll_identity`;
+  native `NativeIdentityProvider`, `file_identity`,
+  `NativeDatabase.enroll_identity` and an `identity` argument on the other
+  constructors and `prepare_device`; Kotlin `IdentityProvider`,
+  `FileIdentityProvider`, `RockyDatabase.enrollIdentity` and `identity`
+  parameters, `RockySession.revokeIdentity`.
+- `Authority { identity, chain, manifest }`: `Authority::owner` for the owner,
+  whose identity key is the publisher key, `Authority::issuer` through issuer
+  links. `issue_issuer` grants issuer authority (extension field `issues`);
+  issuer links name no manifest and may grant any grant and range below them.
+  `CredentialChain::certify`/`certify_with` take over lane B's node leaf: the
+  subject is the node, with exactly one number of the identity's range.
+- `Endorsement` (the signer's issuer links and signature) signs
+  `SignedManifest`, `SignedTransition`, `SignedHorizon` and `DiscoverySecret`;
+  `verify` is authenticity, `verify_current` also needs a signer no held
+  statement ended. Adopting a generation met for the first time uses it.
+- `SignedRevocation::sign(statement, identity, chain)`; `Revocation` names
+  `nodes`, `identities` and `capabilities`, signed by `issuer`, the identity.
+  `RevocationSet::revoking_holder` tells a node's own revocation from its
+  issuer's. SDK `revoke` takes `node` or `identity`; the intent's `Rotation`
+  lists `nodes`.
+- Coordinator: `DomainControl.trusted` lists identities; `Request` carries the
+  node `certificate` (`SignedCapability::certifies`); in-sync `Member`s record
+  their `identity`; `NetworkCoordinator::certify` sets the certificate.
+- A generation's chain is placed by its leaf's manifest in `rocky-secure`, not
+  its root's. Lane C's removal of `Capability.manifest` drops the issuer-link
+  exemption in `CredentialChain::links` and `AuthorBinding::verify_chain`.
+- Node numbers: a stored identity's one node takes its range's first number;
+  nodes of a supplied identity reserve from the bottom of its range (at most
+  256, half of it) through the provider, and that node's `Minting` starts
+  above them.
+
+### Formats
+
+Values resolve with lane B's to these; none advances twice.
+
+| Format | Current |
+| --- | --- |
+| Capability extension (`issues` added) | 4 |
+| Author binding (`issues` added) | 2 |
+| Revocation ID and signature labels; set entries carry the issuer chain | 3; at most 8 KiB each |
+| SDK `identity.json` (`identity`, `stored_identity`, rotation `nodes`) | 17 |
+| Invitation URI | 5 |
+| Pair request labels; enrollment carries the issuer chain, no key | 3 |
+| Renewal answer, signed by the answering identity with its issuer chain | 4 |
+| Identity request and answer | 1 |
+| Signed manifest and transition labels | 2 |
+| Horizon statement (`HORIZON_FORMAT`) | 6 |
+| Discovery secret label | 2 |
+| Coordinator control label, request label, Raft `FORMAT` | 3, 5, 7 |
+
+### Verification
+
+- `cargo test -p rocky-credentials --test identities`: three nodes of one
+  identity certify themselves with distinct numbers and no issuer; a
+  certificate adds no rights and keeps the range; revoking an identity stops
+  all three nodes, revoking one node certificate only that node; a revoked
+  issuer's manifest no longer verifies as current while what it signed
+  before stays authentic; another issuer renews its members; the owner is
+  never revoked. 41–72 ms each.
+- `cargo test -p rocky-sdk --test identities`: two further nodes join from a
+  node of the identity with no issuer reachable and read its rows, a
+  stranger's provider is refused; revoking one node makes it alone report
+  `revoked`, revoking the identity stops the other two, unrecorded ones
+  included (0.83 s and 1.09 s alone). `--test credentials`: a paired issuer
+  holds no copy of the publisher key.
+- `cargo test -p rocky-coordinator`: a control trusting an identity admits
+  its certified nodes as separate in-sync members, refuses a missing,
+  foreign or misbound certificate, and waits to drop an identity in sync.
+- `./scripts/lint` and `NEXTEST_TEST_THREADS=4 ./scripts/check`: passed, 668
+  and 239 tests. `./sdks/native/check`: passed.
+  `sdks/kotlin/gradlew -p sdks/kotlin check`: passed, with `IdentityTest`
+  (enrollIdentity, revokeIdentity) and the iOS simulator tests.
+- `./examples/shoppinglist-app/check`: passed, 58 JVM tests and both app
+  builds, against this lane's SDK published to a lane-local
+  `-Dmaven.repo.local` given through `KOTLIN_CLI_JAVA_OPTIONS`.
+
+- `cargo nextest run -p rocky-sdk -p rocky-credentials -p rocky-secure -p
+  rocky-coordinator`, every tier except the 100,000-row migration: 615 of
+  616 passed.
+
+Limits: `scripts/check --e2e` was not run; the package run above covers these
+crates' e2e tests except the 100,000-row migration. Of them, the e2e test
+`a_registered_service_domain_commits_ordinary_rows_and_closes` now commits
+through identity-trusted controls but fails its last assertion: a coordinated
+`BEGIN` after closing the domain still succeeds, since it only reads the head.
+On the base commit it failed earlier, and this does not involve identities. Further nodes of an issuer identity sign
+and revoke but hand out no ranges; a non-owner issuer's own expiry grows
+only when an issuer above it renews it. Lane C's adoption without renewal is
+not part of these checks.

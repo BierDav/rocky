@@ -331,6 +331,11 @@ impl TrustBundle {
         if json.len() > MAX_FRAME * 4 {
             return Err(CoordinationError::Configuration);
         }
-        serde_json::from_str(json).map_err(|_| CoordinationError::Configuration)
+        let bundle: Self =
+            serde_json::from_str(json).map_err(|_| CoordinationError::Configuration)?;
+        if bundle.format != BUNDLE_FORMAT {
+            return Err(CoordinationError::UnsupportedFormat);
+        }
+        Ok(bundle)
     }
 }

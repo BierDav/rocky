@@ -35,7 +35,6 @@ impl SecureDemo {
             .fields
             .iter()
             .map(|field| field.id)
-            .chain([app.definition().item_id("method", "SetEmployee")])
             .collect();
         let full: Vec<_> = scopes
             .iter()
@@ -177,13 +176,13 @@ impl SecureDemo {
     pub fn employee_id(&self) -> Commitment {
         rocky_core::commitment("employees.id.v1", b"demo-employee")
     }
+    /// Writes the public name and the private salary, one frame per scope.
     pub async fn set_employee(&self, name: &str, salary: &str) -> Result<(), Error> {
-        let mut changes = Vec::new();
         for (scope, after) in [
             (self.scopes[0], self.app().name(name)),
             (self.scopes[1], self.app().salary(salary)),
         ] {
-            changes.push(RowChange {
+            let change = RowChange {
                 scope,
                 row: self.employee_id(),
                 before: self
@@ -194,13 +193,17 @@ impl SecureDemo {
                     .get(&self.employee_id())
                     .cloned(),
                 after: Some(after),
-            });
+            };
+            let handle = rocky_core::commitment(
+                "employees.demo-write.v1",
+                format!(
+                    "{}:{name}:{salary}",
+                    scope.encryption.map(|b| format!("{b:02x}")).concat()
+                )
+                .as_bytes(),
+            );
+            self.admin.author(handle, vec![change], vec![]).await?;
         }
-        let handle = rocky_core::commitment(
-            "employees.demo-write.v1",
-            format!("{name}:{salary}").as_bytes(),
-        );
-        self.admin.author(handle, changes, vec![]).await?;
         Ok(())
     }
     pub async fn edit_public_name(&self, name: &str) -> Result<(), Error> {
@@ -342,8 +345,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let demo = SecureDemo::open(dir.path()).await.unwrap();
         demo.set_employee("Alice", "918273").await.unwrap();
+        demo.pump().await.unwrap();
         demo.edit_public_name("Alicia").await.unwrap();
         demo.pump().await.unwrap();
+        assert_eq!(
+            demo.admin.snapshot(demo.scopes[0]).await.unwrap().rows[&demo.employee_id()],
+            demo.app().name("Alicia")
+        );
         assert_eq!(
             demo.admin.snapshot(demo.scopes[0]).await.unwrap().rows,
             demo.editor.snapshot(demo.scopes[0]).await.unwrap().rows

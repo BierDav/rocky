@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Deterministic draft notes and strongly ordered stock reservation"
+description = "Deterministic draft notes"
 
 [dependencies]
 rocky-core.workspace = true

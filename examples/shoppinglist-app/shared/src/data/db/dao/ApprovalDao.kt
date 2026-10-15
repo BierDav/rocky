@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.Flow
 import org.example.examples.shopping.data.db.entity.DecisionRow
 import org.example.examples.shopping.data.db.entity.RequestRow
 
-/** Confirmed rows: these DAOs only read, since SQL refuses every write to a command-controlled table. */
+/** Reads ordinary request rows and committed coordinated decisions. */
 @Dao
 interface ApprovalDao {
     @Query("SELECT * FROM requests ORDER BY id")

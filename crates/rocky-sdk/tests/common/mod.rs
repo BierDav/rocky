@@ -24,7 +24,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: SCHEMA,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 impl Device {
@@ -209,7 +209,7 @@ pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
         schema,
         secrets,
         network: None,
-        commands: None,
+        coordination: None,
     })
     .err()
     .ok_or("expected removal confirmation")?

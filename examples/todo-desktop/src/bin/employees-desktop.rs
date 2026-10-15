@@ -16,8 +16,8 @@ fn App() -> Element {
         let _revision = refresh();
         async move {
             let public = demo.editor.snapshot(demo.scopes[0]).await?;
-            let confirmed = demo.editor.command_snapshot(demo.scopes[0]).await?;
-            let private = demo.admin.command_snapshot(demo.scopes[1]).await?;
+            let confirmed = demo.editor.snapshot(demo.scopes[0]).await?;
+            let private = demo.admin.snapshot(demo.scopes[1]).await?;
             let row = demo.employee_id();
             let name = public
                 .rows

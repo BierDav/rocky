@@ -491,7 +491,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
             schema,
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
-            commands: None,
+            coordination: None,
         },
         None,
     )?)?;
@@ -515,7 +515,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
             schema,
             secrets: None,
             network: Some(Network::Borrowed(gate.clone())),
-            commands: None,
+            coordination: None,
         },
         &invitation,
     )?)?;
@@ -538,7 +538,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         schema,
         secrets: None,
         network: None,
-        commands: None,
+        coordination: None,
     })?)?;
     assert_eq!(
         member.ok(json!({"type": "status"})).await["data"]["bootstrap_pending"],
@@ -586,7 +586,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
             schema,
             secrets: None,
             network: Some(Network::Owned(hub.connector("a"))),
-            commands: None,
+            coordination: None,
         },
         None,
     )?)?;
@@ -610,7 +610,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
             schema,
             secrets: None,
             network: Some(Network::Borrowed(gate.clone())),
-            commands: None,
+            coordination: None,
         },
         &invitation,
     )?)?;
@@ -635,7 +635,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
             schema,
             secrets: None,
             network: Some(Network::Owned(hub.connector("revoked"))),
-            commands: None,
+            coordination: None,
         },
         &invitation,
     )?)?;

@@ -4,8 +4,7 @@ use horizon::HorizonMessage;
 use rows::{CatchUp, ScopeSync};
 
 /// Bytes of one checkpoint page: the largest a frame holds, leaving room
-/// for the framing. The first page carries its scope's strong state; the
-/// latest confirmed command's credential chains travel beside it.
+/// for the framing.
 pub(super) const CHECKPOINT_PAGE: usize = MAX_SECURE_FRAME - 8192;
 
 #[derive(Serialize, Deserialize)]
@@ -16,11 +15,6 @@ pub(super) enum CheckpointMessage {
     },
     ArchiveBegin {
         signed: Box<SignedCheckpoint>,
-    },
-    ArchiveChain {
-        scope: ResourceScope,
-        checkpoint: Commitment,
-        chain: CredentialChain,
     },
     ArchivePage {
         page: Box<CheckpointPage>,
@@ -39,11 +33,6 @@ pub(super) enum CheckpointMessage {
     },
     CheckpointRows {
         page: Box<CheckpointPage>,
-    },
-    /// A chain the first page's strong state names, sent before that page
-    /// in a message of its own.
-    CheckpointChain {
-        chain: CredentialChain,
     },
 }
 
@@ -88,7 +77,7 @@ impl NativeSession {
                     "native session byte budget exhausted; continue checkpoint deposit on a new session",
                 ));
             }
-            let mut page = replica
+            let page = replica
                 .checkpoint_page(
                     self.peer,
                     &self.credentials,
@@ -98,16 +87,6 @@ impl NativeSession {
                     CHECKPOINT_PAGE,
                 )
                 .await?;
-            for chain in std::mem::take(&mut page.chains) {
-                self.send(CheckpointMessage::ArchiveChain {
-                    scope,
-                    checkpoint,
-                    chain,
-                })
-                .await?;
-                self.acknowledged("unexpected checkpoint archive chain acknowledgment")
-                    .await?;
-            }
             after = page.next;
             self.send(CheckpointMessage::ArchivePage {
                 page: Box::new(page),
@@ -159,35 +138,13 @@ impl NativeSession {
                 quota: CHECKPOINT_PAGE,
             })
             .await?;
-            let mut reply = self.reply::<CheckpointMessage>().await?;
-            let mut chains = Vec::new();
-            while let CheckpointMessage::CheckpointChain { chain } = reply {
-                if after.is_some() || chains.len() == 2 {
-                    return Err(denied("unexpected checkpoint archive chain"));
-                }
-                chains.push(chain);
-                reply = self.reply::<CheckpointMessage>().await?;
-            }
-            let CheckpointMessage::CheckpointRows { page } = reply else {
+            let CheckpointMessage::CheckpointRows { page } =
+                self.reply::<CheckpointMessage>().await?
+            else {
                 return Err(denied("unexpected checkpoint archive page"));
             };
-            if page.scope != scope
-                || page.checkpoint != checkpoint
-                || page.after != after
-                || !page.chains.is_empty()
-            {
+            if page.scope != scope || page.checkpoint != checkpoint || page.after != after {
                 return Err(denied("checkpoint archive page outside request"));
-            }
-            for chain in chains {
-                replica
-                    .archive_checkpoint_chain(
-                        self.peer,
-                        &self.credentials,
-                        scope,
-                        checkpoint,
-                        chain,
-                    )
-                    .await?;
             }
             after = page.next;
             complete = after.is_none();
@@ -313,27 +270,14 @@ impl NativeSession {
                 })
                 .await?;
             }
-            let mut reply = self.reply::<CheckpointMessage>().await?;
-            let mut chains = Vec::new();
-            // The caller's chain and the executor's, at most.
-            while let CheckpointMessage::CheckpointChain { chain } = reply {
-                if after.is_some() || chains.len() == 2 {
-                    return Err(denied("unexpected checkpoint response"));
-                }
-                chains.push(chain);
-                reply = self.reply::<CheckpointMessage>().await?;
-            }
-            let CheckpointMessage::CheckpointRows { mut page } = reply else {
+            let CheckpointMessage::CheckpointRows { page } =
+                self.reply::<CheckpointMessage>().await?
+            else {
                 return Err(denied("unexpected checkpoint response"));
             };
-            if page.scope != scope
-                || page.checkpoint != checkpoint
-                || page.after != after
-                || !page.chains.is_empty()
-            {
+            if page.scope != scope || page.checkpoint != checkpoint || page.after != after {
                 return Err(denied("checkpoint page outside request"));
             }
-            page.chains = chains;
             (after, complete) = (page.next, page.next.is_none());
             // The peer cuts the next page while this one is verified and
             // stored: a page costs the slower of the two, not their sum.
@@ -474,22 +418,6 @@ impl NativeSession {
                 self.send(CheckpointMessage::ArchiveProgress { after, complete })
                     .await
             }
-            CheckpointMessage::ArchiveChain {
-                scope,
-                checkpoint,
-                chain,
-            } => {
-                replica
-                    .archive_checkpoint_chain(
-                        self.peer,
-                        &self.credentials,
-                        scope,
-                        checkpoint,
-                        chain,
-                    )
-                    .await?;
-                self.send(Message::Acknowledged).await
-            }
             CheckpointMessage::ArchivePage { page } => {
                 replica
                     .archive_checkpoint_page(self.peer, &self.credentials, *page)
@@ -516,7 +444,7 @@ impl NativeSession {
                 if quota > CHECKPOINT_PAGE {
                     return Err(denied("native page quota"));
                 }
-                let mut page = replica
+                let page = replica
                     .checkpoint_page(
                         self.peer,
                         &self.credentials,
@@ -526,10 +454,6 @@ impl NativeSession {
                         quota,
                     )
                     .await?;
-                for chain in std::mem::take(&mut page.chains) {
-                    self.send(CheckpointMessage::CheckpointChain { chain })
-                        .await?;
-                }
                 self.send(CheckpointMessage::CheckpointRows {
                     page: Box::new(page),
                 })

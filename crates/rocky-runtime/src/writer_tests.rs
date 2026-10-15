@@ -304,11 +304,8 @@ async fn groups_are_bounded_by_queued_bytes() {
             replica
                 .inner
                 .commands
-                .try_send(Command::Strong(
-                    Box::new(strong::Request::StoreCommand(vec![
-                        0;
-                        MAX_FRAME_BYTES - 256
-                    ])),
+                .try_send(Command::Sync(
+                    replication::Request::Receive(vec![0; MAX_FRAME_BYTES - 256]),
                     reply,
                 ))
                 .unwrap();
@@ -441,7 +438,6 @@ async fn reads_leave_no_transaction_or_cursor_open() {
         .await
         .unwrap()
         .unwrap();
-    replica.strong_status().await.unwrap();
     replica.sync_state().await.unwrap();
     let other = crate::sqlite::Connection::open(&dir.path().join(FILE)).unwrap();
     assert_eq!(

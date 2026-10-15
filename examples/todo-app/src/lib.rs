@@ -4,8 +4,6 @@ mod policy;
 mod reducer;
 mod replay;
 mod storage;
-mod strong;
-pub use strong::{decode_snapshot, encode_snapshot};
 
 pub use payload::{Action, ActionKind, MAX_TITLE_BYTES};
 pub use policy::{RowGrant, StaticPolicy};
@@ -68,7 +66,6 @@ pub enum Error {
     DeniedAction(ActionKind),
     DeniedField(u32),
     DeniedRead,
-    DeniedCommand,
     MissingCreate(OperationId),
     Tombstoned(OperationId),
     UnresolvedDependencies(Vec<OperationId>),
@@ -129,6 +126,3 @@ impl rocky_core::Application for TodoApp {
         state.reduce(envelope, action)
     }
 }
-
-/// Todo composition selects this optional registered command.
-pub const PUBLISH_LIST_SNAPSHOT: &str = "PublishListSnapshot";

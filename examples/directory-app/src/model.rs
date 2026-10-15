@@ -1,7 +1,6 @@
 use rocky_core::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-pub const COMMAND: &str = "DirectoryTransition";
 pub const QUOTA: usize = 1024;
 #[derive(Clone)]
 pub struct DirectoryApp {
@@ -79,7 +78,6 @@ pub struct Artifacts {
     pub owner: PrincipalId,
     pub app_grants: Vec<Commitment>,
     pub keys: Vec<ResourceScope>,
-    pub pending: Vec<(Scope, RequestId)>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Deletion {
@@ -87,8 +85,6 @@ pub struct Deletion {
     pub revoked_nodes: Vec<Commitment>,
     pub revoked_grants: Vec<Commitment>,
     pub rotate_keys: Vec<ResourceScope>,
-    /// Submitted commands require historical lookup; deletion does not undo a commit.
-    pub resolve_pending: Vec<(Scope, RequestId)>,
     pub disposition: Vec<(Scope, Disposition)>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

@@ -20,6 +20,6 @@ object DesktopPlatformBindings {
         context.directory.absolutePath,
         context.deviceName,
         room = { path -> Room.databaseBuilder<ShoppingDatabase>(path) },
-        commands = ::publicCoordination,
+        coordinator = { publicCoordination(context.directory.absolutePath) },
     )
 }

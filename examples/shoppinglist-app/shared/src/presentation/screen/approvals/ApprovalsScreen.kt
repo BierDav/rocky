@@ -24,8 +24,7 @@ import org.example.examples.shopping.util.date
 data object ApprovalsKey : NavKey
 
 /**
- * Purchase approvals as strong commands: any device asks, a trusted device approves or declines, and the coordination
- * service orders every request and decision, so the first decision stands on every device.
+ * Purchase requests sync as ordinary rows; trusted devices coordinate decisions so the first committed one stands.
  */
 @Composable
 fun ApprovalsScreen(model: ApprovalsViewModel = metroViewModel()) {
@@ -47,7 +46,7 @@ fun ApprovalsScreen(model: ApprovalsViewModel = metroViewModel()) {
                     },
                 )
             }
-            if (state.asking > 0) item { Sending("Sending your request to an executing trusted device…") }
+            if (state.asking > 0) item { Sending("Saving your request…") }
             if (pending.isEmpty() && state.asking == 0) item { Hint("No open requests") }
             items(pending, key = { it.key }) { approval ->
                 ApprovalCard(
@@ -63,14 +62,12 @@ fun ApprovalsScreen(model: ApprovalsViewModel = metroViewModel()) {
             }
             item { Spacer(Modifier.height(72.dp)) }
         }
-        if (available) {
-            ExtendedFloatingActionButton(
-                onClick = { asking = true },
-                icon = { Icon(Icons.Filled.AddShoppingCart, null) },
-                text = { Text("Ask to buy") },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            )
-        }
+        ExtendedFloatingActionButton(
+            onClick = { asking = true },
+            icon = { Icon(Icons.Filled.AddShoppingCart, null) },
+            text = { Text("Ask to buy") },
+            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+        )
     }
     if (asking) {
         AskDialog(onDismiss = { asking = false }) { title, note ->
@@ -86,13 +83,13 @@ private fun CoordinationCard(status: Coordinated, trusted: Boolean) {
         Coordinated.Unavailable -> Triple(
             Color(0xFF9E9E9E),
             "No coordination service",
-            "This device opened without one, as over direct TCP. Requests need the public coordinator, reached over iroh.",
+            "Requests can be saved and synced. A coordination service must be configured before trusted devices can decide.",
         )
 
         Coordinated.Member -> Triple(
             Color(0xFF43A047),
             "Coordinated",
-            "Requests go to a trusted device that executes them; the public coordination service orders them.",
+            "Requests sync to trusted devices, and committed decisions sync back.",
         )
 
         is Coordinated.Waiting -> Triple(Color(0xFFF9A825), "Setting up coordination", status.reason)
@@ -100,7 +97,7 @@ private fun CoordinationCard(status: Coordinated, trusted: Boolean) {
         is Coordinated.Registered -> Triple(
             Color(0xFF43A047),
             "Registered with the coordination service",
-            "Control revision ${status.revision}: ${status.executors} trusted device(s) execute, ${status.invokers} device(s) may ask. " +
+            "${status.trusted} trusted device(s) can decide. Every member may ask. " +
                 "Renewed automatically before ${date(status.expiresAtEpochSeconds)}.",
         )
 
@@ -194,7 +191,7 @@ private fun AskDialog(onDismiss: () -> Unit, onAsk: (String, String) -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "A trusted device approves or declines it. The request is a strong command: it counts once its order is confirmed.",
+                    "Your request is saved here and syncs to trusted devices. Their first committed decision stands.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(title, { title = it }, label = { Text("What, e.g. Coffee machine") }, singleLine = true)

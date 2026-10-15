@@ -1,6 +1,5 @@
 use super::*;
 use crate::tests::{create, fault, mutation, runtime_config};
-use rocky_coordinator::MemoryCoordinator;
 use rocky_core::*;
 use tempfile::TempDir;
 use todo_app::{Action, StaticPolicy, TodoApp};
@@ -8,26 +7,6 @@ use todo_app::{Action, StaticPolicy, TodoApp};
 mod ledger_app;
 use ledger_app::{LedgerApp, payload};
 
-fn coordinator() -> MemoryCoordinator {
-    coordinator_with(rocky_coordinator::Limits::default())
-}
-fn coordinator_with(limits: rocky_coordinator::Limits) -> MemoryCoordinator {
-    let coordinator = MemoryCoordinator::with_limits(limits);
-    coordinator
-        .register(
-            fixtures::SCOPE,
-            fixtures::OWNER,
-            [7; 16],
-            vec![fixtures::LAPTOP, fixtures::PHONE],
-            1,
-            1,
-        )
-        .unwrap();
-    coordinator
-        .acquire(fixtures::SCOPE, fixtures::OWNER, fixtures::LAPTOP)
-        .unwrap();
-    coordinator
-}
 async fn todo(dir: &TempDir) -> Replica<TodoApp> {
     Replica::open_with_config(
         dir.path().join("test.db"),
@@ -39,116 +18,8 @@ async fn todo(dir: &TempDir) -> Replica<TodoApp> {
     .await
     .unwrap()
 }
-async fn edit_file(dir: &TempDir, sql: &str) {
-    let db = crate::sqlite::Connection::open(&dir.path().join("test.db")).unwrap();
-    db.execute(sql, ()).await.unwrap();
-}
 #[tokio::test]
-async fn rejection_isolated_from_independent_work_and_preparation_survives() {
-    let dir = TempDir::new().unwrap();
-    let replica = todo(&dir).await;
-    let coordinator = coordinator();
-    let request = replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    let mut unrelated = request.clone();
-    unrelated.id.node = fixtures::PHONE;
-    let package = StrongPackage {
-        request: unrelated,
-        base: coordinator.head(fixtures::SCOPE).unwrap(),
-        sequence: 1,
-        rows: vec![0; 4],
-        cut_base: Default::default(),
-    };
-    let forged = StrongReceipt {
-        confirmation: package.confirmation().unwrap(),
-        sequence: 1,
-    };
-    assert!(
-        replica
-            .receive_result(package.encode().unwrap(), forged.encode(), &coordinator)
-            .await
-            .is_err()
-    );
-    assert!(
-        replica
-            .strong_status()
-            .await
-            .unwrap()
-            .verification
-            .contains(&(forged.confirmation.result, VerificationState::Rejected))
-    );
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(replica.confirmed_publications().await.unwrap().len(), 1);
-    replica.close().await.unwrap();
-    let replica = todo(&dir).await;
-    replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(replica.confirmed_publications().await.unwrap().len(), 2);
-    replica.close().await.unwrap();
-}
-#[tokio::test]
-async fn every_strong_ledger_binding_is_checked_offline_on_open() {
-    let baseline = TempDir::new().unwrap();
-    let replica = todo(&baseline).await;
-    let preparer = coordinator();
-    for _ in 0..2 {
-        replica
-            .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-            .await
-            .unwrap();
-        replica.execute_pending(&preparer).await.unwrap();
-    }
-    replica.close().await.unwrap();
-    for sql in [
-        "UPDATE rocky_strong_meta SET head=zeroblob(32)",
-        "UPDATE rocky_strong_meta SET command_sequence=command_sequence+1",
-        "UPDATE rocky_preparations SET hash=zeroblob(32) WHERE rowid=1",
-        "UPDATE rocky_preparations SET receipt=zeroblob(32) WHERE rowid=1",
-        "UPDATE rocky_preparations SET verified=0 WHERE rowid=1",
-        "UPDATE rocky_preparations SET applied=0 WHERE rowid=1",
-        "UPDATE rocky_preparations SET state='unknown' WHERE rowid=1",
-        "DELETE FROM rocky_strong_outbox WHERE rowid=1",
-        "DELETE FROM rocky_preparations WHERE rowid=1",
-        "UPDATE rocky_strong_meta SET sequence=-1",
-        "UPDATE rocky_strong_meta SET id=2",
-        "UPDATE rocky_strong_meta SET configuration=NULL",
-        "DELETE FROM rocky_command_handles WHERE rowid=1",
-        "UPDATE rocky_requests SET sequence=9 WHERE rowid=1",
-    ] {
-        let dir = TempDir::new().unwrap();
-        std::fs::copy(baseline.path().join("test.db"), dir.path().join("test.db")).unwrap();
-        edit_file(&dir, sql).await;
-        let restored = Replica::open_with_config(
-            dir.path().join("test.db"),
-            TodoApp,
-            StaticPolicy::default(),
-            crate::tests::identity(),
-            runtime_config(),
-        )
-        .await;
-        assert!(matches!(restored, Err(Error::Corrupt(_))), "{sql}");
-    }
-    let dir = TempDir::new().unwrap();
-    let replica = todo(&dir).await;
-    let coordinator = coordinator();
-    replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    replica.close().await.unwrap();
-    coordinator.set_available(false).unwrap();
-    let replica = todo(&dir).await;
-    assert_eq!(replica.query().await.unwrap().strong_head.sequence, 1);
-    replica.close().await.unwrap();
-}
-#[tokio::test]
-async fn three_named_peers_have_independent_operation_and_result_obligations() {
+async fn three_named_peers_have_independent_operation_obligations() {
     let dir = TempDir::new().unwrap();
     let third = NodeId([9; 16]);
     let fourth = NodeId([10; 16]);
@@ -171,16 +42,6 @@ async fn three_named_peers_have_independent_operation_and_result_obligations() {
     .await
     .unwrap();
     let operation = create(&replica, "row").await;
-    let coordinator = coordinator();
-    replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    let hash = replica.confirmed_publications().await.unwrap()[0]
-        .receipt
-        .confirmation
-        .result;
     replica
         .acknowledge(
             fixtures::PHONE,
@@ -191,15 +52,7 @@ async fn three_named_peers_have_independent_operation_and_result_obligations() {
         )
         .await
         .unwrap();
-    replica
-        .acknowledge_result(fixtures::PHONE, hash, true)
-        .await
-        .unwrap();
     assert_eq!(replica.peer_progress(third).await.unwrap().pending, 1);
-    assert_eq!(
-        replica.strong_status().await.unwrap().commands[0].state,
-        CommandState::ConfirmedLocally
-    );
     replica.close().await.unwrap();
     let replica = Replica::open_with_config(
         dir.path().join("test.db"),
@@ -221,22 +74,15 @@ async fn three_named_peers_have_independent_operation_and_result_obligations() {
             )
             .await
             .unwrap();
-        replica.acknowledge_result(peer, hash, true).await.unwrap();
     }
-    assert_eq!(
-        replica.strong_status().await.unwrap().commands[0].state,
-        CommandState::PeerApplied
-    );
+    assert_eq!(replica.peer_progress(third).await.unwrap().pending, 0);
     replica.close().await.unwrap();
     let db = crate::sqlite::Connection::open(&dir.path().join("test.db")).unwrap();
     assert_eq!(
-        crate::tests::rows(
-            &db,
-            "SELECT COUNT(*) FROM rocky_outbox UNION ALL SELECT COUNT(*) FROM rocky_strong_outbox"
-        )
-        .await
-        .unwrap(),
-        vec![vec![SqlValue::Integer(0)], vec![SqlValue::Integer(0)]]
+        crate::tests::rows(&db, "SELECT COUNT(*) FROM rocky_outbox")
+            .await
+            .unwrap(),
+        vec![vec![SqlValue::Integer(0)]]
     );
 }
 #[tokio::test]
@@ -254,12 +100,6 @@ async fn durable_handles_survive_cancelled_waiters_reopen_and_conflicting_retrie
         .unwrap();
     let handle = receipt.handle();
     drop(receipt);
-    let command_handle = CommandHandle([3; 32]);
-    drop(
-        replica
-            .submit_command(command_handle, todo_app::PUBLISH_LIST_SNAPSHOT)
-            .unwrap(),
-    );
     replica.close().await.unwrap();
     let replica = todo(&dir).await;
     let original = replica.lookup_mutation(handle).await.unwrap().unwrap();
@@ -291,28 +131,6 @@ async fn durable_handles_survive_cancelled_waiters_reopen_and_conflicting_retrie
                     }
                 )
             )
-            .unwrap()
-            .committed()
-            .await,
-        Err(Error::Conflict)
-    ));
-    let request = replica
-        .lookup_command(command_handle)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        replica
-            .submit_command(command_handle, todo_app::PUBLISH_LIST_SNAPSHOT)
-            .unwrap()
-            .committed()
-            .await
-            .unwrap(),
-        request
-    );
-    assert!(matches!(
-        replica
-            .submit_command(command_handle, "Other")
             .unwrap()
             .committed()
             .await,
@@ -393,7 +211,6 @@ async fn local_only_second_app_matches_batched_projection_replay_and_state_admis
         .await
         .unwrap();
     }
-    assert!(a.request_command("Unused").await.is_err());
     for bytes in a.operation_page(None).await.unwrap().items {
         b.receive(bytes).await.unwrap();
     }
@@ -445,61 +262,9 @@ async fn local_only_second_app_matches_batched_projection_replay_and_state_admis
     b.close().await.unwrap();
 }
 #[tokio::test]
-async fn bounded_pages_and_frame_rejection_preserve_committed_state() {
+async fn frame_rejection_and_queue_bytes_preserve_committed_state() {
     let dir = TempDir::new().unwrap();
     let replica = todo(&dir).await;
-    // More outstanding results than one session window while no peer applies them.
-    let coordinator = coordinator_with(rocky_coordinator::Limits {
-        window_entries: 64,
-        ..Default::default()
-    });
-    for _ in 0..35 {
-        create(&replica, "row").await;
-        replica
-            .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-            .await
-            .unwrap();
-    }
-    replica.execute_pending(&coordinator).await.unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    let mut requests = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = replica.request_page(cursor).await.unwrap();
-        assert!(page.items.len() <= 32);
-        requests.extend(page.items.iter().map(|r| r.id));
-        cursor = page.next;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    assert_eq!(requests.len(), 35);
-    assert_eq!(
-        requests
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        35
-    );
-    let mut results = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = replica.result_page(cursor).await.unwrap();
-        assert!(page.items.len() <= 32);
-        results.extend(page.items.iter().map(|r| r.receipt.confirmation.result));
-        cursor = page.next;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    assert_eq!(results.len(), 35);
-    assert_eq!(
-        results
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        35
-    );
     let baseline = replica.query().await.unwrap();
     assert!(matches!(
         replica.receive(vec![0; MAX_FRAME_BYTES + 1]).await,
@@ -522,11 +287,8 @@ async fn bounded_pages_and_frame_rejection_preserve_committed_state() {
     let mut held = Vec::new();
     for _ in 0..32 {
         let (reply, _) = oneshot::channel();
-        let result = replica.inner.commands.try_send(Command::Strong(
-            Box::new(strong::Request::StoreCommand(vec![
-                0;
-                MAX_FRAME_BYTES - 256
-            ])),
+        let result = replica.inner.commands.try_send(Command::Sync(
+            replication::Request::Receive(vec![0; MAX_FRAME_BYTES - 256]),
             reply,
         ));
         if let Err(error) = result {
@@ -541,7 +303,7 @@ async fn bounded_pages_and_frame_rejection_preserve_committed_state() {
 }
 
 #[tokio::test]
-async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
+async fn custom_scope_and_second_author_persist_and_reopen() {
     let dir = TempDir::new().unwrap();
     let scope = Scope {
         mesh: MeshId([21; 16]),
@@ -549,17 +311,17 @@ async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
         domain: DomainId([23; 16]),
     };
     let caller = PrincipalId([24; 16]);
-    let executor = NodeId([25; 16]);
-    let client = NodeId([26; 16]);
+    let author = NodeId([25; 16]);
+    let second = NodeId([26; 16]);
     let policy = StaticPolicy {
         scope,
         caller,
-        nodes: vec![executor, client],
+        nodes: vec![author, second],
         ..Default::default()
     };
     let config = RuntimeConfig {
-        authors: vec![(executor, caller), (client, caller)],
-        delivery_targets: vec![executor, client],
+        authors: vec![(author, caller), (second, caller)],
+        delivery_targets: vec![author, second],
         full_nodes: Vec::new(),
     };
     let a = Replica::open_with_config(
@@ -568,7 +330,7 @@ async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
         policy.clone(),
         Identity {
             scope,
-            node: executor,
+            node: author,
             caller,
         },
         config.clone(),
@@ -581,40 +343,17 @@ async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
         policy.clone(),
         Identity {
             scope,
-            node: client,
+            node: second,
             caller,
         },
         config.clone(),
     )
     .await
     .unwrap();
-    let coordinator = MemoryCoordinator::default();
-    coordinator
-        .register(scope, caller, [27; 16], vec![executor], 1, 1)
-        .unwrap();
-    coordinator
-        .set_invokers(scope, caller, vec![(client, caller)])
-        .unwrap();
-    coordinator.acquire(scope, caller, executor).unwrap();
     let operation = create(&b, "custom author").await;
     a.receive(operation.encode().unwrap()).await.unwrap();
     a.process_pending().await.unwrap();
-    let request = b
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    a.receive_request(request.encode().unwrap()).await.unwrap();
-    a.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(coordinator.head(scope).unwrap().sequence, 1);
-    assert!(coordinator.acquire(scope, caller, client).is_err());
-    let result = a.confirmed_publications().await.unwrap().remove(0);
-    b.receive_result(
-        result.package.encode().unwrap(),
-        result.receipt.encode(),
-        &coordinator,
-    )
-    .await
-    .unwrap();
+    assert_eq!(a.query().await.unwrap().rows[0].title, "custom author");
     a.close().await.unwrap();
     b.close().await.unwrap();
     let b = Replica::open_with_config(
@@ -623,7 +362,7 @@ async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
         policy,
         Identity {
             scope,
-            node: client,
+            node: second,
             caller,
         },
         config,
@@ -631,7 +370,6 @@ async fn custom_scope_and_client_only_invoker_persist_and_reopen() {
     .await
     .unwrap();
     assert_eq!(b.query().await.unwrap().rows[0].title, "custom author");
-    assert_eq!(b.query().await.unwrap().strong_head.sequence, 1);
     b.close().await.unwrap();
 }
 
@@ -807,13 +545,6 @@ async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields()
     let replica = todo(&dir).await;
     let first = create(&replica, "first").await;
     create(&replica, "hidden").await;
-    let coordinator = coordinator();
-    replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap();
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(replica.confirmed_publications().await.unwrap().len(), 1);
     replica.close().await.unwrap();
     let policy = StaticPolicy {
         version: 2,
@@ -834,7 +565,6 @@ async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields()
     )
     .await
     .unwrap();
-    assert!(replica.confirmed_publications().await.unwrap().is_empty());
     assert_eq!(replica.query().await.unwrap().rows.len(), 1);
     assert!(
         replica
@@ -855,7 +585,7 @@ async fn paired_row_field_grants_filter_whole_rows_and_reject_forbidden_fields()
 }
 
 #[tokio::test]
-async fn observer_and_retained_history_quotas_preserve_existing_work() {
+async fn observer_quota_preserves_existing_observers() {
     let dir = TempDir::new().unwrap();
     let replica = todo(&dir).await;
     let observers: Vec<_> = (0..MAX_OBSERVERS)
@@ -864,20 +594,5 @@ async fn observer_and_retained_history_quotas_preserve_existing_work() {
     assert!(matches!(replica.observe(), Err(Error::Quota { .. })));
     drop(observers);
     drop(replica.observe().unwrap());
-    replica.close().await.unwrap();
-    // The strong ledger is bounded by bytes; rejection evidence is never pruned.
-    let bound = crate::RetentionPolicy::default().retained_bytes;
-    edit_file(&dir, &format!("INSERT INTO rocky_rejected_receipts VALUES(zeroblob(32),zeroblob({bound}),x'00','quota fixture')")).await;
-    let replica = todo(&dir).await;
-    let before = replica.query().await.unwrap();
-    let error = replica
-        .request_command(todo_app::PUBLISH_LIST_SNAPSHOT)
-        .await
-        .unwrap_err();
-    assert_eq!(error.reason(), FailureReason::Quota);
-    assert!(matches!(error, Error::Retention { .. }));
-    assert!(replica.strong_status().await.unwrap().commands.is_empty());
-    assert_eq!(replica.query().await.unwrap(), before);
-    create(&replica, "ordinary edits remain independent").await;
     replica.close().await.unwrap();
 }

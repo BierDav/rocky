@@ -48,7 +48,6 @@ impl Node {
                                 let result = session
                                     .serve_all(
                                         &self.replica,
-                                        self.coordinator.as_deref(),
                                         &delivery::Port {
                                             node: self,
                                             serving: true,

@@ -543,7 +543,7 @@ private fun refusePartitionedShapes(listsExport: String, listsOverlay: SchemaBui
         primaryKey("list", "id")
         partitionBy("list", group = group)
     }
-    // Uniqueness across partitions is a strong command.
+    // Uniqueness across partitions requires a coordinated write.
     refused("must include every partition column") {
         lists()
         table("items") {
@@ -611,22 +611,6 @@ private fun refusePartitionedShapes(listsExport: String, listsOverlay: SchemaBui
         table("items") {
             item()
             reference("list", "lists", onDelete = Delete.SetNull)
-        }
-    }
-    refused("cannot be command-controlled") {
-        table("holds") {
-            text("customer")
-            primaryKey("customer")
-            partitionBy("customer")
-            tableClass = TableClass.CommandControlled
-        }
-    }
-    refused("cannot hold confirmed rows") {
-        table("stock") {
-            text("customer")
-            primaryKey("customer")
-            partitionBy("customer")
-            tableClass = TableClass.ConfirmedReadOnly
         }
     }
     refused("an existence log needs an unpartitioned") {

@@ -95,7 +95,7 @@ async fn main() -> Result<(), Failure> {
             schema,
             secrets: None,
             network: None,
-            commands: None,
+            coordination: None,
         };
         let database = Database::create(options(&handwritten), None)?.database;
         let scope: Value = serde_json::from_str(&database.scope())?;

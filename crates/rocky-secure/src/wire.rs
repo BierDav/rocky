@@ -20,11 +20,6 @@ const DECODED_FRAMES: usize = 256;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PackageKind {
-    Invocation,
-    Rows,
-    CommandResult,
-    Job,
-    Blob,
     Checkpoint,
     /// Rows read on behalf of a peer that does not hold the scope.
     Read,
@@ -489,65 +484,5 @@ impl EncryptedPackage {
             "rocky.encrypted-package.v2",
             &encode(self)?,
         ))
-    }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PackageSet {
-    pub commitments: Vec<Commitment>,
-}
-impl PackageSet {
-    pub fn bind(packages: &[EncryptedPackage]) -> Result<Self, Error> {
-        if packages.is_empty() || packages.len() > 64 {
-            return Err(denied("package set quota"));
-        }
-        Ok(Self {
-            commitments: packages
-                .iter()
-                .map(EncryptedPackage::commitment)
-                .collect::<Result<_, _>>()?,
-        })
-    }
-    pub fn commitment(&self) -> Result<Commitment, Error> {
-        Ok(rocky_core::commitment(
-            "rocky.encrypted-package-set.v1",
-            &encode(self)?,
-        ))
-    }
-    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        encode(self)
-    }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode(bytes)
-    }
-    /// Verify a coordinator-bound package without needing private subpackages.
-    pub async fn verify_confirmed_subset(
-        package: &rocky_core::StrongPackage,
-        receipt: &rocky_core::StrongReceipt,
-        coordinator: &dyn rocky_core::Coordinator,
-        subset: &[EncryptedPackage],
-    ) -> Result<Self, Error> {
-        if package.confirmation()? != receipt.confirmation
-            || package.sequence != receipt.sequence
-            || subset
-                .iter()
-                .any(|part| part.scope.domain != package.request.scope)
-        {
-            return Err(denied("result receipt/subpackage scope mismatch"));
-        }
-        coordinator.verify(receipt).await?;
-        let binding = Self::from_bytes(&package.rows)?;
-        binding.verify_subset(subset)?;
-        Ok(binding)
-    }
-    pub fn verify_subset(&self, packages: &[EncryptedPackage]) -> Result<(), Error> {
-        if self.commitments.is_empty() || self.commitments.len() > 64 {
-            return Err(denied("package set quota"));
-        }
-        for package in packages {
-            if !self.commitments.contains(&package.commitment()?) {
-                return Err(denied("unbound result subpackage"));
-            }
-        }
-        Ok(())
     }
 }

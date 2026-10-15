@@ -73,8 +73,6 @@ sealed interface RockyEvent {
         val scopes: List<ScopeName>,
     ) : RockyEvent
 
-    /** A sync with [peer] moved rows, but pulling confirmed command results failed with [error]; it is retried. Recorded when the error changes. */
-    data class ResultsFailed(override val sequence: Long, override val atEpochMillis: Long, val peer: String, val error: String) : RockyEvent
     data class PeerAdded(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
     data class PeerRemoved(override val sequence: Long, override val atEpochMillis: Long, val peer: String) : RockyEvent
 
@@ -183,8 +181,6 @@ sealed interface RockyEvent {
                     text("peer"),
                     event.getValue("scopes").jsonArray.map { ScopeName.of(it.jsonObject) },
                 )
-
-                "results_failed" -> ResultsFailed(sequence, at, text("peer"), text("error"))
 
                 "peer_added" -> PeerAdded(sequence, at, text("peer"))
 

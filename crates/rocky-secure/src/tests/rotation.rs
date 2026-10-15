@@ -273,9 +273,8 @@ async fn an_interrupted_rotation_completes_at_open_and_never_rolls_back() {
 async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();
-    let (alice, bob) = (PrivateKey::new(), PrivateKey::new());
+    let alice = PrivateKey::new();
     let opened = config(&f, &alice, f.full(), vec![key(f.public, 1, OLD)]);
-    let (coordinator, _) = recovery::coordination(&f, &[&opened]);
     let replica = EncryptedReplica::open(dir.path().join("alice.db"), f.app(), opened)
         .await
         .unwrap();
@@ -285,41 +284,6 @@ async fn earlier_epochs_retire_only_when_nothing_retained_needs_them() {
         .await
         .unwrap();
     insert(&replica, &f, 2).await;
-    // Recovery evidence spans both epochs: the original frames, with the
-    // inventory naming the latest. A recipient holding both keys reads all.
-    let both = vec![key(f.public, 1, OLD), key(f.public, 2, NEW)];
-    let recipient = config(&f, &bob, f.full(), both);
-    let package = replica
-        .export_recovery(
-            bob.public_key(),
-            &recipient.credentials,
-            vec![f.public],
-            &[9; 32],
-            &coordinator,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        package.inventory.key_epochs,
-        [(
-            f.public,
-            [
-                rocky_core::KeyEpoch::new(1, &OLD),
-                rocky_core::KeyEpoch::new(2, &NEW)
-            ]
-            .into()
-        )]
-        .into()
-    );
-    assert_eq!(package.inventory.frontier.len(), 2);
-    let restored = EncryptedReplica::open(dir.path().join("bob.db"), f.app(), recipient)
-        .await
-        .unwrap();
-    restored
-        .import_recovery(&package, &[9; 32], &coordinator)
-        .await
-        .unwrap();
-    assert_eq!(rows(&restored, &f).await, 2);
     // The current epoch is not retired, and epoch 1 still opens a retained write.
     assert!(
         replica

@@ -95,6 +95,9 @@ unreserved record is 0074; 0064 remains reserved for
 | Service boundaries, resource ownership | [sdk-composition](../runtime/sdk-composition.md#design-rationale) |
 | Transport-independent identity, contact records, peer sync | [sdk-transports](../runtime/sdk-transports.md#design-rationale) |
 
+[Decision 0073](0073-stuck-recovery-and-command-removal.md) records command
+removal and the boundary to Phase 10 stuck recovery.
+
 ## Writing a record
 
 Prefer adding to a guide's rationale section. For a new record, create

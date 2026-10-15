@@ -3,18 +3,15 @@
 //! secure SQL session commits. See `docs/runtime/secure-sql.md`.
 use crate::{
     ApplicationManifest, Commitment, DomainId, KeyColumn, LogicalSchema, RowApplication, RowChange,
-    RowFields, RowWrite, SchemaError, SqlValue, TableClass, commitment, key_components,
+    RowFields, RowWrite, SchemaError, SqlValue, commitment, key_components,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// One mergeable or command-controlled table: its field per column, in
-/// declared order.
+/// One mergeable table: its field per column, in declared order.
 #[derive(Clone, Debug)]
 pub struct TypedTable {
     pub sql_name: String,
     pub id: Commitment,
-    /// Command-controlled rows change only through confirmed results.
-    pub class: TableClass,
     pub fields: Vec<Commitment>,
     /// Column positions of the primary key, in key order.
     pub key: Vec<usize>,
@@ -28,8 +25,7 @@ impl TypedTable {
         &self.units
     }
 }
-/// A logical schema's typed tables as a `RowApplication`. Its row writes
-/// are mergeable; confirmed results also reach command-controlled tables.
+/// A logical schema's typed tables as a `RowApplication`.
 #[derive(Clone, Debug)]
 pub struct TypedRows {
     schema: LogicalSchema,
@@ -63,7 +59,6 @@ impl TypedRows {
                 TypedTable {
                     sql_name: table.sql_name.clone(),
                     id,
-                    class: table.class,
                     fields: table
                         .columns
                         .iter()
@@ -335,11 +330,6 @@ impl TypedRows {
         }
         Ok(tuple)
     }
-    /// Checks the changes of a confirmed command result, which may also
-    /// change command-controlled tables.
-    pub fn validate_confirmed(&self, changes: &[RowChange]) -> Result<(), String> {
-        changes.iter().try_for_each(|change| self.validate(change))
-    }
     fn validate(&self, change: &RowChange) -> Result<(), String> {
         self.identity(change)?;
         self.change_partition(change)?;
@@ -378,19 +368,8 @@ impl RowApplication for TypedRows {
     fn row_identity(&self, change: &RowChange) -> Result<Option<crate::RowIdentity>, String> {
         self.identity(change)
     }
-    /// Row writes: a command-controlled table refuses every one.
     fn validate_changes(&self, changes: &[RowChange]) -> Result<(), String> {
-        for change in changes {
-            if let Some(table) = self.tables.get(&change.scope.table)
-                && table.class == TableClass::CommandControlled
-            {
-                return Err(format!(
-                    "{} is command-controlled; only confirmed commands change it",
-                    table.sql_name
-                ));
-            }
-        }
-        self.validate_confirmed(changes)
+        changes.iter().try_for_each(|change| self.validate(change))
     }
     /// A foreign key's columns merge as one unit: an update publishes all
     /// of them or none, so concurrent edits never mix two references.

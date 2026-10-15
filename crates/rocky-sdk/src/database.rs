@@ -2,7 +2,6 @@
 //! optional network service. See `docs/runtime/sdk-composition.md`.
 use crate::{
     Failure,
-    commands::{Commands, HANDLER_DEADLINE, Hosted},
     connection::{self, ConnectionOptions, Page, SqlFailure, TableEvents},
     enrollment::{DEFAULT_TTL, DeviceKeys, Settings, Supplied, now},
     node::{self, Client, Node},
@@ -31,9 +30,15 @@ pub struct Open<'a> {
     pub schema: &'a str,
     pub secrets: Option<Arc<dyn SecretStore>>,
     pub network: Option<Network>,
-    /// The coordinator and handlers of the schema's strong commands.
-    /// Without them commands are submitted and read, never run or settled.
-    pub commands: Option<Commands>,
+    /// Optional metadata log or coordination service.
+    pub coordination: Option<Coordination>,
+}
+/// Optional coordination, independent of database and network ownership.
+#[derive(Clone)]
+pub enum Coordination {
+    Composed(Arc<dyn rocky_core::DomainLog>),
+    #[cfg(feature = "iroh")]
+    Service(Box<crate::TrustBundle>),
 }
 /// An open database and the network service it opened with, if any.
 pub struct Opened {
@@ -61,7 +66,7 @@ struct Setup {
     schema: Schema,
     secrets: Arc<dyn SecretStore>,
     install: Install,
-    commands: Option<Commands>,
+    coordination: Option<Coordination>,
     confirmation: Option<String>,
 }
 enum Command {
@@ -230,7 +235,7 @@ impl Database {
                 .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
             directory,
             install,
-            commands: open.commands,
+            coordination: open.coordination,
             confirmation,
         };
         let network = open.network;
@@ -713,7 +718,7 @@ async fn identity(
 /// Readies an opened replica for this identity: its readable tables,
 /// group keys, credential signer and row authors.
 pub(crate) async fn attach(
-    replica: &EncryptedReplica<rocky_core::TypedCommands>,
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &mut Settings,
     vault: &crate::secrets::Vault,
     domain: &crate::domain::Domain,
@@ -778,7 +783,7 @@ pub(crate) async fn attach(
 
 /// Gives every granted scope without one the default retention policy.
 pub(crate) async fn retain(
-    replica: &EncryptedReplica<rocky_core::TypedCommands>,
+    replica: &EncryptedReplica<rocky_core::TypedRows>,
     settings: &Settings,
     domain: &crate::domain::Domain,
 ) -> Result<(), Failure> {
@@ -908,7 +913,7 @@ pub(crate) fn publication(domain: &crate::domain::Domain) -> rocky_core::Commitm
 /// Inserts a row of `table` for each row of `select`, with the next id of
 /// its partition, inside the open transaction.
 async fn insert_rows(
-    sql: &rocky_secure::SecureSql<rocky_core::TypedCommands>,
+    sql: &rocky_secure::SecureSql<rocky_core::TypedRows>,
     schema: &rocky_core::LogicalSchema,
     table: &str,
     select: &str,
@@ -1101,23 +1106,11 @@ async fn run(
                 settings.credentials = renewed.chain;
             }
         }
-        // The handler runs on a thread of its own, outside this reactor.
-        let host = match setup
-            .commands
-            .as_ref()
-            .and_then(|commands| Some((commands.handler.clone()?, commands.deadline)))
-        {
-            Some((handler, deadline)) => {
-                let deadline = deadline.unwrap_or(HANDLER_DEADLINE);
-                Some(Hosted::start(handler, deadline)? as Arc<dyn rocky_core::CommandHost>)
-            }
-            None => None,
-        };
         // The migrations of a generation this issuer signed.
         if let Some(pending) = crate::generation::Migration::read(&path)? {
             migrate(&directory, &mut settings, &vault, &path, pending.from).await?;
         }
-        let domain = settings.domain()?.hosted(host);
+        let domain = settings.domain()?;
         // A restored file is rebound to this device's identity first.
         let marker = directory.join(crate::backup::MARKER);
         let replica = if marker.exists() {
@@ -1144,51 +1137,33 @@ async fn run(
         attach(&replica, &mut settings, &vault, &domain, &path).await?;
         retain(&replica, &settings, &domain).await?;
         #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
-        let mut acquire: Option<crate::node::Acquire> = None;
-        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
         let mut service: Option<crate::owner::Service> = None;
-        #[cfg_attr(not(feature = "iroh"), allow(unused_mut))]
-        let mut log: Option<Arc<dyn rocky_core::DomainLog>> = None;
-        let coordinator = match setup.commands.as_ref().map(|c| &c.coordinator) {
+        let log: Option<Arc<dyn rocky_core::DomainLog>> = match &setup.coordination {
             None => None,
-            Some(crate::Coordination::Composed(coordinator)) => Some(coordinator.clone()),
+            Some(Coordination::Composed(log)) => Some(log.clone()),
             #[cfg(feature = "iroh")]
-            Some(crate::Coordination::Service(bundle)) => {
+            Some(Coordination::Service(bundle)) => {
                 let transport = link
                     .as_ref()
                     .map(|(transport, _)| transport.clone())
-                    .ok_or("a coordination service is reached over the database's network")?;
+                    .ok_or("a coordination service needs the database's network")?;
                 let key = rocky_credentials::PrivateKey::from_bytes(&vault.get("node")?);
                 service = Some(crate::owner::Service::new(
                     (**bundle).clone(),
                     directory.to_path_buf(),
                 ));
-                let client = Arc::new(rocky_coordinator::service::NetworkCoordinator::connect(
-                    bundle,
-                    key,
-                    directory.join("coordinator.evidence"),
-                    transport,
-                )?);
-                log = Some(client.clone() as Arc<dyn rocky_core::DomainLog>);
-                let acquiring = client.clone();
-                acquire = Some(Arc::new(move |scope, epoch| {
-                    let client = acquiring.clone();
-                    Box::pin(async move {
-                        let id = rocky_core::commitment(
-                            "rocky.sdk-acquire.v1",
-                            &[&scope.domain.0[..], &epoch.to_le_bytes()].concat(),
-                        );
-                        client.acquire(scope, id).await.map(|_| ())
-                    })
-                }));
-                Some(client as Arc<dyn rocky_core::Coordinator>)
+                Some(Arc::new(
+                    rocky_coordinator::service::NetworkCoordinator::connect(
+                        bundle, key, transport,
+                    )?,
+                ))
             }
         };
         settings.save(&path)?;
-        Ok::<_, Failure>((domain, replica, coordinator, acquire, service, log))
+        Ok::<_, Failure>((domain, replica, service, log))
     }
     .await;
-    let (domain, replica, coordinator, acquire, service, log) = match opened {
+    let (domain, replica, service, log) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             if let Some((transport, true)) = &link {
@@ -1202,17 +1177,9 @@ async fn run(
     };
     let scope = serde_json::to_string(&domain.scope)?;
     let node = Arc::new(
-        Node::new(
-            replica.clone(),
-            domain,
-            vault,
-            settings,
-            path.clone(),
-            coordinator,
-            acquire,
-        )
-        .with_service(service)
-        .with_declared(setup.schema.clone()),
+        Node::new(replica.clone(), domain, vault, settings, path.clone())
+            .with_service(service)
+            .with_declared(setup.schema.clone()),
     );
     node.coordinate(log);
     if let Err(error) = async {
@@ -1378,7 +1345,7 @@ async fn run(
 /// thread, so no statement waits for the device, and one flush covers every
 /// commit that arrived during the previous one. A flush failure surfaces at
 /// the next call that exposes data, which flushes itself.
-async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedCommands>) {
+async fn settle_commits(replica: EncryptedReplica<rocky_core::TypedRows>) {
     let mut revisions = replica.observe_revision();
     while revisions.changed().await.is_ok() {
         let _ = replica.flush().await;
@@ -1450,7 +1417,7 @@ mod tests {
                     schema: SCHEMA,
                     secrets: None,
                     network: None,
-                    commands: None,
+                    coordination: None,
                 };
                 let error = if create {
                     Database::create(options, None)
@@ -1499,7 +1466,7 @@ mod tests {
             schema: SCHEMA,
             secrets: None,
             network: None,
-            commands: None,
+            coordination: None,
         };
         let database = Database::create(options(), None)?.database;
         let session = database.session();
@@ -1581,7 +1548,7 @@ mod tests {
                 schema: r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,
                 network: None,
-                commands: None,
+                coordination: None,
             },
             None,
         )?;

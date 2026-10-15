@@ -1,6 +1,5 @@
 //! Trusted inventory fixture for the Kotlin/JVM qualification consumer.
 use inventory_app::{InventoryApp, Policy};
-use rocky_coordinator::MemoryCoordinator;
 use rocky_core::{DomainId, MeshId, NodeId, PrincipalId, Scope};
 use rocky_runtime::{Identity, Replica, sdk::Session};
 use serde::Deserialize;
@@ -42,13 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    let coordinator = Arc::new(MemoryCoordinator::default());
-    coordinator.register(scope, caller, [6; 16], vec![node], 1, 1)?;
-    coordinator.acquire(scope, caller, node)?;
     let session = Arc::new(Session::new(replica.clone()));
     let (input, mut messages) = mpsc::channel::<Message>(32);
     let (output, mut replies) = mpsc::channel::<Value>(32);
-    output.send(json!({"scope":scope,"version":1})).await?;
+    output
+        .send(json!({"scope":scope,"version":rocky_runtime::sdk::VERSION}))
+        .await?;
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         let mut reader = stdin.lock();
@@ -90,19 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .map_err(|_| "host closed")?;
                 let session = session.clone();
-                let coordinator = coordinator.clone();
-                let replica = replica.clone();
                 let output = output.clone();
                 tasks.spawn_local(async move {
                     let _permit = permit;
                     let encoded = serde_json::to_vec(&message.call)?;
-                    let result = session
-                        .dispatch_json(&encoded, Some(coordinator.as_ref()))
-                        .await;
-                    // Scheduling belongs to this trusted fixture's composition.
-                    if message.call["request"]["type"] == "invoke" {
-                        replica.execute_pending(coordinator.as_ref()).await?;
-                    }
+                    let result = session.dispatch_json(&encoded).await;
                     let reply: Value = serde_json::from_slice(&result)?;
                     output.send(json!({"id":message.id,"reply":reply})).await?;
                     Ok::<_, Box<dyn std::error::Error>>(())

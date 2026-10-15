@@ -10,14 +10,13 @@ The runtime flushes commits, serializes its file-copy boundary and uses SQLite
 `VACUUM INTO` for a coherent full-file copy. The signed inventory binds exporter,
 publisher, scope, manifest, revision and each file's length/hash. Files are streamed
 with a 64 KiB buffer; inventory is capped at 256 KiB. The archive carries installed
-credential/generation metadata and optional `coordinator.evidence` alongside SQLite.
+credential/generation metadata in `identity.json` alongside SQLite.
 
 SQLite retains typed projections and canonical signed operation bytes, business
-keys/incarnations, tombstones, bundle dependencies, mutation handles, pending
-invocations, command tickets/preparations/results, signed receipts and effect
-observations. Coordinator evidence retains retirement/session facts and historical
-receipts; missing public-window records still mean explicit historical unavailability.
-A backup never makes the public coordinator an application payload store.
+keys/incarnations, tombstones, bundle dependencies, mutation handles, held changes
+and coordinated-entry metadata. Application decisions are ordinary rows; no
+command ticket, result, receipt cache or managed command effect is retained.
+The coordinator remains a metadata service, never an application payload store.
 
 The archive contains no signing/reader keys and is not encrypted as a whole.
 Private storage and public credential records remain sensitive backup material;
@@ -40,26 +39,27 @@ storage and encrypted recovery-key packages remain separate mechanisms.
    same archive. Another archive or an already finished installation refuses.
 4. Rebind file ownership once, retaining original author logs and every durable
    handle. Reopen verifies signed history and reconstructs authorized projections.
-   Imported grants do not renew old invocations or bypass current revocations.
-5. Check private-scope/key completeness and coordinator readiness explicitly;
-   obtain missing history/keys through authorized recovery. Fence an old executor
-   before claiming execution readiness. New mutations use the fresh author's log.
+   Imported grants do not bypass current revocations.
+5. Check private-scope/key completeness and coordinated-log readiness explicitly.
+   Obtain missing history/keys from authorized peers. New mutations use the
+   fresh author's log; restore does not create a new identity for an uncertain
+   coordinated append or synthesize its outcome.
 
-Uncertain command/effect identities stay unchanged. Restore/rebuild/reopen never
-calls an effect provider or runs a command handler merely to replay data. Scheduling
-an unresolved ticket remains explicit, and uses its original request identity.
-Retired/expired coordinator requests are never redispatched under a fresh ID.
-Missing payloads/keys and acknowledged-loss replacement retain the explicit
-[fenced recovery behavior](recovery-and-effects.md).
+A permanently lost in-sync set needs the separate
+[Phase 10 recovery contract](../features_09/10-stuck-recovery.md). Database
+backup does not replace coordinator durability or authorize a recovery cut.
 
 ## Qualification
 
-SDK backup tests cover altered archives, foreign-domain invitations, fresh identity,
-unsent original-author operations, new-author writes, reopen and uncertain command
-lookup after a lost coordinator response. The packaged Kotlin consumer restores
-queries and an applied ticket without another handler call. Runtime recovery/effects
-subprocess tests remain the evidence for interrupted preparation/confirmation and
-external-effect uncertainty. See [phase-8 evidence](sdk-packaging.md#build-and-consume-a-package).
+SDK backup tests cover altered/retired archives, foreign-domain invitations,
+fresh identity, unsent original-author operations, new-author writes and reopen.
+The packaged Kotlin consumer restores ordinary queries and reopens generations.
+See [Phase 11 evidence](../features_09/11-removing-strong-commands-evidence.md)
+for current verification.
 
 The SDK archive is one placement group's coherent local cut, not an atomic backup
 of arbitrary application files, key escrow or a coordinator disaster-recovery backup.
+
+Current archives use `rocky.backup.v2` and inventory format 2. They carry only
+`identity.json` and `rocky.sqlite`; the removed coordinator receipt cache is
+never archived. Earlier archives are refused, without an alternate reader.

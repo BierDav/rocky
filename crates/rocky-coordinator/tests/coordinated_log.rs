@@ -10,10 +10,10 @@ use support::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn coordinated_log_survives_leader_change_and_deadline_without_double_commit() {
     let mut cluster = Cluster::start().await;
-    let admin = cluster.client(&cluster.admin, "log-admin");
-    let issuer = cluster.client(&cluster.issuer, "log-owner");
-    let first = cluster.client(&cluster.executor, "log-first");
-    let second = cluster.client(&cluster.alternate, "log-second");
+    let admin = cluster.client(&cluster.admin);
+    let issuer = cluster.client(&cluster.issuer);
+    let first = cluster.client(&cluster.executor);
+    let second = cluster.client(&cluster.alternate);
     issuer
         .call([1; 32], Operation::Control(cluster.app_control(1)))
         .await

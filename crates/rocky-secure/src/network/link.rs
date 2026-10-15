@@ -3,7 +3,7 @@ use super::*;
 use tokio::io::{ReadHalf, WriteHalf};
 
 /// The handshake's version; its signing label carries it, so another is refused.
-pub(super) const HANDSHAKE_VERSION: u32 = 3;
+pub(super) const HANDSHAKE_VERSION: u32 = 4;
 pub const CHANNELS: u16 = 6;
 pub mod channels;
 pub const FRAME_BYTES: usize = 64 * 1024;
@@ -401,30 +401,11 @@ pub async fn scope_token<A: RowApplication>(
             .map(|log| (log.author, log.held))
             .collect();
         let existence: Vec<_> = inner.existence_frontier(scope).await?.into_iter().collect();
-        let mut head = inner
-            .conn
-            .query(
-                "SELECT COALESCE(MAX(sequence), 0) FROM secure_results WHERE domain=?",
-                [encode(&scope.domain)?],
-            )
-            .await?;
-        let row = head
-            .next()
-            .await?
-            .ok_or_else(|| Error::Corrupt("link result head".into()))?;
-        let head = u64::try_from(row.get::<i64>(0)?)
-            .map_err(|_| Error::Corrupt("link result head".into()))?;
-        let bytes = encode(&(
-            logs,
-            existence,
-            head,
-            inner.strong_base(scope).await?.sequence(),
-            inner.mergeable_horizon(scope).await?,
-        ))?;
+        let bytes = encode(&(logs, existence, inner.mergeable_horizon(scope).await?))?;
         (bytes, inner.flusher.clone(), inner.commit)
     };
     flusher.flush(commit)?;
-    Ok(rocky_core::commitment("rocky.link-scope.v1", &bytes))
+    Ok(rocky_core::commitment("rocky.link-scope.v2", &bytes))
 }
 impl NativeSession {
     async fn offer_link_states<A: RowApplication>(
@@ -733,12 +714,13 @@ mod tests {
     fn only_current_link_name_and_handshake_label() {
         // Explicit control close reasons use the current wire name; admission is unchanged.
         assert_eq!(
-            rocky_core::net::Protocol::named(b"rocky/link/3"),
+            rocky_core::net::Protocol::named(b"rocky/link/4"),
             Some(rocky_core::net::Protocol::Link)
         );
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/1"), None);
         assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/2"), None);
-        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v3");
+        assert_eq!(rocky_core::net::Protocol::named(b"rocky/link/3"), None);
+        assert_eq!(session_label(HANDSHAKE_VERSION), "rocky.link.v4");
     }
 }
 

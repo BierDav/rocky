@@ -1,4 +1,4 @@
-// The original inventory contract on the legacy process-host transport, and typed-command type errors.
+// The original inventory contract on the legacy process-host transport, and precise SQL observation.
 plugins {
     id("rocky.jvm")
 }
@@ -10,9 +10,6 @@ dependencies {
 kotlin {
     compilerOptions { allWarningsAsErrors.set(true) }
 }
-
-val compiler by configurations.creating
-dependencies { compiler(libs.kotlin.compiler.embeddable) }
 
 val host = tasks.register<Exec>("buildProcessHost") {
     workingDir(repositoryRoot)
@@ -29,13 +26,4 @@ val qualify = tasks.register<JavaExec>("qualify") {
     args(work.get().asFile.path, repositoryRoot.asFile.path)
 }
 
-val rejected = tasks.register<RejectedFixtures>("rejectedFixtures") {
-    description = "Checks that each fixture under rejected/ is a type error."
-    fixtures.from(fileTree("rejected") { include("*.kt") })
-    support.from(fileTree("rejected/support"))
-    classpath.from(sourceSets.main.get().compileClasspath)
-    compiler.from(configurations["compiler"])
-    work.set(layout.buildDirectory.dir("rejected"))
-}
-
-tasks.check { dependsOn(qualify, rejected) }
+tasks.check { dependsOn(qualify) }

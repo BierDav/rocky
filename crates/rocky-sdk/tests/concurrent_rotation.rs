@@ -18,7 +18,7 @@ fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
         schema: SCHEMA,
         secrets: Some(fixture::keys(root)),
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 async fn join(

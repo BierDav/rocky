@@ -491,7 +491,7 @@ async fn point_reads_use_the_stored_tables_indexes_through_a_filtered_view() {
 }
 
 #[tokio::test]
-async fn observers_wake_for_their_tables_only_and_share_one_execution() {
+async fn observers_wake_for_their_domain_only_and_share_one_execution() {
     let dir = TempDir::new().unwrap();
     let runtime = open(&dir, None).await;
     let (a, b) = (
@@ -499,30 +499,27 @@ async fn observers_wake_for_their_tables_only_and_share_one_execution() {
         runtime.domain(scope(2)).unwrap(),
     );
     let options = ReadOptions::new(scope(1), 16);
-    let (drafts, jobs) = (
-        "SELECT note FROM drafts ORDER BY sequence",
-        "SELECT * FROM jobs",
-    );
+    let drafts = "SELECT note FROM drafts ORDER BY sequence";
     let mut watchers = Vec::new();
     for _ in 0..8 {
         watchers.push(a.observe_read(query(drafts), options.clone()).unwrap());
     }
-    let mut idle = a.observe_read(query(jobs), options.clone()).unwrap();
+    let mut idle = b
+        .observe_read(query(drafts), ReadOptions::new(scope(2), 16))
+        .unwrap();
     assert!(idle.next().await.unwrap().rows.is_empty());
     let reads = a.inner.reads().unwrap().clone();
     let executed = || reads.executed.load(Ordering::Relaxed);
     for watcher in &mut watchers {
         assert!(watcher.next().await.unwrap().rows.is_empty());
     }
-    // Eight observers of one query, one execution; the jobs query is another.
-    assert_eq!(executed(), 2);
-    let (jobs_before, drafts_before) = (reads.counters(jobs), reads.counters(drafts));
+    // Eight observers of one query, one execution.
+    assert_eq!(executed(), 1);
+    let drafts_before = reads.counters(drafts);
     for text in ["one", "two", "three"] {
         note(&a, text).await;
     }
-    note(&b, "other domain").await;
-    // Draft writes advance only the drafts view; the other domain nothing.
-    assert_eq!(reads.counters(jobs), jobs_before);
+    // Draft writes advance the drafts view; the other domain sees nothing.
     assert_eq!(
         reads.counters(drafts),
         (drafts_before.0 + 3, drafts_before.1)
@@ -533,14 +530,16 @@ async fn observers_wake_for_their_tables_only_and_share_one_execution() {
         assert_eq!(texts(&snapshot), ["one", "two", "three"]);
         assert_eq!(snapshot.revision.get(), 3);
     }
-    assert_eq!(executed(), 3);
+    assert_eq!(executed(), 2);
     // Nothing changed since: a further `next` waits instead of reading again.
     let mut waiting = Box::pin(watchers[0].next());
     assert!(futures_poll(&mut waiting).is_none());
     assert!(futures_poll(&mut Box::pin(idle.next())).is_none());
     note(&a, "four").await;
     assert_eq!(texts(&waiting.await.unwrap()).len(), 4);
-    assert_eq!(executed(), 4);
+    assert_eq!(executed(), 3);
+    note(&b, "other domain").await;
+    assert_eq!(texts(&idle.next().await.unwrap()), ["other domain"]);
     drop(watchers);
     runtime.close().await.unwrap();
     assert!(matches!(idle.next().await, Err(Error::Closed)));

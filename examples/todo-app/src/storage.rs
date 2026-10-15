@@ -84,17 +84,6 @@ impl StoredApplication for TodoApp {
             projection: 1,
         }
     }
-    fn commands(&self) -> &'static [rocky_core::CommandMethod] {
-        &[rocky_core::CommandMethod {
-            name: crate::PUBLISH_LIST_SNAPSHOT,
-            version: 1,
-            schema: 1,
-            handler: 1,
-        }]
-    }
-    fn command(&self, method: &str) -> Option<&dyn rocky_core::CommandHandler<Self>> {
-        (method == crate::PUBLISH_LIST_SNAPSHOT).then_some(self)
-    }
     fn projection_rows(&self, state: &TodoState) -> Vec<Vec<SqlValue>> {
         state
             .entries
@@ -226,64 +215,5 @@ impl StoredApplication for TodoApp {
         policy: &StaticPolicy,
     ) -> Result<(), Error> {
         policy.admit_read(scope, caller)
-    }
-}
-
-impl rocky_core::CommandHandler<TodoApp> for TodoApp {
-    fn seal(&self, state: &TodoState) -> Result<Vec<u8>, Error> {
-        crate::encode_snapshot(&state.visible_rows())
-    }
-    fn admit(
-        &self,
-        request: &rocky_core::StrongRequest,
-        policy: &StaticPolicy,
-    ) -> Result<(), Error> {
-        <Self as rocky_core::CommandHandler<TodoApp>>::validate(self, request)?;
-        policy.admit_read(request.scope, request.caller)?;
-        if !policy.publish
-            || !policy.nodes.contains(&request.id.node)
-            || request.method != "PublishListSnapshot"
-            || request.version != 1
-            || request.schema != 1
-            || request.handler != 1
-        {
-            return Err(Error::DeniedCommand);
-        }
-        Ok(())
-    }
-    fn validate(&self, request: &rocky_core::StrongRequest) -> Result<(), Error> {
-        if !request.arguments.is_empty()
-            || request.policy != [0; 32]
-            || request.method != crate::PUBLISH_LIST_SNAPSHOT
-            || request.version != 1
-            || request.schema != 1
-            || request.handler != 1
-        {
-            return Err(Error::DeniedCommand);
-        }
-        Ok(())
-    }
-    fn select_result(
-        &self,
-        bytes: &[u8],
-        context: rocky_core::AdmissionContext,
-        policy: &StaticPolicy,
-    ) -> Result<bool, Error> {
-        policy.admit_read(context.scope, context.caller)?;
-        let rows = crate::decode_snapshot(bytes)?;
-        Ok(rows.iter().all(|row| {
-            policy.rows.as_ref().is_none_or(|grants| {
-                grants
-                    .iter()
-                    .any(|grant| grant.entity == row.id && grant.read)
-            })
-        }))
-    }
-    fn execute(
-        &self,
-        state: &TodoState,
-        _request: &rocky_core::StrongRequest,
-    ) -> Result<Vec<u8>, Error> {
-        self.seal(state)
     }
 }

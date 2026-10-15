@@ -1,15 +1,9 @@
-//! Schema and handler generations of SDK domains: an issuer signs the
-//! next generation, members fetch it, old devices keep their work, and a
-//! coordinator activates a handler generation. See
+//! Schema generations: issuers sign them and members fetch them while
+//! older devices keep their work. See
 //! `docs/runtime/generations.md`.
 mod common;
-use common::identity as support;
 use common::{Device, Failure, SCHEMA, introduce};
-use rocky_coordinator::MemoryCoordinator;
-use rocky_core::{Activation, HandlerInput, HandlerOutput, Outcome, SqlValue, TableWrite};
-use rocky_sdk::{
-    CommandHandler, Commands, Coordination, Database, Network, Open, transport::memory::Hub,
-};
+use rocky_sdk::{Database, Network, Open, transport::memory::Hub};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -35,7 +29,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
         schema,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 async fn generation(device: &Device) -> Value {
@@ -103,9 +97,9 @@ async fn members_fetch_the_issuers_generation_and_keep_their_pending_work() -> R
 
     let a = Device::new(Database::open(open(&a_dir, SECOND, network("a")))?)?;
     let status = generation(&a).await;
-    assert_eq!(status["current"], json!({"schema": 2, "handler": 1}));
+    assert_eq!(status["current"], json!({"schema": 2}));
     assert_eq!(status["application"], "current");
-    assert_eq!(status["previous"], json!([{"schema": 1, "handler": 1}]));
+    assert_eq!(status["previous"], json!([{"schema": 1}]));
     assert_eq!(status["rebuilding"], Value::Null);
     assert_eq!(
         rows(&a, "SELECT title, note FROM items").await,
@@ -459,7 +453,7 @@ async fn a_local_schema_change_rebuilds_tables_and_keeps_the_generation() -> Res
     let bumped: &'static str = Box::leak(bumped.into_boxed_str());
     let a = Device::new(Database::open(open(root.path(), bumped, None))?)?;
     let status = generation(&a).await;
-    assert_eq!(status["current"], json!({"schema": 1, "handler": 1}));
+    assert_eq!(status["current"], json!({"schema": 1}));
     assert_eq!(status["previous"], json!([]));
     assert_eq!(a.titles().await, ["apples"]);
     a.close().await;
@@ -493,135 +487,6 @@ async fn a_name_keeps_its_type_and_a_rename_is_another_field() -> Result<(), Fai
     Ok(())
 }
 
-const COMMANDS: &str = r#"{"application":"counter","version":1,"commands":{"format":1,"handler":1,"commands":[{"name":"Add","version":1,"handler":"counts.add.v1","arguments":[{"name":"amount","type":"integer"}],"accepted":[{"name":"value","type":"integer"}],"rejected":[],"invocation":"counts","result":"counts","resources":["counts"]}]},"format":6,"tables":[{"name":"counts","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"value","type":"integer","not_null":true}],"primary_key":["key"]}]}"#;
-
-/// Adds to one counter; `factor` stands for the handler's implementation.
-struct Counter {
-    factor: i64,
-}
-impl CommandHandler for Counter {
-    fn handle(&self, input: &HandlerInput) -> Result<HandlerOutput, String> {
-        let SqlValue::Integer(amount) = input.arguments[0] else {
-            return Err("amount".into());
-        };
-        let value = match input
-            .reads
-            .scan("counts", None, None, 1)?
-            .first()
-            .map(|row| &row[1])
-        {
-            Some(SqlValue::Integer(value)) => *value,
-            _ => 0,
-        } + amount * self.factor;
-        Ok(HandlerOutput {
-            outcome: Outcome::Accepted(vec![SqlValue::Integer(value)]),
-            writes: vec![TableWrite::Put {
-                table: "counts".into(),
-                row: support::identity_row(vec![
-                    SqlValue::Text("total".into()),
-                    SqlValue::Integer(value),
-                ]),
-            }],
-            jobs: Vec::new(),
-        })
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_handler_generation_runs_only_after_the_coordinator_activates_it() -> Result<(), Failure>
-{
-    let root = tempfile::tempdir()?;
-    let coordinator = Arc::new(MemoryCoordinator::default());
-    let commands = |factor| {
-        Some(Commands {
-            coordinator: Coordination::Composed(coordinator.clone()),
-            handler: Some(Arc::new(Counter { factor }) as Arc<dyn CommandHandler>),
-            deadline: None,
-        })
-    };
-    let directory = root.path().join("a");
-    let a = Device::new(Database::create(
-        Open {
-            directory: &directory,
-            schema: COMMANDS,
-            secrets: None,
-            network: None,
-            commands: commands(1),
-        },
-        None,
-    )?)?;
-    let identity = a.ok(json!({"type": "command_identity"})).await;
-    let id = |name: &str| -> [u8; 16] {
-        let hex = identity[name].as_str().unwrap_or_default();
-        let bytes: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap_or_default())
-            .collect();
-        bytes.try_into().unwrap_or_default()
-    };
-    let (node, owner) = (
-        rocky_core::NodeId(id("node")),
-        rocky_core::PrincipalId(id("principal")),
-    );
-    let scope: rocky_core::Scope = serde_json::from_value(identity["scope"].clone())?;
-    coordinator.register(scope, owner, [1; 16], vec![node], 1, 1)?;
-    coordinator.acquire(scope, owner, node)?;
-    let add = |handle: u8, amount: i64| {
-        json!({"type": "command_submit", "handle": vec![handle; 32], "method": "Add", "version": 1,
-               "arguments": [{"type": "integer", "value": amount.to_string()}]})
-    };
-    let run = |handle: u8| json!({"type": "command_run", "handle": vec![handle; 32]});
-    a.ok(add(1, 2)).await;
-    assert_eq!(a.ok(run(1)).await["tickets"][0]["state"], "applied");
-    // Submitted under handler generation 1, run after the upgrade.
-    a.ok(add(2, 3)).await;
-    a.close().await;
-
-    let upgraded = COMMANDS.replace(r#""handler":1,"commands""#, r#""handler":2,"commands""#);
-    let upgraded: &'static str = Box::leak(upgraded.into_boxed_str());
-    let a = Device::new(Database::open(Open {
-        directory: &directory,
-        schema: upgraded,
-        secrets: None,
-        network: None,
-        commands: commands(10),
-    })?)?;
-    assert_eq!(
-        generation(&a).await["current"],
-        json!({"schema": 1, "handler": 2})
-    );
-    // The coordinator still runs generation 1: the new handler waits.
-    let waiting = a.ok(run(2)).await["tickets"][0].clone();
-    assert_eq!(waiting["state"], "queued");
-    assert_eq!(waiting["error"]["code"], "unsupported_generation");
-    assert_eq!(waiting["error"]["retryable"], true);
-    let proposal = a.ok(json!({"type": "command_activation"})).await;
-    assert_eq!(proposal["active"], false);
-    let activation: Activation = serde_json::from_value(proposal["activation"].clone())?;
-    assert_eq!((activation.schema, activation.handler), (1, 2));
-    assert_eq!(activation.head.sequence, 1);
-    // Only the owner activates, at exactly this head.
-    assert!(
-        coordinator
-            .activate(rocky_core::PrincipalId([0; 16]), &activation)
-            .is_err()
-    );
-    let head = coordinator.activate(owner, &activation)?;
-    assert_eq!((head.schema, head.handler), (1, 2));
-    assert_eq!(
-        a.ok(json!({"type": "command_activation"})).await["active"],
-        true
-    );
-    let ran = a.ok(run(2)).await["tickets"][0].clone();
-    assert_eq!(ran["state"], "applied", "{ran}");
-    assert_eq!(
-        ran["outcome"],
-        json!({"kind": "accepted", "values": [{"type": "integer", "value": "32"}]})
-    );
-    a.close().await;
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_older_application_adopts_the_newer_generation_it_meets() -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
@@ -651,7 +516,7 @@ async fn an_older_application_adopts_the_newer_generation_it_meets() -> Result<(
     b.add(3, "bread").await;
     b.sync().await.expect("sync");
     let status = generation(&b).await;
-    assert_eq!(status["current"], json!({"schema": 3, "handler": 1}));
+    assert_eq!(status["current"], json!({"schema": 3}));
     assert_eq!(status["rebuilding"], Value::Null);
     assert_eq!(status["application"], "behind");
     // Both ways: the issuer's rank arrives, the member's bread leaves.
@@ -939,7 +804,7 @@ async fn an_older_generation_the_database_lacks_is_fetched_before_its_frames_app
     b.sync().await.expect("sync");
     let status = generation(&b).await;
     assert_eq!(status["current"]["schema"], 2);
-    assert_eq!(status["previous"], json!([{"schema": 1, "handler": 1}]));
+    assert_eq!(status["previous"], json!([{"schema": 1}]));
     let activity = b.ok(json!({"type": "activity"})).await;
     assert!(
         activity["events"]
@@ -986,10 +851,7 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
     let a = Device::new(Database::open(open(&dirs("a"), SECOND, network("a")))?)?;
     b.sync().await.expect("sync");
     for device in [&a, &b] {
-        assert_eq!(
-            generation(device).await["previous"],
-            json!([{"schema": 1, "handler": 1}])
-        );
+        assert_eq!(generation(device).await["previous"], json!([{"schema": 1}]));
     }
     // Every retained frame of generation 1 is finalized and pruned.
     let participant = b.node().await;
@@ -1035,10 +897,7 @@ async fn a_manifest_nothing_retained_names_is_dropped_and_fetched_again() -> Res
         let _ = c.sync().await;
         let _ = b.sync().await;
     }
-    assert_eq!(
-        generation(&b).await["previous"],
-        json!([{"schema": 1, "handler": 1}])
-    );
+    assert_eq!(generation(&b).await["previous"], json!([{"schema": 1}]));
     let activity = b.ok(json!({"type": "activity"})).await;
     let events = activity["events"].as_array().ok_or("events")?;
     assert!(

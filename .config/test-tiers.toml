@@ -40,7 +40,7 @@ filter = '''
     | (package(rocky-runtime) & !test(/^(read|checkpoint)::tests::/))
     | (package(rocky-runtime) & test(=read::tests::pages_through_null_ordering_values_cover_the_result_once))
     | (package(rocky-coordinator) & test(/^(client::tests|raft_store::tests|machine::(public_tests|coordinated_tests))::/))
-    | (package(rocky-sdk) & test(/^(commands|database|enrollment|mesh|node)::/) & !test(/^node::command_mesh::tests::/))
+    | (package(rocky-sdk) & test(/^(database|enrollment|mesh|node)::/))
     | (package(rocky-storage) & test(/^(cursor|database|sqlite)::tests::/))
     | (package(rocky-credentials) & (test(/^keys::tests::/) | test(=revocation::tests::every_interleaving_of_merges_yields_one_digest)))
     | (package(runtime-scaling) & (test(/^(soak|wide)::tests::/) | test(=attribution::tests::storage_facts_read_the_sqlite_header)))
@@ -67,26 +67,19 @@ suite = "15m"
 filter = '''
     (binary_id(rocky-coordinator::coordinated_log) & test(=coordinated_log_survives_leader_change_and_deadline_without_double_commit))
     | (package(rocky-sdk) & test(/^node::delivery_tests::(a_crash_|a_mailbox_refuses_at_both_bounds)/))
-    | (binary_id(rocky-sdk::commands) & test(=mesh_forwarder_restart_drops_inflight_work_and_same_ticket_completes))
     | test(/::soak_/)
     | (package(rocky-coordinator) & test(=raft_store::probe::coordinator_state_settles_after_one_retention_window))
     | (binary_id(rocky-coordinator) & (
           test(=raft_store::tests::openraft_storage_contract)
     ))
-    | (binary_id(rocky-coordinator::applications) & (
-          test(=directory_and_alice_share_metadata_voters_and_quorum_loss_keeps_local_work)
-    ))
     | (binary_id(rocky-coordinator::cluster) & (
-          test(=certified_lost_reply_survives_another_executors_advance)
+          test(=three_persistent_voters_keep_controls_and_logs_across_restarts)
         | test(=crashes_at_log_commit_apply_reply_and_snapshot_boundaries)
         | test(=three_persistent_voters_fence_recover_and_verify_offline)
     ))
     | (binary_id(rocky-coordinator::public) & (
           test(=a_completely_restored_service_stays_fenced)
         | test(=outages_and_restarts_keep_state_and_restore_is_fenced)
-    ))
-    | (binary_id(rocky-coordinator::public_runtime) & (
-          test(=an_application_runs_strong_commands_on_a_registered_domain)
     ))
     | (binary_id(rocky-runtime) & (
           test(=audit_tests::observer_and_retained_history_quotas_preserve_existing_work)
@@ -135,7 +128,7 @@ filter = '''
         | test(=partitioned_issuers_revocations_merge_when_b_syncs_first)
     ))
     | (binary_id(rocky-sdk::service) & (
-          test(=devices_run_typed_commands_through_a_registered_service_domain)
+          test(=a_registered_service_domain_commits_ordinary_rows_and_closes)
         | test(=a_device_granted_execute_registers_and_executes_without_being_an_issuer)
     ))
     | (binary_id(rocky-sdk::shopping_release) & (
@@ -154,7 +147,6 @@ filter = '''
         | test(=tests::roles::a_far_behind_replica_catches_up_while_both_sides_keep_writing)
         | test(=tests::roles::a_sync_larger_than_a_session_continues_on_the_next)
         | test(=tests::roles::interrupted_transfers_resume_and_a_replacement_full_node_converges)
-        | test(=tests::strong_history::executor_and_reader_cross_commands_with_a_window_and_recover_from_the_base)
     ))
 '''
 

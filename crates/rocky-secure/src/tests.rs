@@ -733,7 +733,7 @@ async fn link_tcp_sessions_forward_original_ciphertext_and_named_acknowledgments
 }
 
 #[tokio::test]
-async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
+async fn learned_revocation_lost_keys_and_wrong_generations() {
     let fixture = Fixture::new();
     let dir = TempDir::new().unwrap();
     let source_key = PrivateKey::new();
@@ -803,70 +803,21 @@ async fn learned_revocation_lost_keys_wrong_generations_and_package_subset() {
         .install_key(KeyMaterial::new(fixture.private, 1, [22; 32]))
         .await
         .unwrap();
-    for (index, kind) in [
-        PackageKind::CommandResult,
-        PackageKind::Job,
-        PackageKind::Blob,
+    // A sealed package carries no plaintext.
+    let private = EncryptedPackage::seal(
+        fixture.private,
+        rocky_core::KeyEpoch::new(1, &[22; 32]),
         PackageKind::Checkpoint,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let public = EncryptedPackage::seal(
-            fixture.public,
-            rocky_core::KeyEpoch::new(1, &[11; 32]),
-            kind.clone(),
-            &[11; 32],
-            b"public",
-        )
-        .unwrap();
-        let private = EncryptedPackage::seal(
-            fixture.private,
-            rocky_core::KeyEpoch::new(1, &[22; 32]),
-            kind,
-            &[22; 32],
-            b"SECRET SALARY",
-        )
-        .unwrap();
-        let set = PackageSet::bind(&[public.clone(), private.clone()]).unwrap();
-        assert!(
-            !encode(&private)
-                .unwrap()
-                .windows(13)
-                .any(|bytes| bytes == b"SECRET SALARY")
-        );
-        assert!(set.verify_subset(std::slice::from_ref(&public)).is_ok());
-        assert_eq!(
-            target.open_package(&private, &set).await.unwrap(),
-            b"SECRET SALARY"
-        );
-        let other = EncryptedPackage::seal(
-            fixture.private,
-            rocky_core::KeyEpoch::new(1, &[22; 32]),
-            PackageKind::Blob,
-            &[22; 32],
-            b"other",
-        )
-        .unwrap();
-        assert!(set.verify_subset(&[other]).is_err());
-        let public_config = fixture.config(
-            &PrivateKey::new(),
-            vec![grant(fixture.public, &[Right::Read], &[])],
-            &[fixture.public],
-        );
-        let public_reader = EncryptedReplica::open(
-            dir.path().join(format!("public-{index}.db")),
-            fixture.app(),
-            public_config,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            public_reader.open_package(&public, &set).await.unwrap(),
-            b"public"
-        );
-        assert!(public_reader.open_package(&private, &set).await.is_err());
-    }
+        &[22; 32],
+        b"SECRET SALARY",
+    )
+    .unwrap();
+    assert!(
+        !encode(&private)
+            .unwrap()
+            .windows(13)
+            .any(|bytes| bytes == b"SECRET SALARY")
+    );
     let revoked = revoking(
         &fixture.publisher,
         fixture.app().definition().app,
@@ -1291,99 +1242,6 @@ async fn two_native_clients_and_keyless_relay_with_offline_manifest() {
 }
 
 #[tokio::test]
-async fn confirmed_result_binds_private_subpackages_without_granting_access() {
-    use rocky_core::{
-        AppliedFrontier, NodeId, PrincipalId, RequestId, StrongPackage, StrongRequest,
-    };
-    let fixture = Fixture::new();
-    let scope = fixture.public.domain;
-    let caller = PrincipalId([7; 16]);
-    let node = NodeId([3; 16]);
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    coordinator
-        .register(scope, caller, [6; 16], vec![node], 1, 1)
-        .unwrap();
-    let base = coordinator.acquire(scope, caller, node).unwrap();
-    let public = EncryptedPackage::seal(
-        fixture.public,
-        rocky_core::KeyEpoch::new(1, &[11; 32]),
-        PackageKind::CommandResult,
-        &[11; 32],
-        b"public result",
-    )
-    .unwrap();
-    let private = EncryptedPackage::seal(
-        fixture.private,
-        rocky_core::KeyEpoch::new(1, &[22; 32]),
-        PackageKind::CommandResult,
-        &[22; 32],
-        b"private salary",
-    )
-    .unwrap();
-    let binding = PackageSet::bind(&[public.clone(), private.clone()]).unwrap();
-    let request = StrongRequest {
-        scope,
-        caller,
-        id: RequestId {
-            node,
-            sequence: rocky_core::next_request_sequence(0, now().unwrap()).unwrap(),
-        },
-        method: "Publish".into(),
-        version: 1,
-        schema: 1,
-        handler: 1,
-        client_request: [1; 32],
-        arguments: vec![],
-        policy: [1; 32],
-        frontier: AppliedFrontier::default(),
-        digest: [1; 32],
-    };
-    let package = StrongPackage {
-        request,
-        base,
-        sequence: 1,
-        rows: binding.to_bytes().unwrap(),
-        cut_base: Default::default(),
-    };
-    let receipt = coordinator
-        .confirm(package.confirmation().unwrap())
-        .unwrap();
-    let verified = PackageSet::verify_confirmed_subset(
-        &package,
-        &receipt,
-        &coordinator,
-        std::slice::from_ref(&public),
-    )
-    .await
-    .unwrap();
-    let dir = TempDir::new().unwrap();
-    let key = PrivateKey::new();
-    let reader = EncryptedReplica::open(
-        dir.path().join("reader.db"),
-        fixture.app(),
-        fixture.config(
-            &key,
-            vec![grant(fixture.public, &[Right::Read], &[])],
-            &[fixture.public],
-        ),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        reader.open_package(&public, &verified).await.unwrap(),
-        b"public result"
-    );
-    assert!(reader.open_package(&private, &verified).await.is_err());
-    let mut changed = package.clone();
-    changed.rows.push(0);
-    assert!(
-        PackageSet::verify_confirmed_subset(&changed, &receipt, &coordinator, &[public])
-            .await
-            .is_err()
-    );
-}
-
-#[tokio::test]
 async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision() {
     let fixture = Fixture::new();
     let dir = TempDir::new().unwrap();
@@ -1477,13 +1335,6 @@ async fn signatures_wrong_scope_generation_and_mixed_batch_fail_without_revision
     assert_eq!(before.revision, after.revision);
 }
 
-mod commands;
-mod confirmed_tables;
-
-mod recovery;
-
-mod effects;
-
 mod scaling;
 
 mod checkpoint;
@@ -1496,7 +1347,7 @@ mod coordinated;
 mod delegation;
 mod delivery;
 mod existence;
-mod exposure;
+mod formats;
 mod generations;
 mod group;
 mod partitions;
@@ -1505,11 +1356,6 @@ mod revocations;
 mod roles;
 mod rotation;
 mod sql;
-mod typed_commands;
-
-mod strong_history;
-
-mod formats;
 
 mod partition_foreign_keys;
 

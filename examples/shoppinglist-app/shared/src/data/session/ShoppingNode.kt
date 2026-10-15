@@ -12,10 +12,10 @@ import org.example.examples.shopping.data.household.NodeKind
 import org.example.examples.shopping.data.household.PairingCode
 import org.example.examples.shopping.util.readText
 import org.example.examples.shopping.util.replaceText
-import rocky.CommandRuntime
 import rocky.PeerTransport
 import rocky.RockyDatabase
 import rocky.SecretStore
+import rocky.ServiceCoordinator
 import rocky.room.RockyRoom
 import rocky.room.buildOnRocky
 
@@ -29,8 +29,8 @@ class ShoppingPlatform(
     val secrets: () -> SecretStore? = { null },
     /** Read on each open: iroh unless a driver chose another transport before the first one. */
     val transport: () -> PeerTransport = { PeerTransport.Iroh() },
-    /** Read on each open, like [transport]: strong commands, such as [publicCoordination]; none disables approvals. */
-    val commands: () -> CommandRuntime? = { null },
+    /** Read on each open, like [transport]: the deployment's coordination service; none disables decisions. */
+    val coordinator: suspend () -> ServiceCoordinator? = { null },
     /** Sees each opened database first, for instance to follow Android's app lifecycle. */
     val opened: (RockyDatabase) -> Unit = {},
     /** Sees each database before it closes, undoing [opened]. */
@@ -46,7 +46,7 @@ class ShoppingNode private constructor(
     val rocky: RockyDatabase,
     private val room: RockyRoom<ShoppingDatabase>,
     val self: String,
-    commands: CommandRuntime?,
+    coordinator: ServiceCoordinator?,
     foreground: Flow<Boolean>,
     private val kindPath: String,
     initialKind: NodeKind?,
@@ -58,7 +58,7 @@ class ShoppingNode private constructor(
     private val shared = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundErrors)
     val repository = ShoppingRepository(room.room, rocky)
     val household = Household(room.room, rocky, self, shared)
-    val approvals = Approvals(room.room, rocky, household, self, commands != null)
+    val approvals = Approvals(room.room, rocky, household, self, coordinator != null)
     val isTrusted: Boolean get() = rocky.isIssuer
     var kind: NodeKind? = initialKind
         private set
@@ -91,8 +91,8 @@ class ShoppingNode private constructor(
 
     companion object {
         /** A new household with this device as its first trusted device. */
-        suspend fun create(platform: ShoppingPlatform): ShoppingNode = open(platform) { commands ->
-            RockyDatabase.create(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), commands = commands)
+        suspend fun create(platform: ShoppingPlatform): ShoppingNode = open(platform) { coordinator ->
+            RockyDatabase.create(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), coordinator = coordinator)
         }.configure {
             rememberKind(NodeKind.Trusted)
             household.record(self, platform.deviceName, NodeKind.Trusted)
@@ -100,16 +100,16 @@ class ShoppingNode private constructor(
         }
 
         /** Joins with a scanned [code]; a partial device holds only the lists shared with it. */
-        suspend fun join(platform: ShoppingPlatform, code: PairingCode): ShoppingNode = open(platform) { commands ->
-            RockyDatabase.join(platform.directory, ShoppingSchema, code.invitation, platform.transport(), platform.secrets(), commands = commands)
+        suspend fun join(platform: ShoppingPlatform, code: PairingCode): ShoppingNode = open(platform) { coordinator ->
+            RockyDatabase.join(platform.directory, ShoppingSchema, code.invitation, platform.transport(), platform.secrets(), coordinator = coordinator)
         }.configure {
             rememberKind(code.kind)
             rocky.partitions.role(code.kind.role)
             if (isTrusted) household.record(self, code.name, NodeKind.Trusted)
         }
 
-        suspend fun resume(platform: ShoppingPlatform, confirmation: String? = null): ShoppingNode = open(platform) { commands ->
-            RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), commands = commands, confirmation = confirmation)
+        suspend fun resume(platform: ShoppingPlatform, confirmation: String? = null): ShoppingNode = open(platform) { coordinator ->
+            RockyDatabase.resume(platform.directory, ShoppingSchema, platform.transport(), platform.secrets(), coordinator = coordinator, confirmation = confirmation)
         }.configure {
             if (isTrusted && rocky.observeStatus().first().authority.verifiedRevocation == null && household.devices().first().none { it.node == self }) {
                 household.record(self, platform.deviceName, NodeKind.Trusted)
@@ -124,12 +124,12 @@ class ShoppingNode private constructor(
             throw error
         }
 
-        private suspend fun open(platform: ShoppingPlatform, open: suspend (CommandRuntime?) -> RockyDatabase): ShoppingNode {
+        private suspend fun open(platform: ShoppingPlatform, open: suspend (ServiceCoordinator?) -> RockyDatabase): ShoppingNode {
             var opened: ShoppingNode? = null
             try {
                 return withContext(Dispatchers.IO) {
-                    val commands = platform.commands()
-                    val rocky = open(commands)
+                    val coordinator = platform.coordinator()
+                    val rocky = open(coordinator)
                     var room: RockyRoom<ShoppingDatabase>? = null
                     try {
                         platform.opened(rocky)
@@ -141,7 +141,7 @@ class ShoppingNode private constructor(
                         room = openedRoom
                         val kindPath = "${platform.directory}/device-kind"
                         val kind = readText(kindPath)?.let { requireNotNull(NodeKind.of(it)) { "Unknown local device kind" } }
-                        ShoppingNode(rocky, openedRoom, self, commands, platform.foreground, kindPath, kind, platform.closed, failure, backgroundErrors).also { opened = it }
+                        ShoppingNode(rocky, openedRoom, self, coordinator, platform.foreground, kindPath, kind, platform.closed, failure, backgroundErrors).also { opened = it }
                     } catch (error: Throwable) {
                         withContext(NonCancellable) {
                             try {

@@ -36,7 +36,7 @@ async fn call(session: &Session<InventoryApp>, request: Request) -> Reply {
         request,
     })
     .unwrap();
-    serde_json::from_slice(&session.dispatch_json(&bytes, None).await).unwrap()
+    serde_json::from_slice(&session.dispatch_json(&bytes).await).unwrap()
 }
 fn ok(reply: Reply) -> Value {
     match reply {
@@ -127,7 +127,7 @@ async fn subscription_registration_races_coalescing_cancellation_and_scope_denia
     let mut foreign = scope();
     foreign.domain = DomainId([2; 16]);
     assert!(
-        matches!(session.dispatch(Call { version:VERSION, scope:foreign, request:Request::Read { query:query("SELECT note FROM drafts") } }, None).await, Reply::Error { error, .. } if error.code == "denied")
+        matches!(session.dispatch(Call { version:VERSION, scope:foreign, request:Request::Read { query:query("SELECT note FROM drafts") } }).await, Reply::Error { error, .. } if error.code == "denied")
     );
     assert!(matches!(
         call(
@@ -172,8 +172,9 @@ async fn precise_handles_preconditions_restart_and_explicit_strong_reads() {
     assert!(
         matches!(call(&session, Request::Mutate { handle:[1;32], entity:None, payload:b"different".to_vec(), baseline:None }).await, Reply::Error { error, .. } if error.code == "conflict")
     );
+    // The removed strong read is no request of this contract.
     assert!(
-        matches!(call(&session, Request::ReadStrong { query:query("SELECT note FROM drafts") }).await, Reply::Error { error, .. } if error.code == "missing_head")
+        matches!(serde_json::from_slice::<Reply>(&session.dispatch_json(format!(r#"{{"version":{VERSION},"scope":{},"request":{{"type":"read_strong","query":{{"sql":"SELECT 1","values":[]}}}}}}"#, serde_json::to_string(&session.scope()).unwrap()).as_bytes()).await).unwrap(), Reply::Error { error, .. } if error.code == "denied")
     );
     let exact = ok(call(
         &session,
@@ -184,7 +185,7 @@ async fn precise_handles_preconditions_restart_and_explicit_strong_reads() {
     .await);
     assert_eq!(exact["rows"][0][0]["value"], "9223372036854775807");
     assert!(
-        matches!(serde_json::from_slice::<Reply>(&session.dispatch_json(br#"{"version":1}"#, None).await).unwrap(), Reply::Error { error, .. } if error.code == "denied")
+        matches!(serde_json::from_slice::<Reply>(&session.dispatch_json(br#"{"version":2}"#).await).unwrap(), Reply::Error { error, .. } if error.code == "denied")
     );
     drop(session);
     replica.close().await.unwrap();

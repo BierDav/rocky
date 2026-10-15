@@ -1,8 +1,8 @@
 //! Generations of an application definition: what changed between two
 //! installed schemas, and the transition a publisher signs before a
 //! replicated change activates. See `docs/runtime/generations.md`.
-use crate::{AppId, CommandSet, Commitment, LogicalSchema, TableClass, commitment, logical};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::{AppId, Commitment, LogicalSchema, TableClass, commitment, logical};
+use std::collections::BTreeSet;
 
 /// How a new schema relates to the installed one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,15 +76,8 @@ pub enum Unsupported {
     /// A required field of an existing table needs a default: rows written
     /// before it hold no value for it.
     RequiredField(String),
-    /// A declared command version was removed or redefined.
-    ChangedCommand(String),
-    /// Commands changed without a higher handler generation.
-    HandlerGeneration,
     /// The new generation does not follow the installed one.
     Generation,
-    /// A command-controlled table was added, removed or reshaped; its
-    /// confirmed rows have no transition.
-    CommandTable(String),
 }
 impl std::fmt::Display for Unsupported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,16 +91,7 @@ impl std::fmt::Display for Unsupported {
                 f,
                 "required field {field} of an existing table needs a default"
             ),
-            Self::ChangedCommand(command) => {
-                write!(f, "command {command} was removed or redefined")
-            }
-            Self::HandlerGeneration => {
-                f.write_str("changed commands need a higher handler generation")
-            }
             Self::Generation => f.write_str("the generation does not follow the installed one"),
-            Self::CommandTable(table) => {
-                write!(f, "command-controlled table {table} cannot change")
-            }
         }
     }
 }
@@ -218,23 +202,6 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
             }
         }
     }
-    // Confirmed rows only change through commands, never a transition.
-    let commanded = |schema: &LogicalSchema| -> BTreeMap<String, String> {
-        schema
-            .tables
-            .iter()
-            .filter(|table| table.class == TableClass::CommandControlled)
-            .map(|table| (table.sql_name.clone(), logical::table_shape(schema, table)))
-            .collect()
-    };
-    let (before, after) = (commanded(old), commanded(new));
-    if let Some(name) = before
-        .keys()
-        .chain(after.keys())
-        .find(|name| before.get(*name) != after.get(*name))
-    {
-        return Err(Unsupported::CommandTable(name.clone()));
-    }
     Ok(SchemaChange::Additive {
         tables,
         fields,
@@ -243,44 +210,15 @@ pub fn classify(old: &LogicalSchema, new: &LogicalSchema) -> Result<SchemaChange
     })
 }
 
-/// Classifies the commands of a new definition. Every declared version
-/// stays, byte for byte: tickets submitted under it must remain
-/// executable. Any change needs a higher handler generation; a higher one
-/// with the same commands is a new handler implementation.
-pub fn classify_commands(old: &CommandSet, new: &CommandSet) -> Result<bool, Unsupported> {
-    let declared = |set: &CommandSet| -> BTreeMap<(String, u32), Vec<u8>> {
-        set.descriptors()
-            .iter()
-            .map(|descriptor| {
-                (
-                    (descriptor.name.clone(), descriptor.version),
-                    descriptor.canonical(),
-                )
-            })
-            .collect()
-    };
-    let (before, after) = (declared(old), declared(new));
-    for (key, canonical) in &before {
-        if after.get(key) != Some(canonical) {
-            return Err(Unsupported::ChangedCommand(format!("{} v{}", key.0, key.1)));
-        }
-    }
-    match new.handler().cmp(&old.handler()) {
-        std::cmp::Ordering::Less => Err(Unsupported::HandlerGeneration),
-        std::cmp::Ordering::Equal if before != after => Err(Unsupported::HandlerGeneration),
-        std::cmp::Ordering::Equal => Ok(false),
-        std::cmp::Ordering::Greater => Ok(true),
-    }
-}
-
 /// Most ids one transition lists, over all its sets.
 pub const MAX_TRANSITION_IDS: usize = 8192;
+/// The one transition format; other bytes are refused.
+const TRANSITION_FORMAT: &[u8] = b"rocky.transition.v5";
 
-/// The schema and handler generations of a definition.
+/// The schema generation of a definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Generation {
     pub schema: u32,
-    pub handler: u32,
 }
 
 /// Item ids a transition's new manifest names and its old one does not,
@@ -304,7 +242,7 @@ impl ItemChanges {
     }
 }
 
-/// What a publisher signs to activate a replicated or handler change: the
+/// What a publisher signs to activate a replicated change: the
 /// installed definition and the next one. Every generation of a lineage
 /// stays admitted. Operations keep their original signed bytes; nothing is
 /// re-signed or translated. Transitions are the lineage every device keeps,
@@ -336,16 +274,11 @@ impl GenerationTransition {
     /// removed tables and the named and removed fields, each as a count and
     /// its ids in ascending order.
     pub fn canonical(&self) -> Vec<u8> {
-        let mut bytes = b"rocky.transition.v4".to_vec();
+        let mut bytes = TRANSITION_FORMAT.to_vec();
         bytes.extend(self.app.0);
         bytes.extend(self.from);
         bytes.extend(self.to);
-        for number in [
-            self.before.schema,
-            self.before.handler,
-            self.after.schema,
-            self.after.handler,
-        ] {
+        for number in [self.before.schema, self.after.schema] {
             bytes.extend(number.to_le_bytes());
         }
         bytes.extend(self.time.to_le_bytes());
@@ -360,13 +293,13 @@ impl GenerationTransition {
     pub fn from_canonical(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
         let invalid = || crate::ProtocolError::InvalidManifest;
         let rest = bytes
-            .strip_prefix(b"rocky.transition.v4".as_slice())
-            .filter(|rest| rest.len() >= 16 + 32 + 32 + 4 * 4 + 8)
+            .strip_prefix(TRANSITION_FORMAT)
+            .filter(|rest| rest.len() >= 16 + 32 + 32 + 2 * 4 + 8)
             .ok_or_else(invalid)?;
         let (app, rest) = rest.split_at(16);
         let (from, rest) = rest.split_at(32);
         let (to, rest) = rest.split_at(32);
-        let (numbers, rest) = rest.split_at(4 * 4);
+        let (numbers, rest) = rest.split_at(2 * 4);
         let (time, mut rest) = rest.split_at(8);
         let time = u64::from_le_bytes(time.try_into().map_err(|_| invalid())?);
         let mut sets: [BTreeSet<Commitment>; 5] = Default::default();
@@ -398,7 +331,7 @@ impl GenerationTransition {
             .iter()
             .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
-        let [before_schema, before_handler, after_schema, after_handler] = numbers[..] else {
+        let [before_schema, after_schema] = numbers[..] else {
             return Err(invalid());
         };
         let [
@@ -414,11 +347,9 @@ impl GenerationTransition {
             to: to.try_into().map_err(|_| invalid())?,
             before: Generation {
                 schema: before_schema,
-                handler: before_handler,
             },
             after: Generation {
                 schema: after_schema,
-                handler: after_handler,
             },
             added,
             tables: ItemChanges {
@@ -453,21 +384,14 @@ impl GenerationTransition {
             ..self.clone()
         } == *other
     }
-    /// A step forward: a new manifest, generations that do not go back and
-    /// one of them up. Only a schema step names or removes; nothing is both
-    /// named and removed, and a removed field is not one rows may lack.
+    /// A step forward: a new manifest and the next schema generation.
+    /// Nothing is both named and removed, and a removed field is not one
+    /// rows may lack.
     pub fn validate(&self) -> Result<(), crate::ProtocolError> {
         let (before, after) = (self.before, self.after);
-        let forward = after.schema >= before.schema
-            && after.handler >= before.handler
-            && after != before
-            && after.schema <= before.schema.saturating_add(1);
-        let changes = self.sets().iter().any(|set| !set.is_empty());
         if self.from == self.to
-            || !forward
             || before.schema == 0
-            || before.handler == 0
-            || (changes && after.schema == before.schema)
+            || before.schema.checked_add(1) != Some(after.schema)
             || self.sets().iter().map(|set| set.len()).sum::<usize>() > MAX_TRANSITION_IDS
             || !self.tables.named.is_disjoint(&self.tables.removed)
             || !self.fields.named.is_disjoint(&self.fields.removed)
@@ -563,53 +487,6 @@ mod tests {
         table("items", all)
     }
 
-    #[test]
-    fn command_controlled_tables_have_no_transition() {
-        let stock = |columns: &[(&str, bool)]| {
-            let mut all = vec![column("id", true)];
-            all.extend(
-                columns
-                    .iter()
-                    .map(|(name, required)| column(name, *required)),
-            );
-            let mut stock = table("stock", all);
-            stock.class = TableClass::CommandControlled;
-            stock
-        };
-        let old = schema(vec![items(&[("name", true)]), stock(&[("left", true)])]);
-        // Mergeable additions still classify; the command table is untouched.
-        let added = schema(vec![
-            items(&[("name", true), ("note", false)]),
-            stock(&[("left", true)]),
-        ]);
-        assert!(matches!(
-            classify(&old, &added),
-            Ok(SchemaChange::Additive { .. })
-        ));
-        for new in [
-            schema(vec![
-                items(&[("name", true)]),
-                stock(&[("left", true), ("note", false)]),
-            ]),
-            schema(vec![items(&[("name", true)])]),
-        ] {
-            assert_eq!(
-                classify(&old, &new),
-                Err(Unsupported::CommandTable("stock".into()))
-            );
-        }
-        let without = schema(vec![items(&[("name", true)])]);
-        assert_eq!(
-            classify(&without, &old),
-            Err(Unsupported::CommandTable("stock".into()))
-        );
-        let mut merged = old.clone();
-        merged.tables[1].class = TableClass::Mergeable;
-        assert_eq!(
-            classify(&old, &merged),
-            Err(Unsupported::TableClass("stock".into()))
-        );
-    }
     #[test]
     fn local_and_additive_changes_are_told_apart_from_unsupported_ones() {
         let old = schema(vec![items(&[("name", true)])]);
@@ -815,14 +692,8 @@ mod tests {
             app: AppId([3; 16]),
             from: [4; 32],
             to: [5; 32],
-            before: Generation {
-                schema: 1,
-                handler: 1,
-            },
-            after: Generation {
-                schema: 2,
-                handler: 1,
-            },
+            before: Generation { schema: 1 },
+            after: Generation { schema: 2 },
             added: [[7; 32], [6; 32]].into(),
             tables: ItemChanges {
                 named: [[10; 32]].into(),
@@ -846,7 +717,7 @@ mod tests {
         );
         // One current format: another version or length is refused.
         let mut other = transition.canonical();
-        other[b"rocky.transition.v".len()] = b'3';
+        other[b"rocky.transition.v".len()] = b'4';
         assert!(GenerationTransition::from_canonical(&other).is_err());
         let mut longer = transition.canonical();
         longer.push(0);
@@ -866,18 +737,7 @@ mod tests {
                 ..transition.clone()
             },
             GenerationTransition {
-                after: Generation {
-                    schema: 3,
-                    handler: 1,
-                },
-                ..transition.clone()
-            },
-            // Only a schema step names or removes.
-            GenerationTransition {
-                after: Generation {
-                    schema: 1,
-                    handler: 2,
-                },
+                after: Generation { schema: 3 },
                 ..transition.clone()
             },
             // A field is named or removed, not both.

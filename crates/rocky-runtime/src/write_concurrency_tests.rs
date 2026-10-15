@@ -1,10 +1,9 @@
-//! Grouped incoming pages, merged strong steps and the awaiting submit; see
+//! Grouped incoming pages and the awaiting submit; see
 //! `docs/runtime/write-concurrency.md`.
 use super::*;
 use crate::scaling_option_tests::{NODE, PEER, grouped, note, open_node, pause, scope};
 use crate::worker::{Fault, GroupLog};
 use inventory_app::InventoryApp;
-use rocky_core::*;
 use tempfile::TempDir;
 
 /// Encoded operations of `PEER` in domain 1, in author order.
@@ -18,44 +17,6 @@ pub(super) async fn peer_operations(dir: &Path, count: u8) -> Vec<Vec<u8>> {
     }
     source.close().await.unwrap();
     operations
-}
-pub(super) fn coordinator() -> rocky_coordinator::MemoryCoordinator {
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    let owner = PrincipalId([7; 16]);
-    coordinator
-        .register(scope(1), owner, [6; 16], vec![NODE], 1, 1)
-        .unwrap();
-    coordinator.acquire(scope(1), owner, NODE).unwrap();
-    coordinator
-}
-/// A published request, its prepared package and the coordinator's receipt.
-pub(super) async fn confirmed(
-    replica: &Replica<InventoryApp>,
-    coordinator: &rocky_coordinator::MemoryCoordinator,
-) -> (StrongPackage, StrongReceipt) {
-    let request = replica
-        .submit_command_with_arguments(
-            CommandHandle([1; 32]),
-            inventory_app::RESERVE,
-            1u64.to_le_bytes().to_vec(),
-            [9; 32],
-        )
-        .unwrap()
-        .committed()
-        .await
-        .unwrap();
-    let head = coordinator.head(scope(1)).unwrap();
-    let prepared = replica
-        .strong_request(strong::Request::Prepare(Box::new(request), head))
-        .await
-        .unwrap();
-    let strong::Response::Package(package) = prepared else {
-        panic!("package");
-    };
-    let receipt = coordinator
-        .confirm(package.confirmation().unwrap())
-        .unwrap();
-    (package, receipt)
 }
 async fn rows(replica: &Replica<InventoryApp>) -> usize {
     replica.query().await.unwrap().rows.len()
@@ -136,35 +97,6 @@ async fn a_page_is_split_into_bounded_batches_in_input_order() {
     }
     assert_eq!(rows(&replica).await, usize::from(count));
     assert_eq!(log.lock().unwrap().len(), 3);
-    runtime.close().await.unwrap();
-}
-
-/// Store, verify and apply are one commit: when it fails, none of them
-/// happened and the command is still an unknown outcome to look up.
-#[tokio::test]
-async fn a_failed_commit_of_a_received_result_leaves_none_of_its_steps() {
-    let dir = TempDir::new().unwrap();
-    let runtime = open_node(&dir.path().join("node.db"), NODE, grouped()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    let (package, receipt) = confirmed(&replica, &coordinator).await;
-    let before = replica.query().await.unwrap();
-    crate::tests::fault(&replica, Fault::FailCommit).await;
-    assert!(
-        replica
-            .receive_result(package.encode().unwrap(), receipt.encode(), &coordinator)
-            .await
-            .is_err()
-    );
-    let status = replica.strong_status().await.unwrap();
-    assert!(status.received.is_empty() && status.verification.is_empty());
-    assert_eq!(status.sequence, 0);
-    assert_eq!(status.commands[0].state, CommandState::OutcomeUnknown);
-    assert_eq!(replica.query().await.unwrap(), before);
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(replica.confirmed_publications().await.unwrap().len(), 1);
-    assert_eq!(replica.strong_status().await.unwrap().sequence, 1);
-    assert_eq!(coordinator.head(scope(1)).unwrap().sequence, 1);
     runtime.close().await.unwrap();
 }
 

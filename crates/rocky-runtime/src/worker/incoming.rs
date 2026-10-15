@@ -118,9 +118,6 @@ where
                 "counters differ from canonical history".into(),
             ));
         }
-        if open {
-            self.restore_strong(false).await?;
-        }
         self.retained = count;
         self.retained_bytes = bytes.saturating_add(count.saturating_mul(RECORD_OVERHEAD));
         self.frontier = frontier;

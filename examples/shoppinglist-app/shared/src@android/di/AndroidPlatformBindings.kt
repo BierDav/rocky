@@ -32,7 +32,7 @@ object AndroidPlatformBindings {
             deviceName = Build.MODEL,
             room = { path -> Room.databaseBuilder<ShoppingDatabase>(application, path) },
             secrets = { secrets },
-            commands = ::publicCoordination,
+            coordinator = { publicCoordination(File(application.filesDir, "shopping").absolutePath) },
             opened = { database ->
                 lifecycle.follow(database) { foreground ->
                     visible.value = foreground

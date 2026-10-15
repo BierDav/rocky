@@ -124,7 +124,6 @@ where
                 return Err(corrupt("counters differ from canonical history"));
             }
         }
-        let strong_count = self.restore_strong(true).await? as u64;
         // An imported checkpoint and pruned history carry clocks and
         // revisions this file no longer shows.
         let exact = !pruned
@@ -135,8 +134,8 @@ where
         if clock < maximum_clock
             || (exact && clock != maximum_clock)
             || *revision < 0
-            || (exact && *revision as u64 > applied_count + strong_count)
-            || (applied_count + strong_count > 0 && *revision == 0)
+            || (exact && *revision as u64 > applied_count)
+            || (applied_count > 0 && *revision == 0)
         {
             return Err(corrupt("counters differ from canonical history"));
         }

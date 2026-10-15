@@ -21,15 +21,14 @@ enum class NodeKind(val label: String, val summary: String) {
     Partial("Partial", "Holds only the lists shared with it"),
     ;
 
-    /** Members read lists and approvals, edit list contents and invoke requests; management stays trusted-only. */
+    /** Members read lists and approvals, edit list contents and write requests; management stays trusted-only. */
     val profile: GrantProfile get() = when (this) {
         Trusted -> GrantProfile.Issuer
 
         Full, Partial -> GrantProfile.Grants(
             listOf("lists", "decisions").map { Grant(it, setOf(Right.Read)) } +
                 listOf("categories", "items").map { Grant(it, setOf(Right.Read, Right.Insert, Right.Update, Right.Delete)) } +
-                // A command's row effects need the caller's right too; SQL never writes a command-controlled table.
-                Grant("requests", setOf(Right.Read, Right.Insert, Right.Invoke)),
+                Grant("requests", setOf(Right.Read, Right.Insert)),
         )
     }
     val role: ReplicaRole get() = if (this == Partial) ReplicaRole.Partial else ReplicaRole.Full

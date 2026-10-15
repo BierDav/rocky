@@ -26,11 +26,7 @@ impl Fixture {
                 scope,
                 configuration: [4; 16],
                 revision: 1,
-                owner: PrincipalId([5; 16]),
-                executors: nodes.iter().map(PrivateKey::public_key).collect(),
-                invokers: vec![(owner.public_key(), PrincipalId([5; 16]))],
-                schema: 1,
-                handler: 1,
+                trusted: nodes.iter().map(PrivateKey::public_key).collect(),
                 not_before: T - 1,
                 expires: T + 100_000,
             },
@@ -490,7 +486,7 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
     let mut control = f.state.controls[0].control.clone();
     control.revision = 2;
     control
-        .executors
+        .trusted
         .extend((0..31).map(|_| PrivateKey::new().public_key()));
     let request = Request::sign_at(
         f.state.genesis.id().unwrap(),
@@ -555,13 +551,11 @@ fn log_roles_and_signed_proofs_cannot_bypass_domain_control() {
         f.state.apply_at(T + 2, &request),
         Err(CoordinationError::Denied)
     );
-    // Legacy closure cannot strand a pending log entry.
+    // Closure cannot strand a pending log entry.
     let close = Request::sign_at(
         f.state.genesis.id().unwrap(),
         [8; 32],
-        Operation::Close {
-            head: f.state.state.find(f.scope).unwrap().head.clone(),
-        },
+        Operation::Close { scope: f.scope },
         &f.owner,
         T + 2,
     )

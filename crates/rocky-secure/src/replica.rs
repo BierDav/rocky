@@ -48,7 +48,7 @@ pub use bundle::{MAX_BUNDLE_BYTES, MAX_BUNDLE_FRAMES, MAX_BUNDLE_ROWS, ROWS_PER_
 pub use checkpoint::{
     AuditReport, CheckpointPage, CheckpointStatement, CheckpointStatus, CustodySummary,
     HorizonPage, LogPosition, MAX_CHECKPOINT_LOGS, PruneBlock, PruneReport, RebootstrapReport,
-    RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint, StrongSummary,
+    RetentionLimits, RetentionPolicy, SetSummary, SignedCheckpoint,
 };
 pub use coordinated::{
     CommittedEntry, CoordinatedCommit, CoordinatedEntry, CoordinatedError, CoordinatedStatus,
@@ -294,7 +294,6 @@ mod byte_fields {
 pub(super) struct Inner<A> {
     _owner: DatabaseOwner,
     pub(super) conn: Arc<ScopedConnection>,
-    /// Shared, so a command handler runs without the replica lock.
     pub(super) app: Arc<A>,
     /// `config.keys` holds the current key of every scope.
     pub(super) config: SecureConfig,
@@ -376,13 +375,6 @@ pub(super) struct Inner<A> {
     maintenance_error: Option<String>,
     /// Commit that made each scope's checkpoint current, by scope number.
     verified_at: BTreeMap<i64, u64>,
-    /// Confirmed history already audited against its projection, by scope.
-    pub(super) audited: BTreeMap<ResourceScope, crate::command::Audited>,
-    /// The authority at the last pass over every retained result.
-    pub(super) reconciled: Option<u64>,
-    /// The submission sequence through which every ticket is settled, and
-    /// each domain's last request sequence within it.
-    pub(super) acknowledged: (i64, BTreeMap<rocky_core::Scope, u64>),
     /// Peers whose credentials and frontiers are kept whatever the bound.
     configured: BTreeSet<PublicKey>,
     /// When each peer was last served since open, by a growing count; a
@@ -495,8 +487,6 @@ pub struct EncryptedReplica<A> {
     pub(super) inner: Arc<Mutex<Inner<A>>>,
     queue: Arc<group::Queue>,
     revisions: watch::Receiver<u64>,
-    /// Serializes command execution on this replica.
-    pub(super) executing: Arc<super::command::Gate>,
     /// The coordinated log this trusted node acknowledges stored entries to.
     domain_log: Arc<coordinated::Trusted>,
 }
@@ -506,7 +496,6 @@ impl<A> Clone for EncryptedReplica<A> {
             inner: self.inner.clone(),
             queue: self.queue.clone(),
             revisions: self.revisions.clone(),
-            executing: self.executing.clone(),
             domain_log: self.domain_log.clone(),
         }
     }
@@ -536,7 +525,6 @@ impl<A> EncryptedReplica<A> {
 }
 fn protocol_schema() -> impl Iterator<Item = &'static str> {
     [
-        super::command::SCHEMA,
         generation::SCHEMA,
         migrate::SCHEMA,
         backup::SCHEMA,
@@ -591,7 +579,7 @@ pub async fn check_replica_format(path: &Path) -> Result<(), Error> {
         ));
     };
     let (label, _, _): (String, Commitment, PublicKey) = decode(bytes)?;
-    if label != "rocky.encrypted-replica.v19" {
+    if label != generation::FILE_IDENTITY {
         return Err(Error::Incompatible(
             "unsupported encrypted replica format".into(),
         ));
@@ -780,9 +768,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             limits: RetentionLimits::default(),
             maintenance_error: None,
             verified_at: BTreeMap::new(),
-            audited: BTreeMap::new(),
-            reconciled: None,
-            acknowledged: (0, BTreeMap::new()),
             configured: BTreeSet::new(),
             served: (0, BTreeMap::new()),
             #[cfg(test)]
@@ -876,7 +861,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             inner: Arc::new(Mutex::new(inner)),
             queue: Arc::default(),
             revisions,
-            executing: Arc::default(),
             domain_log: Arc::default(),
         };
         replica.settle().await?;

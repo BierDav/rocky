@@ -30,8 +30,6 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_overlay(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_scratch(scope INTEGER NOT NULL,row BLOB NOT NULL,fields BLOB NOT NULL,PRIMARY KEY(scope,row))",
     "CREATE TABLE IF NOT EXISTS secure_retention(scope BLOB PRIMARY KEY,policy BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS secure_rebootstrap_strong(scope INTEGER PRIMARY KEY,state BLOB NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap(scope INTEGER PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,sets BLOB NOT NULL,direct INTEGER NOT NULL)",
     "CREATE TABLE IF NOT EXISTS secure_rebootstrap_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_pages(scope INTEGER NOT NULL,after BLOB NOT NULL,next BLOB,signature BLOB NOT NULL,PRIMARY KEY(scope,after)) WITHOUT ROWID",
@@ -76,19 +74,6 @@ pub struct SetSummary {
     pub count: u64,
     pub digest: Commitment,
 }
-/// Strong base and suffix artifacts of the scope's domain.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StrongSummary {
-    /// Sequence and head at which verification of the retained suffix starts.
-    pub base: Option<(u64, Commitment)>,
-    /// Applied strong sequence and head of this scope's command rows.
-    pub head: Option<(u64, Commitment)>,
-    pub rows: Commitment,
-    pub results: SetSummary,
-    pub commands: SetSummary,
-    pub preparations: SetSummary,
-    pub observations: SetSummary,
-}
 /// Recovery copies of the covered operations when the checkpoint was sealed.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustodySummary {
@@ -96,11 +81,9 @@ pub struct CustodySummary {
     pub superseded: u64,
     /// Retained covered operations nobody acknowledged: sole copies.
     pub sole: SetSummary,
-    /// Recovery archives held for other nodes; a checkpoint never releases them.
-    pub archives: SetSummary,
 }
 /// The current checkpoint statement format; every other one is refused.
-pub(crate) const CHECKPOINT_FORMAT: u32 = 9;
+pub(crate) const CHECKPOINT_FORMAT: u32 = 10;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointStatement {
     pub format: u32,
@@ -114,7 +97,6 @@ pub struct CheckpointStatement {
     pub moves: SetSummary,
     pub definition: Commitment,
     pub schema: u32,
-    pub handler: u32,
     /// The digest of the revocations the signer held.
     pub revocations: Commitment,
     pub scope: ResourceScope,
@@ -133,7 +115,6 @@ pub struct CheckpointStatement {
     pub creations: SetSummary,
     /// Mutation handles the signer retains.
     pub handles: SetSummary,
-    pub strong: StrongSummary,
     pub custody: CustodySummary,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -319,41 +300,6 @@ impl SignedCheckpoint {
             || !self.node.verify(&self.signing_bytes()?, &self.signature)
         {
             return Err(denied("invalid checkpoint signature or frontier"));
-        }
-        Ok(())
-    }
-    pub(crate) fn verify_history_authority<A: RowApplication>(
-        &self,
-        inner: &Inner<A>,
-    ) -> Result<(), Error> {
-        self.verify_signature()?;
-        inner.verify_checkpoint_horizon(self)?;
-        inner.admits(self.statement.definition)?;
-        // History verifies with no revocation, at the time it was signed.
-        let revocations = RevocationSet::new();
-        let time = self
-            .credentials
-            .0
-            .iter()
-            .map(|credential| credential.capability.not_before)
-            .max()
-            .ok_or_else(|| denied("checkpoint credentials missing"))?;
-        inner.check_authenticated_partition(
-            self.statement.scope,
-            self.statement.partition.as_ref(),
-        )?;
-        let grants = self.checkpoint_grants(inner.config.publisher, &revocations, time)?;
-        if !grants.iter().any(|grant| {
-            grant.scope == self.statement.scope
-                && grant.rows == RowSelection::All
-                && grant.rights.contains(&Right::Read)
-                && [Right::Insert, Right::Update, Right::Delete]
-                    .iter()
-                    .any(|right| grant.rights.contains(right))
-        }) {
-            return Err(denied(
-                "historical strong checkpoint signer lacks scope write authority",
-            ));
         }
         Ok(())
     }
@@ -1129,7 +1075,6 @@ impl<A: RowApplication> Inner<A> {
             .generation_of(statement.definition, false)
             .map_err(|_| unverifiable("names a definition this replica no longer admits"))?;
         if statement.schema != generation.schema
-            || statement.handler != generation.handler
             || statement.scope != scope
             || statement.rows != record.sets.rows_summary()
             || statement.tombstones != record.sets.tombstones

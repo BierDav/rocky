@@ -4,17 +4,14 @@ use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
 
-mod commands;
 mod database;
 #[cfg(feature = "iroh")]
 mod endpoint;
 mod sql;
 mod status;
-pub use commands::{
-    DevelopmentCoordinator, NativeCommandHandler, NativeCommands, NativeHandlerReads,
-};
 pub use database::{
-    NativeDatabase, NativeDatabaseSession, NativeNetwork, NativeNetworkService, prepare_device,
+    NativeDatabase, NativeDatabaseSession, NativeDevelopmentLog, NativeNetwork,
+    NativeNetworkService, prepare_device,
 };
 pub use sql::{
     NativeConnection, NativePage, NativeStatement, NativeTableChange, NativeTableEvents,
@@ -120,6 +117,23 @@ pub(crate) fn foreign(
     secrets.map(|store| Arc::new(Foreign(store)) as Arc<dyn rocky_sdk::SecretStore>)
 }
 
+/// Composes only a supported current service bundle; no command adapters.
+fn coordination(bundle: Option<String>) -> Result<Option<rocky_sdk::Coordination>, NativeError> {
+    match bundle {
+        None => Ok(None),
+        #[cfg(feature = "iroh")]
+        Some(bundle) => Ok(Some(rocky_sdk::Coordination::Service(Box::new(
+            serde_json::from_str(&bundle).map_err(|error| NativeError::Failure {
+                detail: error.to_string(),
+            })?,
+        )))),
+        #[cfg(not(feature = "iroh"))]
+        Some(_) => Err(NativeError::Failure {
+            detail: "a coordination service needs iroh".into(),
+        }),
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct NativeSession {
     engine: Arc<rocky_sdk::Engine>,
@@ -132,17 +146,17 @@ impl NativeSession {
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
         transport: Arc<dyn Transport>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let network = Some(Network::Borrowed(transport));
-        let commands = commands.map(NativeCommands::compose).transpose()?;
+        let coordination = coordination(coordinator)?;
         Ok(Arc::new(Self {
             engine: rocky_sdk::Engine::open_composed(
                 &options,
                 &schema,
                 foreign(secrets),
                 network,
-                commands,
+                coordination,
             )
             .map_err(failure)?,
         }))
@@ -151,23 +165,22 @@ impl NativeSession {
 #[uniffi::export]
 impl NativeSession {
     /// Without `secrets`, keys are owner-only files in the data directory.
-    /// `commands` composes the coordinator and handler of the schema's
-    /// strong commands.
+    /// `coordinator` pins a metadata service by its trust bundle.
     #[uniffi::constructor]
     pub fn open(
         options: String,
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
-        commands: Option<NativeCommands>,
+        coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
-        let commands = commands.map(NativeCommands::compose).transpose()?;
+        let coordination = coordination(coordinator)?;
         Ok(Arc::new(Self {
             engine: rocky_sdk::Engine::open_composed(
                 &options,
                 &schema,
                 foreign(secrets),
                 None,
-                commands,
+                coordination,
             )
             .map_err(failure)?,
         }))

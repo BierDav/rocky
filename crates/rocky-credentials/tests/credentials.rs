@@ -25,10 +25,8 @@ impl Domain {
             app: ApplicationManifest::app_id(key, "example"),
             schema: 1,
             projection: 1,
-            handler: 1,
             entities: Vec::new(),
             fields: Vec::new(),
-            methods: Vec::new(),
             operations: Vec::new(),
             domains: vec![DomainRule {
                 domain: DomainId([2; 16]),
@@ -62,8 +60,6 @@ impl Domain {
                     table,
                 },
                 columns: [("text".to_owned(), field)].into(),
-                invokes: BTreeSet::new(),
-                executes: BTreeSet::new(),
             });
         }
         Self {
@@ -267,7 +263,7 @@ fn chains_keep_manifest_revocations_expiry_attenuation_and_paired_rights() {
         domain
             .verify(
                 &widen(&|grant| {
-                    grant.rights.insert(Right::Execute);
+                    grant.rights.insert(Right::PublishSchema);
                 }),
                 &node,
                 &policy,
@@ -342,7 +338,7 @@ fn a_login_principal_alone_grants_nothing() {
 }
 
 #[test]
-fn profiles_are_scoped_and_hold_no_executor_or_schema_right() {
+fn profiles_are_scoped_and_hold_no_schema_right() {
     let domain = Domain::new();
     let custody = Profile::Custody {
         scopes: Domain::names(&["notes"]),
@@ -357,10 +353,9 @@ fn profiles_are_scoped_and_hold_no_executor_or_schema_right() {
     let writer = Profile::Writer {
         scopes: Domain::names(&["payroll"]),
     };
-    let forbidden: BTreeSet<Right> = [Right::Invoke, Right::Execute, Right::PublishSchema].into();
     for profile in [&reader, &writer, &Profile::Issuer] {
         let grants = profile.grants(&domain.resources).expect("grants");
-        assert!(rights(&grants).is_disjoint(&forbidden));
+        assert!(!rights(&grants).contains(&Right::PublishSchema));
         assert!(grants.iter().all(|grant| grant.rows == RowSelection::All));
     }
     let grants = reader.grants(&domain.resources).expect("reader");
@@ -378,33 +373,6 @@ fn profiles_are_scoped_and_hold_no_executor_or_schema_right() {
             .len(),
         2
     );
-    // Command methods add paired rights: a writer of the scope arguments
-    // are sealed for invokes, and only an issuer executes.
-    let mut commanded = Domain::new().resources;
-    let (reserve, audit) = ([7; 32], [8; 32]);
-    commanded[1].invokes = [reserve].into();
-    commanded[0].executes = [reserve, audit].into();
-    commanded[1].executes = [reserve].into();
-    let grants = writer.grants(&commanded).expect("writer");
-    assert!(grants[0].rights.contains(&Right::Invoke) && grants[0].fields.contains(&reserve));
-    assert!(!grants[0].rights.contains(&Right::Execute));
-    let both = Profile::Writer {
-        scopes: Domain::names(&["notes", "payroll"]),
-    };
-    let grants = both.grants(&commanded).expect("writer");
-    assert!(!grants[0].rights.contains(&Right::Invoke) && !grants[0].fields.contains(&reserve));
-    assert!(rights(&reader.grants(&commanded).expect("reader")).is_disjoint(&forbidden));
-    let grants = Profile::Issuer.grants(&commanded).expect("issuer");
-    assert!(
-        grants
-            .iter()
-            .all(|grant| grant.rights.contains(&Right::Execute))
-    );
-    assert!(grants[0].fields.contains(&audit) && !grants[1].fields.contains(&audit));
-    assert!(
-        !grants[0].rights.contains(&Right::Invoke) && grants[1].rights.contains(&Right::Invoke)
-    );
-    assert!(!rights(&grants).contains(&Right::PublishSchema));
     // No default and no unknown scope.
     for names in [&[][..], &["missing"][..], &["notes", "missing"][..]] {
         let scopes = Domain::names(names);
@@ -658,24 +626,17 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
 #[test]
 fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     let mut resources = Domain::new().resources;
-    let (reserve, audit) = ([7; 32], [8; 32]);
     resources[0].columns.insert("title".into(), [6; 32]);
-    resources[1].invokes = [reserve].into();
-    resources[1].executes = [reserve, audit].into();
     let parse = |value: serde_json::Value| serde_json::from_value::<Vec<Grant>>(value);
-    // Execute and custody to whoever the issuer names; columns narrow fields.
+    // Any rights to whoever the issuer names; columns narrow fields.
     let raw = parse(serde_json::json!([
         {"scope": "notes", "rights": ["read", "update", "custody"], "columns": ["title"]},
-        {"scope": "payroll", "rights": ["execute", "custody"]},
+        {"scope": "payroll", "rights": ["delete", "custody"]},
     ]))
     .expect("grants");
     let grants = Grant::resolve_all(&raw, &resources).expect("resolved");
     assert_eq!(grants[0].fields, [[6; 32]].into());
-    assert_eq!(
-        rights(&grants[1..]),
-        [Right::Execute, Right::Custody].into()
-    );
-    assert!(grants[1].fields.contains(&audit) && grants[1].fields.contains(&reserve));
+    assert_eq!(rights(&grants[1..]), [Right::Delete, Right::Custody].into());
     assert_eq!(
         serde_json::to_value(&raw[0]).expect("json")["rights"],
         serde_json::json!(["read", "update", "custody"])
@@ -690,10 +651,8 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
         Profile::of(&grants, &resources),
         Profile::Grants { grants: raw }
     );
-    // A command right where no command is, unknown names, empty sets and
-    // the schema right are refused.
+    // Unknown names, empty sets and the schema right are refused.
     for refused in [
-        serde_json::json!([{"scope": "notes", "rights": ["execute"]}]),
         serde_json::json!([{"scope": "notes", "rights": ["read"], "columns": ["x"]}]),
         serde_json::json!([{"scope": "x", "rights": ["read"]}]),
         serde_json::json!([{"scope": "notes", "rights": []}]),
@@ -706,7 +665,10 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
             "{refused}"
         );
     }
-    assert!(parse(serde_json::json!([{"scope": "notes", "rights": ["fly"]}])).is_err());
+    // So are names that are no right, the removed command rights included.
+    for name in ["fly", "invoke", "execute"] {
+        assert!(parse(serde_json::json!([{"scope": "notes", "rights": [name]}])).is_err());
+    }
     assert!(parse(serde_json::json!([{"scope": "notes", "rights": [], "rows": "all"}])).is_err());
     // The starter profiles are functions over raw grants.
     let writer = Profile::Writer {
@@ -714,7 +676,7 @@ fn raw_grants_name_rights_and_columns_and_profiles_are_built_on_them() {
     };
     let raw = writer.raw(&resources).expect("raw");
     assert_eq!(raw.len(), 1);
-    assert!(raw[0].rights.contains(&Right::Invoke) && raw[0].columns.is_none());
+    assert!(raw[0].rights.contains(&Right::Insert) && raw[0].columns.is_none());
     assert_eq!(
         Profile::Grants { grants: raw }
             .grants(&resources)
@@ -810,7 +772,7 @@ fn delegation_narrows_and_a_delegated_chain_is_renewed_by_its_delegator() {
         assert!(delegate_with(holder, grants, depth).is_err());
     }
     let mut widened = wider.clone();
-    widened.rights.insert(Right::Execute);
+    widened.rights.insert(Right::PublishSchema);
     assert!(delegate_with(&holder, vec![wider, widened], 1).is_err());
     // The delegate reaches only its own node: one link is all it allows.
     assert!(

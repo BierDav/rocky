@@ -104,7 +104,7 @@ then proposes. Committed entries are kept for the last 1,024 positions.
 | Rust | `EncryptedReplica::{coordinated_slot, propose, store_entry, resolve_coordinated, committed_entries, coordinated_status, set_domain_log}`, `SecureSql::commit_coordinated`, the `EntryPeers` transport port and the `rocky_core::DomainLog` metadata port |
 | Coordinator | `NetworkCoordinator` implements `DomainLog`; `rocky_coordinator::coordinated::MemoryLog` runs the same log machine in one process |
 | Live links | `NativeSession::{store_entry, committed_entries}`; a store is paged and its chains carried as for pushes |
-| SDK | `Database::coordinate(log)`; a coordination-service database composes its service's log itself. SQL `BEGIN` and `COMMIT` with `"coordinated": true`; `coordinated` reports `trusted`, `position` and `undecided` |
+| SDK | `Open::coordination` accepts `Coordination::Composed(Arc<dyn DomainLog>)` or `Coordination::Service(bundle)`; `Database::coordinate(log)` changes the composed log after open. A service database composes its log itself. SQL `BEGIN` and `COMMIT` with `"coordinated": true`; `coordinated` reports `trusted`, `position` and `undecided` |
 | Kotlin | `RockySession.coordinated { query(...); execute(...) }` returns `CoordinatedCommit(position, hash, value)`; `coordinatedStatus()`. Failures are `RockyException` with the codes above |
 
 ```kotlin
@@ -117,11 +117,11 @@ val invoice = session.coordinated {
 ```
 
 The SDK sends entries only over open live links: a trusted node without one
-to a member of the set leaves the set at the deadline. Kotlin cannot compose
-its own `DomainLog`; it uses a coordination service's.
+to a member of the set leaves the set at the deadline. Kotlin uses a coordination service, or attaches `DevelopmentLog` for
+in-process development. A development log loses its ledger at process exit.
 
-The encrypted file identity is `rocky.encrypted-replica.v19` and the live
-link handshake `rocky.link.v3`; other versions are refused.
+The encrypted file identity is `rocky.encrypted-replica.v20` and the live
+link handshake `rocky.link.v4`; other versions are refused.
 
 ## Limits
 

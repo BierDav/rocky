@@ -25,8 +25,6 @@ pub enum Right {
     Update,
     Insert,
     Delete,
-    Invoke,
-    Execute,
     Custody,
     PublishSchema,
 }
@@ -193,73 +191,6 @@ pub trait RowApplication: Send + Sync + 'static {
     }
 }
 
-/// Strong row state is separate from mergeable field registers.
-pub type CommandRows = BTreeMap<ResourceScope, BTreeMap<Commitment, RowFields>>;
-
-#[derive(Clone, Debug)]
-pub struct RowCommandOutput {
-    pub changes: Vec<RowChange>,
-    /// Application-owned outputs must retain their reader scope.
-    pub outputs: Vec<ScopedCommandOutput>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum CommandOutputKind {
-    Result,
-    Job,
-    Blob,
-    Checkpoint,
-}
-
-#[derive(Clone, Debug)]
-pub struct ScopedCommandOutput {
-    pub scope: ResourceScope,
-    pub kind: CommandOutputKind,
-    pub bytes: Vec<u8>,
-}
-
-/// Installed deterministic handlers declare the complete invariant-relevant reader scopes.
-pub trait RowCommandApplication: RowApplication {
-    fn command_resources(&self, scope: Scope, method: &str) -> Result<Vec<ResourceScope>, String>;
-    fn command_invocation_scope(&self, scope: Scope, method: &str)
-    -> Result<ResourceScope, String>;
-    fn execute_command(
-        &self,
-        method: &str,
-        arguments: &[u8],
-        state: &CommandRows,
-    ) -> Result<RowCommandOutput, String>;
-    /// Whether requests of this version are admitted. Byte-oriented methods
-    /// without a descriptor stay at version 1.
-    fn supports_version(&self, _method: &str, version: u32) -> bool {
-        version == 1
-    }
-    /// Checks plaintext arguments before they are sealed, and again after
-    /// an executor opened them.
-    fn validate_arguments(
-        &self,
-        _method: &str,
-        _version: u32,
-        _arguments: &[u8],
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    /// Checks the row changes of a confirmed result. Unlike row writes,
-    /// they may change tables only commands control.
-    fn validate_confirmed(&self, changes: &[RowChange]) -> Result<(), String> {
-        self.validate_changes(changes)
-    }
-    /// Executes against the predecessor in `call`. The runtime calls this
-    /// outside its transactions and locks and checks the predecessor again
-    /// before it prepares the output.
-    fn run_command<'a>(&'a self, call: crate::CommandCall<'a>) -> crate::CommandOutputFuture<'a> {
-        let output = self
-            .execute_command(call.method, call.arguments, call.state)
-            .map_err(crate::CommandFailure::Invalid);
-        Box::pin(std::future::ready(output))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,13 +273,7 @@ mod tests {
         }
         // Reading or holding custody is not a write right.
         assert!(!changed.permitted_by(&[grant(
-            &[
-                Right::Read,
-                Right::Custody,
-                Right::Invoke,
-                Right::Execute,
-                Right::PublishSchema
-            ],
+            &[Right::Read, Right::Custody, Right::PublishSchema],
             &[1, 2],
         )]));
     }

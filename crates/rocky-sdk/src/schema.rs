@@ -1,6 +1,6 @@
 use crate::Failure;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -13,10 +13,6 @@ pub struct Schema {
     pub views: Vec<rocky_core::LogicalView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_policy: Option<rocky_core::UpdatePolicy>,
-    /// Typed strong commands over the tables. Part of the signed
-    /// definition: every device of a domain declares the same ones.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commands: Option<rocky_core::CommandDefinitions>,
     /// Tables granted like another: each grant of a profile on the value
     /// also covers the key. Declared when the key table is added; see
     /// `docs/runtime/generations.md#tables-granted-like-another`.
@@ -105,8 +101,6 @@ impl Schema {
             self.definition([0; 32])?
                 .build()?
                 .supported_on(rocky_core::Profile::Secure)?;
-            let names: BTreeSet<_> = tables.iter().map(|table| &table.name).collect();
-            self.validate_commands(&names)?;
             self.validate_granted_like()?;
             if let Some(table) = self
                 .migrations
@@ -146,26 +140,6 @@ impl Schema {
                         .into(),
                 );
             }
-            // Only confirmed commands write such a table: one must name it.
-            let commanded: BTreeSet<String> = match &self.commands {
-                Some(commands) => commands
-                    .build()?
-                    .descriptors()
-                    .iter()
-                    .flat_map(|descriptor| descriptor.resources.clone())
-                    .collect(),
-                None => BTreeSet::new(),
-            };
-            if let Some(table) = tables.iter().find(|table| {
-                table.class == rocky_core::TableClass::CommandControlled
-                    && !commanded.contains(&table.name)
-            }) {
-                return Err(format!(
-                    "command-controlled table {} is a resource of no command",
-                    table.name
-                )
-                .into());
-            }
             Ok(())
         }
     }
@@ -187,24 +161,6 @@ impl Schema {
                     "{table} cannot be granted like {like}: both must be distinct mergeable tables, and {like} granted like none"
                 )
                 .into());
-            }
-        }
-        Ok(())
-    }
-    fn validate_commands(&self, names: &BTreeSet<&String>) -> Result<(), Failure> {
-        if let Some(commands) = &self.commands {
-            for descriptor in commands.build()?.descriptors() {
-                if let Some(scope) = descriptor
-                    .resources
-                    .iter()
-                    .find(|scope| !names.contains(scope))
-                {
-                    return Err(format!(
-                        "command {} names {scope}, which is not a table",
-                        descriptor.name
-                    )
-                    .into());
-                }
             }
         }
         Ok(())

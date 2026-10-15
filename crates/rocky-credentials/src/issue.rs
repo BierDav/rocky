@@ -16,18 +16,14 @@ pub struct Resource {
     pub scope: ResourceScope,
     /// Each column's name and field commitment.
     pub columns: BTreeMap<String, Commitment>,
-    /// The command methods whose arguments are sealed for this scope.
-    pub invokes: BTreeSet<Commitment>,
-    /// The command methods that read or write this scope.
-    pub executes: BTreeSet<Commitment>,
 }
 
 /// Most grants one capability holds.
 pub const MAX_GRANTS: usize = 64;
 
 /// A raw grant: rights over one named reader scope, optionally limited to
-/// some of its columns. Any set is issuable, `Execute` and `Custody`
-/// included; the profiles below are functions producing these.
+/// some of its columns. Any set is issuable, `Custody` included; the
+/// profiles below are functions producing these.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
@@ -39,9 +35,8 @@ pub struct Grant {
     pub columns: Option<BTreeSet<String>>,
 }
 impl Grant {
-    /// The signed grant this names over `resources`. `Invoke` and
-    /// `Execute` pair the scope's command methods, and are refused on a
-    /// scope that has none. `PublishSchema` is no collection right.
+    /// The signed grant this names over `resources`. `PublishSchema` is no
+    /// collection right.
     pub fn resolve(&self, resources: &[Resource]) -> Result<ResourceGrant, Error> {
         let resource = resources
             .iter()
@@ -52,7 +47,7 @@ impl Grant {
                 "a grant names no right, or one that is not a collection's",
             ));
         }
-        let mut fields: BTreeSet<Commitment> = match &self.columns {
+        let fields: BTreeSet<Commitment> = match &self.columns {
             None => resource.columns.values().copied().collect(),
             Some(names) => names
                 .iter()
@@ -65,20 +60,6 @@ impl Grant {
                 })
                 .collect::<Result<_, _>>()?,
         };
-        // A method is named in `fields`, paired with its scope.
-        for (right, methods) in [
-            (Right::Invoke, &resource.invokes),
-            (Right::Execute, &resource.executes),
-        ] {
-            if self.rights.contains(&right) {
-                if methods.is_empty() {
-                    return Err(denied(
-                        "a grant names a command right on a scope no command uses",
-                    ));
-                }
-                fields.extend(methods);
-            }
-        }
         Ok(ResourceGrant {
             scope: resource.scope,
             rows: RowSelection::All,
@@ -126,13 +107,11 @@ mod named_rights {
     use rocky_core::Right;
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
     use std::collections::BTreeSet;
-    const NAMES: [(Right, &str); 8] = [
+    const NAMES: [(Right, &str); 6] = [
         (Right::Read, "read"),
         (Right::Update, "update"),
         (Right::Insert, "insert"),
         (Right::Delete, "delete"),
-        (Right::Invoke, "invoke"),
-        (Right::Execute, "execute"),
         (Right::Custody, "custody"),
         (Right::PublishSchema, "publish_schema"),
     ];
@@ -160,9 +139,8 @@ mod named_rights {
 
 /// What an enrollment grants. There is no default: an issuer names one.
 /// Reader, writer and issuer are the optional starter layer: functions
-/// producing raw grants. A writer of a scope invokes the commands sealed
-/// for it; only an issuer executes commands among them. No profile holds
-/// `PublishSchema`.
+/// producing raw grants. A writer edits its scopes; issuers enroll and
+/// renew devices. No profile holds `PublishSchema`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", from = "ProfileRecord")]
 pub enum Profile {
@@ -244,20 +222,11 @@ impl Profile {
         Ok(resources
             .iter()
             .filter(|resource| names.is_none_or(|names| names.contains(&resource.name)))
-            .map(|resource| {
-                let mut rights: BTreeSet<Right> = rights.iter().copied().collect();
-                if rights.contains(&Right::Update) && !resource.invokes.is_empty() {
-                    rights.insert(Right::Invoke);
-                }
-                if self.issues() && !resource.executes.is_empty() {
-                    rights.insert(Right::Execute);
-                }
-                Grant {
-                    scope: resource.name.clone(),
-                    rights,
-                    // Custody covers ciphertext only: no column at all.
-                    columns: matches!(self, Self::Custody { .. }).then(BTreeSet::new),
-                }
+            .map(|resource| Grant {
+                scope: resource.name.clone(),
+                rights: rights.iter().copied().collect(),
+                // Custody covers ciphertext only: no column at all.
+                columns: matches!(self, Self::Custody { .. }).then(BTreeSet::new),
             })
             .collect())
     }

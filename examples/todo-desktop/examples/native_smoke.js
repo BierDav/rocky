@@ -44,29 +44,7 @@ const toggle = async (connected) => {
 };
 try {
     await wait(() => panel(0) && panel(1) && rev(0) >= 0 && rev(1) >= 0);
-    if (scenario === 'publication') {
-        await create(0, 'Sealed native todo');
-        await wait(() => find(1, 'Sealed native todo'));
-        document.querySelector('#publish-1').click();
-        await wait(() => [0,1].every(i => panel(i).querySelectorAll('.publication').length === 1 && panel(i).textContent.includes('applied by named peer')));
-        await rename(0, 'Sealed native todo', 'Live edit after publication');
-        await wait(() => find(1, 'Live edit after publication'));
-        if (![0,1].every(i => panel(i).querySelector('.publication').textContent.includes('Sealed native todo'))) throw new Error('publication changed with live edit');
-        document.querySelector('#coordination').click();
-        await wait(() => document.querySelector('#coordination').textContent.includes('Enable'));
-        document.querySelector('#publish-1').click();
-        await wait(() => panel(1).textContent.includes('Publication request 2:'));
-        await create(1, 'Later offline input');
-        await wait(() => find(0, 'Later offline input'));
-        if (![0,1].every(i => panel(i).querySelectorAll('.publication').length === 1)) throw new Error('unconfirmed result exposed');
-        document.querySelector('#coordination').click();
-        await wait(() => [0,1].every(i => panel(i).querySelectorAll('.publication').length === 2));
-        if ([0,1].some(i => panel(i).querySelectorAll('.publication')[1].textContent.includes('Later offline input'))) throw new Error('sealed input replaced');
-        document.querySelector('#takeover').click();
-        await wait(() => document.body.textContent.includes('Executor: Phone'));
-        document.querySelector('#publish-0').click();
-        await wait(() => [0,1].every(i => panel(i).querySelectorAll('.publication').length === 3 && panel(i).textContent.includes('applied by named peer')));
-    } else if (scenario === 'offline') {
+    if (scenario === 'offline') {
         await create(0, 'Shared todo');
         await wait(() => find(1, 'Shared todo'));
         await toggle(false);

@@ -1,6 +1,5 @@
 //! Signed backup archives of one database: a coherent copy of its file,
-//! the receipt evidence its coordinator client retained and its identity
-//! record, which holds no key. An archive is restored only into a fresh
+//! and its identity record, which holds no key. An archive is restored only into a fresh
 //! signing identity enrolled with an issuer. See
 //! `docs/runtime/backup-and-restore.md`.
 use crate::{Failure, enrollment::Settings};
@@ -14,13 +13,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAGIC: &[u8] = b"rocky.backup.v1\n";
-const FORMAT: u32 = 1;
+const MAGIC: &[u8] = b"rocky.backup.v2\n";
+const FORMAT: u32 = 2;
 const MAX_HEADER: usize = 256 * 1024;
 /// The files an archive carries, in order. The database is required.
 const DATABASE: &str = "rocky.sqlite";
 const IDENTITY: &str = "identity.json";
-const EVIDENCE: &str = "coordinator.evidence";
 /// Written before a restore enrolls: the restored file's predecessor.
 pub(crate) const MARKER: &str = "restore.json";
 
@@ -57,7 +55,7 @@ pub(crate) struct Marker {
 }
 
 fn label(inventory: &[u8]) -> Vec<u8> {
-    [b"rocky.backup.v1".as_slice(), inventory].concat()
+    [b"rocky.backup.v2".as_slice(), inventory].concat()
 }
 fn digest(path: &Path) -> Result<(u64, String), Failure> {
     let mut reader = BufReader::new(File::open(path)?);
@@ -167,11 +165,7 @@ pub(crate) fn open(archive: &Path, staging: &Path) -> Result<Opened, Failure> {
         .iter()
         .map(|entry| entry.name.as_str())
         .collect();
-    if names.first() != Some(&IDENTITY)
-        || names.get(1) != Some(&DATABASE)
-        || names.len() > 3
-        || (names.len() == 3 && names[2] != EVIDENCE)
-    {
+    if names.first() != Some(&IDENTITY) || names.get(1) != Some(&DATABASE) || names.len() != 2 {
         return Err("the backup archive holds unexpected files".into());
     }
     std::fs::create_dir_all(staging)?;

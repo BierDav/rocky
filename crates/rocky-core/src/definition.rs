@@ -838,7 +838,7 @@ mod partition_tests {
         assert!(wrong_index.validate().is_err());
     }
     #[test]
-    fn partitioned_tables_refuse_incomplete_indexes_references_and_command_control() {
+    fn partitioned_tables_refuse_incomplete_indexes_and_references() {
         let reason = |json: &str| match SchemaDefinition::parse(json.as_bytes())
             .unwrap()
             .build()
@@ -885,37 +885,17 @@ mod partition_tests {
             reason(&complete.replace(",\"on_conflict\":\"latest_wins\"", "")),
             crate::Incompatibility::UniqueConstraint
         );
-        let mut commanded = definition();
-        commanded.tables[0].class = TableClass::CommandControlled;
-        assert_eq!(
-            match commanded
-                .build()
-                .unwrap()
-                .supported_on(crate::Profile::Secure)
-            {
-                Err(SchemaError::Incompatible { reason, .. }) => reason,
-                other => panic!("{other:?}"),
-            },
-            crate::Incompatibility::TableClass(TableClass::CommandControlled)
-        );
     }
     #[test]
-    fn partitioned_confirmed_rows_are_refused_on_every_profile() {
-        let mut confirmed = definition();
-        confirmed.tables[0].class = TableClass::ConfirmedReadOnly;
-        let schema = confirmed.build().unwrap();
-        for profile in [crate::Profile::Secure, crate::Profile::Trusted] {
-            assert!(
-                matches!(
-                    schema.supported_on(profile),
-                    Err(SchemaError::Incompatible {
-                        reason: crate::Incompatibility::TableClass(TableClass::ConfirmedReadOnly),
-                        ..
-                    })
-                ),
-                "{profile:?}: {:?}",
-                schema.supported_on(profile)
-            );
+    fn removed_command_table_classes_are_refused() {
+        let json = |class: &str| {
+            format!(
+                r#"{{"format":6,"publisher":"1111111111111111111111111111111111111111111111111111111111111111","application":"stock","tables":[{{"name":"stock","class":"{class}","columns":[{{"name":"item","type":"text","not_null":true}}],"primary_key":["item"]}}]}}"#
+            )
+        };
+        SchemaDefinition::parse(json("mergeable").as_bytes()).unwrap();
+        for class in ["command_controlled", "confirmed_read_only"] {
+            assert!(SchemaDefinition::parse(json(class).as_bytes()).is_err());
         }
     }
     #[test]

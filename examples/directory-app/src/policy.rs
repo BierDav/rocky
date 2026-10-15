@@ -27,18 +27,13 @@ impl Directory {
             + self
                 .artifacts
                 .iter()
-                .map(|a| a.app_grants.len() + a.keys.len() + a.pending.len())
+                .map(|a| a.app_grants.len() + a.keys.len())
                 .sum::<usize>()
             + self.deleted_keys.len()
             + self
                 .deletions
                 .iter()
-                .map(|d| {
-                    1 + d.revoked_nodes.len()
-                        + d.revoked_grants.len()
-                        + d.rotate_keys.len()
-                        + d.resolve_pending.len()
-                })
+                .map(|d| 1 + d.revoked_nodes.len() + d.revoked_grants.len() + d.rotate_keys.len())
                 .sum::<usize>()
     }
     fn has_key(&self, key: Commitment) -> bool {
@@ -208,7 +203,6 @@ impl DirectoryApp {
                     || !directory.user(caller)
                     || artifacts.app_grants.len() > 64
                     || artifacts.keys.len() > 64
-                    || artifacts.pending.len() > 64
                 {
                     return Err(Invalid);
                 }
@@ -221,11 +215,6 @@ impl DirectoryApp {
                     for key in artifacts.keys {
                         if !old.keys.contains(&key) {
                             old.keys.push(key);
-                        }
-                    }
-                    for pending in artifacts.pending {
-                        if !old.pending.contains(&pending) {
-                            old.pending.push(pending);
                         }
                     }
                 } else {
@@ -290,7 +279,6 @@ impl DirectoryApp {
                         owner: caller,
                         app_grants: vec![],
                         keys: vec![],
-                        pending: vec![],
                     });
                 directory.deleted_keys.extend(nodes.iter().copied());
                 directory.deleted_keys.extend(
@@ -319,7 +307,6 @@ impl DirectoryApp {
                     revoked_nodes: nodes,
                     revoked_grants: grants,
                     rotate_keys: artifacts.keys,
-                    resolve_pending: artifacts.pending,
                     disposition,
                 });
             }
@@ -334,10 +321,8 @@ impl DirectoryApp {
             app: ApplicationManifest::app_id(self.publisher, "directory"),
             schema: 1,
             projection: 1,
-            handler: 1,
             entities: vec![],
             fields: vec![],
-            methods: vec![],
             operations: vec![],
             domains: vec![DomainRule {
                 domain: self.domain,
@@ -348,15 +333,8 @@ impl DirectoryApp {
         m.entities.push(DefinitionItem {
             id: m.item_id("entity", "Directory"),
             name: "Directory".into(),
-            shape:
-                "bounded snapshot; users/deployments/nodes; scoped delegation; deletion disposition"
-                    .into(),
-        });
-        m.methods.push(DefinitionItem {
-            id: m.item_id("method", COMMAND),
-            name: COMMAND.into(),
             shape: format!(
-                "v1 predecessor transition; registrar={:?}; ownership={:?}",
+                "bounded snapshot; users/deployments/nodes; scoped delegation; deletion disposition; registrar={:?}; ownership={:?}",
                 self.bootstrap_registrar, self.initial_ownership
             ),
         });

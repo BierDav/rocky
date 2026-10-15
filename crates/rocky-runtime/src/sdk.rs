@@ -1,6 +1,5 @@
 //! JSON v1 transport contract. See `docs/runtime/sdk-contract.md`.
 use crate::*;
-use rocky_core::Coordinator;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -59,8 +58,8 @@ where
     pub fn scope(&self) -> Scope {
         self.replica.inner.scope
     }
-    pub async fn dispatch(&self, call: Call, coordinator: Option<&dyn Coordinator>) -> Reply {
-        match self.execute(call, coordinator).await {
+    pub async fn dispatch(&self, call: Call) -> Reply {
+        match self.execute(call).await {
             Ok(value) => Reply::Ok {
                 version: VERSION,
                 value,
@@ -71,11 +70,7 @@ where
             },
         }
     }
-    pub async fn dispatch_json(
-        &self,
-        bytes: &[u8],
-        coordinator: Option<&dyn Coordinator>,
-    ) -> Vec<u8> {
+    pub async fn dispatch_json(&self, bytes: &[u8]) -> Vec<u8> {
         let reply = if bytes.len() > MAX_FRAME_BYTES {
             Reply::Error {
                 version: VERSION,
@@ -87,7 +82,7 @@ where
             }
         } else {
             match serde_json::from_slice(bytes) {
-                Ok(call) => self.dispatch(call, coordinator).await,
+                Ok(call) => self.dispatch(call).await,
                 Err(_) => Reply::Error {
                     version: VERSION,
                     error: Error::Rejected("invalid SDK call".into()).into(),
@@ -100,11 +95,7 @@ where
             _ => br#"{"status":"error","version":1,"error":{"code":"quota","retryable":false,"message":"SDK response exceeds frame budget"}}"#.to_vec(),
         }
     }
-    async fn execute(
-        &self,
-        call: Call,
-        coordinator: Option<&dyn Coordinator>,
-    ) -> Result<Value, Error> {
+    async fn execute(&self, call: Call) -> Result<Value, Error> {
         if self.subscriptions.lock().map_err(|_| Error::Closed)?.closed {
             return Err(Error::Closed);
         }
@@ -118,26 +109,6 @@ where
             Request::Read { query } => {
                 let (query, options) = query.bound(call.scope)?;
                 Ok(snapshot(self.replica.read(query, options).await?))
-            }
-            Request::ReadStrong { query } => {
-                let coordinator =
-                    coordinator.ok_or(Error::StrongPending(PendingReason::MissingHead))?;
-                let (query, options) = query.bound(call.scope)?;
-                Ok(
-                    match self
-                        .replica
-                        .read_strong(query, options, coordinator)
-                        .await?
-                    {
-                        StrongRead::Ready(result) => {
-                            json!({"state":"ready", "snapshot":snapshot(result)})
-                        }
-                        StrongRead::Unavailable => json!({"state":"unavailable"}),
-                        StrongRead::Pending { discovered, reason } => {
-                            json!({"state":"pending", "head":discovered.head, "sequence":discovered.sequence.to_string(), "reason":pending_code(reason)})
-                        }
-                    },
-                )
             }
             Request::Subscribe { query } => {
                 let (query, options) = query.bound(call.scope)?;
@@ -238,71 +209,16 @@ where
                     None => json!({"state":"unresolved"}),
                 })
             }
-            Request::Invoke {
-                handle,
-                method,
-                version,
-                arguments,
-                policy,
-            } => {
-                let result = self
-                    .replica
-                    .invoke_command(
-                        CommandHandle(handle),
-                        CommandInvocation {
-                            method,
-                            version,
-                            arguments,
-                            policy,
-                            inputs: None,
-                        },
-                    )?
-                    .committed()
-                    .await?;
-                Ok(json!({"state":"queued", "request":request_id(result.id)}))
-            }
-            Request::CommandProgress { handle } => {
-                let progress = self
-                    .replica
-                    .track_command(CommandHandle(handle), &[])
-                    .await?;
-                let state = match progress.state {
-                    None => "unresolved",
-                    Some(CommandState::Queued) => "queued",
-                    Some(CommandState::OutcomeUnknown) => "outcome_unknown",
-                    Some(CommandState::ConfirmedLocally) => "confirmed_locally",
-                    Some(CommandState::PeerApplied) => "peer_applied",
-                    Some(CommandState::Released) => "released",
-                    Some(CommandState::Retired) => "retired",
-                    Some(CommandState::Expired) => "expired",
-                };
-                Ok(
-                    json!({"state":state,"request":progress.request.map(request_id),"outcome":progress.outcome}),
-                )
-            }
         }
     }
 }
 fn operation(id: OperationId) -> Value {
     json!({"node":id.node.0,"sequence":id.sequence.get().to_string()})
 }
-fn pending_code(reason: PendingReason) -> &'static str {
-    match reason {
-        PendingReason::MissingInput => "missing_input",
-        PendingReason::MissingConfirmedPackage => "missing_confirmed_package",
-        PendingReason::Executor => "executor",
-        PendingReason::MissingHead => "missing_head",
-        PendingReason::StaleFence => "stale_fence",
-        PendingReason::CutBase => "cut_base",
-    }
-}
 fn snapshot(result: ReadSnapshot) -> Value {
     let completeness = match result.completeness {
         Completeness::Local { pending_operations } => {
             json!({"type":"local","pending_operations":pending_operations})
-        }
-        Completeness::CoordinatorHead { sequence, head } => {
-            json!({"type":"coordinator_head","sequence":sequence.to_string(),"head":head})
         }
     };
     let rows: Vec<Vec<BoundValue>> = result
@@ -316,11 +232,7 @@ fn snapshot(result: ReadSnapshot) -> Value {
         CursorKind::Offset => "offset",
     });
     let next = result.next.map(|cursor| cursor.encode());
-    json!({"scope":result.scope,"revision":result.revision.get().to_string(),"rows":rows,"next":next,"next_kind":next_kind,"completeness":completeness,"strong_head":{"sequence":result.strong_head.sequence.to_string(),"head":result.strong_head.head,"configuration":result.strong_head.configuration}})
-}
-
-fn request_id(id: rocky_core::RequestId) -> Value {
-    json!({"node":id.node.0,"sequence":id.sequence.get().to_string()})
+    json!({"scope":result.scope,"revision":result.revision.get().to_string(),"rows":rows,"next":next,"next_kind":next_kind,"completeness":completeness})
 }
 
 #[cfg(test)]

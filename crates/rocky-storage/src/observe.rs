@@ -18,8 +18,6 @@ pub enum Cause {
     Local,
     /// Operations received from a peer.
     Sync,
-    /// A confirmed strong result was applied.
-    Confirmed,
     /// The tables were rebuilt: a rebootstrap, a checkpoint or a shadow switch.
     Rebuild,
     /// Authority or readiness changed: credentials, keys, holdings or

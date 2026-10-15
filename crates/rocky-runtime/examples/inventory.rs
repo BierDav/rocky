@@ -3,11 +3,8 @@
 mod inventory_client;
 use inventory_app::{InventoryApp, Policy};
 use inventory_client::InventoryClient;
-use rocky_coordinator::MemoryCoordinator;
 use rocky_core::{DomainId, MeshId, NodeId, PrincipalId, Scope};
-use rocky_runtime::{
-    CommandHandle, DomainInstallation, Identity, MutationHandle, Runtime, RuntimeConfig,
-};
+use rocky_runtime::{DomainInstallation, Identity, MutationHandle, Runtime, RuntimeConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,41 +45,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
     )
     .await?;
-    let coordinator = MemoryCoordinator::default();
-    for scope in &scopes {
-        coordinator.register(*scope, caller, [6; 16], vec![node], 1, 1)?;
-        coordinator.acquire(*scope, caller, node)?;
-    }
     let client = InventoryClient::new(runtime.domain(scopes[0])?, scopes[0]);
     let draft = client
         .note(MutationHandle([1; 32]), None, "local draft")?
         .committed()
         .await?;
     client
-        .reserve(CommandHandle([2; 32]), 7)?
+        .note(MutationHandle([2; 32]), None, "second draft")?
         .committed()
         .await?;
     client
         .note(
             MutationHandle([3; 32]),
             Some(draft.scoped_id()),
-            "edited while reservation pending",
+            "edited draft",
         )?
         .committed()
         .await?;
-    client.replica.execute_pending(&coordinator).await?;
-    client
-        .reserve(CommandHandle([4; 32]), 4)?
-        .committed()
-        .await?;
-    client.replica.execute_pending(&coordinator).await?;
-    let stock = client.stock().await?;
-    assert_eq!(stock.remaining, 3);
+    let notes = client.notes().await?;
+    assert_eq!(notes.notes, ["edited draft", "second draft"]);
     println!(
-        "remaining={} revision={} completeness={:?}",
-        stock.remaining,
-        stock.revision.get(),
-        stock.completeness
+        "notes={:?} revision={} completeness={:?}",
+        notes.notes,
+        notes.revision.get(),
+        notes.completeness
     );
     runtime.close().await?;
     Ok(())

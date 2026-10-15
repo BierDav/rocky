@@ -137,7 +137,7 @@ fn ownership_bounded_delegation_and_revocation_cascade() {
     );
 }
 #[test]
-fn deletion_requires_disposition_and_retains_revocation_key_and_pending_work() {
+fn deletion_requires_disposition_and_retains_revocation_and_key_work() {
     let app = app();
     let alice = principal([4; 32]);
     let bob = principal([5; 32]);
@@ -179,13 +179,6 @@ fn deletion_requires_disposition_and_retains_revocation_key_and_pending_work() {
         encryption: [1; 32],
         table: [2; 32],
     };
-    let pending = (
-        scope,
-        RequestId {
-            node: NodeId([8; 16]),
-            sequence: AuthorSequence::new(1).unwrap(),
-        },
-    );
     d = app
         .transition(
             d,
@@ -194,7 +187,6 @@ fn deletion_requires_disposition_and_retains_revocation_key_and_pending_work() {
                 owner: alice,
                 app_grants: vec![[22; 32]],
                 keys: vec![resource],
-                pending: vec![pending],
             }),
         )
         .unwrap();
@@ -221,7 +213,6 @@ fn deletion_requires_disposition_and_retains_revocation_key_and_pending_work() {
     assert!(!d.registered_node([8; 32]));
     assert!(d.deployments.is_empty());
     assert_eq!(d.deletions[0].rotate_keys, vec![resource]);
-    assert_eq!(d.deletions[0].resolve_pending, vec![pending]);
     assert_eq!(d.deletions[0].revoked_grants, vec![[22; 32]]);
     assert!(
         app.transition(

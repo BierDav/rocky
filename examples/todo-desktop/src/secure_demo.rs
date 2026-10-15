@@ -1,6 +1,5 @@
 //! Development employees composition over authenticated loopback links and an opaque relay.
 use employees_app::Employees;
-use rocky_coordinator::MemoryCoordinator;
 use rocky_core::{
     Commitment, MeshId, PrincipalKind, ResourceGrant, ResourceScope, Right, RowChange, RowSelection,
 };
@@ -8,9 +7,8 @@ use rocky_secure::{
     Capability, CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, RevocationSet,
     SecureConfig, SignedCapability, SignedManifest,
     network::{NativeSession, link::Link},
-    secure_node_id, secure_principal_id,
 };
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone)]
@@ -18,7 +16,6 @@ pub struct SecureDemo {
     pub admin: EncryptedReplica<Employees>,
     pub editor: EncryptedReplica<Employees>,
     pub relay: EncryptedReplica<Employees>,
-    pub coordinator: Arc<MemoryCoordinator>,
     pub scopes: [ResourceScope; 2],
     identities: [(PrivateKey, CredentialChain); 3],
     publisher: [u8; 32],
@@ -50,8 +47,6 @@ impl SecureDemo {
                     Right::Update,
                     Right::Insert,
                     Right::Delete,
-                    Right::Invoke,
-                    Right::Execute,
                     Right::Custody,
                 ]
                 .into(),
@@ -148,11 +143,6 @@ impl SecureDemo {
         let relay_config = config(85, relay_grants, vec![])?;
         let identities = [&admin_config, &editor_config, &relay_config]
             .map(|config| (config.node.clone(), config.credentials.clone()));
-        let coordinator = Arc::new(MemoryCoordinator::default());
-        let caller = secure_principal_id(user.public_key());
-        let executor = secure_node_id(admin_config.node.public_key());
-        coordinator.register(scopes[0].domain, caller, [1; 16], vec![executor], 1, 1)?;
-        coordinator.acquire(scopes[0].domain, caller, executor)?;
         let publisher_bytes = *publisher.public_key().as_bytes();
         let admin = EncryptedReplica::open(
             dir.join("admin-secure.db"),
@@ -176,7 +166,6 @@ impl SecureDemo {
             admin,
             editor,
             relay,
-            coordinator,
             scopes,
             identities,
             publisher: publisher_bytes,
@@ -189,15 +178,29 @@ impl SecureDemo {
         rocky_core::commitment("employees.id.v1", b"demo-employee")
     }
     pub async fn set_employee(&self, name: &str, salary: &str) -> Result<(), Error> {
-        let args = format!("demo-employee\n{name}\n{salary}");
-        let handle = rocky_core::commitment("employees.demo-command.v1", args.as_bytes());
-        let command = self
-            .admin
-            .invoke_encrypted(handle, self.scopes[1], "SetEmployee", args.as_bytes())
-            .await?;
-        self.admin
-            .execute_encrypted(command, self.coordinator.as_ref())
-            .await?;
+        let mut changes = Vec::new();
+        for (scope, after) in [
+            (self.scopes[0], self.app().name(name)),
+            (self.scopes[1], self.app().salary(salary)),
+        ] {
+            changes.push(RowChange {
+                scope,
+                row: self.employee_id(),
+                before: self
+                    .admin
+                    .snapshot(scope)
+                    .await?
+                    .rows
+                    .get(&self.employee_id())
+                    .cloned(),
+                after: Some(after),
+            });
+        }
+        let handle = rocky_core::commitment(
+            "employees.demo-write.v1",
+            format!("{name}:{salary}").as_bytes(),
+        );
+        self.admin.author(handle, changes, vec![]).await?;
         Ok(())
     }
     pub async fn edit_public_name(&self, name: &str) -> Result<(), Error> {
@@ -227,41 +230,8 @@ impl SecureDemo {
     pub async fn pump(&self) -> Result<(), Error> {
         self.copy_rows(1, 2, vec![self.scopes[0]]).await?;
         self.copy_rows(2, 0, vec![self.scopes[0]]).await?;
-        for sequence in 1..=rocky_secure::MAX_SECURE_RECORDS as u64 {
-            let result = self
-                .admin
-                .encrypted_result_for(
-                    self.identities[2].0.public_key(),
-                    &self.identities[2].1,
-                    self.scopes[0].domain,
-                    sequence,
-                    &self.scopes,
-                )
-                .await?;
-            let Some(result) = result else {
-                break;
-            };
-            let (mut admin, mut relay, _link) = self.channel(0, 2).await?;
-            let (send, receive) = tokio::join!(
-                admin.push_result(&self.admin, result),
-                relay.serve_command_once(&self.relay, self.coordinator.as_ref())
-            );
-            send?;
-            receive?;
-            let (mut editor, mut relay, _link) = self.channel(1, 2).await?;
-            let (receive, send) = tokio::join!(
-                editor.pull_result(
-                    &self.editor,
-                    self.scopes[0].domain,
-                    sequence,
-                    vec![self.scopes[0]],
-                    self.coordinator.as_ref()
-                ),
-                relay.serve_command_once(&self.relay, self.coordinator.as_ref())
-            );
-            receive?;
-            send?;
-        }
+        self.copy_rows(0, 2, self.scopes.to_vec()).await?;
+        self.copy_rows(2, 1, vec![self.scopes[0]]).await?;
         Ok(())
     }
     fn replica(&self, index: usize) -> &EncryptedReplica<Employees> {
@@ -380,21 +350,17 @@ mod tests {
         );
         assert_eq!(
             demo.editor
-                .command_snapshot(demo.scopes[0])
+                .snapshot(demo.scopes[0])
                 .await
                 .unwrap()
                 .rows
                 .len(),
             1
         );
-        assert!(demo.editor.command_snapshot(demo.scopes[1]).await.is_err());
-        assert!(demo.relay.command_snapshot(demo.scopes[1]).await.is_err());
+        assert!(demo.editor.snapshot(demo.scopes[1]).await.is_err());
+        assert!(demo.relay.snapshot(demo.scopes[1]).await.is_err());
         assert_eq!(
-            demo.admin
-                .command_snapshot(demo.scopes[1])
-                .await
-                .unwrap()
-                .rows[&demo.employee_id()],
+            demo.admin.snapshot(demo.scopes[1]).await.unwrap().rows[&demo.employee_id()],
             demo.app().salary("918273")
         );
         assert!(

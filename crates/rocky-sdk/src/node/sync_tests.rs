@@ -76,8 +76,6 @@ async fn node(
         vault,
         settings,
         root.join("identity.json"),
-        None,
-        None,
     ));
     node.link(transport, true).await;
     Ok(node)
@@ -606,7 +604,7 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
                     serving: true,
                 };
                 answering
-                    .serve_all(&server.replica, None, &deliveries, None)
+                    .serve_all(&server.replica, &deliveries, None)
                     .await
             };
             let exchanging = async {
@@ -630,7 +628,7 @@ async fn a_peer_importing_a_scope_is_not_fed_its_history() -> Result<(), Failure
                     serving: true,
                 };
                 answering
-                    .serve_all(&server.replica, None, &deliveries, None)
+                    .serve_all(&server.replica, &deliveries, None)
                     .await
             };
             let exchanging = async {

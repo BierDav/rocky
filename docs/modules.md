@@ -5,12 +5,11 @@ are governed by [V4](proposals/architecture-proposal-v4.md),
 [design rationale](runtime/coordinator-retention.md#design-rationale) and
 [features_07](features_07/README.md), not by the SDK's current composition choices.
 
-The target separates reusable credentials, managed database/replication, strong
-commands and optional iroh services. `rocky-sdk` becomes language bindings plus
+The target separates reusable credentials, managed database/replication,
+coordinated writes and optional iroh services. `rocky-sdk` becomes language bindings plus
 an optional starter composition; it does not require ownership of networking.
-Consumers define schemas and handlers in their own language without a Rust build.
-There is no command crate: contracts stay in `rocky-core` and execution in the
-runtimes. [Design rationale](runtime/sdk-composition.md#design-rationale)
+Consumers define schemas and transitions in their own language without a Rust build.
+Shared contracts stay in `rocky-core` and transaction execution in the runtimes. [Design rationale](runtime/sdk-composition.md#design-rationale)
 records the dependency direction, ports and resource ownership.
 The public coordinator retains only bounded generic metadata and receives no
 application schema/handlers/payloads. The [bounded retention protocol](runtime/coordinator-retention.md) supplies safe
@@ -18,26 +17,21 @@ retirement and explicit expiry. [Public coordination](runtime/public-coordinatio
 adds tenant registration and an iroh client lane.
 
 Core protocol, todo semantics, persistent replicas, two-replica synchronization,
-strong publication and native desktop UI are implemented. See
+coordinated writes and native desktop UI are implemented; Phase 11 consumer
+conversion remains [incomplete](features_09/11-removing-strong-commands-evidence.md). See
 [local replicas](runtime/local-replica.md), [two-replica sync](runtime/local-replica.md#replication-port)
 and [strong publication](runtime/strong-publication.md).
 
 ## rocky-core
 
 Implements shared identities, checked counters, canonical operation envelopes,
-versions, dependency readiness, applied history/frontiers, strong commitments and
+versions, dependency readiness, applied history/frontiers, commitments and
 protocol errors. Its generic coordinator port carries metadata only, as does the
 `DomainLog` port of [coordinated writes](runtime/coordinated-writes.md).
 It defines unsigned canonical manifests, publisher-bound definition IDs and scoped
 operation references. It defines the shared `Application` reducer and `StoredApplication` compiled
-projection contracts with optional registered command handlers and the tables a checkpoint carries, independent of storage engines.
-Scoped grants and the `RowApplication`/`RowCommandApplication` contracts define
-precise row transitions and deterministic encrypted-command handlers.
-`CommandDefinitions` builds the canonical descriptors of typed commands with
-their argument and outcome codec, `CommandHost` is where handlers run, `HandlerReads` gives immutable primary-key
-reads and bounded key-range scans, and
-`TypedCommands` is the row application of typed tables with commands
-([typed commands](runtime/typed-commands.md)).
+projection contracts and the tables a checkpoint carries, independent of storage engines.
+Scoped grants and `RowApplication` define precise authorized row transitions.
 `SqlWrites` and the captured-row, intent and transaction-token types are the
 evidence of a SQL transaction ([SQL sessions](runtime/sql-sessions.md)).
 `DatabaseBinding` names the tables one session sees and the domain of each
@@ -65,7 +59,7 @@ manifest, capability chain and the mergeable set of signed revocation
 statements ([revocations](runtime/revocations.md)), the
 distinct identities, raw grants and chain delegation, author pseudonyms and range verification,
 grant profiles built on
-raw grants with the invoke and execute rights of declared commands,
+raw grants with read and write rights,
 `Authority` issuance, the `KeyProvider`
 contract with its file fallback, transport-free invitation, pairing and
 renewal messages, and the coordination grant and tenant admission control
@@ -109,10 +103,6 @@ The storage adapter comes from `rocky-storage`. Incoming operations commit durab
 bounded dependency-ready apply transactions. Named-peer acknowledgments are
 persistent; exact receipt sets and bounded retained-history pages drive reconciliation.
 
-Durable command requests, immutable preparations and verified result application
-use a separate strong head and publication outbox. Coordinator calls stay outside
-the storage worker and transactions.
-
 `SqlSession` runs ordinary statements and transactions on a domain's typed
 tables. A transaction leases the file writer; one row hook feeds digests and
 capture, and the commit step turns the changed rows into operations
@@ -125,7 +115,7 @@ cursors and catalogs, and replicas and databases register table observers
 published after each group commits ([queries and observation](runtime/queries-and-observation.md)).
 
 The language-neutral `sdk::Session` wraps an already authorized compiled domain
-with precise handles, local/strong reads and cancellable bound-query subscriptions.
+with precise handles, local reads and cancellable bound-query subscriptions.
 The Kotlin/JVM process consumer is qualified separately; see [SDK contract](runtime/sdk-contract.md).
 
 Depends on `rocky-core` and `rocky-storage`. It must not depend on
@@ -139,8 +129,7 @@ transactions, and non-unique indexes have an additive hook; legacy `Replica::ope
 remains single-domain and single-file. Worker memory holds counters and a frontier; stored rows are the
 state. Bound reads run application-declared authorized views over stored rows on
 read-only connections, paged and index-served
-([design rationale](runtime/local-replica.md#design-rationale)); strong reads can fetch matching payloads through
-`StrongPayloadSource`. See [app runtime](runtime/app-runtime.md). Each domain's
+([design rationale](runtime/local-replica.md#design-rationale)). See [app runtime](runtime/app-runtime.md). Each domain's
 worker serializes author work; the file writer group-commits projections,
 history, outbox and revisions atomically, buffered by default and flushed before
 anything leaves the device ([design rationale](runtime/write-concurrency.md#durability-and-exposure)),
@@ -162,19 +151,13 @@ capabilities `rocky-credentials` verifies under the revocation set it holds,
 reader key epochs and rotation,
 encrypted row operations, a framework-transaction p2panda store adapter and bounded
 authenticated synchronization over live links and their request channels
-(`network.rs`, `network/link.rs`), encrypted command scheduling and
-scoped strong projections with [bounded strong history](runtime/strong-history.md),
-and signed per-scope checkpoints, pruning and
+(`network.rs`, `network/link.rs`), signed per-scope checkpoints, pruning and
 rebootstrap ([encrypted checkpoints](runtime/encrypted-checkpoints.md)), and
 replica roles: scope subscriptions, frontier range sync, eviction under full-node
 custody and remote reads ([replica roles](runtime/replica-roles.md)).
 The session's delivery family carries opaque sealed deliveries; their owner
 implements its `Deliveries` port ([decision 0054](decisions/0054-envelope-delivery.md)).
-Handlers run outside its lock and transactions, one command at a time, and
-durable tickets record what a device knows of each command it submitted,
-apart from whatever delivers it ([typed commands](runtime/typed-commands.md)).
-`SignedCommandRequest` authenticates a node key before a trusted replica admits
-the compiled command. Its files are separate from trusted legacy files; see
+Its files are separate from trusted files; see
 [permissions and sync](runtime/permissions-and-sync.md). Multi-scope transaction
 bundles and authority-bound sessions are in [secure sessions](runtime/secure-sessions.md);
 never-offered bundles incompatible with a removal become
@@ -183,7 +166,6 @@ never-offered bundles incompatible with a removal become
 and catch up bundles a domain's coordinated log orders, behind the
 `EntryPeers` transport port and the link's entry messages;
 typed tables and SQL sessions over them in [secure SQL](runtime/secure-sql.md),
-read-only command-controlled tables in [confirmed tables](runtime/confirmed-tables.md),
 with availability-checked cursors and table events in
 [queries and observation](runtime/queries-and-observation.md).
 Secure history range access, redundant recovery archive pruning and same-definition
@@ -216,21 +198,16 @@ Start at `crates/rocky-iroh/src/lib.rs`.
 
 ## rocky-coordinator
 
-Owns generic executor assignment, leadership epochs, expected-head validation,
-active generations and confirmation deduplication. It also owns the metadata-only
-[coordinated log](runtime/coordinated-log.md), trusted in-sync membership, pending
-entry resolution and bounded hash window, served to trusted nodes through the
-`rocky_core::DomainLog` port by `NetworkCoordinator` and the in-process
-`coordinated::MemoryLog`; application bundle storage stays outside this crate. The deterministic in-memory state
-machine supplies fixture registration, acquire/takeover, lookup and receipt
-verification.
+Owns the metadata-only [coordinated log](runtime/coordinated-log.md), trusted
+in-sync membership, pending entry resolution and bounded hash window, served
+through `rocky_core::DomainLog` by `NetworkCoordinator` and the in-process
+`coordinated::MemoryLog`. Application bundle storage stays outside this crate.
 
 Depends on `rocky-core` and `rocky-credentials`, and on `rocky-iroh` for the
 voter's client lane behind its default `iroh` feature. It receives metadata and
-commitments, not application payloads, reducers or UI types. The legacy in-memory
-fixture remains separate. The certified profile owns root bootstrap verification,
+commitments, not application payloads, reducers or UI types. The in-process log fixture remains separate. The certified profile owns root bootstrap verification,
 generic control certificates, persistent OpenRaft metadata/log/snapshot storage,
-authenticated TCP and trusted signed receipts. A genesis with a `PublicService`
+authenticated TCP and signed metadata replies. A genesis with a `PublicService`
 policy adds tenant registration, per-tenant quotas and request lanes, the
 `Protocol::Coordinate` client lane, linearizable reads, voter backup and fenced
 restore, and the `TrustBundle` clients pin; `rocky-voter` provisions and
@@ -272,40 +249,17 @@ and permission-controlling fields. See [secure row qualification](runtime/permis
 
 ## inventory-app
 
-Implements the manifest-bound second application: LWW draft notes merge locally;
-stock reservation executes against the confirmed predecessor, retains business
-rejection and projects fulfillment job intents. Version 2 of the reservation
-takes typed arguments beside the retained bytes of version 1. Depends on `rocky-core` only.
-The typed SDK/composition examples live in `rocky-runtime/examples`; no UI SQL
-writes or package construction is required. See [qualification](runtime/app-runtime.md#examples-and-qualification).
-
-## accounting-app
-
-Its `Alice` application owns observed-event checkboxes and deterministic review-intent jobs. `Accounting`
-owns versioned event conditions and downstream review authorization. It depends
-on `rocky-core` only. The runtime owns durable effect attempts, authenticated
-observations and encrypted recovery artifacts; the coordinator owns explicit
-acknowledged-loss domain replacement metadata. See
-[recovery and effects](runtime/recovery-and-effects.md) for workflow and fault evidence.
+Implements the manifest-bound inventory draft-note application. Depends on
+`rocky-core`; runtime composition examples live in `rocky-runtime/examples`.
+The old stock command API has been removed.
 
 ## todo-desktop
 
-Owns desktop composition, UI state and development controls. It instantiates
-independent Laptop and Phone replicas with separate database files, and owns
-the bounded, fault-controllable in-process transport adapter. It composes the
-trusted coordinator, routes strong requests/results and exposes publication,
-coordination availability and explicit Phone takeover controls.
-It consumes observation and mutation APIs rather than writing SQL directly.
-
-Depends on `rocky-runtime`, `rocky-secure`, `rocky-coordinator`, `todo-app` and `employees-app`. The coordinator
-dependency is for composing the development setup, not placing its rules in UI.
-Dioxus 0.7 renders both editable panels from runtime observations. The separate
-`employees-desktop` executable composes secure row/command clients with an opaque
-relay over authenticated loopback links; see [its guide](runtime/encrypted-commands.md).
-The default todo executable accepts `--data-dir`; its window-close path drains
-both runtimes before exit.
-
-Start at `examples/todo-desktop/src/lib.rs`.
+Owns desktop composition, UI state and development controls, with independent
+Laptop and Phone files and a fault-controllable in-process transport.
+The todo demo uses ordinary mutations; the employee demo uses encrypted row
+bundles and an opaque relay. The old publication controls have been removed.
+Their verification is recorded separately from library package tests. See [Phase 11 evidence](features_09/11-removing-strong-commands-evidence.md).
 
 ## Kotlin integration and shoppinglist-app
 
@@ -326,32 +280,24 @@ iroh comes from `rocky-iroh` behind the default `iroh` feature
 network, `Session` handles share it, `Connection` serves a database
 driver's writer and readers ([SQL driver](runtime/sql-driver.md)) and a `NetworkService` owns or borrows its
 transport; `Engine` is the starter composition of the three
-([SDK composition](runtime/sdk-composition.md)). `Commands` composes an
-application's coordinator, or a coordination service its trust bundle names
-([public coordination](runtime/public-coordination.md)), and a handler: the handler runs on its own thread
-with a deadline, and command calls discover executor contacts, forward once when needed,
-and submit, run, deliver and settle tickets
-([typed commands](runtime/typed-commands.md)). Its `owner` module signs a domain
-owner's tenant-key registration, control and activation calls. It also accepts
-portable definition tables through the SDK/native schema input and owns `TypedApp`, the typed-table
-application with business keys and row incarnations, and its translation of
-captured SQL rows; the Kotlin builder and Room importer share this definition path. It uses the existing
-runtime, independent of example application reducers. `sdks/native` is the
+([SDK composition](runtime/sdk-composition.md)). `Open::coordination` composes an application-owned `DomainLog` or a service trust
+bundle. The `owner` module signs trusted-node control certificates under the
+tenant key; the coordinator receives only generic metadata.
+
+`sdks/native` is the
 excluded UniFFI ABI crate; generated FFI scaffolding is isolated from the safe
 workspace, with no authored unsafe code. Besides the session it exports the
 typed [driver connections](runtime/sql-driver.md) and table events, the
-foreign transport contract, the foreign command handler, an in-memory
-development coordinator and, with iroh, an endpoint handle that hosts the
-application's protocols next to Rocky's. In-process UniFFI bindings are the
-accepted consumer adapter ([design rationale](runtime/sdk-packaging.md#design-rationale)).
-The ABI crate also owns the [Kotlin/Native generator and simulator
-qualification](runtime/kotlin-native-binding.md). `vendor/apple-libc` supplies
+foreign transport contract and coordinated SQL. The native `DevelopmentLog`
+wraps the same in-process log machine used by Rust fixtures;
+see the [Phase 11 evidence](features_09/11-removing-strong-commands-evidence.md).
+`vendor/apple-libc` supplies
 the pinned Darwin declarations used by vendored netdev/netwatch; it has no
 network implementation or authored unsafe code.
 
-`sdks/kotlin/rocky-core` owns the [definition builder and Room JSON import](runtime/schema-definitions.md#build-in-kotlin), typed commands and their handlers, the ORM-neutral suspend/Flow SDK,
+`sdks/kotlin/rocky-core` owns the [definition builder and Room JSON import](runtime/schema-definitions.md#build-in-kotlin), the ORM-neutral suspend/Flow SDK,
 durable runtime port, transport and secret-store selection, peers, `RockyEndpoint` and native handle lifecycle. `RockyDatabase` owns independently closable sessions and optional
-network services; `Credentials` and `CommandPort` provide separate capabilities.
+network services; `Credentials` provides the credential capability.
 Signed generation lineage, backup archives and packaged resources are covered in
 [SDK packaging](runtime/sdk-packaging.md) and [generations](runtime/generations.md). `sdks/kotlin/rocky-sqlite` is the `androidx.sqlite` driver on Rocky's file, with no Room
 dependency ([SQL driver](runtime/sql-driver.md)). `sdks/kotlin/rocky-room` binds Room to

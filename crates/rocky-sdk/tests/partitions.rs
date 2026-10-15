@@ -9,7 +9,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
         schema: SCHEMA,
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 async fn reply(session: &Session, scope: &Value, request: Value) -> Value {
@@ -247,7 +247,7 @@ async fn own_id_partitions_continue_the_table_log() {
         schema,
         secrets: None,
         network: None,
-        commands: None,
+        coordination: None,
     };
     let mut db = Database::create(options(), None).unwrap().database;
     let scope: Value = serde_json::from_str(&db.scope()).unwrap();

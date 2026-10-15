@@ -15,7 +15,7 @@ import rocky.internal.native.prepareDevice
 
 /** Database ownership is independent of sessions and of an optional network. */
 class RockyDatabase private constructor(
-    private val native: NativeDatabase,
+    internal val native: NativeDatabase,
     nativeSession: NativeDatabaseSession,
     client: RockyClient,
     domain: String,
@@ -26,6 +26,9 @@ class RockyDatabase private constructor(
 
     /** The service attached by create/join/open; closing it leaves the database open. */
     val openedNetwork: RockyNetworkService? = native.openedNetwork()?.let(::RockyNetworkService)
+
+    /** Attaches an in-process log for development; its ledger lasts only for this process. */
+    suspend fun coordinate(log: DevelopmentLog) = nativeCall { log.native.attach(native) }
 
     /** Each session owns its observations and cancellation, while sharing committed storage. */
     fun openSession(): RockySession = native.session().let { session -> RockySession(session, RockyClient(SessionTransport(session, domain)), domain, isIssuer) }
@@ -125,6 +128,7 @@ class RockyDatabase private constructor(
         /** A new installation writes at once: its authors are installed before it is returned. */
         private suspend fun RockyDatabase.withAuthors(required: Boolean): RockyDatabase {
             try {
+                if (required && status().data.bootstrapPending) syncOnce()
                 installAuthors()
             } catch (error: Throwable) {
                 // A member whose issuer did not answer asks again on its next sync.
@@ -140,7 +144,7 @@ class RockyDatabase private constructor(
         fun exists(directory: String): Boolean = fileExists("$directory/identity.json")
 
         /** Local composition: no network is started unless supplied. */
-        suspend fun local(directory: String, schema: Schema, secrets: SecretStore? = null, commands: CommandRuntime? = null): RockyDatabase = make(false) { NativeDatabase.create(directory, schema.json(), secretProvider(secrets), null, composeCommands(commands), null) }
+        suspend fun local(directory: String, schema: Schema, secrets: SecretStore? = null, coordinator: ServiceCoordinator? = null): RockyDatabase = make(false) { NativeDatabase.create(directory, schema.json(), secretProvider(secrets), null, coordinator?.trustBundle, null) }
 
         /** Installs an independently supplied credential bundle after Credentials.prepare. */
         suspend fun install(
@@ -149,7 +153,7 @@ class RockyDatabase private constructor(
             supplied: JsonObject,
             secrets: SecretStore? = null,
             transport: PeerTransport? = null,
-            commands: CommandRuntime? = null,
+            coordinator: ServiceCoordinator? = null,
         ): RockyDatabase = make(false) {
             withNetwork(transport) { selected ->
                 NativeDatabase.install(
@@ -158,32 +162,32 @@ class RockyDatabase private constructor(
                     supplied.toString(),
                     secretProvider(secrets),
                     selected,
-                    composeCommands(commands),
+                    coordinator?.trustBundle,
                 )
             }
         }
 
         /** A new domain with this device as its first issuer, with its authors installed. */
-        suspend fun create(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.create(directory, schema.json(), secretProvider(secrets), it, composeCommands(commands), null) } }
+        suspend fun create(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, coordinator: ServiceCoordinator? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.create(directory, schema.json(), secretProvider(secrets), it, coordinator?.trustBundle, null) } }
             .withAuthors(required = true)
 
         /** Enrolls with an invitation and installs the authors of the tables it writes, from its issuer when it does not issue. */
-        suspend fun join(directory: String, schema: Schema, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.join(directory, schema.json(), invitation, requireNotNull(it), secretProvider(secrets), composeCommands(commands)) } }
+        suspend fun join(directory: String, schema: Schema, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, coordinator: ServiceCoordinator? = null): RockyDatabase = make(automaticSync) { withNetwork(transport) { NativeDatabase.join(directory, schema.json(), invitation, requireNotNull(it), secretProvider(secrets), coordinator?.trustBundle) } }
             .let { it.withAuthors(required = it.isIssuer) }
 
         /** Resumes the installation in [directory], or creates a new domain there. */
-        suspend fun openOrCreate(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = if (exists(directory)) {
-            resume(directory, schema, transport, secrets, automaticSync, commands, confirmation)
+        suspend fun openOrCreate(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, coordinator: ServiceCoordinator? = null, confirmation: String? = null): RockyDatabase = if (exists(directory)) {
+            resume(directory, schema, transport, secrets, automaticSync, coordinator, confirmation)
         } else {
-            create(directory, schema, transport, secrets, automaticSync, commands)
+            create(directory, schema, transport, secrets, automaticSync, coordinator)
         }
-        suspend fun open(directory: String, schema: Schema, transport: PeerTransport? = null, secrets: SecretStore? = null, automaticSync: Boolean = false, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = make(automaticSync) {
+        suspend fun open(directory: String, schema: Schema, transport: PeerTransport? = null, secrets: SecretStore? = null, automaticSync: Boolean = false, coordinator: ServiceCoordinator? = null, confirmation: String? = null): RockyDatabase = make(automaticSync) {
             withNetwork(transport) {
-                if (confirmation == null) NativeDatabase.open(directory, schema.json(), secretProvider(secrets), it, composeCommands(commands)) else NativeDatabase.openConfirmed(directory, schema.json(), confirmation, secretProvider(secrets), it, composeCommands(commands))
+                if (confirmation == null) NativeDatabase.open(directory, schema.json(), secretProvider(secrets), it, coordinator?.trustBundle) else NativeDatabase.openConfirmed(directory, schema.json(), confirmation, secretProvider(secrets), it, coordinator?.trustBundle)
             }
         }
-        suspend fun resume(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, commands: CommandRuntime? = null, confirmation: String? = null): RockyDatabase = open(directory, schema, transport, secrets, automaticSync, commands, confirmation)
-        suspend fun restore(directory: String, schema: Schema, archive: String, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, commands: CommandRuntime? = null): RockyDatabase = make(false) { withNetwork(transport) { NativeDatabase.restore(directory, schema.json(), archive, invitation, requireNotNull(it), secretProvider(secrets), composeCommands(commands)) } }
+        suspend fun resume(directory: String, schema: Schema, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, automaticSync: Boolean = true, coordinator: ServiceCoordinator? = null, confirmation: String? = null): RockyDatabase = open(directory, schema, transport, secrets, automaticSync, coordinator, confirmation)
+        suspend fun restore(directory: String, schema: Schema, archive: String, invitation: String, transport: PeerTransport = PeerTransport.Iroh(), secrets: SecretStore? = null, coordinator: ServiceCoordinator? = null): RockyDatabase = make(false) { withNetwork(transport) { NativeDatabase.restore(directory, schema.json(), archive, invitation, requireNotNull(it), secretProvider(secrets), coordinator?.trustBundle) } }
         fun newHandle(): String = newMutationHandle()
     }
 }
@@ -206,7 +210,7 @@ data class AuthorPseudonym(val collection: String, val author: Int)
 /** The issuer's private mapping from an author pseudonym to a device. */
 data class PseudonymOwner(val node: String, val collection: String, val author: Int)
 
-/** Credential lifecycle over managed storage, independently usable from command delivery. */
+/** Credential lifecycle over managed storage, independently usable from coordination. */
 class Credentials internal constructor(private val session: RockySession) {
     companion object : PlatformCredentialOpeners() {
         /** Prepares public user/node keys for an independent issuer; secret material stays in the provider. */

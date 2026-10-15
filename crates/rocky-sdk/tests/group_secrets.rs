@@ -88,7 +88,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<
         schema,
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     }
 }
 impl Peer {

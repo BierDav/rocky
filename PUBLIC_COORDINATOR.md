@@ -1,5 +1,12 @@
 # Rocky coordinator (david-cluster-1) — public integration info
 
+**Retired format.** This certificate belongs to the removed command service and
+is refused by current clients. It is retained here as historical deployment
+information, not a current application pin. Provision a new service with the
+current `rocky-voter` and supply its format-2 bundle to the application. No
+replacement certificate or deployment is implied by Phase 11.
+
+
 ## Trust bundle (the one artifact)
 Lives at `selfhosted-platform` → `manifests/secrets/rocky-coordinator-genesis.yaml` (`data["bundle.json"]`), and in the cluster as ConfigMap `rocky-coordinator-genesis` in namespace `rocky-coordinator` (key `bundle.json`).
 

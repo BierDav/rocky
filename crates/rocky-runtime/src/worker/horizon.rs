@@ -18,12 +18,11 @@ where
                 let mut stored = worker.retention.stored.clone();
                 let moved = worker.move_horizon(&mut stored).await?;
                 let (released, more) = worker.delete_behind(&stored).await?;
-                let strong = worker.prune_strong(&mut stored).await?;
-                if moved || strong {
+                if moved {
                     worker.persist(&stored).await?;
                 }
                 worker.inject_fault().await?;
-                let step = if moved || more || strong {
+                let step = if moved || more {
                     Step::More
                 } else {
                     Step::Done
@@ -281,96 +280,6 @@ where
             }
         }
         Ok((released, more))
-    }
-    /// Deletes applied results before the latest one once every delivery
-    /// target has applied them or is declared behind, with their requests and
-    /// stale attempts. The latest result stays: it is the predecessor of the
-    /// next command and carries the strong projection.
-    pub(super) async fn prune_strong(&self, stored: &mut Stored) -> Result<bool, Error> {
-        let head = self.local_strong_head().await?;
-        // Nothing lies between the retained base and the latest result.
-        if head.sequence <= stored.strong_base.map_or(0, |(sequence, _)| sequence) + 1 {
-            return Ok(false);
-        }
-        let mut attempts = self.attempts().await?;
-        attempts.sort_by_key(|(package, ..)| package.sequence);
-        let mut pruned = false;
-        let mut count = 0;
-        for (package, _, receipt, _, applied) in &attempts {
-            if !applied || package.sequence >= head.sequence || count == STRONG_BATCH {
-                continue;
-            }
-            let Some(receipt) = receipt else {
-                continue;
-            };
-            let hash = receipt.confirmation.result;
-            let mut delivered = true;
-            for target in &self.config.delivery_targets {
-                if stored
-                    .peers
-                    .iter()
-                    .any(|(peer, mark)| peer == target && mark.behind)
-                {
-                    continue;
-                }
-                let mut ack = self
-                    .conn()
-                    .query(
-                        "SELECT 1 FROM rocky_strong_ack WHERE peer=? AND hash=? AND applied=1",
-                        crate::sqlite::params![target.0.to_vec(), hash.to_vec()],
-                    )
-                    .await?;
-                delivered &= ack.next().await?.is_some();
-            }
-            // Results form a chain: only a delivered prefix can go.
-            if !delivered {
-                break;
-            }
-            for sql in [
-                "DELETE FROM rocky_preparations WHERE hash=?",
-                "DELETE FROM rocky_strong_ack WHERE hash=?",
-                "DELETE FROM rocky_strong_outbox WHERE hash=?",
-            ] {
-                self.conn().execute(sql, [hash.to_vec()]).await?;
-            }
-            for (other, _, _, _, applied) in &attempts {
-                if !applied && other.request.id == package.request.id {
-                    self.conn()
-                        .execute(
-                            "DELETE FROM rocky_preparations WHERE hash=?",
-                            [other.confirmation()?.result.to_vec()],
-                        )
-                        .await?;
-                }
-            }
-            for sql in [
-                "DELETE FROM rocky_requests WHERE node=? AND sequence=?",
-                "DELETE FROM rocky_request_holds WHERE node=? AND sequence=?",
-            ] {
-                self.conn()
-                    .execute(
-                        sql,
-                        crate::sqlite::params![
-                            package.request.id.node.0.to_vec(),
-                            package.request.id.sequence.get() as i64
-                        ],
-                    )
-                    .await?;
-            }
-            stored.strong_base = Some((package.sequence, receipt.confirmation.new_head));
-            pruned = true;
-            count += 1;
-        }
-        if pruned {
-            // Command handles whose request is gone, past the retry window.
-            self.conn()
-                .execute(
-                    "DELETE FROM rocky_command_handles WHERE sequence<=(SELECT sequence FROM rocky_command_handles ORDER BY sequence DESC LIMIT 1 OFFSET ?) AND NOT EXISTS (SELECT 1 FROM rocky_requests r WHERE r.node=rocky_command_handles.node AND r.sequence=rocky_command_handles.sequence)",
-                    [self.retention.policy.handles as i64],
-                )
-                .await?;
-        }
-        Ok(pruned && count == STRONG_BATCH)
     }
     /// The operations `state` lacks after `after`, or the notice that it is
     /// behind the horizon. A named target's held and applied frontiers are

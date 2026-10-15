@@ -66,7 +66,6 @@ class RockyClient(private val transport: Transport) {
         },
     )
     suspend fun read(query: JsonObject): JsonObject = call(request("read") { put("query", query) })
-    suspend fun readStrong(query: JsonObject): JsonObject = call(request("read_strong") { put("query", query) })
     suspend fun mutate(handle: JsonArray, payload: ByteArray, entity: JsonObject? = null, baseline: String? = null): JsonObject = call(
         request("mutate") {
             put("handle", handle)
@@ -76,7 +75,6 @@ class RockyClient(private val transport: Transport) {
         },
     )
     suspend fun recoverMutation(handle: JsonArray): JsonObject = call(request("mutation_progress") { put("handle", handle) })
-    suspend fun recoverCommand(handle: JsonArray): JsonObject = call(request("command_progress") { put("handle", handle) })
     fun observe(query: JsonObject): Flow<JsonObject> = observation {
         // NonCancellable ensures cancellation during registration still releases its token.
         val subscription = withContext(NonCancellable) { call(request("subscribe") { put("query", query) }).getValue("subscription") }

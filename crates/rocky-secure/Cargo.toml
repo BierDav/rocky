@@ -25,7 +25,6 @@ rand = "=0.8.8"
 
 [dev-dependencies]
 serde_json = "1"
-accounting-app = { path = "../../examples/accounting-app" }
 employees-app = { path = "../../examples/employees-app" }
 rocky-coordinator.workspace = true
 rocky-storage = { workspace = true, features = ["test-support"] }

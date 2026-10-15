@@ -392,7 +392,7 @@ async fn a_transport_ended_link_closes_and_reconnects_with_backoff() -> Result<(
 }
 
 #[tokio::test(start_paused = true)]
-async fn saturated_link_budget_leaves_pair_and_command_admission_free() -> Result<(), Failure> {
+async fn saturated_link_budget_leaves_pair_admission_free() -> Result<(), Failure> {
     tokio::task::LocalSet::new()
         .run_until(frozen(async {
             let root = tempfile::tempdir()?;
@@ -423,11 +423,9 @@ async fn saturated_link_budget_leaves_pair_and_command_admission_free() -> Resul
             ));
             let before = service.served.load(Ordering::Relaxed);
             let pair = transport.connect("a", Protocol::Pair).await?;
-            let command = transport.connect("a", Protocol::Command).await?;
-            until(|| service.served.load(Ordering::Relaxed) >= before + 2).await;
+            until(|| service.served.load(Ordering::Relaxed) > before).await;
             assert_eq!(service.live_budget.available_permits(), 0);
             drop(pair);
-            drop(command);
             a.detach(None).await;
             b.detach(None).await;
             Ok(())
@@ -1071,14 +1069,11 @@ async fn real_budget_gate() -> Result<(), Failure> {
             ));
             let before = sa.served.load(Ordering::Relaxed);
             let mut pair = transport.connect(&aa, Protocol::Pair).await?;
-            let mut command = transport.connect(&aa, Protocol::Command).await?;
             // QUIC exposes a newly opened stream to the peer on its first write.
             tokio::io::AsyncWriteExt::write_all(&mut pair, &[0]).await?;
-            tokio::io::AsyncWriteExt::write_all(&mut command, &[0]).await?;
-            until(|| sa.served.load(Ordering::Relaxed) >= before + 2).await;
+            until(|| sa.served.load(Ordering::Relaxed) > before).await;
             assert_eq!(sa.live_budget.available_permits(), 0);
             drop(pair);
-            drop(command);
             drop(full);
             assert!(sa.live_budget.available_permits() > 0);
             a.detach(None).await;

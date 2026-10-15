@@ -42,7 +42,7 @@ class ProcessTransport private constructor(private val process: Process, val dom
                 put(
                     "call",
                     buildJsonObject {
-                        put("version", 1)
+                        put("version", 2)
                         put("scope", domain)
                         put("request", request)
                     },
@@ -59,7 +59,7 @@ class ProcessTransport private constructor(private val process: Process, val dom
                 }
             }
             val result = reply.await()
-            check(result.getValue("version").jsonPrimitive.int == 1) { "SDK version mismatch" }
+            check(result.getValue("version").jsonPrimitive.int == 2) { "SDK version mismatch" }
             if (result.getValue("status").jsonPrimitive.content == "error") {
                 val error = result.getValue("error").jsonObject
                 throw RockyException(
@@ -97,7 +97,7 @@ class ProcessTransport private constructor(private val process: Process, val dom
             try {
                 val reader = process.inputStream.bufferedReader()
                 val hello = Json.parseToJsonElement(reader.readLine() ?: error("missing host greeting")).jsonObject
-                check(hello.getValue("version").jsonPrimitive.int == 1)
+                check(hello.getValue("version").jsonPrimitive.int == 2)
                 // Reuse the greeting reader: a buffered reader may read ahead.
                 ProcessTransport(process, hello.getValue("scope").jsonObject, reader)
             } catch (error: Throwable) {

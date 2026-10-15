@@ -260,10 +260,8 @@ impl StoredApplication for WideSchema {
             app: Self::app_id(),
             schema: 1,
             projection: 1,
-            handler: 1,
             entities: Vec::new(),
             fields: Vec::new(),
-            methods: Vec::new(),
             operations: Vec::new(),
             domains: (1..=self.1)
                 .map(|domain| DomainRule {

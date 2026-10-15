@@ -165,7 +165,7 @@ flowchart LR
 | 0070 | 5, 6 | [Confirmed rollouts and the end of cuts](../decisions/0070-confirmed-rollouts-and-the-end-of-cuts.md) |
 | 0071 | 7 | [Staged migration publication](../decisions/0071-staged-migration-publication.md) |
 | 0072 | 8, 9 | The coordinated log and coordinated writes |
-| 0073 | 10, 11 | Stuck recovery and the end of strong commands |
+| 0073 | 10, 11 | [Stuck recovery and the end of strong commands](../decisions/0073-stuck-recovery-and-command-removal.md) |
 
 ## Open questions
 

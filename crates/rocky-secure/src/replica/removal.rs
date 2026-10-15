@@ -197,7 +197,6 @@ impl<A: RowApplication> Inner<A> {
         statement.definition = self.signing_definition(scope.table);
         let generation = self.generation_of(statement.definition, false)?;
         statement.schema = generation.schema;
-        statement.handler = generation.handler;
         statement.sequence = statement
             .sequence
             .checked_add(1)

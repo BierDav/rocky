@@ -37,16 +37,11 @@ pub enum TableClass {
     Mergeable,
     /// Installed, never written by a replicated operation.
     LocalOnly,
-    /// Written only from confirmed strong results.
-    ConfirmedReadOnly,
-    /// Written only by strong commands.
-    CommandControlled,
 }
 impl TableClass {
-    /// Rows with a key and register fields that replicas agree on: mergeable
-    /// rows, or confirmed rows of a command-controlled table.
+    /// Rows with a key and register fields that replicas agree on.
     pub fn typed(self) -> bool {
-        matches!(self, Self::Mergeable | Self::CommandControlled)
+        self == Self::Mergeable
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,8 +170,6 @@ pub enum Incompatibility {
     View,
     /// The secure profile stores no derived column.
     DerivedColumn(String),
-    /// The secure profile installs mergeable and local-only tables only.
-    TableClass(TableClass),
     /// A conflict policy this index cannot have, named by the index.
     ConflictPolicy(String),
     /// A foreign key Rocky cannot resolve, named by its first column.
@@ -639,14 +632,7 @@ impl LogicalTable {
             .filter_map(|index| index.on_conflict.map(|policy| (index, policy)))
     }
     fn installable(&self) -> Result<(), Incompatibility> {
-        // Partitioned command control and confirmed rows remain unsupported.
         if !self.partition_by.is_empty() {
-            if matches!(
-                self.class,
-                TableClass::CommandControlled | TableClass::ConfirmedReadOnly
-            ) {
-                return Err(Incompatibility::TableClass(self.class));
-            }
             for (index, policy) in self.policy_indexes() {
                 if policy == ConflictPolicy::SetNull
                     || self
@@ -896,10 +882,6 @@ fn replicated_table<'a>(schema: &'a LogicalSchema, table: &'a LogicalTable) -> R
         partition_group: table.partition_group.as_deref(),
         existence_log: table.existence_log,
     }
-}
-/// The replicated shape of a whole table, its class included.
-pub(crate) fn table_shape(schema: &LogicalSchema, table: &LogicalTable) -> String {
-    json(&replicated_table(schema, table))
 }
 /// The replicated shape of a table's key, in key order, for comparison.
 pub(crate) fn key_shape(table: &LogicalTable) -> String {
@@ -1175,10 +1157,6 @@ impl LogicalSchema {
             return found;
         }
         for table in &self.tables {
-            if table.class == TableClass::ConfirmedReadOnly {
-                refuse(table, Incompatibility::TableClass(table.class));
-                continue;
-            }
             if !table.class.typed() {
                 continue;
             }
@@ -1223,9 +1201,8 @@ impl LogicalSchema {
     pub fn fingerprint(&self) -> Result<Commitment, SchemaError> {
         Ok(commitment("rocky.logical-schema.v1", &self.canonical()?))
     }
-    /// Commits to what replicas must agree on: mergeable and command-
-    /// controlled tables by name, their class, keys and registers,
-    /// and the update policy.
+    /// Commits to what replicas must agree on: mergeable tables by name,
+    /// their class, keys and registers, and the update policy.
     pub fn replicated_fingerprint(&self) -> Commitment {
         let replicated = Replicated {
             format: self.format,
@@ -1296,8 +1273,7 @@ impl LogicalSchema {
             .filter(|table| found.contains(table.sql_name.as_str()))
             .collect()
     }
-    /// Mergeable and command-controlled tables: those with signed entities
-    /// and fields. See `docs/runtime/confirmed-tables.md`.
+    /// Mergeable tables: those with signed entities and fields.
     pub fn typed(&self) -> impl Iterator<Item = &LogicalTable> {
         self.tables.iter().filter(|table| table.class.typed())
     }
@@ -1343,10 +1319,8 @@ impl LogicalSchema {
             app,
             schema,
             projection: 1,
-            handler: 1,
             entities,
             fields,
-            methods: Vec::new(),
             operations: ["insert", "update", "delete"]
                 .into_iter()
                 .map(|name| item("operation", name.to_string(), shape.clone()))
@@ -1480,30 +1454,6 @@ mod tests {
         schema.installable().unwrap();
     }
 
-    #[test]
-    fn command_controlled_tables_install_with_their_class_signed() {
-        let schema = schema();
-        let mut commanded = schema.clone();
-        commanded.tables[0].class = TableClass::CommandControlled;
-        commanded.supported_on(crate::Profile::Secure).unwrap();
-        // Mergeable shapes keep their bytes; the class is in the others.
-        let domain = [DomainId([1; 16])];
-        let (before, after) = (schema.manifest(&domain), commanded.manifest(&domain));
-        assert!(before.entities[0].shape.contains("mergeable"));
-        assert!(after.entities[0].shape.contains("command_controlled"));
-        assert_eq!(before.fields, after.fields);
-        assert_ne!(before.hash(), after.hash());
-        assert_ne!(
-            schema.replicated_fingerprint(),
-            commanded.replicated_fingerprint()
-        );
-        let mut confirmed = schema.clone();
-        confirmed.tables[0].class = TableClass::ConfirmedReadOnly;
-        assert!(confirmed.supported_on(crate::Profile::Secure).is_err());
-        // The same rules as a mergeable table apply.
-        commanded.tables[0].auto_generate = true;
-        assert!(commanded.installable().is_err());
-    }
     #[test]
     fn canonical_descriptors_round_trip_and_reject_other_bytes() {
         let schema = schema();

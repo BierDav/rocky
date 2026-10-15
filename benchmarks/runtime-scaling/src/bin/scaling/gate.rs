@@ -1,11 +1,11 @@
 //! Phase 5 gate: sustained local writes on 16 domains at full durability,
-//! with strong commands and incoming pages running beside them; see
+//! with incoming pages and paced writers running beside them; see
 //! docs/runtime/write-concurrency.md.
 use super::{CALLER, Failure, NODE, Wide, installation, resident_mib, scope};
 use rocky_core::*;
 use rocky_runtime::{
-    CommandHandle, DomainInstallation, Durability, Error, Mutation, Replica, Runtime,
-    RuntimeConfig, RuntimeOptions, WriterStats,
+    DomainInstallation, Durability, Error, Mutation, Replica, Runtime, RuntimeConfig,
+    RuntimeOptions, WriterStats,
 };
 use std::sync::{
     Arc, Mutex,
@@ -19,14 +19,10 @@ const DOMAINS: u8 = 16;
 const CLIENTS: usize = 8;
 /// Rows each local client creates before it only edits them.
 const ROWS: usize = 256;
-/// Two more domains in the same file run strong commands beside one paced
-/// local writer each. A command seals, replays and names every operation of
-/// its domain, so it cannot run on a domain that takes hundreds of writes a
-/// second: the result frame holds at most 43,690 operation identities.
-const STRONG: [u8; 2] = [17, 18];
-const STRONG_ROWS: usize = 16;
-const STRONG_PAUSE: Duration = Duration::from_millis(250);
-const STRONG_WRITE_PAUSE: Duration = Duration::from_secs(1);
+/// Two more domains run paced local writers.
+const PACED: [u8; 2] = [17, 18];
+const PACED_ROWS: usize = 16;
+const PACED_WRITE_PAUSE: Duration = Duration::from_secs(1);
 /// Domains that also receive a peer's operations, a page per tick.
 const INCOMING: [u8; 4] = [3, 4, 5, 6];
 const INCOMING_BATCH: usize = 320;
@@ -111,11 +107,6 @@ pub async fn erp_open_loop(
     let path = dir.join("erp.db");
     let options = open_options(1, Durability::Full, Some(128), None);
     let runtime = open(path, NODE, options, tables).await?;
-    let coordinator = Arc::new(rocky_coordinator::MemoryCoordinator::default());
-    for domain in STRONG {
-        coordinator.register(scope(domain), CALLER, [6; 16], vec![NODE], 1, 1)?;
-        coordinator.acquire(scope(domain), CALLER, NODE)?;
-    }
     println!(
         "erp open_loop rate={rate}/s duration_s={seconds} tables={tables} files=1 durability=Full group=128 checkpoint_frames={}",
         options.checkpoint_frames
@@ -213,35 +204,7 @@ pub async fn erp_open_loop(
     } else {
         None
     };
-    let strong_runtime = runtime.domain(scope(STRONG[0]))?;
-    let strong_coordinator = coordinator.clone();
-    let strong = tokio::spawn(async move {
-        let mut histogram = Histogram::new();
-        let mut index = 0u64;
-        while tokio::time::Instant::now() < deadline {
-            let started = Instant::now();
-            let mut handle = [STRONG[0]; 32];
-            handle[..8].copy_from_slice(&index.to_le_bytes());
-            strong_runtime
-                .submit_command_with_arguments(
-                    CommandHandle(handle),
-                    inventory_app::RESERVE,
-                    1u64.to_le_bytes().to_vec(),
-                    [9; 32],
-                )?
-                .committed()
-                .await?;
-            strong_runtime
-                .execute_pending(strong_coordinator.as_ref())
-                .await?;
-            histogram.record(started.elapsed());
-            index += 1;
-            tokio::time::sleep(STRONG_PAUSE).await;
-        }
-        Ok::<_, Error>(histogram)
-    });
     let (local, during_bulk, dropped, max_lag, intervals) = writer.await??;
-    let strong = strong.await??;
     let bulk_duration = if let Some(bulk) = bulk {
         Some(bulk.await??)
     } else {
@@ -275,7 +238,6 @@ pub async fn erp_open_loop(
             completed < &expected || offered < &expected || *late > 0
         );
     }
-    strong.line("erp strong commands", elapsed);
     let stats = runtime.domain(scope(1))?.writer_stats();
     println!(
         "erp writer groups={} steps={} step_us={} commit_us={} checkpoints={} checkpoint_us={} checkpoint_copy_us={} checkpoint_file_flush_us={}",
@@ -327,12 +289,12 @@ pub(super) async fn open(
     } else {
         None
     };
-    let installations = (1..=DOMAINS + STRONG.len() as u8)
+    let installations = (1..=DOMAINS + PACED.len() as u8)
         .map(|domain| {
-            let base = installation(DOMAINS + STRONG.len() as u8, domain);
+            let base = installation(DOMAINS + PACED.len() as u8, domain);
             DomainInstallation {
                 app: Wide(
-                    DOMAINS + STRONG.len() as u8,
+                    DOMAINS + PACED.len() as u8,
                     if domain == 1 { schema } else { None },
                     tables,
                 ),
@@ -383,35 +345,6 @@ async fn client(
         if !pause.is_zero() {
             tokio::time::sleep(pause).await;
         }
-    }
-    Ok(timings)
-}
-/// One command at a time, published and executed, with a pause between.
-async fn commands(
-    replica: Replica<Wide>,
-    domain: u8,
-    coordinator: Arc<rocky_coordinator::MemoryCoordinator>,
-    deadline: Instant,
-) -> Result<Histogram, Error> {
-    let mut timings = Histogram::new();
-    let mut index = 0u64;
-    while Instant::now() < deadline {
-        let started = Instant::now();
-        let mut handle = [domain; 32];
-        handle[..8].copy_from_slice(&index.to_le_bytes());
-        replica
-            .submit_command_with_arguments(
-                CommandHandle(handle),
-                inventory_app::RESERVE,
-                1u64.to_le_bytes().to_vec(),
-                [9; 32],
-            )?
-            .committed()
-            .await?;
-        replica.execute_pending(coordinator.as_ref()).await?;
-        timings.record(started.elapsed());
-        index += 1;
-        tokio::time::sleep(STRONG_PAUSE).await;
     }
     Ok(timings)
 }
@@ -528,15 +461,10 @@ pub async fn run(
         tables,
     )
     .await?;
-    let coordinator = Arc::new(rocky_coordinator::MemoryCoordinator::default());
-    for domain in STRONG {
-        coordinator.register(scope(domain), CALLER, [6; 16], vec![NODE], 1, 1)?;
-        coordinator.acquire(scope(domain), CALLER, NODE)?;
-    }
     println!(
         "gate: {seconds} s, {DOMAINS} domains x {CLIENTS} clients, files={files}, group={}, \
-         checkpoint_frames={}, full durability, incoming on {INCOMING:?}, strong on two \
-         more domains {STRONG:?}",
+         checkpoint_frames={}, full durability, incoming on {INCOMING:?}, paced writes on two \
+         more domains {PACED:?}",
         options.group_commit, options.checkpoint_frames
     );
     let started = Instant::now();
@@ -557,23 +485,14 @@ pub async fn run(
     }
     let paced = Arc::new(AtomicU64::new(0));
     let mut light = Vec::new();
-    for domain in STRONG {
+    for domain in PACED {
         light.push(tokio::spawn(client(
             runtime.domain(scope(domain))?,
             format!("{domain}-light"),
-            STRONG_ROWS,
-            STRONG_WRITE_PAUSE,
+            PACED_ROWS,
+            PACED_WRITE_PAUSE,
             deadline,
             paced.clone(),
-        )));
-    }
-    let mut strong = Vec::new();
-    for domain in STRONG {
-        strong.push(tokio::spawn(commands(
-            runtime.domain(scope(domain))?,
-            domain,
-            coordinator.clone(),
-            deadline,
         )));
     }
     let mut feeders = Vec::new();
@@ -630,10 +549,6 @@ pub async fn run(
     for writer in light {
         writer.await??;
     }
-    let mut strong_timings = Histogram::new();
-    for task in strong {
-        strong_timings.merge(&task.await??);
-    }
     let mut pages = Histogram::new();
     let mut received = 0;
     for feeder in feeders {
@@ -643,7 +558,6 @@ pub async fn run(
     }
     let elapsed = started.elapsed();
     local.line("gate local writes", elapsed);
-    strong_timings.line("gate strong commands", elapsed);
     pages.line("gate incoming pages", elapsed);
     let finished = stats();
     let passive = (finished.checkpoints - finished.truncations).max(1) as f64;
@@ -680,7 +594,7 @@ pub async fn run(
     let reopening = Instant::now();
     let runtime = open(path, NODE, options, tables).await?;
     let mut operations = 0;
-    for domain in 1..=DOMAINS + STRONG.len() as u8 {
+    for domain in 1..=DOMAINS + PACED.len() as u8 {
         let frontier = runtime.domain(scope(domain))?.sync_state().await?.applied;
         operations += frontier.0.iter().map(|(_, s)| s.get()).sum::<u64>();
     }

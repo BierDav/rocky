@@ -15,7 +15,7 @@ fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a
         schema: common::SCHEMA,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 fn domain(device: &Device) -> rocky_core::Scope {

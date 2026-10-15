@@ -23,7 +23,7 @@ fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> O
         schema,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 fn version(schema: &str, version: u32) -> String {

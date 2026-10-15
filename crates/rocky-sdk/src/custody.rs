@@ -72,7 +72,7 @@ impl CustodyPeer {
             schema: &schema,
             secrets: None,
             network: Some(Network::Owned(Arc::new(config.transport))),
-            commands: None,
+            coordination: None,
         };
         let Opened { database, .. } = if existing {
             Database::open(open)?

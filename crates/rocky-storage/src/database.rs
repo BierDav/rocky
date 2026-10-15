@@ -73,7 +73,7 @@ impl DatabaseOwner {
 }
 
 /// Current Rocky SQLite file identity. Application schema generations are independent.
-pub const FILE_FORMAT: i64 = 0x524b5901;
+pub const FILE_FORMAT: i64 = 0x524b5902;
 
 /// Read-only preflight, also used before SDK settings/enrollment writes.
 pub async fn check_file_format(path: &Path) -> Result<(), Error> {

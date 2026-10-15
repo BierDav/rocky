@@ -26,8 +26,8 @@ data class CoordinatedStatus(val trusted: Boolean, val position: Long, val undec
  */
 internal suspend fun <T> RockyClient.coordinated(handle: JsonArray, block: suspend CoordinatedSql.() -> T): CoordinatedCommit<T> {
     val transaction = object : CoordinatedSql {
-        override suspend fun nextId(table: String): Long = nextId(table).toLong()
-        override suspend fun nextId(table: String, vararg partitionValues: Any?): Long = nextId(table, JsonArray(partitionValues.map(::cell))).toLong()
+        override suspend fun nextId(table: String): Long = this@coordinated.nextId(table).toLong()
+        override suspend fun nextId(table: String, vararg partitionValues: Any?): Long = this@coordinated.nextId(table, JsonArray(partitionValues.map(::cell))).toLong()
         override suspend fun execute(sql: String, vararg values: Any?): Long = sql(sql, JsonArray(values.map(::cell))).getValue("changes").jsonPrimitive.content.toLong()
         override suspend fun query(sql: String, vararg values: Any?): JsonArray = sql(sql, JsonArray(values.map(::cell))).getValue("rows").jsonArray
     }

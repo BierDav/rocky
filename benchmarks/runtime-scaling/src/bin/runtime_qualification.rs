@@ -1,10 +1,9 @@
 //! Bounded adapter measurements; run the compiled binary under `/usr/bin/time -l`.
-use inventory_app::{InventoryApp, Policy, RESERVE};
-use rocky_coordinator::MemoryCoordinator;
+use inventory_app::{InventoryApp, Policy};
 use rocky_core::{DomainId, MeshId, NodeId, PrincipalId, Scope};
 use rocky_runtime::{
-    BoundQuery, CommandHandle, DomainInstallation, Identity, Mutation, ReadOptions, Replica,
-    Runtime, RuntimeConfig,
+    BoundQuery, DomainInstallation, Identity, Mutation, ReadOptions, Replica, Runtime,
+    RuntimeConfig,
 };
 use std::time::Instant;
 
@@ -29,30 +28,6 @@ async fn drafts(
             })?
             .committed()
             .await?;
-        timings.push(started.elapsed().as_micros());
-    }
-    Ok(timings)
-}
-async fn commands(
-    replica: &Replica<InventoryApp>,
-    label: u8,
-    coordinator: &MemoryCoordinator,
-) -> Result<Vec<u128>, rocky_runtime::Error> {
-    let mut timings = Vec::new();
-    for index in 0..8 {
-        let started = Instant::now();
-        let mut handle = [label; 32];
-        handle[0] = index;
-        replica
-            .submit_command_with_arguments(
-                CommandHandle(handle),
-                RESERVE,
-                1u64.to_le_bytes().to_vec(),
-                [9; 32],
-            )?
-            .committed()
-            .await?;
-        replica.execute_pending(coordinator).await?;
         timings.push(started.elapsed().as_micros());
     }
     Ok(timings)
@@ -97,11 +72,6 @@ async fn workload(independent: bool) -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
     )
     .await?;
-    let coordinator = MemoryCoordinator::default();
-    for domain in [1, 2] {
-        coordinator.register(scope(domain), caller, [6; 16], vec![node], 1, 1)?;
-        coordinator.acquire(scope(domain), caller, node)?;
-    }
     let a = runtime.domain(scope(1))?;
     let b = runtime.domain(scope(if independent { 2 } else { 1 }))?;
     let name = if independent {
@@ -118,9 +88,6 @@ async fn workload(independent: bool) -> Result<(), Box<dyn std::error::Error>> {
         [left?, right?].concat(),
         started.elapsed(),
     );
-    let started = Instant::now();
-    let (left, right) = tokio::join!(commands(&a, 1, &coordinator), commands(&b, 2, &coordinator));
-    report(name, "strong", [left?, right?].concat(), started.elapsed());
     let mut reads = Vec::new();
     let started = Instant::now();
     for _ in 0..32 {

@@ -246,8 +246,7 @@ impl NativeSession {
             },
             Message::Checkpoints(
                 CheckpointMessage::CheckpointOffer { scope }
-                | CheckpointMessage::CheckpointPull { scope, .. }
-                | CheckpointMessage::ArchiveChain { scope, .. },
+                | CheckpointMessage::CheckpointPull { scope, .. },
             ) => vec![*scope],
             Message::Checkpoints(CheckpointMessage::ArchiveBegin { signed }) => {
                 vec![signed.statement.scope]
@@ -273,9 +272,6 @@ impl NativeSession {
                 ExistenceMessage::BaseBegin { attachment } => vec![attachment.scope],
                 _ => Vec::new(),
             },
-            Message::Commands(message) => {
-                return self.require_command_holding(replica, message).await;
-            }
             _ => Vec::new(),
         };
         for scope in scopes {

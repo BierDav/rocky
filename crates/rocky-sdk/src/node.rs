@@ -2,7 +2,6 @@
 //! network service, and the JSON calls of the native ABI. See
 //! `docs/runtime/sdk-composition.md` and `docs/runtime/sdk-enrollment.md`.
 mod adoption;
-mod command_mesh;
 mod coordinated;
 mod delivery;
 mod discovery;
@@ -25,12 +24,11 @@ use crate::{
 };
 use data_encoding::HEXLOWER;
 use futures_util::{StreamExt, stream};
-use rocky_core::{Coordinator, ResourceScope, SqlValue, TypedCommands, commitment};
+use rocky_core::{ResourceScope, SqlValue, TypedRows, commitment};
 use rocky_credentials::Profile;
 use rocky_secure::{
-    CredentialChain, Delivery, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey,
-    RevocationSet, SecureSession, SecureSql, SqlError, SqlOptions, TicketState, Unavailable,
-    secure_node_id, secure_principal_id,
+    CredentialChain, EncryptedReplica, Error, KeyMaterial, PrivateKey, PublicKey, RevocationSet,
+    SecureSession, SecureSql, SqlError, SqlOptions, Unavailable, secure_node_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -81,16 +79,6 @@ fn named(error: Failure) -> Failure {
         refused(error)
     }
 }
-
-/// An executor's refusal that a later run of the same ticket may not meet.
-#[derive(Debug)]
-struct Deferred(String);
-impl std::fmt::Display for Deferred {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-impl std::error::Error for Deferred {}
 
 /// A bound SQL value as the JSON contract spells it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -147,8 +135,8 @@ struct Query {
 
 #[derive(Clone)]
 struct Reader {
-    session: SecureSession<TypedCommands>,
-    sql: Arc<SecureSql<TypedCommands>>,
+    session: SecureSession<TypedRows>,
+    sql: Arc<SecureSql<TypedRows>>,
 }
 struct Subscription {
     query: Query,
@@ -233,8 +221,6 @@ struct Reached {
     /// Scopes the peer restores from a checkpoint instead of this device's history.
     waiting: Vec<ResourceScope>,
     held: Vec<ResourceScope>,
-    /// Why the last successful sync's results pass failed, if it did.
-    results: Option<String>,
 }
 
 /// How long the sync worker lets a committed change settle before its pass:
@@ -251,7 +237,7 @@ async fn settle() {
 
 pub(crate) struct Node {
     owner: std::sync::OnceLock<std::sync::Weak<Node>>,
-    pub replica: EncryptedReplica<TypedCommands>,
+    pub replica: EncryptedReplica<TypedRows>,
     /// The installed generation's domain; replaced when the database adopts
     /// a newer generation.
     domain: std::sync::RwLock<Arc<Domain>>,
@@ -275,7 +261,6 @@ pub(crate) struct Node {
     retries: std::sync::Mutex<BTreeMap<PublicKey, PeerRetry>>,
     resolution_retries:
         std::sync::Mutex<BTreeMap<rocky_credentials::PeerId, crate::scheduling::Retry>>,
-    forwarding: command_mesh::Slots,
     sync_control: watch::Sender<u64>,
     worker_running: watch::Sender<bool>,
     sync_state: watch::Sender<&'static str>,
@@ -309,17 +294,12 @@ pub(crate) struct Node {
     /// Moves the discovery clock forward, for the topic window.
     #[cfg(test)]
     pub(crate) discovery_skew: AtomicU64,
-    /// The application's coordinator, when it composed strong commands.
-    coordinator: Option<Arc<dyn Coordinator>>,
     observations: crate::status::Observations,
     node_identity: Result<String, String>,
     #[cfg(test)]
     status_clock: std::sync::Mutex<Option<(u64, tokio::time::Instant)>>,
     last_reconciliation: std::sync::Mutex<Option<crate::ReconciliationReport>>,
-    /// Takes an unassigned domain of a coordination service for this
-    /// executing device, once per fencing epoch.
-    acquire: Option<Acquire>,
-    /// The coordination service commands are composed with, for its owner.
+    /// The coordination service this database is composed with, for its owner.
     service: Option<crate::owner::Service>,
     /// Deposits held as a mailbox, loaded at first use.
     mailbox: Mutex<Option<crate::delivery::Mailbox>>,
@@ -329,10 +309,6 @@ pub(crate) struct Node {
     /// Peers whose baselines this process compared, by generation.
     compared: std::sync::Mutex<std::collections::BTreeSet<(PublicKey, String)>>,
 }
-/// Acquires `scope` at fencing `epoch` with this device's node key.
-pub(crate) type Acquire = Arc<
-    dyn Fn(rocky_core::Scope, u64) -> rocky_core::CoordinationFuture<'static, ()> + Send + Sync,
->;
 
 impl Node {
     /// The domain of the installed generation.
@@ -343,43 +319,14 @@ impl Node {
             .clone()
     }
     pub fn new(
-        replica: EncryptedReplica<TypedCommands>,
+        replica: EncryptedReplica<TypedRows>,
         domain: Domain,
         vault: Vault,
         settings: Settings,
         path: PathBuf,
-        coordinator: Option<Arc<dyn Coordinator>>,
-        acquire: Option<Acquire>,
     ) -> Self {
         let settings_schema = settings.schema.clone();
         let observations = crate::status::Observations::default();
-        let coordinator = coordinator.map(|inner| {
-            Arc::new(crate::status::ObservedCoordinator {
-                inner,
-                observations: observations.clone(),
-            }) as Arc<dyn Coordinator>
-        });
-        let acquire = acquire.map(|inner| {
-            let observations = observations.clone();
-            Arc::new(move |scope, epoch| {
-                let future = inner(scope, epoch);
-                let attempt = observations.begin(
-                    "coordinator".into(),
-                    crate::AttemptOperation::CoordinatorAcquire,
-                    crate::AttemptStage::CoordinatorRequest,
-                );
-                Box::pin(async move {
-                    let result = future.await;
-                    attempt.finish(
-                        result
-                            .as_ref()
-                            .err()
-                            .map(crate::status::coordination_failure),
-                    );
-                    result
-                }) as rocky_core::CoordinationFuture<'static, ()>
-            }) as Acquire
-        });
         Self {
             #[cfg(test)]
             status_clock: Default::default(),
@@ -407,7 +354,6 @@ impl Node {
             bootstrap: Mutex::new(()),
             retries: std::sync::Mutex::new(BTreeMap::new()),
             resolution_retries: std::sync::Mutex::new(BTreeMap::new()),
-            forwarding: command_mesh::Slots::default(),
             sync_control: watch::channel(0).0,
             worker_running: watch::channel(false).0,
             sync_state: watch::channel("idle").0,
@@ -429,8 +375,6 @@ impl Node {
             announcing: AtomicBool::new(false),
             #[cfg(test)]
             discovery_skew: AtomicU64::new(0),
-            coordinator,
-            acquire,
             service: None,
             mailbox: Mutex::new(None),
             declared: settings_schema,
@@ -573,7 +517,7 @@ impl Node {
     pub(crate) async fn sql_session(
         &self,
         options: SqlOptions,
-    ) -> Result<(SecureSession<TypedCommands>, SecureSql<TypedCommands>), Failure> {
+    ) -> Result<(SecureSession<TypedRows>, SecureSql<TypedRows>), Failure> {
         if self.ended.lock().await.is_some() {
             return Err(refused("this device logged out of the domain"));
         }
@@ -1171,11 +1115,7 @@ impl Node {
                 );
                 Ok(json!({"subscription": id.to_string()}))
             }
-            kind if kind.starts_with("command_") => {
-                let result = self.command(kind, request).await;
-                self.wake_sync();
-                result
-            }
+            kind if kind.starts_with("coordination_") => self.coordination(kind, request).await,
             "next" => self.next(client, subscription(request)?).await,
             "unsubscribe" => {
                 client.subscriptions()?.remove(&subscription(request)?);
@@ -1669,7 +1609,7 @@ impl Node {
         }
     }
     /// Writes a signed backup archive to `target`: a coherent copy of the
-    /// file, the retained receipt evidence and the identity, which holds no
+    /// file and the identity, which holds no
     /// key. See `docs/runtime/backup-and-restore.md`.
     async fn backup(&self, target: &std::path::Path) -> Result<Value, Failure> {
         let _backup = self.backups.lock().await;
@@ -1701,13 +1641,7 @@ impl Node {
             let settings = snapshot;
             let identity = staging.join("identity.json");
             std::fs::write(&identity, serde_json::to_vec(&*settings)?)?;
-            let mut staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
-            let evidence = directory.join("coordinator.evidence");
-            if evidence.exists() {
-                let copy = staging.join("coordinator.evidence");
-                std::fs::copy(&evidence, &copy)?;
-                staged.push(("coordinator.evidence", copy));
-            }
+            let staged = vec![("identity.json", identity), ("rocky.sqlite", database)];
             let node = PrivateKey::from_bytes(&self.vault.get("node")?);
             let scope = serde_json::to_value(self.domain().scope)?;
             let target = target.to_path_buf();
@@ -1730,7 +1664,7 @@ impl Node {
         let waiting_for_issuer = !settings.issuer() && application == crate::DeclaredSchema::Ahead;
         drop(settings);
         let status = self.replica.generations().await?;
-        let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema, "handler": generation.handler});
+        let generation = |generation: rocky_core::Generation| json!({"schema": generation.schema});
         Ok(json!({
             "manifest": HEXLOWER.encode(&status.manifest),
             "current": generation(status.current),
@@ -1996,14 +1930,9 @@ impl Node {
         result: &Result<(bool, bool, sync::Transfer), Failure>,
     ) {
         let peer_hex = peer.to_hex();
-        let (before, refused_before, waiting_before, results_before) = match before {
-            Some(reached) => (
-                Some(reached.error),
-                reached.refused,
-                reached.waiting,
-                reached.results,
-            ),
-            None => (None, Vec::new(), Vec::new(), None),
+        let (before, refused_before, waiting_before) = match before {
+            Some(reached) => (Some(reached.error), reached.refused, reached.waiting),
+            None => (None, Vec::new(), Vec::new()),
         };
         match result {
             Err(error) => {
@@ -2042,13 +1971,6 @@ impl Node {
                         "scopes_waiting",
                         json!({"peer": peer_hex, "scopes": scopes}),
                     );
-                }
-                // Rows synced; confirmed results did not. Recorded when the error changes.
-                if let Some(error) = &transfer.results
-                    && transfer.results != results_before
-                {
-                    self.activity
-                        .record("results_failed", json!({"peer": peer_hex, "error": error}));
                 }
                 if transfer.scopes.is_empty() {
                     return;
@@ -2533,13 +2455,11 @@ impl Node {
                         self.peer_reconciliation(peer, &result, first_attempt_id),
                     );
                     let error = result.as_ref().err().map(ToString::to_string);
-                    let (refused, waiting, received) = match &result {
-                        Ok((_, _, transfer)) => (
-                            transfer.refused.clone(),
-                            transfer.waiting.clone(),
-                            transfer.results.clone(),
-                        ),
-                        Err(_) => (Vec::new(), Vec::new(), None),
+                    let (refused, waiting) = match &result {
+                        Ok((_, _, transfer)) => {
+                            (transfer.refused.clone(), transfer.waiting.clone())
+                        }
+                        Err(_) => (Vec::new(), Vec::new()),
                     };
                     let before = self.reached()?.insert(
                         peer,
@@ -2552,7 +2472,6 @@ impl Node {
                                 .as_ref()
                                 .map(|(_, _, transfer)| transfer.held.clone())
                                 .unwrap_or_default(),
-                            results: received,
                         },
                     );
                     if let Ok((_, _, transfer)) = &result {
@@ -3089,10 +3008,6 @@ impl Node {
             keep: Some(&keep),
         };
         let reconcile = upstream.link.begin_reconcile().await?;
-        let coordinator = self
-            .coordinator
-            .as_deref()
-            .filter(|_| !self.domain().app.commands().is_empty());
         // Envelopes first, on the exchange's first session: a list a
         // delivery opens syncs in this exchange. A stalled dial must not
         // hold the shared checkpoint import slot.
@@ -3161,7 +3076,6 @@ impl Node {
             &self.replica,
             &upstream,
             &scopes,
-            coordinator,
             |bootstrap| {
                 self.sync_state.send_replace(if bootstrap {
                     "bootstrapping"
@@ -3225,7 +3139,7 @@ impl Node {
         Ok((newer, retry, sync::Transfer::default()))
     }
     /// Serves one inbound one-shot stream: pairing and renewal on an issuer,
-    /// and commands. Synchronization runs on live links.
+    /// and enrollment. Synchronization runs on live links.
     pub async fn serve(&self, protocol: Protocol, stream: Stream) -> Result<(), Failure> {
         if !self.online.load(Ordering::SeqCst) || self.ended.lock().await.is_some() {
             return Err("networking is disabled or this device logged out".into());
@@ -3314,16 +3228,6 @@ impl Node {
                 })
                 .await
             }
-            // The invocation carries its caller's signature and credentials;
-            // whoever forwards it gains nothing by doing so.
-            Protocol::Command => {
-                answer(stream, async |request| {
-                    let reply = self.answer_command_carrier(&request).await?;
-                    self.wake_sync();
-                    Ok(reply)
-                })
-                .await
-            }
             Protocol::Link => Err("links require network-service ownership".into()),
             Protocol::Coordinate => Err("a database serves no coordinator requests".into()),
         }
@@ -3374,11 +3278,6 @@ impl Node {
         ))
     }
 
-    fn coordinator(&self) -> Result<&dyn Coordinator, Failure> {
-        self.coordinator
-            .as_deref()
-            .ok_or_else(|| refused("no coordinator is composed with this database"))
-    }
     #[cfg(feature = "iroh")]
     async fn service_call(
         &self,
@@ -3386,18 +3285,7 @@ impl Node {
         kind: &str,
         request: &Value,
         publisher: Option<PrivateKey>,
-        activation: Option<rocky_core::Activation>,
     ) -> Result<Value, Failure> {
-        let user = self
-            .settings
-            .lock()
-            .await
-            .credentials
-            .0
-            .first()
-            .ok_or("missing credentials")?
-            .capability
-            .subject;
         let transport = self
             .network
             .read()
@@ -3408,21 +3296,16 @@ impl Node {
         let domain = crate::owner::Domain {
             scope: self.domain().scope,
             application: manifest.name.clone(),
-            owner: secure_principal_id(user),
-            schema: manifest.schema,
-            handler: self.domain().app.commands().handler(),
             anchor: self.settings.lock().await.publisher,
             publisher,
             transport,
-            activation,
             request,
         };
         let operation = match kind {
-            "command_service_register" => crate::AttemptOperation::CoordinatorRegister,
-            "command_service_control" => crate::AttemptOperation::CoordinatorControl,
-            "command_service_close" => crate::AttemptOperation::CoordinatorClose,
-            "command_service_usage" => crate::AttemptOperation::CoordinatorUsage,
-            "command_service_activate" => crate::AttemptOperation::CoordinatorActivate,
+            "coordination_register" => crate::AttemptOperation::CoordinatorRegister,
+            "coordination_control" => crate::AttemptOperation::CoordinatorControl,
+            "coordination_close" => crate::AttemptOperation::CoordinatorClose,
+            "coordination_usage" => crate::AttemptOperation::CoordinatorUsage,
             _ => return Err(refused("unknown coordination service request")),
         };
         let attempt = self.observations.begin(
@@ -3445,165 +3328,26 @@ impl Node {
         _: &str,
         _: &Value,
         _: Option<PrivateKey>,
-        _: Option<rocky_core::Activation>,
     ) -> Result<Value, Failure> {
         match *service {}
     }
-    /// Admits and executes a command another device or a gateway delivered,
-    /// through the admission a local ticket passes.
-    async fn execute_delivered(&self, envelope: &[u8]) -> Delivery {
-        match self.coordinator() {
-            Ok(coordinator) => self.replica.deliver_command(envelope, coordinator).await,
-            Err(error) => Delivery::NotSubmitted {
-                retryable: false,
-                message: error.to_string(),
-            },
-        }
-    }
-    /// The calls of typed strong commands. Submission, lookup and
-    /// cancellation are local; `command_run` is what executes or delivers.
-    async fn command(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
-        let app = &self.domain().app;
-        let handle = || -> Result<[u8; 32], Failure> {
-            let bytes: Vec<u8> = serde_json::from_value(request["handle"].clone())
-                .map_err(|_| refused("handle must be 32 bytes"))?;
-            bytes
-                .try_into()
-                .map_err(|_| refused("handle must be 32 bytes"))
-        };
-        let bytes = |name: &str| -> Result<Vec<u8>, Failure> {
-            serde_json::from_value(request[name].clone())
-                .map_err(|_| refused(format!("{name} must be bytes")))
-        };
-        let report = |ticket| crate::commands::ticket_json(app, &ticket);
+    /// The owner's calls on its coordination service: register or control
+    /// the domain's trusted nodes with its tenant key, which stays in this
+    /// process, close the domain or read usage; and the publisher's grant
+    /// that lets a tenant register the application's domains.
+    async fn coordination(&self, kind: &str, request: &Value) -> Result<Value, Failure> {
         match kind {
-            "command_identity" => {
-                let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-                let user = self
-                    .settings
-                    .lock()
-                    .await
-                    .credentials
-                    .0
-                    .first()
-                    .ok_or("missing credentials")?
-                    .capability
-                    .subject;
-                Ok(json!({
-                    "scope": self.domain().scope,
-                    "node": HEXLOWER.encode(&secure_node_id(node).0),
-                    "key": HEXLOWER.encode(node.as_bytes()),
-                    "application": self.domain().manifest().name,
-                    "principal": HEXLOWER.encode(&secure_principal_id(user).0),
-                    "handler": app.hosts(),
-                    "coordinator": self.coordinator.is_some(),
-                    "schema_generation": self.domain().manifest().schema,
-                    "handler_generation": app.commands().handler(),
-                }))
-            }
-            // What the domain's owner submits to the coordinator to activate
-            // this generation: the coordinator's head, which this device's
-            // confirmed results must have reached, and the transition.
-            "command_activation" => {
-                let coordinator = self.coordinator()?;
-                let scope = self.domain().scope;
-                let head = coordinator.head(scope).await?;
-                let manifest = self.domain().manifest();
-                if (head.schema, head.handler) == (manifest.schema, manifest.handler) {
-                    return Ok(json!({"active": true, "activation": null}));
-                }
-                let local = self.replica.confirmed_head(scope).await?;
-                if local != Some((head.sequence, head.head))
-                    && !(local.is_none() && head.sequence == 0)
-                {
-                    return Err(refused(
-                        "this device has not received every confirmed result; sync first",
-                    ));
-                }
-                let transition = self
-                    .settings
-                    .lock()
-                    .await
-                    .transition()?
-                    .ok_or_else(|| refused("this domain has no transition to activate"))?;
-                let resources: std::collections::BTreeSet<_> = app
-                    .commands()
-                    .descriptors()
-                    .iter()
-                    .flat_map(|descriptor| descriptor.resources.iter())
-                    .collect();
-                let mut state = Vec::new();
-                for name in resources {
-                    let resource = app
-                        .scope(name)
-                        .ok_or_else(|| refused("unknown command resource"))?;
-                    let snapshot = self.replica.command_snapshot(resource).await?;
-                    if !snapshot.complete {
-                        return Err(refused(
-                            "generation activation needs complete confirmed resource state",
-                        ));
-                    }
-                    let rows: Vec<_> = app
-                        .typed_rows(name, &snapshot.rows)?
-                        .into_iter()
-                        .map(crate::commands::cells)
-                        .collect();
-                    state.extend(serde_json::to_vec(&(name, rows))?);
-                }
-                if self.replica.confirmed_head(scope).await? != local {
-                    return Err(refused(
-                        "confirmed state advanced during generation verification; retry",
-                    ));
-                }
-                let activation = rocky_core::Activation {
-                    head,
-                    schema: manifest.schema,
-                    handler: manifest.handler,
-                    transition: transition.id(),
-                    state: commitment("rocky.sdk.activation-state.v1", &state),
-                };
-                if !activation.valid() {
-                    return Err(refused(
-                        "the coordinator's generation is not the one before this device's",
-                    ));
-                }
-                Ok(json!({
-                    "active": false,
-                    "commitment": HEXLOWER.encode(&activation.commitment()),
-                    "activation": activation,
-                }))
-            }
-            // The owner registers or controls this domain with its tenant
-            // key; the tenant secret stays in this process.
-            "command_service_register"
-            | "command_service_control"
-            | "command_service_close"
-            | "command_service_usage"
-            | "command_service_activate" => {
+            "coordination_register"
+            | "coordination_control"
+            | "coordination_close"
+            | "coordination_usage" => {
                 let service = self.service.as_ref().ok_or_else(|| {
-                    refused("commands are not composed with a coordination service")
+                    refused("this database is not composed with a coordination service")
                 })?;
                 let settings = self.settings.lock().await.clone();
-                // Whoever may execute registers executors, not only an issuer.
-                let executes = if kind == "command_service_register" && !settings.issuer() {
-                    let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-                    settings
-                        .credentials
-                        .verify(
-                            settings.publisher,
-                            self.domain().manifest().hash(),
-                            node,
-                            &settings.revocations,
-                            now()?,
-                        )?
-                        .iter()
-                        .any(|grant| grant.rights.contains(&rocky_core::Right::Execute))
-                } else {
-                    settings.issuer()
-                };
-                if kind == "command_service_register" && !executes && !settings.issuer() {
+                if kind == "coordination_register" && !settings.issuer() {
                     return Err(refused(
-                        "registering a domain's executors needs credentials holding Execute",
+                        "registering a domain's trusted nodes needs an issuer",
                     ));
                 }
                 let publisher = if settings.issuer() {
@@ -3611,23 +3355,9 @@ impl Node {
                 } else {
                     None
                 };
-                // The owner activates exactly what this device verified.
-                let activation = if kind == "command_service_activate" {
-                    let prepared = Box::pin(self.command("command_activation", request)).await?;
-                    if prepared["active"] == true {
-                        return Ok(json!({"active": true}));
-                    }
-                    Some(serde_json::from_value(prepared["activation"].clone())?)
-                } else {
-                    None
-                };
-                self.service_call(service, kind, request, publisher, activation)
-                    .await
+                self.service_call(service, kind, request, publisher).await
             }
-            // The publisher lets a tenant control key register this
-            // application's domains on a coordination service. It grants
-            // no row, key or command right.
-            "command_coordination_grant" => {
+            "coordination_grant" => {
                 if !self.settings.lock().await.issuer() {
                     return Err(refused("only an issuer holds the publisher key"));
                 }
@@ -3667,197 +3397,7 @@ impl Node {
                 )?;
                 Ok(json!({ "grant": grant }))
             }
-            "command_submit" => {
-                let method = request["method"]
-                    .as_str()
-                    .ok_or("method must be a string")?;
-                let version = request["version"]
-                    .as_u64()
-                    .and_then(|version| u32::try_from(version).ok())
-                    .ok_or("version must be a number")?;
-                let descriptor = app.commands().get(method, version).map_err(refused)?;
-                let cells: Vec<Cell> = serde_json::from_value(request["arguments"].clone())
-                    .map_err(|_| refused("arguments must be tagged values"))?;
-                let arguments = descriptor
-                    .encode_arguments(&crate::commands::values(cells).map_err(refused)?)
-                    .map_err(refused)?;
-                let ticket = self
-                    .replica
-                    .submit_command(handle()?, self.domain().scope, method, version, &arguments)
-                    .await?;
-                report(ticket)
-            }
-            "command_ticket" => match self.replica.ticket(handle()?).await? {
-                Some(ticket) => report(ticket),
-                None => Ok(json!({"state": "unresolved"})),
-            },
-            "command_tickets" => {
-                let tickets = self.replica.open_tickets(usize::MAX).await?;
-                let tickets: Vec<Value> =
-                    tickets.into_iter().map(report).collect::<Result<_, _>>()?;
-                Ok(json!({"tickets": tickets}))
-            }
-            "command_cancel" => report(self.replica.cancel_ticket(handle()?).await?),
-            "command_run" => {
-                let handles = match request.get("handle").filter(|handle| !handle.is_null()) {
-                    Some(_) => vec![handle()?],
-                    None => self
-                        .replica
-                        .open_tickets(usize::MAX)
-                        .await?
-                        .into_iter()
-                        .map(|ticket| ticket.handle)
-                        .collect(),
-                };
-                let mut tickets = Vec::new();
-                for handle in handles {
-                    let failure = self.run(handle).await.err();
-                    let ticket = self
-                        .replica
-                        .ticket(handle)
-                        .await?
-                        .ok_or_else(|| refused("unknown ticket"))?;
-                    let mut ticket = report(ticket)?;
-                    ticket["error"] = failure.as_ref().map_or(Value::Null, error);
-                    tickets.push(ticket);
-                }
-                Ok(json!({"tickets": tickets}))
-            }
-            // The application's statement that every settled ticket's result
-            // reached whoever needs it: the coordinator may retire those
-            // identities, and their receipt evidence is no longer pinned.
-            "command_acknowledge" => {
-                self.replica
-                    .acknowledge_tickets(self.coordinator()?)
-                    .await?;
-                Ok(json!({}))
-            }
-            // The three steps an application's own RPC or gateway forwards.
-            "command_envelope" => {
-                let envelope = self.replica.export_ticket(handle()?).await?;
-                Ok(json!({"envelope": envelope.to_bytes()?}))
-            }
-            "command_execute" => {
-                let answer = self.execute_delivered(&bytes("envelope")?).await;
-                Ok(json!({"answer": answer.to_bytes()?}))
-            }
-            "command_settle" => {
-                let answer = Delivery::from_bytes(&bytes("answer")?)?;
-                report(
-                    self.replica
-                        .settle_delivery(handle()?, answer, self.coordinator()?)
-                        .await?,
-                )
-            }
-            "command_rows" => {
-                let table = request["table"].as_str().ok_or("table must be a string")?;
-                let scope = app.scope(table).ok_or_else(|| refused("unknown table"))?;
-                let snapshot = self.replica.command_snapshot(scope).await?;
-                let rows: Vec<Vec<Cell>> = app
-                    .typed_rows(table, &snapshot.rows)?
-                    .into_iter()
-                    .map(crate::commands::cells)
-                    .collect();
-                let domain = self.domain();
-                let columns: Vec<&str> = domain
-                    .logical()
-                    .table(table)
-                    .ok_or_else(|| refused("unknown table"))?
-                    .columns
-                    .iter()
-                    .map(|column| column.sql_name.as_str())
-                    .collect();
-                // The confirmed sequence this device holds results through.
-                let sequence = self
-                    .replica
-                    .confirmed_head(scope.domain)
-                    .await?
-                    .map_or(0, |(sequence, _)| sequence);
-                // Without `complete`, the rows are withheld, not empty.
-                Ok(json!({
-                    "complete": snapshot.complete,
-                    "sequence": sequence.to_string(),
-                    "revision": snapshot.revision.to_string(),
-                    "columns": columns,
-                    "rows": rows,
-                }))
-            }
             other => Err(refused(format!("unsupported request {other}"))),
-        }
-    }
-    /// Advances one ticket: executes it here when this device is the
-    /// domain's executor, otherwise discovers a direct route or forwards once.
-    /// The coordinator's assignment and the peer's credentials decide eligibility.
-    async fn run(&self, handle: [u8; 32]) -> Result<(), Failure> {
-        let ticket = self
-            .replica
-            .ticket(handle)
-            .await?
-            .ok_or_else(|| refused("unknown ticket"))?;
-        match ticket.state {
-            TicketState::Confirmed | TicketState::Applied => return Ok(()),
-            TicketState::Cancelled => return Err(refused("ticket was cancelled")),
-            // Settled by the coordinator: never run again or replaced.
-            TicketState::Retired | TicketState::Expired => return Ok(()),
-            _ => {}
-        }
-        let coordinator = self.coordinator()?;
-        let mut head = coordinator.head(self.domain().scope).await?;
-        if head.executor == rocky_core::NodeId([0; 16])
-            && self.domain().app.hosts()
-            && let Some(acquire) = &self.acquire
-        {
-            match acquire(self.domain().scope, head.epoch).await {
-                Ok(()) => {}
-                // Not eligible here: another executor acquires it on its next run.
-                Err(rocky_core::CoordinationError::Denied) => {
-                    return Err(Box::new(Deferred(
-                        "the domain has no executor yet; an eligible executor acquires it on its next run".into(),
-                    )));
-                }
-                Err(error) => return Err(error.into()),
-            }
-            head = coordinator.head(self.domain().scope).await?;
-        }
-        if head.executor == rocky_core::NodeId([0; 16]) {
-            return Err(Box::new(Deferred(
-                "the domain has no executor yet; an eligible executor acquires it on its next run"
-                    .into(),
-            )));
-        }
-        let executor = head.executor;
-        let node = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
-        if executor == secure_node_id(node) {
-            self.replica.run_ticket(handle, coordinator).await?;
-            return Ok(());
-        }
-        let attached = self.network.read().await;
-        let link = attached
-            .as_ref()
-            .ok_or(ServiceError::NetworkRequired("command delivery"))?;
-        let envelope = self.replica.export_ticket(handle).await?.to_bytes()?;
-        let mut stage = link.stage.subscribe();
-        let answer = tokio::select! {
-            answer = self.route_command(&*link.transport, executor, envelope) => answer?,
-            _ = stage.wait_for(|stage| *stage == Stage::Cancelled) => {
-                return Err(ServiceError::Closed("network service").into());
-            }
-        };
-        let answer = Delivery::from_bytes(&answer)?;
-        let failure = match &answer {
-            Delivery::Confirmed(_) => None,
-            Delivery::NotSubmitted { retryable, message } => Some((*retryable, message.clone())),
-            Delivery::Unknown(message) => Some((true, message.clone())),
-            // The ticket records the settlement; it is never run again.
-            Delivery::Settled { .. } => None,
-        };
-        self.replica
-            .settle_delivery(handle, answer, coordinator)
-            .await?;
-        match failure {
-            None => Ok(()),
-            Some((true, message)) => Err(Box::new(Deferred(message))),
-            Some((false, message)) => Err(refused(message)),
         }
     }
 
@@ -4229,8 +3769,6 @@ pub fn error(error: &Failure) -> Value {
         ("revocation_set_full", false)
     } else if error.is::<Refused>() {
         ("rejected", false)
-    } else if error.is::<Deferred>() {
-        ("executor_unavailable", true)
     } else if let Some(pending) = horizon_pending(error) {
         return json!({"code": "horizon_pending", "retryable": true, "message": pending.to_string()});
     } else if let Some(coordinated) = error.downcast_ref::<coordinated::Coordinated>() {
@@ -4261,27 +3799,18 @@ pub fn error(error: &Failure) -> Value {
             },
             Some(Error::Conflict) => ("conflict", true),
             Some(Error::Backpressure) => ("quota", true),
-            Some(Error::Handler(_)) => ("handler_unavailable", true),
-            Some(Error::StrongPending(_)) => ("missing_head", true),
             Some(Error::Coordination(coordination)) => coordination_code(coordination),
             _ => ("storage", true),
         }
     };
     json!({"code": code, "retryable": retryable, "message": error.to_string()})
 }
-/// A lost coordinator answer leaves the confirmation unknown; a stale fence
-/// or head is met again by running the same ticket.
+/// A coordination service's refusal as a call's error code.
 fn coordination_code(error: &rocky_core::CoordinationError) -> (&'static str, bool) {
-    use rocky_core::CoordinationError::{
-        Backpressure, Denied, Generations, StaleEpoch, StaleHead, Unavailable,
-    };
+    use rocky_core::CoordinationError::{Backpressure, Denied, Unavailable};
     match error {
-        Unavailable => ("unknown_confirmation", true),
-        // A full response window: acknowledge settled tickets or wait for expiry.
+        Unavailable => ("coordinator_unavailable", true),
         Backpressure => ("quota", true),
-        // Retried once the coordinator activates this device's generation.
-        Generations => ("unsupported_generation", true),
-        StaleHead | StaleEpoch => ("missing_head", true),
         Denied => ("denied", false),
         _ => ("rejected", false),
     }

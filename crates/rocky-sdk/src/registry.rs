@@ -4,7 +4,7 @@
 //! `docs/decisions/0048-replicated-issuer-registry.md`.
 use crate::{Failure, domain::REGISTRY};
 use data_encoding::{BASE64URL_NOPAD, HEXLOWER};
-use rocky_core::{Commitment, SqlValue, TypedCommands};
+use rocky_core::{Commitment, SqlValue, TypedRows};
 use rocky_credentials::{PartitionGrant, Profile};
 use rocky_secure::{EncryptedReplica, PublicKey, SecureSql, SqlOptions};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -51,8 +51,6 @@ pub struct Device {
     pub profile: Option<Profile>,
     /// The issuer that wrote the record first.
     pub issuer: PublicKey,
-    /// The device's command identity: its `NodeId` in hexadecimal.
-    pub command: String,
     pub enrolled: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,7 +335,7 @@ fn text(value: &SqlValue) -> Result<&str, Failure> {
     }
 }
 /// Records with a `device` entry, inside the writing transaction.
-async fn devices(sql: &SecureSql<TypedCommands>) -> Result<usize, Failure> {
+async fn devices(sql: &SecureSql<TypedRows>) -> Result<usize, Failure> {
     let count = format!("SELECT COUNT(*) FROM {REGISTRY} WHERE entry = 'device'");
     match sql
         .run(&count, Vec::new())
@@ -352,7 +350,7 @@ async fn devices(sql: &SecureSql<TypedCommands>) -> Result<usize, Failure> {
 }
 /// Every record this issuer holds.
 pub async fn read(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     scope: rocky_core::ResourceScope,
 ) -> Result<Registry, Failure> {
     let session = replica.session([scope].into()).await?;
@@ -375,7 +373,7 @@ pub async fn read(
 /// Commits `changes` as one secure transaction, or nothing. A change that
 /// would add a device beyond the bound refuses the whole transaction.
 pub async fn write(
-    replica: &EncryptedReplica<TypedCommands>,
+    replica: &EncryptedReplica<TypedRows>,
     scope: rocky_core::ResourceScope,
     changes: &Changes,
 ) -> Result<(), Failure> {

@@ -220,9 +220,6 @@ impl<A: RowApplication> SecureSql<A> {
         let table = typed
             .by_name(table)
             .ok_or_else(|| refused("unknown typed table"))?;
-        if table.confirmed() {
-            return Err(denied("identity allocation requires a writable table"));
-        }
         let author = inner
             .row_authors
             .get(&table.scope.table)

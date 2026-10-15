@@ -22,7 +22,6 @@ mod checkpoints;
 mod contacts;
 pub mod link;
 pub use contacts::{ContactFuture, ContactHandler, ContactHint, ContactRequest, ContactResponse};
-mod commands;
 mod delivery;
 mod entries;
 mod existence;
@@ -35,8 +34,6 @@ mod revocations;
 mod rows;
 use chains::{ChainMessage, ChainTable};
 use checkpoints::CheckpointMessage;
-use commands::CommandMessage;
-pub use commands::NO_COORDINATION;
 use contacts::ContactMessage;
 use delivery::DeliveryMessage;
 pub use delivery::{DELIVERY_PAGE, Delivered, Deliveries, DeliveryFuture, Held, Outgoing};
@@ -128,7 +125,6 @@ enum Message {
     HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
-    Commands(CommandMessage),
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
     Contacts(ContactMessage),
@@ -162,7 +158,6 @@ families!(
     HorizonRelay(HorizonRelayMessage),
     Frontiers(FrontierMessage),
     Existence(ExistenceMessage),
-    Commands(CommandMessage),
     Revocations(RevocationMessage),
     Holdings(HoldingMessage),
     Contacts(ContactMessage),

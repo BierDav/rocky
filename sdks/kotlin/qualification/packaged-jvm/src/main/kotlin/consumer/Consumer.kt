@@ -9,47 +9,30 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
-private val amount = Shape(listOf(Field("amount", FieldType.Integer)), { n: Long -> listOf(n) }, { it.single() as Long })
-private val add = Command(
-    "Add",
-    handler = "items.add.v1",
-    arguments = amount,
-    accepted = amount,
-    rejected = Shape.none,
-    invocation = "items",
-    result = "items",
-    resources = listOf("items"),
-)
 private val schema = schema("packaged") {
     table("items") {
         text("title")
         primaryKey("id")
     }
-    commands = CommandSet(listOf(add))
 }
 private val table = schema.table("items")
 private fun handle(n: Int) = n.toString(16).padStart(64, '0')
 private suspend fun titles(port: RuntimePort) = Row.decode(port.read(table.query())).map { it.text("title") }
 
-/** Credential primitives and a non-issuer executor, using only the packaged library. */
+/** Credential primitives and a delegated credentials, using only the packaged library. */
 private suspend fun credentialPrimitives(root: File) {
-    val coordinator = DevelopmentCoordinator()
-    val issuer = RockyDatabase.local(File(root, "issuer"), schema, commands = CommandRuntime(coordinator))
+    val issuer = RockyDatabase.local(File(root, "issuer"), schema)
     var executor: RockyDatabase? = null
     var delegate: RockyDatabase? = null
     try {
         val keys = Credentials.prepare(File(root, "executor"))
-        val all = listOf(Grant("items", setOf(Right.Read, Right.Insert, Right.Update, Right.Delete, Right.Invoke, Right.Execute, Right.Custody)))
+        val all = listOf(Grant("items", setOf(Right.Read, Right.Insert, Right.Update, Right.Delete, Right.Custody)))
         val x = RockyDatabase.install(
             File(root, "executor"),
             schema,
             issuer.credentials.grant(keys, all, delegations = 2, authors = 2),
-            commands = CommandRuntime(coordinator, listOf(add handledBy Handler { _, n -> Decision.accept(n) })),
         ).also { executor = it }
-        check(!x.isIssuer && x.commandIdentity().executes)
-        coordinator.register(x.commandIdentity())
-        x.commands.submit(add, 11L, handle(20))
-        check(x.commands.run(add, handle(20)).outcome == Outcome.Accepted(11L))
+        check(!x.isIssuer)
         val asked = x.credentials.pseudonymRequest("items")
         val credential = issuer.credentials.assignPseudonym(asked)
         val author = x.credentials.installPseudonym(credential)
@@ -141,23 +124,10 @@ private suspend fun groupedLists(root: File) {
 fun main(args: Array<String>) = runBlocking {
     val root = File(args.single()).also { it.mkdirs() }
     val directory = File(root, "database")
-    val coordinator = DevelopmentCoordinator()
-    var calls = 0
-    val runtime = CommandRuntime(
-        coordinator,
-        listOf(
-            add handledBy Handler { _, n ->
-                calls++
-                Decision.accept(n)
-            },
-        ),
-    )
-    var db = RockyDatabase.local(directory, schema, commands = runtime)
+    var db = RockyDatabase.local(directory, schema)
     check(db.network().attachment == rocky.AttachmentState.Detached)
     val a = db.openSession()
     val b = db.openSession()
-    val identity = db.commandIdentity()
-    coordinator.register(identity)
     val node = a.credentials.status().node
     check(a.credentials.status().isIssuer)
     val initial = a.observeStatus().first()
@@ -179,12 +149,6 @@ fun main(args: Array<String>) = runBlocking {
     waiting.cancelAndJoin()
     a.close()
     check(titles(b) == listOf("apples"))
-    b.commands.submit(add, 7L, handle(2))
-    val ticket = b.commands.run(add, handle(2))
-    check(ticket.state == TicketState.Applied && (ticket.outcome as Outcome.Accepted).value == 7L)
-    check(calls == 1)
-    b.commands.submit(add, 9L, handle(3))
-    check(b.commands.cancel(add, handle(3)).state == TicketState.Cancelled)
     val endpoint = RockyEndpoint.bind(ByteArray(32) { 42 }, relay = "disabled", lookup = "disabled", bind = "127.0.0.1:0")
     val attached = db.attach(PeerTransport.Endpoint(endpoint))
     check(db.network().attachment == rocky.AttachmentState.Attached && db.network().ownership == rocky.NetworkOwnership.Application)
@@ -202,13 +166,10 @@ fun main(args: Array<String>) = runBlocking {
         archive,
         invitation.uri,
         PeerTransport.Iroh.isolated(),
-        commands = runtime,
     )
     check(restored.credentials.status().node != db.credentials.status().node)
     check(restored.credentials.status().isIssuer)
     check(titles(restored) == listOf("apples"))
-    check(restored.commands.ticket(add, handle(2))?.state == TicketState.Applied)
-    check(calls == 1) // Restore and replay never redispatch the command handler.
     restored.close()
     owned.close()
     db.close()
@@ -216,21 +177,17 @@ fun main(args: Array<String>) = runBlocking {
     endpoint.shutdown()
     // Reopen under the same identity and upgrade additively without reauthoring the action.
     val upgraded = schema.copy(version = 2, tables = listOf(Table("items", listOf(Column.text("title"), Column.text("note", nullable = true)), primaryKey = listOf("id"))))
-    db = RockyDatabase.open(directory, upgraded, commands = runtime)
+    db = RockyDatabase.open(directory, upgraded)
     check(db.credentials.status().node == node)
     check(db.generation().getValue("current").jsonObject.getValue("schema").jsonPrimitive.int == 2)
     check(titles(db) == listOf("apples"))
     check(Row.decode(db.read(upgraded.table("items").query())).single().isNull("note"))
-    check(db.commands.ticket(add, handle(2))?.state == TicketState.Applied)
     check(db.reconcile(action).getValue("committed").jsonPrimitive.boolean)
-    check(calls == 1)
     db.close()
-    db = RockyDatabase.open(directory, upgraded, commands = runtime)
+    db = RockyDatabase.open(directory, upgraded)
     check(db.credentials.status().node == node)
     check(Row.decode(db.read(upgraded.table("items").query())).single().isNull("note"))
-    check(db.commands.ticket(add, handle(2))?.state == TicketState.Applied)
     check(db.reconcile(action).getValue("committed").jsonPrimitive.boolean)
-    check(calls == 1)
     db.close()
     // Cancellation during native construction still closes the admitted database and leaves it reopenable.
     val began = CountDownLatch(1)
@@ -286,5 +243,5 @@ fun main(args: Array<String>) = runBlocking {
         moving.close()
     }
     groupedLists(File(root, "lists"))
-    println("Packaged consumer passed: grouped partitioned constraints, idempotent row moves, credential primitives, non-issuer executor, local sessions, authority/progress Flow, reconciliation, Kotlin handler/tickets, owned/borrowed networks, fresh restore and generation reopen")
+    println("Packaged consumer passed: grouped partitioned constraints, idempotent row moves, credential primitives, delegated credentials, local sessions, authority/progress Flow, reconciliation, owned/borrowed networks, fresh restore and generation reopen")
 }

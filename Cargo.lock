@@ -3,13 +3,6 @@
 version = 4
 
 [[package]]
-name = "accounting-app"
-version = "0.1.0"
-dependencies = [
- "rocky-core",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6055,7 +6048,6 @@ name = "rocky-runtime"
 version = "0.1.0"
 dependencies = [
  "inventory-app",
- "rocky-coordinator",
  "rocky-core",
  "rocky-storage",
  "serde",
@@ -6093,7 +6085,6 @@ dependencies = [
 name = "rocky-secure"
 version = "0.1.0"
 dependencies = [
- "accounting-app",
  "chacha20poly1305",
  "employees-app",
  "p2panda-core",

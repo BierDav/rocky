@@ -2,7 +2,7 @@
 use crate::{Failure, schema::Schema};
 use rocky_core::{
     ApplicationManifest, Commitment, DomainId, LogicalSchema, MeshId, ResourceScope,
-    RowApplication, Scope, TypedCommands, TypedRows,
+    RowApplication, Scope, TypedRows,
 };
 use rocky_credentials::{Grant, Profile, Resource};
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const REGISTRY: &str = "issuer_registry";
 
 pub(crate) struct Domain {
-    /// The typed tables and commands. It holds no handler until `hosted`.
-    pub app: TypedCommands,
+    /// The typed tables.
+    pub app: TypedRows,
     pub scope: Scope,
     tables: BTreeMap<String, ResourceScope>,
     granted_like: BTreeMap<String, String>,
@@ -109,17 +109,8 @@ impl Domain {
                 )
             })
             .collect();
-        let commands = match &schema.commands {
-            Some(definitions) => definitions.build()?,
-            None => Default::default(),
-        };
         Ok(Self {
-            app: TypedCommands::new(
-                TypedRows::new(logical, vec![domain])?.at_generation(generation, added)?,
-                commands,
-                tables.clone(),
-                None,
-            )?,
+            app: TypedRows::new(logical, vec![domain])?.at_generation(generation, added)?,
             scope,
             tables,
             granted_like: schema.granted_like.clone(),
@@ -185,7 +176,7 @@ impl Domain {
                 .map(|column| logical.field_id(table, column))
                 .collect()
         };
-        let added = self.app.rows().added();
+        let added = self.app.added();
         let current: BTreeSet<Commitment> = resources
             .iter()
             .flat_map(|resource| resource.columns.values().copied())
@@ -250,17 +241,7 @@ impl Domain {
                     table: id,
                     selector: rocky_core::PartitionSelector(selector),
                     rows: rocky_core::RowSelection::All,
-                    rights: grant
-                        .rights
-                        .iter()
-                        .copied()
-                        .filter(|right| {
-                            !matches!(
-                                right,
-                                rocky_core::Right::Invoke | rocky_core::Right::Execute
-                            )
-                        })
-                        .collect(),
+                    rights: grant.rights.clone(),
                     fields: fields(name),
                 });
             }
@@ -271,8 +252,7 @@ impl Domain {
     /// columns a later generation removed, and with the schema's
     /// `granted_like` applied: a table granted like another receives the
     /// same rights wherever the profile names that one in whole rows and is
-    /// silent on it. Commands stay with their own tables. Every
-    /// interpretation of a profile goes through here.
+    /// silent on it. Every interpretation of a profile goes through here.
     pub fn effective(&self, profile: &Profile) -> Profile {
         let profile = &self.current(profile);
         let follow = |scopes: &std::collections::BTreeSet<String>| {
@@ -313,20 +293,9 @@ impl Domain {
                             })
                             .map(|grant| Grant {
                                 scope: table.clone(),
-                                rights: grant
-                                    .rights
-                                    .iter()
-                                    .copied()
-                                    .filter(|right| {
-                                        !matches!(
-                                            right,
-                                            rocky_core::Right::Invoke | rocky_core::Right::Execute
-                                        )
-                                    })
-                                    .collect(),
+                                rights: grant.rights.clone(),
                                 columns: grant.columns.clone(),
-                            })
-                            .filter(|grant| !grant.rights.is_empty()),
+                            }),
                     );
                 }
                 Profile::Grants { grants: all }
@@ -370,16 +339,10 @@ impl Domain {
             },
         }
     }
-    /// This domain with the handlers its device executes commands with.
-    pub fn hosted(mut self, host: Option<std::sync::Arc<dyn rocky_core::CommandHost>>) -> Self {
-        self.app = self.app.with_host(host);
-        self
-    }
     pub fn logical(&self) -> &LogicalSchema {
-        self.app.rows().schema()
+        self.app.schema()
     }
-    /// The signed definition: the tables and, with commands, their methods
-    /// and handler generation.
+    /// The signed definition of the tables.
     pub fn manifest(&self) -> ApplicationManifest {
         self.app.manifest()
     }
@@ -432,15 +395,6 @@ impl Domain {
     }
     fn all_resources(&self) -> Vec<Resource> {
         let logical = self.logical();
-        let manifest = self.manifest();
-        let commands = self.app.commands().descriptors();
-        let methods = |named: &dyn Fn(&rocky_core::CommandDescriptor) -> bool| {
-            commands
-                .iter()
-                .filter(|descriptor| named(descriptor))
-                .map(|descriptor| manifest.item_id("method", &descriptor.name))
-                .collect()
-        };
         logical
             .tables
             .iter()
@@ -452,8 +406,6 @@ impl Domain {
                     .iter()
                     .map(|column| (column.sql_name.clone(), logical.field_id(table, column)))
                     .collect(),
-                invokes: methods(&|descriptor| descriptor.invocation == table.sql_name),
-                executes: methods(&|descriptor| descriptor.resources.contains(&table.sql_name)),
             })
             .collect()
     }
@@ -612,11 +564,17 @@ mod tests {
     }
 
     #[test]
-    fn a_command_controlled_table_needs_a_command() {
+    fn removed_command_definitions_are_refused() {
         let json = r#"{"format":6,"application":"market","version":1,"tables":[{"name":"stock","class":"command_controlled","columns":[{"name":"item","type":"text","not_null":true}],"primary_key":["item"]}]}"#;
-        let error = Schema::parse(json).unwrap_err().to_string();
-        assert!(error.contains("resource of no command"), "{error}");
+        assert!(Schema::parse(json).is_err());
         let confirmed = json.replace("command_controlled", "confirmed_read_only");
         assert!(Schema::parse(&confirmed).is_err());
+        let ordinary = json.replace("command_controlled", "mergeable");
+        assert!(Schema::parse(&ordinary).is_ok());
+        let commands = ordinary.replace(
+            "\"version\":1",
+            "\"version\":1,\"commands\":{\"format\":1,\"handler\":1,\"commands\":[]}",
+        );
+        assert!(Schema::parse(&commands).is_err());
     }
 }

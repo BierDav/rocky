@@ -1,96 +1,78 @@
 mod support;
-use rocky_coordinator::service::{Operation, Outcome};
+use rocky_coordinator::{
+    coordinated::{Action, Result as LogResult},
+    service::{Operation, Outcome},
+};
 use rocky_core::*;
 use std::collections::BTreeSet;
 use support::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn three_persistent_voters_fence_recover_and_verify_offline() {
+async fn three_persistent_voters_keep_controls_and_logs_across_restarts() {
     let mut cluster = Cluster::start().await;
-    #[derive(serde::Serialize)]
-    struct OtherCache {
-        format: u32,
-    }
-    let path = cluster.dir.path().join("refused.evidence");
-    for format in [0, 1, 2, 4, u32::MAX] {
-        let bytes = p2panda_core::cbor::encode_cbor(&OtherCache { format }).unwrap();
-        std::fs::write(&path, &bytes).unwrap();
-        let refused = rocky_coordinator::service::NetworkCoordinator::open(
-            cluster.genesis.clone(),
-            cluster.genesis.root,
-            cluster.genesis.genesis.mesh,
-            cluster.phone.clone(),
-            path.clone(),
-        );
-        assert!(matches!(refused, Err(CoordinationError::UnsupportedFormat)));
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert!(!path.with_file_name("refused.evidence.lock").exists());
-    }
-    let admin = cluster.client(&cluster.admin, "admin");
-    let issuer = cluster.client(&cluster.issuer, "issuer");
-    let alice = cluster.client(&cluster.executor, "alice");
-    let alternate = cluster.client(&cluster.alternate, "alternate");
+    let admin = cluster.client(&cluster.admin);
+    let issuer = cluster.client(&cluster.issuer);
+    let alice = cluster.client(&cluster.executor);
+    let alternate = cluster.client(&cluster.alternate);
     issuer
         .call([1; 32], Operation::Control(cluster.app_control(1)))
         .await
         .unwrap();
-    let h = alice.acquire(cluster.scope, [2; 32]).await.unwrap();
-    let first = proposal(
-        &h,
-        cluster.phone.public_key(),
-        directory_app::principal(*cluster.user.public_key().as_bytes()),
-        1,
-    );
-    let receipt = alice.confirm(first.clone()).await.unwrap();
-    assert_eq!(alice.confirm(first.clone()).await.unwrap(), receipt);
-    let stale = proposal(
-        &alice.head(cluster.scope).await.unwrap(),
-        cluster.phone.public_key(),
-        first.caller,
-        2,
-    );
-    let fenced = alice.takeover(cluster.scope, 1, [3; 32]).await.unwrap();
-    assert_eq!(fenced.epoch, 2);
-    assert_eq!(
-        alice.confirm(stale.clone()).await,
-        Err(CoordinationError::StaleEpoch)
-    );
-    let moved = alternate.takeover(cluster.scope, 2, [4; 32]).await.unwrap();
-    assert_eq!(moved.epoch, 3);
-    assert_eq!(
-        alice.confirm(stale).await,
-        Err(CoordinationError::StaleEpoch)
-    );
-    assert_eq!(alice.confirm(first.clone()).await.unwrap(), receipt);
-    let mut misuse = first.clone();
-    misuse.request_hash = [0; 32];
-    assert_eq!(
-        alice.confirm(misuse).await,
-        Err(CoordinationError::RequestConflict)
-    );
+    join(&alice, cluster.scope, 1).await;
+    let first = append(&alice, cluster.scope, 1, 2).await;
+    let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
+        .coordinated(cluster.scope, first.clone())
+        .await
+        .unwrap()
+    else {
+        panic!("assignment")
+    };
+    // A retried append returns its first answer; another with its sequence conflicts.
     assert_eq!(
         alice
-            .call(
-                [2; 32],
-                Operation::Takeover {
-                    scope: cluster.scope,
-                    expected_epoch: 3
+            .coordinated(cluster.scope, first.clone())
+            .await
+            .unwrap(),
+        Outcome::Coordinated(LogResult::Assigned(pending.clone()))
+    );
+    let Action::Append {
+        expected,
+        epoch,
+        deadline,
+        sequence,
+        ..
+    } = first
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        alice
+            .coordinated(
+                cluster.scope,
+                Action::Append {
+                    expected,
+                    epoch,
+                    hash: [9; 32],
+                    deadline,
+                    sequence,
                 }
             )
             .await,
         Err(CoordinationError::RequestConflict)
     );
+    assert!(matches!(
+        alice
+            .coordinated(cluster.scope, Action::Acknowledge { pending: *pending })
+            .await
+            .unwrap(),
+        Outcome::Coordinated(LogResult::Committed { position: 1, .. })
+    ));
     let leader = cluster.wait_leader(&admin).await;
     cluster.stop(leader);
     let next = cluster.wait_leader(&admin).await;
     assert_ne!(next, leader);
-    assert_eq!(
-        alternate
-            .lookup(cluster.scope, first.request)
-            .await
-            .unwrap(),
-        Some(receipt.clone())
-    );
+    let head = alternate.coordinated_head(cluster.scope).await.unwrap();
+    assert_eq!((head.commit, head.hashes.len()), (1, 1));
     cluster.spawn(leader, false, None);
     cluster.wait_online(leader, &admin).await;
     membership_after_election(
@@ -129,6 +111,7 @@ async fn three_persistent_voters_fence_recover_and_verify_offline() {
     )
     .await
     .unwrap();
+    // The retained plan neither reapplies nor reverses the later one.
     assert_eq!(
         membership_after_election(
             &admin,
@@ -148,9 +131,6 @@ async fn three_persistent_voters_fence_recover_and_verify_offline() {
         admin.status(leader).await.unwrap().voters,
         BTreeSet::from([1, 2, 3])
     );
-    let head = alternate.head(cluster.scope).await.unwrap();
-    assert_eq!(head.sequence, 1);
-    assert_eq!(head.epoch, 3);
     for id in 1..=3 {
         admin.snapshot(id).await.unwrap();
     }
@@ -160,13 +140,9 @@ async fn three_persistent_voters_fence_recover_and_verify_offline() {
         cluster.wait_online(id, &admin).await;
     }
     cluster.wait_leader(&admin).await;
-    assert_eq!(alternate.head(cluster.scope).await.unwrap(), head);
     assert_eq!(
-        alternate
-            .lookup(cluster.scope, first.request)
-            .await
-            .unwrap(),
-        Some(receipt.clone())
+        alternate.coordinated_head(cluster.scope).await.unwrap(),
+        head
     );
     let mut invalid = cluster.app_control(2);
     invalid.control.configuration = [0; 16];
@@ -176,83 +152,29 @@ async fn three_persistent_voters_fence_recover_and_verify_offline() {
             .await
             .is_err()
     );
+    // A revision cannot drop a trusted node the in-sync set still holds.
+    let mut narrowed = cluster.app_control(2);
+    narrowed.control.trusted = vec![cluster.alternate.public_key()];
+    let narrowed =
+        rocky_coordinator::certified::ControlCertificate::sign(narrowed.control, &cluster.issuer)
+            .unwrap();
+    assert_eq!(
+        issuer.call([8; 32], Operation::Control(narrowed)).await,
+        Err(CoordinationError::Backpressure)
+    );
     issuer
-        .call([8; 32], Operation::Control(cluster.app_control(2)))
-        .await
-        .unwrap();
-    let revised = alice.acquire(cluster.scope, [9; 32]).await.unwrap();
-    assert_eq!(revised.sequence, 1);
-    assert_eq!(revised.epoch, 4);
-    assert_eq!(alice.confirm(first.clone()).await.unwrap(), receipt);
-    let evidence = alice.evidence(&receipt).await.unwrap();
-    let phone = cluster.client(&cluster.phone, "retiring-phone");
-    phone
-        .retire(
-            cluster.scope,
-            first.request.node,
-            first.request.sequence.get(),
-        )
+        .call([9; 32], Operation::Control(cluster.app_control(2)))
         .await
         .unwrap();
     assert_eq!(
-        alice.lookup(cluster.scope, first.request).await,
-        Err(CoordinationError::Retired)
+        alice.coordinated_head(cluster.scope).await.unwrap().commit,
+        1
     );
-    assert_eq!(
-        alice.confirm(first.clone()).await,
-        Err(CoordinationError::Retired)
-    );
-    assert_eq!(
-        phone.verify(&receipt).await,
-        Err(CoordinationError::Retired)
-    );
-    alice.verify(&receipt).await.unwrap();
-    assert_eq!(alice.head(cluster.scope).await.unwrap(), revised);
-    // A crash during retirement and subsequent snapshot recovery cannot reopen it.
-    let leader = cluster.wait_leader(&admin).await;
-    cluster.arm(leader, "commit.after_sync");
-    let _ = phone
-        .retire(
-            cluster.scope,
-            first.request.node,
-            first.request.sequence.get() + 1,
-        )
-        .await;
-    cluster.wait_exit(leader).await;
-    cluster.wait_leader(&admin).await;
-    cluster.spawn(leader, false, None);
-    cluster.wait_online(leader, &admin).await;
-    for id in 1..=3 {
-        admin.snapshot(id).await.unwrap();
-    }
-    let mut hole = first.clone();
-    hole.request.sequence = AuthorSequence::new(first.request.sequence.get() + 1).unwrap();
-    assert_eq!(alice.confirm(hole).await, Err(CoordinationError::Retired));
-    assert_eq!(alice.confirm(first).await, Err(CoordinationError::Retired));
     for id in 1..=3 {
         cluster.stop(id);
     }
-    let historical = cluster.client(&cluster.phone, "historical");
-    historical.retain_evidence(evidence.clone()).await.unwrap();
-    historical.verify(&receipt).await.unwrap();
-    assert!(
-        rocky_coordinator::service::NetworkCoordinator::open(
-            cluster.genesis.clone(),
-            cluster.genesis.root,
-            cluster.genesis.genesis.mesh,
-            cluster.phone.clone(),
-            cluster.dir.path().join("historical.evidence")
-        )
-        .is_err()
-    );
-    drop(historical);
-    let historical = cluster.client(&cluster.phone, "historical");
-    historical.verify(&receipt).await.unwrap();
-    let mut forged = evidence;
-    forged.receipt.confirmation.result = [0; 32];
-    assert!(historical.retain_evidence(forged).await.is_err());
     assert_eq!(
-        alternate.head(cluster.scope).await,
+        alternate.coordinated_head(cluster.scope).await,
         Err(CoordinationError::Unavailable)
     );
     // A surviving provisioning marker prevents a missing store from becoming genesis again.
@@ -266,15 +188,15 @@ async fn three_persistent_voters_fence_recover_and_verify_offline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     let mut cluster = Cluster::start().await;
-    let admin = cluster.client(&cluster.admin, "admin");
-    let issuer = cluster.client(&cluster.issuer, "issuer");
-    let alice = cluster.client(&cluster.executor, "alice");
+    let admin = cluster.client(&cluster.admin);
+    let issuer = cluster.client(&cluster.issuer);
+    let alice = cluster.client(&cluster.executor);
     issuer
         .call([1; 32], Operation::Control(cluster.app_control(1)))
         .await
         .unwrap();
-    alice.acquire(cluster.scope, [2; 32]).await.unwrap();
-    let caller = directory_app::principal(*cluster.user.public_key().as_bytes());
+    join(&alice, cluster.scope, 1).await;
+    let mut last = None;
     for (index, stage) in [
         "log.before_sync",
         "log.after_sync",
@@ -286,46 +208,64 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     .enumerate()
     {
         let leader = cluster.wait_leader(&admin).await;
-        let before = alice.head(cluster.scope).await.unwrap();
-        let p = proposal(
-            &before,
-            cluster.phone.public_key(),
-            caller,
-            index as u64 + 1,
-        );
+        let before = alice.coordinated_head(cluster.scope).await.unwrap();
+        let action = append(&alice, cluster.scope, index as u8 + 1, index as u64 + 2).await;
         cluster.arm(leader, stage);
-        let _ = alice.confirm(p.clone()).await;
+        let _ = alice.coordinated(cluster.scope, action.clone()).await;
         cluster.wait_exit(leader).await;
         cluster.wait_leader(&admin).await;
-        let receipt = alice.confirm(p.clone()).await.unwrap();
-        assert_eq!(receipt.sequence, before.sequence + 1, "{stage}");
-        assert_eq!(alice.confirm(p.clone()).await.unwrap(), receipt);
+        // The retry answers what the crashed call may have applied, once.
+        let Outcome::Coordinated(LogResult::Assigned(pending)) = alice
+            .coordinated(cluster.scope, action.clone())
+            .await
+            .unwrap()
+        else {
+            panic!("{stage}: assignment")
+        };
+        assert_eq!(pending.position, before.commit + 1, "{stage}");
+        assert_eq!(
+            alice
+                .coordinated(cluster.scope, action.clone())
+                .await
+                .unwrap(),
+            Outcome::Coordinated(LogResult::Assigned(pending.clone()))
+        );
+        assert!(matches!(
+            alice
+                .coordinated(cluster.scope, Action::Acknowledge { pending: *pending })
+                .await
+                .unwrap(),
+            Outcome::Coordinated(LogResult::Committed { .. })
+        ));
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
         assert_eq!(
-            alice.lookup(cluster.scope, p.request).await.unwrap(),
-            Some(receipt)
+            alice.coordinated_head(cluster.scope).await.unwrap().commit,
+            before.commit + 1,
+            "{stage}"
         );
+        last = Some(action);
     }
     for stage in ["snapshot.before_rename", "snapshot.after_sync"] {
         let leader = cluster.wait_leader(&admin).await;
-        let before = alice.head(cluster.scope).await.unwrap();
+        let before = alice.coordinated_head(cluster.scope).await.unwrap();
         cluster.arm(leader, stage);
         let _ = admin.snapshot(leader).await;
         cluster.wait_exit(leader).await;
         cluster.wait_leader(&admin).await;
         cluster.spawn(leader, false, None);
         cluster.wait_online(leader, &admin).await;
-        assert_eq!(alice.head(cluster.scope).await.unwrap(), before);
+        assert_eq!(alice.coordinated_head(cluster.scope).await.unwrap(), before);
     }
     let leader = cluster.wait_leader(&admin).await;
     let lagging = if leader == 1 { 2 } else { 1 };
     let lagging_applied = admin.status(lagging).await.unwrap().applied.unwrap();
     cluster.stop(lagging);
-    // Reads add no log entries; idempotent acknowledgments of an empty prefix do.
-    let alice_node = rocky_coordinator::certified::node_id(cluster.executor.public_key());
+    // Reads add no log entries; retries of a decided append do, unchanged.
+    let last = last.unwrap();
     for _ in 0..80 {
-        Coordinator::retire(&alice, cluster.scope, alice_node, 1)
+        alice
+            .coordinated(cluster.scope, last.clone())
             .await
             .unwrap();
     }
@@ -373,47 +313,7 @@ async fn crashes_at_log_commit_apply_reply_and_snapshot_boundaries() {
     }
     let status = admin.status(leader).await.unwrap();
     println!(
-        "crash exercise: 5 confirmation boundaries, 2 snapshot boundaries plus interrupted snapshot transfer; leader disk bytes={} logs={} snapshots={}",
+        "crash exercise: 5 append boundaries, 2 snapshot boundaries plus interrupted snapshot transfer; leader disk bytes={} logs={} snapshots={}",
         status.disk_bytes, status.logs, status.snapshots
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn certified_lost_reply_survives_another_executors_advance() {
-    let mut cluster = Cluster::start().await;
-    let admin = cluster.client(&cluster.admin, "admin");
-    let issuer = cluster.client(&cluster.issuer, "issuer");
-    let alice = cluster.client(&cluster.executor, "alice");
-    let alternate = cluster.client(&cluster.alternate, "alternate");
-    issuer
-        .control(cluster.app_control(1), [1; 32])
-        .await
-        .unwrap();
-    let head = alice.acquire(cluster.scope, [2; 32]).await.unwrap();
-    let caller = directory_app::principal(*cluster.user.public_key().as_bytes());
-    let first = proposal(&head, cluster.phone.public_key(), caller, 1);
-    let leader = cluster.wait_leader(&admin).await;
-    cluster.arm(leader, "reply.before_send");
-    let _ = alice.confirm(first.clone()).await;
-    cluster.wait_exit(leader).await;
-    cluster.wait_leader(&admin).await;
-    let receipt = alternate
-        .lookup(cluster.scope, first.request)
-        .await
-        .unwrap()
-        .unwrap();
-    alternate
-        .evidence(&receipt)
-        .await
-        .unwrap()
-        .verify(&cluster.genesis)
-        .unwrap();
-    let head = alternate
-        .takeover(cluster.scope, head.epoch, [3; 32])
-        .await
-        .unwrap();
-    let next = proposal(&head, cluster.phone.public_key(), caller, 2);
-    alternate.confirm(next).await.unwrap();
-    assert_eq!(alice.confirm(first).await.unwrap(), receipt);
-    assert_eq!(alternate.head(cluster.scope).await.unwrap().sequence, 2);
 }

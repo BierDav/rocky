@@ -2,7 +2,7 @@
 use super::*;
 
 pub(crate) const SCHEMA: &[&str] = &[
-    "CREATE TABLE IF NOT EXISTS secure_checkpoint_archive(scope BLOB PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL,chains BLOB NOT NULL) WITHOUT ROWID",
+    "CREATE TABLE IF NOT EXISTS secure_checkpoint_archive(scope BLOB PRIMARY KEY,signed BLOB NOT NULL,cursor BLOB,complete INTEGER NOT NULL) WITHOUT ROWID",
     "CREATE TABLE IF NOT EXISTS secure_checkpoint_archive_pages(scope BLOB NOT NULL,cursor BLOB NOT NULL,page BLOB NOT NULL,PRIMARY KEY(scope,cursor)) WITHOUT ROWID",
 ];
 impl<A: RowApplication> EncryptedReplica<A> {
@@ -50,55 +50,17 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     [encode(&scope)?],
                 )
                 .await?;
-            inner.conn.execute("INSERT INTO secure_checkpoint_archive VALUES(?,?,NULL,0,?) ON CONFLICT(scope) DO UPDATE SET signed=excluded.signed,cursor=NULL,complete=0,chains=excluded.chains", [encode(&scope)?, signed.to_bytes()?, encode(&Vec::<CredentialChain>::new())?]).await?;
+            inner.conn.execute("INSERT INTO secure_checkpoint_archive VALUES(?,?,NULL,0) ON CONFLICT(scope) DO UPDATE SET signed=excluded.signed,cursor=NULL,complete=0", [encode(&scope)?, signed.to_bytes()?]).await?;
             Ok(())
         })?;
         inner.flush()?;
         Ok((None, false))
     }
-    pub(crate) async fn archive_checkpoint_chain(
-        &self,
-        peer: PublicKey,
-        credentials: &CredentialChain,
-        scope: ResourceScope,
-        checkpoint: Commitment,
-        chain: CredentialChain,
-    ) -> Result<(), Error> {
-        let mut inner = self.inner.lock().await;
-        inner.authorize_peer(peer, credentials, scope)?;
-        if inner.scope_key(scope).is_ok() {
-            return Ok(());
-        }
-        inner.check_archive(scope, checkpoint).await?;
-        let mut chains: Vec<CredentialChain> = inner.archive_chains(scope).await?;
-        let encoded = encode(&chain)?;
-        for held in &chains {
-            if encode(held)? == encoded {
-                return Ok(());
-            }
-        }
-        if chains.len() == 2 {
-            return Err(denied("custody checkpoint chain bound"));
-        }
-        chains.push(chain);
-        transaction!(inner, |inner| {
-            inner
-                .conn
-                .execute(
-                    "UPDATE secure_checkpoint_archive SET chains=? WHERE scope=?",
-                    [encode(&chains)?, encode(&scope)?],
-                )
-                .await?;
-            Ok(())
-        })?;
-        inner.flush()?;
-        Ok(())
-    }
     pub(crate) async fn archive_checkpoint_page(
         &self,
         peer: PublicKey,
         credentials: &CredentialChain,
-        mut page: CheckpointPage,
+        page: CheckpointPage,
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock().await;
         let scope = page.scope;
@@ -107,8 +69,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
             return Ok(());
         }
         let signed = inner.check_archive(scope, page.checkpoint).await?;
-        if !page.chains.is_empty()
-            || page.rows.kind != PackageKind::Checkpoint
+        if page.rows.kind != PackageKind::Checkpoint
             || page.rows.scope != scope
             || page.rows.generation != signed.statement.key_epoch
             || page
@@ -116,9 +77,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .is_some_and(|next| page.after.is_some_and(|after| next <= after))
         {
             return Err(denied("custody checkpoint page outside archive"));
-        }
-        if page.after.is_none() {
-            page.chains = inner.archive_chains(scope).await?;
         }
         let cursor = page.after.map(|after| after.to_vec()).unwrap_or_default();
         let bytes = encode(&page)?;
@@ -248,20 +206,6 @@ impl<A: RowApplication> Inner<A> {
             .filter(|signed| signed.id().ok() == Some(checkpoint))
             .ok_or_else(|| denied("custody checkpoint outside archive"))
     }
-    async fn archive_chains(&self, scope: ResourceScope) -> Result<Vec<CredentialChain>, Error> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT chains FROM secure_checkpoint_archive WHERE scope=?",
-                [encode(&scope)?],
-            )
-            .await?;
-        let row = rows
-            .next()
-            .await?
-            .ok_or_else(|| denied("custody checkpoint archive missing"))?;
-        decode(&row.get::<Vec<u8>>(0)?)
-    }
     pub(super) async fn archived_page(
         &self,
         scope: ResourceScope,
@@ -292,9 +236,7 @@ impl<A: RowApplication> Inner<A> {
             .ok_or_else(|| Error::Corrupt("custody checkpoint page missing".into()))?
             .get::<Vec<u8>>(0)?;
         let page: CheckpointPage = decode(&bytes)?;
-        let mut detached = page.clone();
-        detached.chains.clear();
-        if encode(&detached)?.len() > quota {
+        if encode(&page)?.len() > quota {
             return Err(denied("byte quota smaller than archived checkpoint page"));
         }
         Ok(page)

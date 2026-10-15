@@ -10,8 +10,6 @@ pub enum PruneBlock {
     NoPolicy,
     /// The authenticated existence base needs another durable holder.
     HorizonCustody { held: usize, needed: usize },
-    /// The domain requires recovery custodians, whose archives need complete history.
-    RecoveryCustody,
     /// A required peer has not acknowledged this operation.
     Unacknowledged {
         peer: rocky_credentials::PeerId,
@@ -59,7 +57,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         };
         loop {
             let mut inner = self.inner.lock().await;
-            inner.prune_strong(scope.domain).await?;
             let step = inner.prune_step(scope).await?;
             report.pruned += step.pruned;
             report.blocked = step.blocked;
@@ -155,21 +152,6 @@ impl<A: RowApplication> Inner<A> {
                     policy.behind.insert(*peer);
                 }
             }
-        }
-        let mut durability = self
-            .conn
-            .query(
-                "SELECT policy FROM secure_durability WHERE domain=?",
-                [encode(&scope.domain)?],
-            )
-            .await?;
-        if let Some(row) = durability.next().await?
-            && matches!(
-                decode::<DurabilityPolicy>(&row.get::<Vec<u8>>(0)?)?,
-                DurabilityPolicy::RequiredCustodians { .. }
-            )
-        {
-            return Ok(PruneStep::blocked(PruneBlock::RecoveryCustody));
         }
         // The checkpoint must survive power loss before anything it covers goes.
         if self

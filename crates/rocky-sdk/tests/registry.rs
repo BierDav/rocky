@@ -35,7 +35,7 @@ fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
         schema: SCHEMA,
         secrets: None,
         network,
-        commands: None,
+        coordination: None,
     }
 }
 fn memory(hub: &Arc<Hub>, name: &str) -> Network {
@@ -196,10 +196,6 @@ async fn a_device_enrolled_at_one_issuer_is_listed_at_another_after_one_sync() -
     assert_eq!(at_a["partitions"][0]["delegations"], 2);
     assert_eq!(at_a["pseudonyms"][0]["collection"], "items");
     assert_eq!(at_a["label"], json!([7, 8, 9]));
-    assert_eq!(
-        at_a["command"],
-        m.ok(json!({"type": "command_identity"})).await["node"]
-    );
     assert_eq!(
         at_a["expires"],
         m.ok(json!({"type": "session"})).await["expires"]

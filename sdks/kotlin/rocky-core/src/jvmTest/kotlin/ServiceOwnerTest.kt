@@ -49,28 +49,26 @@ class ServiceOwnerTest {
                     delay(20)
                 }
             }
-            val probe = Command("Probe", handler = "probe.v1", arguments = Shape.none, accepted = Shape.none, rejected = Shape.none, invocation = "stock", result = "stock", resources = listOf("stock"))
             val definition = schema("closure") {
                 table("stock") {
                     text("key")
                     primaryKey("key")
                 }
-                commands = CommandSet(listOf(probe))
             }
-            val runtime = CommandRuntime(ServiceCoordinator(File(service, "service/bundle.json").readText()))
+            val runtime = ServiceCoordinator(File(service, "service/bundle.json").readText())
             val network = PeerTransport.Iroh.isolated()
             suspend fun create(name: String): RockyDatabase = RockyDatabase.create(
                 File(directory, name),
                 definition,
                 network,
                 automaticSync = false,
-                commands = runtime,
+                coordinator = runtime,
             ).also { databases += it }
             val tenant = Random.nextBytes(32)
             val first = create("domain-0")
             suspend fun register(database: RockyDatabase, id: String) {
-                val identity = database.commandIdentity()
-                database.service(tenant).register(id, listOf(identity), listOf(identity))
+                val identity = database.session().node
+                database.service(tenant).register(id, listOf(identity))
             }
             register(first, newMutationHandle())
             for (index in 1 until 16) {
@@ -85,7 +83,7 @@ class ServiceOwnerTest {
             val registration = newMutationHandle()
             assertEquals("quota", assertFailsWith<RockyException> { register(next, registration) }.code)
             val invitation = first.pairing(GrantProfile.Writer(setOf("stock")))
-            val member = RockyDatabase.join(File(directory, "member"), definition, invitation.uri, network, automaticSync = false, commands = runtime)
+            val member = RockyDatabase.join(File(directory, "member"), definition, invitation.uri, network, automaticSync = false, coordinator = runtime)
                 .also { databases += it }
             assertFalse(member.isIssuer)
             assertEquals("denied", assertFailsWith<RockyException> { member.service(Random.nextBytes(32)).close(newMutationHandle()) }.code)

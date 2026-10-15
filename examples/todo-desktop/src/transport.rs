@@ -55,15 +55,6 @@ where
 pub enum Message {
     Operation(Vec<u8>),
     Acknowledgment(Acknowledgment),
-    StrongRequest(Vec<u8>),
-    StrongResult {
-        package: Vec<u8>,
-        receipt: Vec<u8>,
-    },
-    StrongAcknowledgment {
-        hash: rocky_core::Commitment,
-        applied: bool,
-    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delivery {
@@ -217,9 +208,6 @@ impl SimulatedTransport {
         let result = match delivery.message {
             Message::Operation(bytes) => receiver.receive(bytes).await.map(|_| ()),
             Message::Acknowledgment(ack) => receiver.acknowledge(node(1 - delivery.to), ack).await,
-            Message::StrongRequest(_)
-            | Message::StrongResult { .. }
-            | Message::StrongAcknowledgment { .. } => return Ok(false),
         };
         match result {
             Ok(()) => {
@@ -288,126 +276,6 @@ impl Default for SimulatedTransport {
             capacity: 32,
             paused: false,
             next_direction: 0,
-        }
-    }
-}
-
-impl SimulatedTransport {
-    pub async fn reconcile_strong<A>(&mut self, replicas: &[Replica<A>; 2]) -> Result<(), Error>
-    where
-        A: StoredApplication,
-        A::State: Clone,
-        A::Policy: Send + 'static,
-    {
-        if self.paused {
-            return Ok(());
-        }
-        for from in 0..2 {
-            let to = 1 - from;
-            let source = replicas[from].strong_status().await?;
-            let target = replicas[to].strong_status().await?;
-            let mut deliveries = Vec::new();
-            for command in &source.commands {
-                if !target
-                    .commands
-                    .iter()
-                    .any(|c| c.request.id == command.request.id)
-                {
-                    deliveries.push(Delivery {
-                        to,
-                        message: Message::StrongRequest(
-                            command.request.encode().map_err(RuntimeError::from)?,
-                        ),
-                    });
-                }
-            }
-            for result in replicas[from].strong_results().await? {
-                let hash = result.receipt.confirmation.result;
-                if let Some((_, applied)) = target.received.iter().find(|(h, _)| *h == hash) {
-                    if !source
-                        .peer_acknowledgments
-                        .iter()
-                        .any(|(peer, h, a)| *peer == node(to) && *h == hash && (*a || !*applied))
-                    {
-                        deliveries.push(Delivery {
-                            to: from,
-                            message: Message::StrongAcknowledgment {
-                                hash,
-                                applied: *applied,
-                            },
-                        });
-                    }
-                } else {
-                    deliveries.push(Delivery {
-                        to,
-                        message: Message::StrongResult {
-                            package: result.package.encode().map_err(RuntimeError::from)?,
-                            receipt: result.receipt.encode(),
-                        },
-                    });
-                }
-            }
-            for delivery in deliveries {
-                if self.queue.len() == self.capacity {
-                    return Ok(());
-                }
-                if !self.queue.contains(&delivery) {
-                    self.enqueue(delivery)?;
-                }
-            }
-        }
-        Ok(())
-    }
-    pub async fn deliver_strong<A>(
-        &mut self,
-        index: usize,
-        replicas: &[Replica<A>; 2],
-        coordinator: &dyn rocky_core::Coordinator,
-    ) -> Result<bool, Error>
-    where
-        A: StoredApplication,
-        A::State: Clone,
-        A::Policy: Send + 'static,
-    {
-        if self.paused {
-            return Ok(false);
-        }
-        let Some(delivery) = self.queue.get(index).cloned() else {
-            return Ok(false);
-        };
-        let replica = &replicas[delivery.to];
-        let result = match delivery.message {
-            Message::StrongRequest(bytes) => replica.receive_request(bytes).await,
-            Message::StrongResult { package, receipt } => {
-                replica.receive_result(package, receipt, coordinator).await
-            }
-            Message::StrongAcknowledgment { hash, applied } => {
-                replica
-                    .acknowledge_result(node(1 - delivery.to), hash, applied)
-                    .await
-            }
-            _ => return self.deliver(index, replicas).await,
-        };
-        match result {
-            Ok(()) => {
-                self.queue.remove(index);
-                Ok(true)
-            }
-            // Durable delivery succeeded; verification resumes on the next pump.
-            Err(RuntimeError::Coordination(rocky_core::CoordinationError::Unavailable)) => {
-                self.queue.remove(index);
-                Ok(true)
-            }
-            Err(
-                e @ (RuntimeError::Protocol(_)
-                | RuntimeError::Application(_)
-                | RuntimeError::Rejected(_)
-                | RuntimeError::Coordination(_)),
-            ) => {
-                self.queue.remove(index);
-                Err(e.into())
-            }
-            Err(e) => Err(e.into()),
         }
     }
 }

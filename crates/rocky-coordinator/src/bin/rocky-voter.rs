@@ -284,7 +284,6 @@ fn local(out: &Path, port: u16) -> Result<(), Failure> {
         "trusted_root": root.public_key(),
         "mesh": mesh,
         "key": admin.to_hex(),
-        "evidence": out.join("admin.evidence"),
     });
     write_private(&out.join("admin.json"), &admin_config.to_string())?;
     println!("{}", out.join("service/bundle.json").display());
@@ -303,7 +302,6 @@ struct Admin {
     trusted_root: PublicKey,
     mesh: MeshId,
     key: PrivateKey,
-    evidence: PathBuf,
 }
 fn voters(list: &str) -> Result<std::collections::BTreeSet<u64>, Failure> {
     list.split(',').map(|id| Ok(id.trim().parse()?)).collect()
@@ -312,13 +310,7 @@ async fn admin(path: &Path, command: &[&str]) -> Result<(), Failure> {
     use rocky_coordinator::service::{NetworkCoordinator, Operation};
     let admin: Admin = serde_json::from_slice(&std::fs::read(path)?)?;
     let genesis = CertifiedGenesis::from_bytes(&std::fs::read(&admin.genesis)?)?;
-    let client = NetworkCoordinator::open(
-        genesis,
-        admin.trusted_root,
-        admin.mesh,
-        admin.key,
-        admin.evidence,
-    )?;
+    let client = NetworkCoordinator::open(genesis, admin.trusted_root, admin.mesh, admin.key)?;
     match command {
         ["initialize"] => client.initialize(1).await?,
         ["status", voter] => {

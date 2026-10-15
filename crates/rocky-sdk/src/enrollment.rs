@@ -632,11 +632,6 @@ pub(crate) fn grants_of(profile: &Profile, domain: &Domain) -> Result<Vec<Resour
     }
     Ok(grants)
 }
-/// The command identity a registry record names for `node`.
-pub(crate) fn command_identity(node: PublicKey) -> String {
-    HEXLOWER.encode(&rocky_secure::secure_node_id(node).0)
-}
-
 impl Settings {
     /// The statement of `set` that revokes this device, once the whole set
     /// verifies.
@@ -1675,7 +1670,7 @@ impl Settings {
                 kind: registry::Kind::Paired,
                 profile: Some(profile.clone()),
                 issuer,
-                command: command_identity(request.node),
+
                 enrolled: time,
             },
             false,
@@ -1784,7 +1779,7 @@ impl Settings {
                 kind: registry::Kind::Granted,
                 profile: Some(profile),
                 issuer,
-                command: command_identity(device.node),
+
                 enrolled: time,
             },
             replace,
@@ -1881,7 +1876,7 @@ impl Settings {
                     kind: registry::Kind::Delegated,
                     profile: Some(profile),
                     issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
-                    command: command_identity(device.node),
+
                     enrolled: now()?,
                 },
                 false,
@@ -2124,7 +2119,7 @@ impl Settings {
                 kind: registry::Kind::Created,
                 profile: Some(self.profile.clone()),
                 issuer: node,
-                command: command_identity(node),
+
                 enrolled: now()?,
             },
             false,
@@ -3410,7 +3405,7 @@ impl Settings {
                 kind: registry::Kind::Renewed,
                 profile: Some(profile_of(&prior.grants, &domain)),
                 issuer: me,
-                command: command_identity(request.node),
+
                 enrolled: time,
             },
             false,
@@ -3480,7 +3475,7 @@ impl Settings {
                 kind: registry::Kind::Partition,
                 profile: None,
                 issuer: PrivateKey::from_bytes(&vault.get("node")?).public_key(),
-                command: command_identity(device.node),
+
                 enrolled: now()?,
             },
             false,

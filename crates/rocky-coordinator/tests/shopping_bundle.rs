@@ -1,15 +1,8 @@
-//! The example's published certificate must validate before application startup.
+//! The retired provider certificate must never be treated as a current bootstrap.
 use rocky_coordinator::certified::TrustBundle;
 
 #[test]
-fn shopping_and_its_public_guide_pin_the_same_valid_service() {
-    let source = include_str!(
-        "../../../examples/shoppinglist-app/shared/src/data/coordination/PublicCoordinator.kt"
-    );
-    let json = source.split("\"\"\"").nth(1).unwrap();
-    let bundle = TrustBundle::from_json(json).unwrap();
-    let genesis = bundle.genesis().unwrap();
-
+fn the_retired_provider_bundle_is_refused() {
     let guide = include_str!("../../../PUBLIC_COORDINATOR.md");
     let published = guide
         .split("```json\n")
@@ -18,10 +11,5 @@ fn shopping_and_its_public_guide_pin_the_same_valid_service() {
         .split("```")
         .next()
         .unwrap();
-    let published = TrustBundle::from_json(published)
-        .unwrap()
-        .genesis()
-        .unwrap();
-    assert_eq!(genesis.id().unwrap(), published.id().unwrap());
-    assert_eq!(genesis.genesis.public.unwrap().endpoints.len(), 4);
+    assert!(TrustBundle::from_json(published).is_err());
 }

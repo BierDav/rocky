@@ -158,7 +158,6 @@ pub(crate) fn domain_statements<A: rocky_core::StoredApplication>(
         crate::worker::retention::initial_checkpoint()?,
     ));
     statements.extend(schema.iter().map(|sql| (mapping.sql(sql), Vec::new())));
-    statements.extend(protocol(crate::worker::STRONG_SCHEMA));
     statements.extend(protocol(&[storage::PEER_SCHEMA]));
     let namespace = mapping.names().namespace().map_or_else(
         || "rocky_ckpt".to_string(),

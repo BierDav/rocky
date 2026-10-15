@@ -551,7 +551,7 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         .unwrap();
 
     // Bob may update names only; the owner field controls permissions and
-    // is written by strong commands alone.
+    // no row write changes it.
     let names = vec![grant(
         f.public,
         &[Right::Read, Right::Update, Right::Custody],
@@ -609,10 +609,10 @@ async fn field_limited_and_read_only_principals_cannot_widen_their_writes() {
         Companion::Present(f.app().name("Bobby"))
     );
 
-    // Reading, custody and command rights are not write rights.
+    // Reading and custody rights are not write rights.
     let reader = vec![grant(
         f.public,
-        &[Right::Read, Right::Custody, Right::Invoke, Right::Execute],
+        &[Right::Read, Right::Custody],
         &[f.app().field("display_name"), f.app().field("owner")],
     )];
     let carol = open(

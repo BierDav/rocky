@@ -138,25 +138,19 @@ impl<A: RowApplication> Inner<A> {
             SchemaChange::Unchanged => return Ok(()),
             SchemaChange::Local | SchemaChange::Additive { .. } => {}
         }
-        // Local tables hold application data no stored row restores, and
-        // confirmed rows change only through commands: both stay in place.
-        for table in installed.tables.iter().filter(|table| {
-            matches!(
-                table.class,
-                TableClass::LocalOnly | TableClass::CommandControlled
-            )
-        }) {
+        // Local tables hold application data no stored row restores: they
+        // stay in place.
+        for table in installed
+            .tables
+            .iter()
+            .filter(|table| table.class == TableClass::LocalOnly)
+        {
             if schema
                 .table(&table.sql_name)
                 .is_none_or(|new| new.class != table.class || new.create_sql != table.create_sql)
             {
                 return Err(incompatible(format!(
-                    "{} table {} must stay as it is; only its indexes may change",
-                    if table.class == TableClass::LocalOnly {
-                        "local"
-                    } else {
-                        "command-controlled"
-                    },
+                    "local table {} must stay as it is; only its indexes may change",
                     table.sql_name
                 )));
             }
@@ -374,12 +368,11 @@ impl<A: RowApplication> Inner<A> {
                 inner.conn.execute(sql.clone(), ()).await?;
             }
             for table in &projected.tables {
-                if !table.confirmed()
-                    && projected
-                        .constraints
-                        .as_ref()
-                        .and_then(|constraints| constraints.node(table.scope))
-                        .is_none()
+                if projected
+                    .constraints
+                    .as_ref()
+                    .and_then(|constraints| constraints.node(table.scope))
+                    .is_none()
                 {
                     typed::reproject(&inner.conn, &projected, table).await?;
                 }
@@ -507,7 +500,7 @@ impl<A: RowApplication> Inner<A> {
         }
         self.finish_switch(record).await
     }
-    /// A local or command-controlled table keeps its rows; only its indexes
+    /// A local table keeps its rows; only its indexes
     /// follow the new schema.
     async fn replace_indexes(
         &self,

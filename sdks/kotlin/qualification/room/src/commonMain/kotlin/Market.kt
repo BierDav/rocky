@@ -2,11 +2,10 @@ package rocky.room.qualification
 
 import androidx.room.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.json.*
+import rocky.RockySession
 
-/**
- * Confirmed rows through Room: `stock` is command-controlled, so its DAO reads what commands confirmed and its
- * writes fail; `holds` is an ordinary mergeable table. See `docs/runtime/confirmed-tables.md`.
- */
+/** Ordinary stock rows; restocking uses a coordinated transaction to avoid lost increments. */
 @Entity(tableName = "stock", indices = [Index(value = ["id"], unique = true, name = "stock_identity")])
 data class Stock(@PrimaryKey val item: String, val remaining: Long, val id: Long = 0, @ColumnInfo(name = "row_kind") val rowKind: Long = 0)
 
@@ -37,7 +36,7 @@ interface MarketDao {
     @Query("SELECT rocky_next_id(:table)")
     suspend fun nextId(table: String): Long
 
-    /** A hold that would also set the stock it reserves: the stock write fails the whole transaction. */
+    /** An ordinary local transaction; use coordinated SQL when this stock transition must not race. */
     @Transaction suspend fun holdAndSetStock(hold: Hold, stock: Stock) {
         insertHold(hold.copy(id = nextId("holds")))
         updateStock(stock)
@@ -53,4 +52,19 @@ abstract class MarketDatabase : RoomDatabase() {
 @Suppress("KotlinNoActualForExpect")
 expect object MarketDatabaseConstructor : RoomDatabaseConstructor<MarketDatabase> {
     override fun initialize(): MarketDatabase
+}
+
+/** Reads the committed quantity and changes it once in the domain's ordered log. */
+suspend fun RockySession.restock(item: String, quantity: Long): Long {
+    require(item.isNotBlank() && quantity > 0)
+    return coordinated {
+        val row = query("SELECT remaining FROM stock WHERE item=?", item).singleOrNull()
+        val remaining = row?.jsonArray?.get(0)?.jsonObject?.getValue("value")?.jsonPrimitive?.content?.toLong() ?: 0L
+        if (row == null) {
+            execute("INSERT INTO stock(item,remaining,id) VALUES(?,?,?)", item, quantity, nextId("stock"))
+        } else {
+            execute("UPDATE stock SET remaining=? WHERE item=?", remaining + quantity, item)
+        }
+        remaining + quantity
+    }.value
 }

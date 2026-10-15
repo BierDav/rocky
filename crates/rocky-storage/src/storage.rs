@@ -7,24 +7,11 @@ pub enum FailureReason {
     Denial,
     UnsupportedGeneration,
     MissingDependencies,
-    MissingHead,
     Quota,
     Corruption,
     Conflict,
     Closed,
-    UnknownConfirmation,
     Storage,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PendingReason {
-    MissingInput,
-    MissingConfirmedPackage,
-    Executor,
-    MissingHead,
-    StaleFence,
-    /// This replica holds no checkpoint base the cut can be rebuilt from:
-    /// none, or one past the cut. Sync does not supply it.
-    CutBase,
 }
 #[derive(Debug)]
 pub struct StorageFailure {
@@ -60,7 +47,6 @@ pub enum Error {
         limit: usize,
     },
     Coordination(rocky_core::CoordinationError),
-    StrongPending(PendingReason),
     Rejected(String),
     RetryExhausted,
     Conflict,
@@ -70,7 +56,7 @@ pub enum Error {
         retained: usize,
         limit: usize,
     },
-    /// The handle committed this operation or request, which has since been
+    /// The handle committed this operation, which has since been
     /// pruned. It is not executed again; its bytes are no longer available.
     Pruned {
         node: rocky_core::NodeId,
@@ -83,9 +69,6 @@ pub enum Error {
     },
     /// A SQL session call failed; see `Error::sql_certainty`.
     Sql(crate::sql::SqlError),
-    /// A command handler missed its deadline, failed or was busy. Nothing
-    /// was prepared; the same request can run again.
-    Handler(String),
     #[cfg(any(test, feature = "test-support"))]
     InjectedFailure,
 }
@@ -96,14 +79,10 @@ impl Error {
             | Self::Rejected(_)
             | Self::Sql(crate::sql::SqlError::Denied)
             | Self::Coordination(rocky_core::CoordinationError::Denied) => FailureReason::Denial,
-            Self::Protocol(ProtocolError::UnsupportedVersion { .. })
-            | Self::Incompatible(_)
-            | Self::Coordination(rocky_core::CoordinationError::Generations) => {
+            Self::Protocol(ProtocolError::UnsupportedVersion { .. }) | Self::Incompatible(_) => {
                 FailureReason::UnsupportedGeneration
             }
-            Self::StrongPending(PendingReason::MissingInput)
-            | Self::Protocol(ProtocolError::NotReady(_)) => FailureReason::MissingDependencies,
-            Self::StrongPending(_) => FailureReason::MissingHead,
+            Self::Protocol(ProtocolError::NotReady(_)) => FailureReason::MissingDependencies,
             Self::Quota { .. } | Self::Backpressure | Self::Retention { .. } => {
                 FailureReason::Quota
             }
@@ -111,14 +90,10 @@ impl Error {
             Self::Conflict
             | Self::Pruned { .. }
             | Self::Protocol(ProtocolError::IdentityConflict(_))
-            | Self::Coordination(
-                rocky_core::CoordinationError::RequestConflict
-                | rocky_core::CoordinationError::AlreadyConfirmed(_),
-            ) => FailureReason::Conflict,
-            Self::Closed => FailureReason::Closed,
-            Self::Coordination(rocky_core::CoordinationError::Unavailable) => {
-                FailureReason::UnknownConfirmation
+            | Self::Coordination(rocky_core::CoordinationError::RequestConflict) => {
+                FailureReason::Conflict
             }
+            Self::Closed => FailureReason::Closed,
             _ => FailureReason::Storage,
         }
     }
@@ -135,11 +110,8 @@ impl Error {
                 Self::Backpressure
                     | Self::Retention { .. }
                     | Self::RetryExhausted
-                    | Self::Handler(_)
-                    | Self::StrongPending(_)
                     | Self::Coordination(
                         rocky_core::CoordinationError::Unavailable
-                            | rocky_core::CoordinationError::StaleHead
                             | rocky_core::CoordinationError::StaleEpoch
                     )
             )
@@ -157,7 +129,6 @@ impl std::fmt::Display for Error {
             Self::Durability(e) => write!(f, "required durability setting unavailable: {e}"),
             Self::Rejected(e) => write!(f, "replication data rejected: {e}"),
             Self::Coordination(e) => write!(f, "coordination: {e}"),
-            Self::StrongPending(e) => write!(f, "strong command pending: {e:?}"),
             Self::Quota { resource, limit } => write!(f, "{resource} quota reached ({limit})"),
             Self::Backpressure => {
                 write!(f, "storage queue is full; retry when pending work finishes")
@@ -177,7 +148,6 @@ impl std::fmt::Display for Error {
             ),
             Self::Closed => write!(f, "replica is closed"),
             Self::Sql(error) => write!(f, "SQL session: {error}"),
-            Self::Handler(e) => write!(f, "command handler unavailable: {e}"),
             Self::Rollback { cause, rollback } => {
                 write!(f, "{cause}; rollback failed: {rollback}; replica stopped")
             }

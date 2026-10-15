@@ -17,11 +17,6 @@ pub struct CheckpointPage {
     #[serde(with = "sealed")]
     pub rows: EncryptedPackage,
     pub next: Option<Commitment>,
-    /// The credential chains of the latest confirmed command, on the first
-    /// page only. They travel beside the sealed rows, in a message of their
-    /// own on a native session; the strong state names each by digest.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chains: Vec<CredentialChain>,
 }
 /// The sealed rows with their ciphertext as one CBOR byte string.
 mod sealed {
@@ -78,7 +73,6 @@ struct PagePlain {
     /// Each set of author bindings the rows' proofs name, once. The rows
     /// are signed and name them by digest, so the sets need no signature.
     bindings: Vec<serde_bytes::ByteBuf>,
-    strong: Option<PageStrong>,
     /// The checkpoint signer's signature of `page_signing_bytes`: a peer
     /// relaying the checkpoint can neither alter nor move a page's rows.
     signature: Signature,
@@ -102,14 +96,13 @@ struct OpenedPage {
     /// The encoded sets of author bindings the rows name, checked.
     bindings: Vec<Vec<u8>>,
     next: Option<Commitment>,
-    strong: Option<crate::command::history::StrongState>,
     signature: Signature,
     /// The page's rows as a set of their own.
     delta: Sets,
 }
 /// Opens a page sealed under `key` and verifies it against the staged
-/// checkpoint: binding, order, the signer's signature and, on the first
-/// page, the strong state. Pure computation, run off the replica's thread.
+/// checkpoint: binding, order and the signer's signature. Pure
+/// computation, run off the replica's thread.
 fn open_page(
     page: CheckpointPage,
     key: [u8; 32],
@@ -129,17 +122,6 @@ fn open_page(
     if !signed.signer().verify(&signing, &plain.signature) {
         return Err(denied("checkpoint page signature mismatch"));
     }
-    // Chains beside the page are verified against the digests the
-    // strong state names before anything is staged.
-    let strong = match (plain.strong, page.after) {
-        (Some(state), None) => {
-            let state = state.attach(&page.chains)?;
-            state.binds(signed)?;
-            Some(state)
-        }
-        (None, Some(_)) if page.chains.is_empty() => None,
-        _ => return Err(denied("checkpoint strong page binding mismatch")),
-    };
     // A page carries exactly the binding sets its rows name.
     let mut sets = BTreeMap::new();
     for set in &plain.bindings {
@@ -180,64 +162,9 @@ fn open_page(
             .map(|set| set.into_vec())
             .collect(),
         next: plain.next,
-        strong,
         signature: plain.signature,
         delta,
     })
-}
-/// A scope's strong state as the first page carries it: the latest command
-/// names its chains by digest, and the importer supplies the checkpoint.
-#[derive(Serialize, Deserialize)]
-struct PageStrong {
-    head: Option<(u64, Commitment)>,
-    rows: BTreeMap<Commitment, RowFields>,
-    latest: Option<crate::command::DetachedCommand>,
-}
-impl PageStrong {
-    fn detach(
-        state: &crate::command::history::StrongState,
-    ) -> Result<(Self, Vec<CredentialChain>), Error> {
-        let (latest, chains) = match &state.latest {
-            Some(result) => {
-                let (latest, chains) = result.detach()?;
-                (Some(latest), chains)
-            }
-            None => (None, Vec::new()),
-        };
-        Ok((
-            Self {
-                head: state.head,
-                rows: state.rows.clone(),
-                latest,
-            },
-            chains,
-        ))
-    }
-    /// The strong state with the chains sent beside the page. One that is
-    /// not named, or does not match its digest, refuses the page.
-    fn attach(
-        self,
-        chains: &[CredentialChain],
-    ) -> Result<crate::command::history::StrongState, Error> {
-        let chains = chains
-            .iter()
-            .cloned()
-            .map(crate::wire::Chain::new)
-            .collect::<Result<Vec<_>, _>>()?;
-        let named = self.latest.as_ref().map_or(0, |latest| latest.chains());
-        if chains.len() != named {
-            return Err(denied(crate::command::CHAIN_MISMATCH));
-        }
-        Ok(crate::command::history::StrongState {
-            head: self.head,
-            rows: self.rows,
-            latest: self
-                .latest
-                .map(|latest| ConfirmedCommand::attach(latest, &chains))
-                .transpose()?,
-            checkpoint: None,
-        })
-    }
 }
 /// What a rebootstrap did with the operations this replica held.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,14 +284,6 @@ impl<A: RowApplication> Inner<A> {
         after: Option<Commitment>,
     ) -> Result<(), Error> {
         let statement = &staging.signed.statement;
-        if let Some(state) = &page.strong {
-            self.conn
-                .execute(
-                    "INSERT INTO secure_rebootstrap_strong VALUES(?,?)",
-                    bindings(vec![SqlValue::Integer(id), SqlValue::Blob(encode(state)?)]),
-                )
-                .await?;
-        }
         for set in &page.bindings {
             self.put_bindings(set).await?;
         }
@@ -645,7 +564,6 @@ impl<A: RowApplication> Inner<A> {
             "secure_rebootstrap",
             "secure_rebootstrap_rows",
             "secure_rebootstrap_stubs",
-            "secure_rebootstrap_strong",
             "secure_rebootstrap_pages",
         ] {
             self.conn
@@ -678,11 +596,6 @@ impl<A: RowApplication> Inner<A> {
         if signed.statement.horizon != self.mergeable_horizon(scope).await? {
             return Ok(None);
         }
-        if signed.statement.strong.base.map_or(0, |base| base.0)
-            < self.strong_base(scope).await?.sequence()
-        {
-            return Ok(None);
-        }
         // A checkpoint of a generation this replica does not admit is
         // offered again once maintenance seals one of the current generation.
         if self.admits(signed.statement.definition).is_err() {
@@ -695,34 +608,6 @@ impl<A: RowApplication> Inner<A> {
             return Ok(None);
         }
         Ok(Some((id, signed)))
-    }
-}
-
-#[cfg(test)]
-impl<A: RowApplication> EncryptedReplica<A> {
-    /// Encoded bytes of the checkpoint's strong state as the first page
-    /// carried it with its chains embedded, and as it carries it now.
-    pub(crate) async fn strong_page_bytes(&self, scope: ResourceScope) -> (usize, usize) {
-        let inner = self.inner.lock().await;
-        let id = inner.find_scope_id(scope).await.unwrap().unwrap();
-        let record = rows(
-            &inner.conn,
-            &format!("SELECT state FROM secure_checkpoint_strong WHERE scope={id}"),
-        )
-        .await
-        .unwrap();
-        let [SqlValue::Blob(bytes)] = record[0].as_slice() else {
-            panic!("strong state")
-        };
-        let mut state: crate::command::history::StrongState = decode(bytes).unwrap();
-        if let Some(result) = &mut state.latest {
-            result.parts.retain(|part| part.scope == scope);
-        }
-        let (page, _) = PageStrong::detach(&state).unwrap();
-        (
-            encode(&Some(state)).unwrap().len(),
-            encode(&Some(page)).unwrap().len(),
-        )
     }
 }
 
@@ -831,9 +716,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 && inner.admits(signed.statement.definition).is_ok()
                 && signed.statement.key_epoch == key_epoch
                 && signed.statement.horizon == inner.mergeable_horizon(scope).await?
-                && signed.statement.strong.head == inner.capture_strong(scope).await?.head
-                && signed.statement.strong.base.map_or(0, |base| base.0)
-                    >= inner.strong_base(scope).await?.sequence()
                 && signed.verify_authority(&inner, now()?).is_ok()
             {
                 // Keep a transferable cut stable across page/session retries.
@@ -935,40 +817,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 .collect();
             inner.offer_covered(scope, &logs).await?;
         }
-        let strong = if after.is_none() {
-            let mut record = inner
-                .conn
-                .query(
-                    "SELECT state FROM secure_checkpoint_strong WHERE scope=?",
-                    [id],
-                )
-                .await?;
-            let mut state: crate::command::history::StrongState = decode(
-                &record
-                    .next()
-                    .await?
-                    .ok_or_else(|| denied("checkpoint strong state missing"))?
-                    .get::<Vec<u8>>(0)?,
-            )?;
-            if let Some(result) = &mut state.latest {
-                result.parts.retain(|part| part.scope == scope);
-            }
-            Some(PageStrong::detach(&state)?)
-        } else {
-            None
-        };
-        let (strong, chains) = match strong {
-            Some((strong, chains)) => (Some(strong), chains),
-            None => (None, Vec::new()),
-        };
-        let strong_bytes = encode(&strong)?.len();
         // Stored bytes are CBOR byte strings in the sealed plaintext, and the
         // ciphertext is one in the page. The plaintext must fit one package.
         let budget = (byte_quota - 2048).min(rocky_core::MAX_PAYLOAD_BYTES - 1024);
-        if strong_bytes > budget {
-            return Err(denied("byte quota smaller than checkpoint strong state"));
-        }
-        let budget = budget - strong_bytes;
         // The signer cuts and signs its own checkpoint's pages; a holder of
         // an imported one serves the pages its signer cut and signed.
         let signer = inner.checkpoint_key(&signed);
@@ -1004,7 +855,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             next: None,
             rows: vec![],
             bindings: vec![],
-            strong,
             signature: Signature::from_bytes(&[0; 64]),
         };
         let mut named = BTreeSet::new();
@@ -1091,13 +941,11 @@ impl<A: RowApplication> EncryptedReplica<A> {
                 &key,
                 &encode(&plain)?,
             )?,
-            chains: Vec::new(),
         };
         if encode(&page)?.len() > byte_quota {
             return Err(denied("checkpoint page exceeds the byte quota"));
         }
-        // The chains are beside the page: the quota bounds the page alone.
-        Ok(CheckpointPage { chains, ..page })
+        Ok(page)
     }
     /// Starts importing a peer's signed checkpoint for a scope this replica
     /// reads in whole. Nothing changes until `finish_rebootstrap`.
@@ -1108,7 +956,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let scope = statement.scope;
         let generation = inner.generation_of(statement.definition, true)?;
         if statement.schema != generation.schema
-            || statement.handler != generation.handler
             || signed.signer() == inner.config.node.public_key()
             || inner.scope_key(scope)?.0 != statement.key_epoch
         {
@@ -1463,24 +1310,6 @@ impl<A: RowApplication> EncryptedReplica<A> {
             for mark in &permanent {
                 inner.put_identity_mark(scope, mark).await?;
             }
-            let mut strong = inner
-                .conn
-                .query(
-                    "SELECT state FROM secure_rebootstrap_strong WHERE scope=?",
-                    [id],
-                )
-                .await?;
-            let mut state: crate::command::history::StrongState = decode(
-                &strong
-                    .next()
-                    .await?
-                    .ok_or_else(|| denied("checkpoint strong state missing"))?
-                    .get::<Vec<u8>>(0)?,
-            )?;
-            state.binds(&signed)?;
-            state.checkpoint = Some(signed.clone());
-            inner.install_strong(scope, &state).await?;
-            inner.conn.execute("INSERT INTO secure_checkpoint_strong VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET state=excluded.state", bindings(vec![SqlValue::Integer(id),SqlValue::Blob(encode(&state)?)])).await?;
             inner
                 .conn
                 .execute(
@@ -1514,10 +1343,6 @@ impl<A: RowApplication> Inner<A> {
     /// the operations between them.
     async fn check_frontier(&self, id: i64, signed: &SignedCheckpoint) -> Result<(), Error> {
         self.check_checkpoint_horizon(signed).await?;
-        let base = self.strong_base(signed.statement.scope).await?;
-        if base.sequence() > signed.statement.strong.base.map_or(0, |base| base.0) {
-            return Err(denied("checkpoint behind strong horizon"));
-        }
         if let Some(needed) = self.horizon_bootstrap(signed.statement.scope).await?
             && signed.statement.finalized.as_deref() == Some(&needed)
             && let Some(held) = self

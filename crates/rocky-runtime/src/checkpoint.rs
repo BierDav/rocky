@@ -2,8 +2,8 @@
 //! See `docs/runtime/checkpoints.md`.
 use crate::{Command, Error, Replica, SyncState, TransferPage, digest::SetDigest};
 use rocky_core::{
-    AppliedFrontier, AuthorSequence, Commitment, Configuration, NodeId, OperationId, Scope,
-    SqlValue, StoredApplication, Versions,
+    AppliedFrontier, AuthorSequence, Commitment, NodeId, OperationId, Scope, SqlValue,
+    StoredApplication, Versions,
 };
 use tokio::sync::oneshot;
 
@@ -20,16 +20,12 @@ pub struct RetentionPolicy {
     /// checkpoint; at the bound writes and receipts fail with
     /// `Error::Retention` until pruning releases history.
     pub retained_bytes: usize,
-    /// Most recent local mutation and command handles kept for retries after
-    /// their operations are pruned. An older handle is forgotten.
+    /// Most recent local mutation handles kept for retries after their
+    /// operations are pruned. An older handle is forgotten.
     pub handles: usize,
     /// Run checkpoint and prune steps beside writes. Otherwise only
     /// `Replica::checkpoint` and `Replica::prune` run them.
     pub automatic: bool,
-    /// How long an unresolved strong request may hold checkpoints at its
-    /// sealed cut before the next checkpoint releases it. None holds until it
-    /// resolves; `Replica::release_command` releases one at once.
-    pub request_hold: Option<std::time::Duration>,
     /// How long a delivery target may hold back the horizon before it is
     /// declared behind. None waits for `Replica::declare_behind`.
     pub behind_after: Option<std::time::Duration>,
@@ -46,33 +42,18 @@ impl Default for RetentionPolicy {
             retained_bytes: 64 * crate::MAX_FRAME_BYTES,
             handles: 65_536,
             automatic: true,
-            request_hold: None,
             behind_after: None,
             custody: 0,
         }
     }
 }
 
-/// The strong ledger a checkpoint is anchored to.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StrongAnchor {
-    pub configuration: Option<Configuration>,
-    pub sequence: u64,
-    pub head: Option<Commitment>,
-    /// The latest applied result, which carries the strong projection and
-    /// its job intents.
-    pub result: Option<Commitment>,
-    /// Requests and preparations without an applied result.
-    pub unresolved: SetDigest,
-}
 /// Handles retained for retries when the checkpoint was made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Deduplication {
     pub mutations: u64,
     /// Lowest local sequence that still has a mutation handle.
     pub mutation_floor: u64,
-    pub commands: u64,
-    pub command_floor: u64,
 }
 /// The canonical record of one checkpoint. Everything up to `state` is the
 /// same on every replica that has applied `frontier`; the rest is evidence of
@@ -80,7 +61,7 @@ pub struct Deduplication {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointRecord {
     pub scope: Scope,
-    /// Installed definition: reducer, schema, projection and handlers.
+    /// Installed definition: reducer, schema and projection.
     pub definition: Commitment,
     pub versions: Versions,
     pub projection: u32,
@@ -99,16 +80,15 @@ pub struct CheckpointRecord {
     pub sequence: u64,
     /// The record this one was recomputed from; zero for the first.
     pub previous: Commitment,
-    pub strong: StrongAnchor,
     pub handles: Deduplication,
     /// Recovery copies this checkpoint replaces, and those it leaves as the
     /// only copy. The trusted path keeps none.
     pub superseded_recovery: Vec<Commitment>,
     pub sole_recovery: Vec<Commitment>,
 }
-const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v1";
+const RECORD_MAGIC: &[u8] = b"rocky.checkpoint.v2";
 const NOTICE_MAGIC: &[u8] = b"rocky.horizon.v1";
-const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v1";
+const PAGE_MAGIC: &[u8] = b"rocky.checkpoint.page.v2";
 
 #[derive(Default)]
 struct Writer(Vec<u8>);
@@ -125,12 +105,6 @@ impl Writer {
     fn blob(&mut self, bytes: &[u8]) {
         self.u64(bytes.len() as u64);
         self.bytes(bytes);
-    }
-    fn optional<const N: usize>(&mut self, value: Option<&[u8; N]>) {
-        self.0.push(u8::from(value.is_some()));
-        if let Some(value) = value {
-            self.bytes(value);
-        }
     }
     fn scope(&mut self, scope: Scope) {
         for id in [scope.mesh.0, scope.app.0, scope.domain.0] {
@@ -179,13 +153,6 @@ impl Reader<'_> {
         let (head, tail) = self.0.split_at_checked(length).ok_or_else(malformed)?;
         self.0 = tail;
         Ok(head.to_vec())
-    }
-    fn optional<const N: usize>(&mut self) -> Result<Option<[u8; N]>, Error> {
-        match self.u8()? {
-            0 => Ok(None),
-            1 => Ok(Some(self.array()?)),
-            _ => Err(malformed()),
-        }
     }
     fn magic(&mut self, magic: &[u8]) -> Result<(), Error> {
         let (head, tail) = self.0.split_at_checked(magic.len()).ok_or_else(malformed)?;
@@ -264,19 +231,8 @@ impl CheckpointRecord {
         out.u64(self.key_epoch);
         out.u64(self.sequence);
         out.bytes(&self.previous);
-        out.optional(self.strong.configuration.as_ref());
-        out.u64(self.strong.sequence);
-        out.optional(self.strong.head.as_ref());
-        out.optional(self.strong.result.as_ref());
-        out.digest(&self.strong.unresolved);
-        for value in [
-            self.handles.mutations,
-            self.handles.mutation_floor,
-            self.handles.commands,
-            self.handles.command_floor,
-        ] {
-            out.u64(value);
-        }
+        out.u64(self.handles.mutations);
+        out.u64(self.handles.mutation_floor);
         out.commitments(&self.superseded_recovery);
         out.commitments(&self.sole_recovery);
         out.0
@@ -302,18 +258,9 @@ impl CheckpointRecord {
             key_epoch: input.u64()?,
             sequence: input.u64()?,
             previous: input.array()?,
-            strong: StrongAnchor {
-                configuration: input.optional()?,
-                sequence: input.u64()?,
-                head: input.optional()?,
-                result: input.optional()?,
-                unresolved: input.digest()?,
-            },
             handles: Deduplication {
                 mutations: input.u64()?,
                 mutation_floor: input.u64()?,
-                commands: input.u64()?,
-                command_floor: input.u64()?,
             },
             superseded_recovery: input.commitments()?,
             sole_recovery: input.commitments()?,
@@ -377,12 +324,6 @@ pub struct CheckpointCursor {
     pub table: u32,
     pub position: i64,
 }
-/// The strong result a checkpoint anchors, as its original bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AnchoredResult {
-    pub package: Vec<u8>,
-    pub receipt: Vec<u8>,
-}
 /// One bounded page of a checkpoint's rows. The first page carries the
 /// record. `rows` are stored rows of the application's checkpoint table
 /// number `table`; `start` is the position the page was read from.
@@ -390,7 +331,6 @@ pub struct AnchoredResult {
 pub struct CheckpointPage {
     pub start: CheckpointCursor,
     pub record: Option<Vec<u8>>,
-    pub strong: Option<AnchoredResult>,
     pub table: u32,
     pub rows: Vec<Vec<SqlValue>>,
     pub next: Option<CheckpointCursor>,
@@ -408,11 +348,6 @@ impl CheckpointPage {
         out.0.push(u8::from(self.record.is_some()));
         if let Some(record) = &self.record {
             out.blob(record);
-        }
-        out.0.push(u8::from(self.strong.is_some()));
-        if let Some(strong) = &self.strong {
-            out.blob(&strong.package);
-            out.blob(&strong.receipt);
         }
         out.u32(self.table);
         out.u32(self.rows.len() as u32);
@@ -469,14 +404,6 @@ impl CheckpointPage {
         } else {
             None
         };
-        let strong = if flag(&mut input)? {
-            Some(AnchoredResult {
-                package: input.blob()?,
-                receipt: input.blob()?,
-            })
-        } else {
-            None
-        };
         let table = input.u32()?;
         let mut rows = Vec::new();
         for _ in 0..input.u32()? {
@@ -504,7 +431,6 @@ impl CheckpointPage {
         Ok(Self {
             start,
             record,
-            strong,
             table,
             rows,
             next,
@@ -520,8 +446,6 @@ pub struct CheckpointInfo {
 /// Why no new checkpoint can be made now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointHold {
-    /// An unresolved strong request still needs the state of its sealed cut.
-    UnresolvedRequest,
     /// The last checkpoint did not recompute to the stored projection.
     Unverifiable,
     /// A checkpoint import is in progress.
@@ -822,8 +746,7 @@ where
     }
     /// Full verification, in bounded memory: recomputes the projection from
     /// the checkpoint and retained operations, compares stored rows with
-    /// their digests, and checks retained history, handles, outgoing work
-    /// and the strong ledger.
+    /// their digests, and checks retained history, handles and outgoing work.
     pub async fn audit(&self) -> Result<AuditReport, Error> {
         let retained = match self.retention_request(Request::Audit).await? {
             Response::Audit(retained) => retained,
@@ -876,18 +799,9 @@ mod tests {
             key_epoch: 0,
             sequence: 2,
             previous: [4; 32],
-            strong: StrongAnchor {
-                configuration: Some([5; 16]),
-                sequence: 1,
-                head: Some([6; 32]),
-                result: None,
-                unresolved: SetDigest::default(),
-            },
             handles: Deduplication {
                 mutations: 7,
                 mutation_floor: 1,
-                commands: 1,
-                command_floor: 1,
             },
             superseded_recovery: Vec::new(),
             sole_recovery: Vec::new(),
@@ -898,6 +812,10 @@ mod tests {
         longer.push(0);
         assert!(CheckpointRecord::decode(&longer).is_err());
         assert!(CheckpointRecord::decode(&bytes[..bytes.len() - 1]).is_err());
+        // One current format: the previous record, with its strong anchor, is refused.
+        let mut previous = bytes.clone();
+        previous[b"rocky.checkpoint.v".len()] = b'1';
+        assert!(CheckpointRecord::decode(&previous).is_err());
         let notice = HorizonNotice {
             scope: fixtures::SCOPE,
             node: fixtures::LAPTOP,
@@ -914,10 +832,6 @@ mod tests {
         let page = CheckpointPage {
             start,
             record: Some(bytes),
-            strong: Some(AnchoredResult {
-                package: vec![1, 2],
-                receipt: vec![3],
-            }),
             table: 3,
             rows: vec![vec![
                 SqlValue::Null,

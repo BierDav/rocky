@@ -6,10 +6,8 @@ fn manifest() -> ApplicationManifest {
         app: ApplicationManifest::app_id([1; 32], "example"),
         schema: 1,
         projection: 2,
-        handler: 3,
         entities: Vec::new(),
         fields: Vec::new(),
-        methods: Vec::new(),
         operations: Vec::new(),
         domains: vec![DomainRule {
             domain: DomainId([2; 16]),
@@ -48,8 +46,12 @@ fn canonical_definitions_are_bounded_and_publisher_bound() {
     duplicate.entities.push(duplicate.entities[0].clone());
     assert!(duplicate.validate().is_err());
     let mut upgraded = manifest;
-    upgraded.handler = 4;
+    upgraded.projection = 4;
     assert_ne!(upgraded.hash(), decoded.hash());
+    // One current format: the previous body, with its handler and methods, is refused.
+    let mut previous = bytes.clone();
+    previous[b"rocky.manifest.v".len()] = b'1';
+    assert!(ApplicationManifest::from_body(&previous).is_err());
 }
 
 #[test]
@@ -97,7 +99,7 @@ fn wide_definitions_round_trip_with_fields_and_domains_without_changing_encoding
     wide.fields.reverse();
     wide.domains.reverse();
     assert_eq!(wide.hash(), hash);
-    let offset = b"rocky.manifest.v1".len() + 32 + 4 + wide.name.len() + 16 + 12;
+    let offset = b"rocky.manifest.v2".len() + 32 + 4 + wide.name.len() + 16 + 8;
     let mut oversized = bytes.clone();
     oversized[offset..offset + 4].copy_from_slice(&((MAX_MANIFEST_ITEMS + 1) as u32).to_le_bytes());
     assert!(ApplicationManifest::from_body(&oversized).is_err());

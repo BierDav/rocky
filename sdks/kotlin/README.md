@@ -10,9 +10,9 @@ engine, device [enrollment](../../docs/runtime/sdk-enrollment.md), peers and bac
 sync over a selectable [transport](../../docs/runtime/sdk-transports.md), iroh by
 default. A transport can be written in Kotlin, and `RockyEndpoint` is an
 [iroh endpoint the application owns](../../docs/runtime/sdk-transports.md#iroh) for its
-own protocols next to Rocky's. [Typed strong commands](../../docs/runtime/typed-commands.md)
-are declared with `Command` and decided by a `Handler` written in Kotlin,
-with a `DevelopmentCoordinator` for one process. `rocky-sqlite` is an `androidx.sqlite`
+own protocols next to Rocky's. [Coordinated writes](../../docs/runtime/coordinated-writes.md) run ordinary SQL
+at a committed log head, with a metadata service or an in-process `DevelopmentLog`
+for development. `rocky-sqlite` is an `androidx.sqlite`
 driver on Rocky's own file, without a Room dependency ([SQL driver](../../docs/runtime/sql-driver.md)). `rocky-room` runs Room's DAOs on that driver
 and refreshes their observers after sync ([Room](../../docs/runtime/room-integration.md)). The modules build JVM desktop and
 [Android](../../docs/runtime/android.md), plus arm64 iOS device/simulator
@@ -24,7 +24,7 @@ application-specific operation codec is needed. Start with the
 [integration contract](../../docs/runtime/room-integration.md).
 
 `RockyDatabase.local` opens without networking. `openSession()` gives an independent
-`RockySession`, with `credentials`, `commands` and native `observeStatus()` Flow.
+`RockySession`, with credentials, coordinated SQL and native `observeStatus()` Flow.
 `attach` returns a separately closable network service; borrowed endpoints stay
 application-owned. Starter `create/join/resume` share this implementation.
 `ServiceCoordinator` pins a certified service trust bundle. Independent credential

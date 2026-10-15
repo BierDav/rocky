@@ -1,6 +1,5 @@
 package org.example.examples.shopping.data.db
 
-import org.example.examples.shopping.data.coordination.ApprovalCommands
 import rocky.*
 
 /**
@@ -53,20 +52,17 @@ val ShoppingSchema = schema("shopping", version = 7) {
         text("note")
         text("requester")
         primaryKey("key")
-        tableClass = TableClass.CommandControlled
     }
     table("decisions") {
         text("key")
         boolean("approved")
         text("decider")
         primaryKey("key")
-        tableClass = TableClass.CommandControlled
     }
     trustedTables()
-    commands = ApprovalCommands
 }
 
-/** What a Room export cannot hold: the group, the title policy, the commands and the trusted-only tables. */
+/** What a Room export cannot hold: the group, the title policy, the coordinator and the trusted-only tables. */
 val shoppingRoomOverlay: SchemaBuilder.() -> Unit = {
     table("lists") { partitionBy("id", group = "list") }
     table("categories") { partitionBy("list", group = "list") }
@@ -79,10 +75,7 @@ val shoppingRoomOverlay: SchemaBuilder.() -> Unit = {
         grantedLike = "items"
     }
     itemsMigration()
-    table("requests") { tableClass = TableClass.CommandControlled }
-    table("decisions") { tableClass = TableClass.CommandControlled }
     trustedTables()
-    commands = ApprovalCommands
 }
 
 /**

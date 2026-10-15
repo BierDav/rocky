@@ -34,7 +34,7 @@ fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
         schema: SHOPPING,
         secrets: Some(support::secrets::keys(directory)),
         network,
-        commands: None,
+        coordination: None,
     }
 }
 async fn create(open: Open<'_>, ttl: Option<u64>) -> Result<rocky_sdk::Opened, Failure> {
@@ -1011,7 +1011,7 @@ async fn room_reads_each_reference_action_when_references_share_a_partition_colu
             schema: GROUPED,
             secrets: None,
             network: None,
-            commands: None,
+            coordination: None,
         },
         None,
     )?
@@ -1073,7 +1073,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
         schema: &schema,
         secrets: None,
         network: Some(Network::Owned(hub.connector(name))),
-        commands: None,
+        coordination: None,
     };
     let a = Database::create(setup(&a_path, "a"), None)?.database;
     let invitation = call(

@@ -4,7 +4,7 @@ pub use crate::machine::{Operation, Outcome, Registration};
 pub use crate::raft_store::{Backup, Fence};
 use crate::{certified::*, machine::*, raft_store::*, transport::*};
 use openraft::{BasicNode, LogId, SnapshotPolicy};
-use p2panda_core::{PrivateKey, PublicKey, Signature};
+use p2panda_core::{PrivateKey, PublicKey};
 use rocky_core::{
     net::{Protocol, Transport},
     *,
@@ -25,71 +25,9 @@ pub const READ_STALENESS: u64 = 30;
 /// Concurrent client requests one voter serves without a public service.
 const MESH_LANES: usize = 16;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReceiptEvidence {
-    pub genesis: Commitment,
-    pub voter: PublicKey,
-    pub log: LogId<u64>,
-    pub receipt: StrongReceipt,
-    signature: Signature,
-}
-impl ReceiptEvidence {
-    pub(crate) fn sign(
-        genesis: Commitment,
-        key: &PrivateKey,
-        log: LogId<u64>,
-        receipt: StrongReceipt,
-    ) -> Result<Self, CoordinationError> {
-        let mut evidence = Self {
-            genesis,
-            voter: key.public_key(),
-            log,
-            receipt,
-            signature: key.sign(b""),
-        };
-        evidence.signature = key.sign(&evidence.signing_bytes()?);
-        Ok(evidence)
-    }
-    fn signing_bytes(&self) -> Result<Vec<u8>, CoordinationError> {
-        bytes(
-            "rocky.raft-receipt.v1",
-            &(self.genesis, self.voter, self.log, &self.receipt),
-        )
-    }
-    pub fn verify(&self, genesis: &CertifiedGenesis) -> Result<(), CoordinationError> {
-        let p = &self.receipt.confirmation;
-        // A public service also confirms for scopes its tenants registered.
-        let root_bound = genesis
-            .genesis
-            .authorities
-            .iter()
-            .any(|authority| authority.scope == p.scope);
-        if self.genesis != genesis.id()?
-            || !genesis.genesis.voters.iter().any(|v| v.key == self.voter)
-            || (genesis.genesis.public.is_none()
-                && (p.scope.mesh != genesis.genesis.mesh || !root_bound))
-            || p.configuration != genesis.genesis.configuration
-            || p.expected_sequence.checked_add(1) != Some(self.receipt.sequence)
-            || self.receipt.sequence > MAX_COUNTER
-            || p.epoch == 0
-            || p.new_head
-                != successor(
-                    p.expected_head,
-                    self.receipt.sequence,
-                    p.request_hash,
-                    p.result,
-                )
-            || !self.voter.verify(&self.signing_bytes()?, &self.signature)
-        {
-            return Err(CoordinationError::InvalidCommitment);
-        }
-        Ok(())
-    }
-}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Reply {
     pub(crate) result: Result<Outcome, CoordinationError>,
-    pub(crate) evidence: Option<ReceiptEvidence>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
@@ -104,8 +42,6 @@ pub struct Status {
     pub snapshots: usize,
     pub disk_bytes: u64,
     pub allocated_bytes: u64,
-    pub sessions: usize,
-    pub entries: usize,
     pub state_bytes: usize,
     pub retry_records: usize,
     pub tenants: usize,
@@ -314,10 +250,7 @@ impl VoterService {
     }
     /// Admits one client request within its lanes, then answers it.
     async fn admit(&self, request: Request) -> Reply {
-        let refuse = |error| Reply {
-            result: Err(error),
-            evidence: None,
-        };
+        let refuse = |error| Reply { result: Err(error) };
         if self.fenced.load(Ordering::SeqCst) {
             return refuse(CoordinationError::Unavailable);
         }
@@ -427,38 +360,10 @@ impl VoterService {
         }
         .await;
         match result {
-            Err(error) => Reply {
-                result: Err(error),
-                evidence: None,
-            },
-            Ok((data, log)) => {
-                let receipt = match &data {
-                    Ok(Outcome::Receipt(Some(r))) => Some(r.clone()),
-                    Err(CoordinationError::AlreadyConfirmed(r)) => Some(*r.clone()),
-                    _ => None,
-                };
-                let evidence = match receipt {
-                    None => None,
-                    Some(receipt) => {
-                        let signed = (|| {
-                            ReceiptEvidence::sign(self.genesis.id()?, &self.key, log, receipt)
-                        })();
-                        match signed {
-                            Ok(evidence) => Some(evidence),
-                            Err(error) => {
-                                return Reply {
-                                    result: Err(error),
-                                    evidence: None,
-                                };
-                            }
-                        }
-                    }
-                };
+            Err(error) => Reply { result: Err(error) },
+            Ok((data, _)) => {
                 crash("reply.before_send");
-                Reply {
-                    result: data,
-                    evidence,
-                }
+                Reply { result: data }
             }
         }
     }
@@ -555,8 +460,6 @@ impl VoterService {
                                 snapshots: footprint.snapshots,
                                 disk_bytes: footprint.disk_bytes,
                                 allocated_bytes: footprint.allocated_bytes,
-                                sessions: footprint.state.sessions,
-                                entries: footprint.state.entries,
                                 state_bytes: footprint.state_bytes,
                                 retry_records: footprint.retry_records,
                                 tenants: service.store.tenants().await,

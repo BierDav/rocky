@@ -2,9 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 mod attempts;
-mod coordination;
 pub(crate) use attempts::{Attempt, Observations, epoch_millis, failure};
-pub(crate) use coordination::{ObservedCoordinator, failure as coordination_failure};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,7 +30,6 @@ pub enum DiscoveryPathState {
 #[serde(rename_all = "snake_case")]
 pub enum CoordinationMode {
     NotConfigured,
-    Composed,
     Service,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,20 +38,10 @@ pub enum AttemptOperation {
     ResolveContact,
     OpenLink,
     Reconcile,
-    PullResults,
-    CoordinatorHead,
-    CoordinatorConfirm,
-    CoordinatorLookup,
-    CoordinatorVerify,
-    CoordinatorRetire,
-    CoordinatorExportEvidence,
-    CoordinatorImportEvidence,
-    CoordinatorAcquire,
     CoordinatorRegister,
     CoordinatorControl,
     CoordinatorClose,
     CoordinatorUsage,
-    CoordinatorActivate,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +50,6 @@ pub enum AttemptStage {
     Dial,
     Admission,
     Reconciliation,
-    ResultRetrieval,
     CoordinatorRequest,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +149,6 @@ pub struct AuthorityStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Generation {
     pub schema: u32,
-    pub handler: u32,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebuildProgress {
@@ -250,11 +235,6 @@ pub struct KeyEpochStatus {
     pub current: Option<EncryptionEpoch>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TicketCount {
-    pub state: String,
-    pub count: u64,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DataStatus {
     pub revision: u64,
     pub generation: GenerationStatus,
@@ -262,7 +242,6 @@ pub struct DataStatus {
     pub bootstrap: Option<BootstrapProgress>,
     pub imports: Vec<ScopeImportStatus>,
     pub key_epochs: Vec<KeyEpochStatus>,
-    pub tickets: Vec<TicketCount>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveryPath {
@@ -395,7 +374,6 @@ pub struct PeerReconciliation {
     pub transfers: Vec<ScopeReconciliationTransfer>,
     pub refused: Vec<ScopeStatus>,
     pub waiting: Vec<ScopeStatus>,
-    pub results_failure: Option<AttemptFailure>,
     pub upgrade_required: bool,
     pub retry_pending: bool,
 }

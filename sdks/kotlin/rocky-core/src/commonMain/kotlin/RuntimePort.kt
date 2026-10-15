@@ -35,14 +35,12 @@ interface SqlWrite {
 /** A single-use `rocky://join/…` URI. It carries the issuer's routes, the invitation secret and the profile it grants. */
 data class PairingInvitation(val uri: String, val expiresAtEpochSeconds: Long, val profile: GrantProfile, val sequence: Long)
 
-/** A right a raw grant names on one table. `Invoke` and `Execute` need a command that uses the table. */
+/** A right a raw grant names on one table. */
 enum class Right(val wire: String) {
     Read("read"),
     Insert("insert"),
     Update("update"),
     Delete("delete"),
-    Invoke("invoke"),
-    Execute("execute"),
     Custody("custody"),
     ;
 
@@ -51,7 +49,7 @@ enum class Right(val wire: String) {
     }
 }
 
-/** Rights over one table, limited to `columns` when given. Any set is issuable, `Execute` and `Custody` included. */
+/** Rights over one table, limited to `columns` when given. Custody grants no read access. */
 data class Grant(val table: String, val rights: Set<Right>, val columns: Set<String>? = null)
 
 /**
@@ -137,7 +135,7 @@ data class SessionStatus(val principal: String, val node: String, val revocation
 
 /**
  * Another device's record in the replicated issuer registry, which every issuer reads: the profile its grants amount
- * to (empty grants when only partition grants are known), when its latest chain expires, its command identity and an
+ * to (empty grants when only partition grants are known), when its latest chain expires and an
  * opaque application [label] of at most 256 bytes.
  */
 data class Device(
@@ -147,7 +145,6 @@ data class Device(
     val revoked: Boolean,
     val profile: GrantProfile,
     val expiresAtEpochSeconds: Long? = null,
-    val command: String? = null,
     val label: ByteArray? = null,
 )
 

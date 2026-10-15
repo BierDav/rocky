@@ -232,33 +232,6 @@ async fn concurrent_domains_share_the_file_writer_and_reopen() {
     runtime.close().await.unwrap();
 }
 
-async fn coordinator() -> rocky_coordinator::MemoryCoordinator {
-    let coordinator = rocky_coordinator::MemoryCoordinator::default();
-    for domain in [1, 2] {
-        coordinator
-            .register(scope(domain), CALLER, [6; 16], vec![NODE], 1, 1)
-            .unwrap();
-        coordinator.acquire(scope(domain), CALLER, NODE).unwrap();
-    }
-    coordinator
-}
-async fn reserve(
-    replica: &Replica<InventoryApp>,
-    coordinator: &rocky_coordinator::MemoryCoordinator,
-    handle: [u8; 32],
-) -> Result<(), Error> {
-    replica
-        .submit_command_with_arguments(
-            CommandHandle(handle),
-            inventory_app::RESERVE,
-            1u64.to_le_bytes().to_vec(),
-            [9; 32],
-        )?
-        .committed()
-        .await?;
-    replica.execute_pending(coordinator).await
-}
-
 #[tokio::test]
 async fn reads_follow_incoming_application_and_reopen() {
     let dir = TempDir::new().unwrap();
@@ -298,96 +271,6 @@ async fn reads_follow_incoming_application_and_reopen() {
     assert_eq!(count(&replica, 1).await.rows, [[SqlValue::Integer(3)]]);
     runtime.close().await.unwrap();
     source.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn reads_follow_strong_results() {
-    let dir = TempDir::new().unwrap();
-    let runtime = open(&dir, RuntimeOptions::default()).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let coordinator = coordinator().await;
-    let stock = "SELECT remaining FROM stock";
-    let initial = select(&replica, 1, stock).await;
-    assert_eq!(initial.rows, [[SqlValue::Integer(10)]]);
-    assert_eq!(count(&replica, 1).await.rows, [[SqlValue::Integer(0)]]);
-    for (handle, remaining) in [(1, 9), (2, 8)] {
-        reserve(&replica, &coordinator, [handle; 32]).await.unwrap();
-        let after = select(&replica, 1, stock).await;
-        assert_eq!(after.rows, [[SqlValue::Integer(remaining)]]);
-        assert_eq!(after.strong_head.sequence, u64::from(handle));
-        assert_eq!(select(&replica, 1, stock).await, after);
-    }
-    // A result in one domain leaves the other domain's rows alone.
-    let other = runtime.domain(scope(2)).unwrap();
-    assert_eq!(select(&other, 2, stock).await.rows, initial.rows);
-    runtime.close().await.unwrap();
-}
-
-/// Strong steps and incoming pages of two domains join the same writer's groups.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn strong_commands_and_incoming_replication_share_the_file_writer() {
-    const INCOMING: u8 = 96;
-    const COMMANDS: u8 = 12;
-    let dir = TempDir::new().unwrap();
-    let source = open_node(&dir.path().join("peer.db"), PEER, RuntimeOptions::default()).await;
-    let runtime = open(&dir, RuntimeOptions::default()).await;
-    let coordinator = coordinator().await;
-    let incoming = |domain: u8| {
-        let (from, to) = (
-            source.domain(scope(domain)).unwrap(),
-            runtime.domain(scope(domain)).unwrap(),
-        );
-        async move {
-            for index in 0..INCOMING {
-                let operation = note(&from, index, &format!("{domain}-{index}"))
-                    .committed()
-                    .await?;
-                to.receive(operation.encode()?).await?;
-                if index % 8 == 7 {
-                    to.process_pending().await?;
-                }
-            }
-            to.process_pending().await
-        }
-    };
-    let strong = |domain: u8| {
-        let replica = runtime.domain(scope(domain)).unwrap();
-        let coordinator = &coordinator;
-        async move {
-            for index in 0..COMMANDS {
-                let mut handle = [domain; 32];
-                handle[0] = index;
-                reserve(&replica, coordinator, handle).await?;
-            }
-            Ok::<_, Error>(())
-        }
-    };
-    let (a, b, c, d) = tokio::join!(incoming(1), incoming(2), strong(1), strong(2));
-    for result in [a, b, c, d] {
-        result.unwrap();
-    }
-    let verify = |runtime: &Runtime<InventoryApp>, domain: u8| {
-        let replica = runtime.domain(scope(domain)).unwrap();
-        async move {
-            assert_eq!(
-                count(&replica, domain).await.rows,
-                [[SqlValue::Integer(i64::from(INCOMING))]]
-            );
-            let status = replica.strong_status().await.unwrap();
-            assert_eq!(status.sequence, u64::from(COMMANDS));
-        }
-    };
-    for domain in [1, 2] {
-        verify(&runtime, domain).await;
-    }
-    runtime.close().await.unwrap();
-    source.close().await.unwrap();
-    // Reopen replays history and the strong ledger against counters and projections.
-    let runtime = open(&dir, RuntimeOptions::default()).await;
-    for domain in [1, 2] {
-        verify(&runtime, domain).await;
-    }
-    runtime.close().await.unwrap();
 }
 
 #[tokio::test]

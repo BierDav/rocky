@@ -2,9 +2,9 @@
 //! peer's checkpoint in place of the projection.
 use super::retention::*;
 use super::*;
-use crate::checkpoint::{AnchoredResult, CheckpointCursor, CheckpointPage, CheckpointRecord};
+use crate::checkpoint::{CheckpointCursor, CheckpointPage, CheckpointRecord};
 use crate::digest::SetDigest;
-use rocky_core::{Commitment, StrongPackage, StrongReceipt};
+use rocky_core::Commitment;
 
 impl<A> Worker<A>
 where
@@ -43,14 +43,12 @@ where
         let mut page = CheckpointPage {
             start,
             record: None,
-            strong: None,
             table: start.table,
             rows: Vec::new(),
             next: None,
         };
         if after.is_none() {
             page.record = Some(record.encode());
-            page.strong = self.anchored_result().await?;
         }
         let mut cursor = start;
         while let Some((_, table)) = retention
@@ -201,10 +199,6 @@ where
             stored.candidate = None;
             stored.import = Some(Import {
                 record: bytes.clone(),
-                strong: page
-                    .strong
-                    .as_ref()
-                    .map(|strong| (strong.package.clone(), strong.receipt.clone())),
                 table: 0,
                 position: 0,
             });
@@ -261,8 +255,7 @@ where
                 "checkpoint rows differ from the record's commitment".into(),
             ));
         }
-        let strong = import.strong.clone();
-        let switched = self.switch(&mut stored, &record, strong).await?;
+        let switched = self.switch(&mut stored, &record).await?;
         self.persist(&stored).await?;
         self.inject_fault().await?;
         Ok((stored, Some((switched, checkpoint))))
@@ -274,7 +267,6 @@ where
         &mut self,
         stored: &mut Stored,
         record: &CheckpointRecord,
-        strong: Option<(Vec<u8>, Vec<u8>)>,
     ) -> Result<Switched, Error> {
         let raw = self.conn().connection();
         for (_, table) in self.retention.checkpointed() {
@@ -304,10 +296,6 @@ where
         self.conn()
             .execute("DELETE FROM rocky_rejected_local", ())
             .await?;
-        if let Some((package, receipt)) = strong {
-            self.adopt_strong(stored, record, &package, &receipt)
-                .await?;
-        }
         let lamport = self.lamport.max(record.clock);
         let revision = self.revision.next()?;
         self.conn()
@@ -339,117 +327,5 @@ where
             revision,
             retained: (*count as usize, *bytes as usize),
         })
-    }
-    /// Takes over the strong head a checkpoint is anchored to when it is
-    /// ahead of the local one, with the result that carries its projection.
-    pub(super) async fn adopt_strong(
-        &mut self,
-        stored: &mut Stored,
-        record: &CheckpointRecord,
-        package: &[u8],
-        receipt: &[u8],
-    ) -> Result<(), Error> {
-        let local = self.local_strong_head().await?;
-        if record.strong.sequence <= local.sequence {
-            return Ok(());
-        }
-        let decoded = StrongPackage::decode(package)?;
-        let confirmed = StrongReceipt::decode(receipt)?;
-        let hash = confirmed.confirmation.result;
-        if decoded.confirmation()? != confirmed.confirmation
-            || confirmed.sequence != decoded.sequence
-            || decoded.sequence != record.strong.sequence
-            || Some(confirmed.confirmation.new_head) != record.strong.head
-            || Some(hash) != record.strong.result
-            || Some(decoded.base.configuration) != record.strong.configuration
-            || decoded.request.scope != self.identity.scope
-        {
-            return Err(Error::Rejected(
-                "checkpoint strong anchor differs from its record".into(),
-            ));
-        }
-        if local
-            .configuration
-            .is_some_and(|configuration| configuration != decoded.base.configuration)
-        {
-            return Err(rocky_core::CoordinationError::CoordinationStateLost.into());
-        }
-        // Earlier results cannot join the adopted chain.
-        for (old, _, receipt, _, applied) in self.attempts().await? {
-            if applied
-                && old.sequence < decoded.sequence
-                && let Some(receipt) = receipt
-            {
-                for sql in [
-                    "DELETE FROM rocky_preparations WHERE hash=?",
-                    "DELETE FROM rocky_strong_ack WHERE hash=?",
-                    "DELETE FROM rocky_strong_outbox WHERE hash=?",
-                ] {
-                    self.conn()
-                        .execute(sql, [receipt.confirmation.result.to_vec()])
-                        .await?;
-                }
-            }
-        }
-        let id = decoded.request.id;
-        self.conn()
-            .execute(
-                "INSERT OR IGNORE INTO rocky_requests VALUES(?,?,?)",
-                crate::sqlite::params![
-                    id.node.0.to_vec(),
-                    id.sequence.get() as i64,
-                    decoded.request.encode()?
-                ],
-            )
-            .await?;
-        self.conn()
-            .execute(
-                "INSERT INTO rocky_preparations(hash,bytes,state,receipt,verified,applied) VALUES(?,?,'confirmed',?,1,1) ON CONFLICT(hash) DO UPDATE SET state='confirmed',receipt=excluded.receipt,verified=1,applied=1",
-                crate::sqlite::params![hash.to_vec(), package.to_vec(), receipt.to_vec()],
-            )
-            .await?;
-        self.conn()
-            .execute(
-                "UPDATE rocky_strong_meta SET configuration=?,sequence=?,head=? WHERE id=1",
-                crate::sqlite::params![
-                    decoded.base.configuration.to_vec(),
-                    decoded.sequence as i64,
-                    confirmed.confirmation.new_head.to_vec()
-                ],
-            )
-            .await?;
-        let statements = self
-            .app
-            .command(&decoded.request.method)
-            .ok_or_else(|| Error::Incompatible("unregistered command method".into()))?
-            .project_result(&decoded.rows)
-            .map_err(application)?;
-        self.store(statements).await?;
-        stored.strong_base = Some((decoded.base.sequence, decoded.base.head));
-        Ok(())
-    }
-    pub(super) async fn anchored_result(&self) -> Result<Option<AnchoredResult>, Error> {
-        let mut latest = self
-            .conn()
-            .query(
-                "SELECT bytes,receipt FROM rocky_preparations WHERE applied=1 AND receipt IS NOT NULL",
-                (),
-            )
-            .await?;
-        let mut anchored: Option<(u64, AnchoredResult)> = None;
-        while let Some(row) = latest.next().await? {
-            let package: Vec<u8> = row.get(0)?;
-            let sequence = StrongPackage::decode(&package)?.sequence;
-            if anchored.as_ref().is_none_or(|(known, _)| sequence > *known) {
-                anchored = Some((
-                    sequence,
-                    AnchoredResult {
-                        package,
-                        receipt: row.get(1)?,
-                    },
-                ));
-            }
-        }
-        Ok(anchored.map(|(_, result)| result))
     }
 }

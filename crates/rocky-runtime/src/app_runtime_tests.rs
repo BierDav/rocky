@@ -1,7 +1,6 @@
 use super::*;
 use crate::tests::fault;
-use inventory_app::{InventoryApp, Policy, RESERVE, Reservation};
-use rocky_coordinator::MemoryCoordinator;
+use inventory_app::{InventoryApp, Policy};
 use rocky_core::*;
 use tempfile::TempDir;
 
@@ -53,25 +52,6 @@ async fn open(dir: &TempDir, node: u8) -> Runtime<InventoryApp> {
         .await
         .unwrap()
 }
-fn coordinator() -> MemoryCoordinator {
-    let coordinator = MemoryCoordinator::default();
-    for domain in [1, 2] {
-        coordinator
-            .register(
-                scope(domain),
-                PrincipalId([7; 16]),
-                [6; 16],
-                vec![NodeId([3; 16]), NodeId([4; 16])],
-                1,
-                1,
-            )
-            .unwrap();
-        coordinator
-            .acquire(scope(domain), PrincipalId([7; 16]), NodeId([3; 16]))
-            .unwrap();
-    }
-    coordinator
-}
 fn query(table: &str) -> BoundQuery {
     BoundQuery {
         sql: format!("SELECT * FROM {table}"),
@@ -87,19 +67,6 @@ async fn note(replica: &Replica<InventoryApp>, text: &str) -> Envelope {
             entity: None,
             payload: text.as_bytes().to_vec(),
         })
-        .unwrap()
-        .committed()
-        .await
-        .unwrap()
-}
-async fn reserve(replica: &Replica<InventoryApp>, id: u8, quantity: u64) -> StrongRequest {
-    replica
-        .submit_command_with_arguments(
-            CommandHandle([id; 32]),
-            RESERVE,
-            quantity.to_le_bytes().to_vec(),
-            [9; 32],
-        )
         .unwrap()
         .committed()
         .await
@@ -234,226 +201,6 @@ async fn shared_transactions_rollback_retry_and_cancel_waiters_with_stable_ident
     runtime.close().await.unwrap();
 }
 #[tokio::test]
-async fn reservations_order_predecessors_record_rejections_and_preserve_drafts() {
-    let dir = TempDir::new().unwrap();
-    let runtime = open(&dir, 3).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    let draft = note(&replica, "before cut").await;
-    let first = reserve(&replica, 1, 7).await;
-    assert_eq!(reserve(&replica, 1, 7).await, first);
-    assert!(matches!(
-        replica
-            .submit_command_with_arguments(
-                CommandHandle([1; 32]),
-                RESERVE,
-                8u64.to_le_bytes().to_vec(),
-                [9; 32]
-            )
-            .unwrap()
-            .committed()
-            .await,
-        Err(Error::Conflict)
-    ));
-    reserve(&replica, 2, 4).await;
-    replica
-        .mutate(Mutation {
-            entity: Some(draft.id),
-            payload: b"after cut".to_vec(),
-        })
-        .unwrap()
-        .committed()
-        .await
-        .unwrap();
-    let (left, right) = tokio::join!(
-        replica.execute_pending(&coordinator),
-        replica.execute_pending(&coordinator)
-    );
-    left.unwrap();
-    right.unwrap();
-    let publications = replica.confirmed_publications().await.unwrap();
-    assert_eq!(publications.len(), 2);
-    let accepted = Reservation::decode(&publications[0].package.rows).unwrap();
-    let rejected = Reservation::decode(&publications[1].package.rows).unwrap();
-    assert!(accepted.accepted);
-    assert!(!rejected.accepted);
-    assert_eq!(rejected.remaining, 3);
-    assert_eq!(rejected.jobs.len(), 1);
-    assert_eq!(replica.query().await.unwrap().rows[0].1, "after cut");
-    let tracked = replica
-        .track_command(CommandHandle([2; 32]), &[NodeId([4; 16])])
-        .await
-        .unwrap();
-    assert_eq!(tracked.state, Some(CommandState::ConfirmedLocally));
-    assert!(
-        !Reservation::decode(&tracked.outcome.unwrap())
-            .unwrap()
-            .accepted
-    );
-    runtime.close().await.unwrap();
-    let runtime = open(&dir, 3).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    assert_eq!(
-        replica.read(query("stock"), options(1)).await.unwrap().rows[0][0],
-        SqlValue::Integer(3)
-    );
-    assert_eq!(
-        replica
-            .read(query("jobs"), options(1))
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-    runtime.close().await.unwrap();
-}
-#[tokio::test]
-async fn result_apply_rolls_back_projection_jobs_outbox_and_revision_together() {
-    let dir = TempDir::new().unwrap();
-    let runtime = open(&dir, 3).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    let request = reserve(&replica, 1, 2).await;
-    let package = match replica
-        .strong_request(strong::Request::Prepare(
-            Box::new(request),
-            coordinator.head(scope(1)).unwrap(),
-        ))
-        .await
-        .unwrap()
-    {
-        strong::Response::Package(package) => package,
-        _ => panic!("package"),
-    };
-    let receipt = coordinator
-        .confirm(package.confirmation().unwrap())
-        .unwrap();
-    replica
-        .strong_request(strong::Request::StoreResult(
-            package.encode().unwrap(),
-            receipt.encode(),
-            strong::Verdict::Deferred,
-        ))
-        .await
-        .unwrap();
-    replica
-        .strong_request(strong::Request::Verify(receipt.confirmation.result))
-        .await
-        .unwrap();
-    fault(&replica, worker::Fault::FailBeforeCommit).await;
-    assert!(matches!(
-        replica.strong_request(strong::Request::Apply).await,
-        Err(Error::InjectedFailure)
-    ));
-    assert_eq!(replica.query().await.unwrap().revision.get(), 0);
-    assert_eq!(
-        replica.read(query("stock"), options(1)).await.unwrap().rows[0][0],
-        SqlValue::Integer(10)
-    );
-    assert!(
-        replica
-            .read(query("jobs"), options(1))
-            .await
-            .unwrap()
-            .rows
-            .is_empty()
-    );
-    runtime.close().await.unwrap();
-    let runtime = open(&dir, 3).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    fault(&replica, worker::Fault::RetryBeforeCommit(2)).await;
-    replica.reconcile_strong(&coordinator).await.unwrap();
-    assert_eq!(replica.query().await.unwrap().revision.get(), 1);
-    assert_eq!(
-        replica
-            .read(query("jobs"), options(1))
-            .await
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-    runtime.close().await.unwrap();
-}
-#[tokio::test]
-async fn newer_head_reordered_results_and_missing_inputs_have_precise_read_evidence() {
-    let dir = TempDir::new().unwrap();
-    let source = open(&dir, 3).await;
-    let target = open(&dir, 4).await;
-    let a = source.domain(scope(1)).unwrap();
-    let b = target.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    let draft = note(&a, "required").await;
-    for (id, amount) in [(1, 3), (2, 2)] {
-        reserve(&a, id, amount).await;
-        a.execute_pending(&coordinator).await.unwrap();
-    }
-    assert!(matches!(
-        b.read_strong(query("stock"), options(1), &coordinator)
-            .await
-            .unwrap(),
-        StrongRead::Pending {
-            reason: PendingReason::MissingConfirmedPackage,
-            ..
-        }
-    ));
-    let mut results = a.confirmed_publications().await.unwrap();
-    results.reverse();
-    for result in results {
-        b.receive_result(
-            result.package.encode().unwrap(),
-            result.receipt.encode(),
-            &coordinator,
-        )
-        .await
-        .unwrap();
-    }
-    assert_eq!(b.query().await.unwrap().strong_head.sequence, 0);
-    assert!(matches!(
-        b.read_strong(query("stock"), options(1), &coordinator)
-            .await
-            .unwrap(),
-        StrongRead::Pending {
-            reason: PendingReason::MissingInput,
-            ..
-        }
-    ));
-    b.receive(draft.encode().unwrap()).await.unwrap();
-    let pending = b.read(query("drafts"), options(1)).await.unwrap();
-    assert_eq!(
-        pending.completeness,
-        Completeness::Local {
-            pending_operations: 1
-        }
-    );
-    b.process_pending().await.unwrap();
-    b.reconcile_strong(&coordinator).await.unwrap();
-    match b
-        .read_strong(query("stock"), options(1), &coordinator)
-        .await
-        .unwrap()
-    {
-        StrongRead::Ready(snapshot) => {
-            assert_eq!(snapshot.rows[0][0], SqlValue::Integer(5));
-            assert!(matches!(
-                snapshot.completeness,
-                Completeness::CoordinatorHead { sequence: 2, .. }
-            ));
-        }
-        other => panic!("{other:?}"),
-    }
-    coordinator.set_available(false).unwrap();
-    assert!(matches!(
-        b.read_strong(query("stock"), options(1), &coordinator)
-            .await
-            .unwrap(),
-        StrongRead::Unavailable
-    ));
-    source.close().await.unwrap();
-    target.close().await.unwrap();
-}
-#[tokio::test]
 async fn reads_are_bound_scoped_bounded_and_observations_coalesce() {
     let dir = TempDir::new().unwrap();
     let runtime = open(&dir, 3).await;
@@ -527,7 +274,7 @@ async fn reads_are_bound_scoped_bounded_and_observations_coalesce() {
     runtime.close().await.unwrap();
 }
 #[tokio::test]
-async fn manifest_reopen_is_immutable_and_receiving_data_never_installs_handlers() {
+async fn manifest_reopen_is_immutable() {
     let mut manifest = inventory_app::manifest();
     let hash = manifest.hash();
     manifest.entities.reverse();
@@ -535,18 +282,10 @@ async fn manifest_reopen_is_immutable_and_receiving_data_never_installs_handlers
     manifest.fields[0].shape.push_str(" changed");
     assert_ne!(manifest.hash(), hash);
     manifest.validate().unwrap();
-    manifest.methods[0].id = [0; 32];
+    manifest.operations[0].id = [0; 32];
     assert_eq!(manifest.validate(), Err(ProtocolError::InvalidManifest));
     let dir = TempDir::new().unwrap();
     let runtime = open(&dir, 3).await;
-    let a = runtime.domain(scope(1)).unwrap();
-    assert!(
-        a.submit_command(CommandHandle([1; 32]), "uninstalled")
-            .unwrap()
-            .committed()
-            .await
-            .is_err()
-    );
     runtime.close().await.unwrap();
     let mut changed = installs(3);
     changed.pop();
@@ -565,14 +304,14 @@ async fn cancelled_progress_reads_recover_and_named_peer_evidence_coalesces() {
     let replica = runtime.domain(scope(1)).unwrap();
     let handle = MutationHandle([55; 32]);
     let mut observer = replica
-        .observe_progress(TrackedHandle::Mutation(handle), vec![NodeId([4; 16])])
+        .observe_progress(handle, vec![NodeId([4; 16])])
         .unwrap();
     assert!(matches!(
         observer.next().await.unwrap(),
-        TrackingSnapshot::Mutation(MutationProgress {
+        MutationProgress {
             committed: None,
             ..
-        })
+        }
     ));
     // Poll a pending next then cancel it, without timing-based sleeps.
     {
@@ -613,117 +352,20 @@ async fn cancelled_progress_reads_recover_and_named_peer_evidence_coalesces() {
         )
         .await
         .unwrap();
-    match observer.next().await.unwrap() {
-        TrackingSnapshot::Mutation(progress) => {
-            assert!(progress.committed.is_some());
-            assert!(progress.peers[0].received);
-            assert!(progress.peers[0].applied);
-        }
-        _ => panic!("mutation tracking"),
-    }
-    let handle = CommandHandle([56; 32]);
-    let mut commands = replica
-        .observe_progress(TrackedHandle::Command(handle), vec![NodeId([4; 16])])
-        .unwrap();
-    assert!(matches!(
-        commands.next().await.unwrap(),
-        TrackingSnapshot::Command(CommandTracking { request: None, .. })
-    ));
-    drop(
-        replica
-            .submit_command_with_arguments(handle, RESERVE, 1u64.to_le_bytes().to_vec(), [9; 32])
-            .unwrap(),
-    );
-    let coordinator = coordinator();
-    replica.execute_pending(&coordinator).await.unwrap();
-    let package = replica
-        .confirmed_publications()
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    replica
-        .acknowledge_result(NodeId([4; 16]), package.receipt.confirmation.result, true)
-        .await
-        .unwrap();
-    match commands.next().await.unwrap() {
-        TrackingSnapshot::Command(progress) => {
-            assert_eq!(progress.state, Some(CommandState::PeerApplied));
-            assert!(progress.outcome.is_some());
-            assert!(progress.peers[0].applied);
-        }
-        _ => panic!("command tracking"),
-    }
+    let progress = observer.next().await.unwrap();
+    assert!(progress.committed.is_some());
+    assert!(progress.peers[0].received);
+    assert!(progress.peers[0].applied);
     runtime.close().await.unwrap();
-}
-#[tokio::test]
-async fn caller_supplied_exact_inputs_are_durable_even_before_inputs_arrive() {
-    let dir = TempDir::new().unwrap();
-    let source = open(&dir, 3).await;
-    let target = open(&dir, 4).await;
-    let a = source.domain(scope(1)).unwrap();
-    let b = target.domain(scope(1)).unwrap();
-    let draft = note(&a, "remote input").await;
-    let original = reserve(&a, 1, 1).await;
-    let invocation = CommandInvocation {
-        method: RESERVE.into(),
-        version: 1,
-        arguments: 2u64.to_le_bytes().to_vec(),
-        policy: [9; 32],
-        inputs: Some(SealedInputs {
-            frontier: original.frontier.clone(),
-            digest: original.digest,
-        }),
-    };
-    let request = b
-        .invoke_command(CommandHandle([70; 32]), invocation.clone())
-        .unwrap()
-        .committed()
-        .await
-        .unwrap();
-    assert_eq!(request.frontier, original.frontier);
-    assert_eq!(request.digest, original.digest);
-    let mut changed = invocation.clone();
-    changed.inputs.as_mut().unwrap().digest = [1; 32];
-    assert!(matches!(
-        b.invoke_command(CommandHandle([70; 32]), changed)
-            .unwrap()
-            .committed()
-            .await,
-        Err(Error::Conflict)
-    ));
-    let coordinator = coordinator();
-    coordinator
-        .takeover(scope(1), PrincipalId([7; 16]), NodeId([4; 16]), 1)
-        .unwrap();
-    assert!(matches!(
-        b.execute_pending(&coordinator).await,
-        Err(Error::StrongPending(PendingReason::MissingInput))
-    ));
-    b.receive(draft.encode().unwrap()).await.unwrap();
-    b.process_pending().await.unwrap();
-    b.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(
-        b.track_command(CommandHandle([70; 32]), &[])
-            .await
-            .unwrap()
-            .state,
-        Some(CommandState::ConfirmedLocally)
-    );
-    source.close().await.unwrap();
-    target.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn dynamic_sql_sees_only_current_authorized_rows_and_strong_corruption_is_rejected() {
+async fn dynamic_sql_sees_only_current_authorized_rows() {
     let dir = TempDir::new().unwrap();
     let runtime = open(&dir, 3).await;
     let replica = runtime.domain(scope(1)).unwrap();
     note(&replica, "public note").await;
     note(&replica, "private note").await;
-    let coordinator = coordinator();
-    reserve(&replica, 1, 2).await;
-    replica.execute_pending(&coordinator).await.unwrap();
     runtime.close().await.unwrap();
     let mut subset = installs(3);
     subset[0].policy.note_prefix = Some("public".into());
@@ -753,20 +395,6 @@ async fn dynamic_sql_sees_only_current_authorized_rows_and_strong_corruption_is_
             .is_empty()
     );
     runtime.close().await.unwrap();
-    let db = crate::sqlite::Connection::open(&dir.path().join("3.db")).unwrap();
-    let conn = crate::scoped_connection::ScopedConnection::new(
-        db,
-        Some(&crate::runtime::namespace(scope(1))),
-        InventoryApp.schema(),
-    );
-    conn.execute("UPDATE stock SET remaining=9", ())
-        .await
-        .unwrap();
-    drop(conn);
-    assert!(matches!(
-        Runtime::open(dir.path().join("3.db"), installs(3)).await,
-        Err(Error::Corrupt(_))
-    ));
 }
 /// While the file writer holds its group open, another connection's write
 /// is refused as retryable busy and its reads see only committed state.
@@ -823,106 +451,4 @@ async fn scoped_busy_writes_and_pending_receipts_are_observable() {
     assert_eq!(observer.next().await.unwrap().rows.len(), 1);
     runtime.close().await.unwrap();
     target.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn strong_read_fetches_the_discovered_chain_and_exact_inputs_from_a_replica() {
-    let dir = TempDir::new().unwrap();
-    let source = open(&dir, 3).await;
-    let target = open(&dir, 4).await;
-    let a = source.domain(scope(1)).unwrap();
-    let b = target.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    note(&a, "required remote note").await;
-    for id in [1, 2] {
-        reserve(&a, id, 2).await;
-        a.execute_pending(&coordinator).await.unwrap();
-    }
-    match b
-        .read_strong_from(query("stock"), options(1), &coordinator, &a)
-        .await
-        .unwrap()
-    {
-        StrongRead::Ready(snapshot) => {
-            assert_eq!(snapshot.rows[0][0], SqlValue::Integer(6));
-            assert_eq!(snapshot.strong_head.sequence, 2);
-        }
-        other => panic!("{other:?}"),
-    }
-    assert_eq!(b.query().await.unwrap().rows[0].1, "required remote note");
-    source.close().await.unwrap();
-    target.close().await.unwrap();
-}
-/// Version 2 of the reservation is typed; version 1 keeps its retained
-/// bytes; a version outside the horizon is refused, not translated.
-#[tokio::test]
-async fn typed_reservation_versions_share_one_head_and_refuse_other_versions() {
-    use inventory_app::{Remaining, Reserve, Shortfall};
-    let dir = TempDir::new().unwrap();
-    let runtime = open(&dir, 3).await;
-    let replica = runtime.domain(scope(1)).unwrap();
-    let coordinator = coordinator();
-    let invoke = async |id: u8, version: u32, arguments: Vec<u8>| {
-        replica
-            .invoke_command(
-                CommandHandle([id; 32]),
-                CommandInvocation {
-                    method: RESERVE.into(),
-                    version,
-                    arguments,
-                    policy: [9; 32],
-                    inputs: None,
-                },
-            )
-            .unwrap()
-            .committed()
-            .await
-    };
-    // Retained version 1 bytes still execute beside typed version 2.
-    reserve(&replica, 1, 4).await;
-    let typed = inventory_app::reserve(5).unwrap();
-    let accepted = invoke(2, 2, typed.clone()).await.unwrap();
-    let rejected = invoke(3, 2, inventory_app::reserve(2).unwrap())
-        .await
-        .unwrap();
-    assert_eq!((accepted.version, rejected.version), (2, 2));
-    replica.execute_pending(&coordinator).await.unwrap();
-    let outcomes: Vec<_> = replica
-        .confirmed_publications()
-        .await
-        .unwrap()
-        .iter()
-        .map(|publication| {
-            Reservation::decode(&publication.package.rows)
-                .unwrap()
-                .outcome()
-        })
-        .collect();
-    // A rejection is a confirmed result at its own sequence, not an error.
-    assert_eq!(
-        outcomes,
-        [Ok(Remaining(6)), Ok(Remaining(1)), Err(Shortfall(1))]
-    );
-    assert_eq!(coordinator.head(scope(1)).unwrap().sequence, 3);
-
-    // The typed arguments bind their descriptor: other bytes are refused.
-    let descriptor = inventory_app::commands().get(RESERVE, 2).unwrap();
-    assert_eq!(Reserve::decode_arguments(descriptor, &typed).unwrap().0, 5);
-    for (id, version, arguments) in [
-        (4, 2, 5u64.to_le_bytes().to_vec()),
-        (5, 1, typed.clone()),
-        (6, 2, inventory_app::reserve(0).unwrap()),
-    ] {
-        assert!(invoke(id, version, arguments).await.is_err());
-    }
-    let unsupported = invoke(7, 3, typed).await.unwrap_err();
-    assert!(
-        unsupported
-            .to_string()
-            .contains("outside the support horizon"),
-        "{unsupported}"
-    );
-    replica.execute_pending(&coordinator).await.unwrap();
-    assert_eq!(coordinator.head(scope(1)).unwrap().sequence, 3);
-    runtime.close().await.unwrap();
 }

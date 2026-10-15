@@ -119,9 +119,6 @@ impl<A: RowApplication> Inner<A> {
         let projected = typed
             .declared_by_scope(scope)
             .ok_or_else(|| denied("horizon scope is not installed"))?;
-        if projected.confirmed() {
-            return Err(denied("confirmed tables use the strong horizon"));
-        }
         let schema = typed.rows.schema();
         let mut queue = vec![projected.table.sql_name.clone()];
         let mut seen = BTreeSet::new();

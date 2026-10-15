@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonPrimitive
 import org.example.examples.shopping.data.ShoppingRepository
-import org.example.examples.shopping.data.coordination.ApprovalCommands
 import org.example.examples.shopping.data.db.ShoppingSchema
 import org.example.examples.shopping.data.db.list
 import org.example.examples.shopping.data.db.trustedTables
@@ -47,17 +46,14 @@ private val ShoppingSchemaV6 = schema("shopping", version = 6) {
         text("note")
         text("requester")
         primaryKey("key")
-        tableClass = TableClass.CommandControlled
     }
     table("decisions") {
         text("key")
         boolean("approved")
         text("decider")
         primaryKey("key")
-        tableClass = TableClass.CommandControlled
     }
     trustedTables()
-    commands = ApprovalCommands
 }
 
 /**

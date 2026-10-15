@@ -1092,62 +1092,6 @@ async fn a_far_behind_replica_catches_up_while_both_sides_keep_writing() {
 }
 
 #[tokio::test]
-async fn a_full_node_alone_confirms_nothing() {
-    use super::commands::{command_grants, coordinator};
-    let f = Fixture::new();
-    let dir = TempDir::new().unwrap();
-    let device_config = f.config(
-        &PrivateKey::new(),
-        command_grants(&f),
-        &[f.public, f.private],
-    );
-    let coordinator = coordinator(&f, &device_config);
-    let device = EncryptedReplica::open(dir.path().join("device.db"), f.app(), device_config)
-        .await
-        .unwrap();
-    let full = EncryptedReplica::open(
-        dir.path().join("full.db"),
-        f.app(),
-        f.config(
-            &PrivateKey::new(),
-            command_grants(&f),
-            &[f.public, f.private],
-        ),
-    )
-    .await
-    .unwrap();
-    let command = device
-        .invoke_encrypted([1; 32], f.private, "SetEmployee", b"id\nAlice\n123456")
-        .await
-        .unwrap();
-    // Holding everything does not make the full node an executor.
-    assert!(
-        full.execute_encrypted(command.clone(), &coordinator)
-            .await
-            .is_err()
-    );
-    for replica in [&full, &device] {
-        assert!(
-            replica
-                .command_snapshot(f.public)
-                .await
-                .unwrap()
-                .rows
-                .is_empty()
-        );
-    }
-    // The registered executor still confirms through the coordinator.
-    device
-        .execute_encrypted(command, &coordinator)
-        .await
-        .unwrap();
-    assert_eq!(
-        device.command_snapshot(f.public).await.unwrap().rows.len(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn a_sync_larger_than_a_session_continues_on_the_next() {
     let f = Fixture::new();
     let dir = TempDir::new().unwrap();

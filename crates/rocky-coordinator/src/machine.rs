@@ -937,7 +937,11 @@ impl Metadata {
         {
             return Err(CoordinationError::Backpressure);
         }
-        self.state.domain(scope)?.coordinated.store(log.tip, next);
+        let logs = &mut self.state.domain(scope)?.coordinated;
+        logs.store(log.tip, next);
+        if matches!(action, Action::Join { .. }) && result.is_ok() {
+            logs.leave_others(request.key, log.tip);
+        }
         result.map(Outcome::Coordinated)
     }
     fn transition(&mut self, request: &Request) -> Result<Outcome, CoordinationError> {

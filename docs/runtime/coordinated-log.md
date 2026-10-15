@@ -29,8 +29,9 @@ the log's first join; a log nobody configured takes the domain's. Trusted
 nodes relay it for every tip of the opened line before they join. Only a
 configuration, a join, a cut or a seal opens a log; a domain holds at most
 8 open logs and refuses more with `Backpressure`. A node is in sync on one
-open tip of its domain: joining another is `Denied`, and a tip no trusted
-node follows has an empty set that takes no append. A control revision cannot
+open tip of its domain: joining another leaves the first and moves its epoch,
+and waits with `Backpressure` while the first has a pending entry. A tip no
+trusted node follows has an empty set that takes no append. A control revision cannot
 remove an identity whose node is in sync or occur while an entry is pending;
 renew it before expiry. Removing a key that already missed a
 write does not erase its bounded retry watermark. Exhausting the domain's retained
@@ -120,8 +121,10 @@ stale record returns `StaleHead`. `DomainLog::cut` reports it as `Committed`.
 The current log machine fixes caps at 32 trusted keys per live tenant and domain,
 60 admitted appends per authority minute per tenant across its logs, 8 open and
 8 retained ended tip logs per domain, and a 30-second acknowledgment deadline.
-Beyond 8 ended logs the earliest ended one is dropped; devices never write a
-sealed tip, which their own graph records. Existing `Usage` byte/domain budgets remain fixed at
+Beyond 8 ended logs the earliest ended one is dropped and reads as unopened;
+devices never write a tip their graph sealed, and a trusted node holding
+committed entries of a dropped log refuses to write it
+([limits](coordinated-writes.md#limits)). Existing `Usage` byte/domain budgets remain fixed at
 provisioning or root-certified for a public service. Changing the log's fixed
 policy requires a new store format; it does not add fields to signed genesis.
 Retries consume no additional append rate. Quiet domains generate no log traffic.

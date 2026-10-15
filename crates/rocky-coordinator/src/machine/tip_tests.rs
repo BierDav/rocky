@@ -75,8 +75,6 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
         f.apply_on(&nodes[0], dev, Action::Configure { minimum: 1 }),
         Ok(Outcome::Coordinated(LogResult::Configured))
     );
-    // A node in sync on `main` follows no other tip.
-    assert_eq!(join(&mut f, &nodes[0], dev), Err(CoordinationError::Denied));
     join(&mut f, &follower, dev).unwrap();
     assert_eq!(
         f.apply_on(&follower, dev, Action::Configure { minimum: 2 }),
@@ -129,6 +127,48 @@ fn a_tips_writes_commit_through_its_own_log_and_followers() {
     );
     assert!(head.hashes.is_empty());
     assert_eq!(f.state.log_head(dev).unwrap().minimum, 1);
+}
+
+#[test]
+fn a_node_joining_another_tip_leaves_the_log_it_was_in_sync_on() {
+    let mut f = Fixture::new(1, Limits::default());
+    let main = tip_log(f.scope);
+    let dev = TipLog {
+        scope: f.scope,
+        tip: dev(),
+    };
+    let nodes = f.nodes.clone();
+    let before = f.state.log_head(main).unwrap();
+    assert_eq!(before.members.len(), 2);
+    join(&mut f, &nodes[0], dev).unwrap();
+    let head = f.state.log_head(main).unwrap();
+    assert_eq!(head.epoch, before.epoch + 1);
+    assert!(!head.member(nodes[0].public_key()) && head.member(nodes[1].public_key()));
+    assert!(f.state.log_head(dev).unwrap().member(nodes[0].public_key()));
+    // A node does not leave a tip while an entry there is pending.
+    let Ok(Outcome::Coordinated(LogResult::Assigned(_))) = f.apply_on(
+        &nodes[1],
+        main,
+        Action::Append {
+            expected: head.commit,
+            epoch: head.epoch,
+            hash: [8; 32],
+            deadline: T + 10,
+            sequence: 9,
+        },
+    ) else {
+        panic!("assignment")
+    };
+    assert_eq!(
+        join(&mut f, &nodes[1], dev),
+        Err(CoordinationError::Backpressure)
+    );
+    assert!(
+        f.state
+            .log_head(main)
+            .unwrap()
+            .member(nodes[1].public_key())
+    );
 }
 
 #[test]

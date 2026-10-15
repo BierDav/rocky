@@ -587,20 +587,27 @@ impl Logs {
     }
     /// A copy of `tip`'s log to apply `action` from `key` to; `store` keeps
     /// it. Only a configuration, a join, a cut or a seal opens a log, within
-    /// `TIP_LOGS` open ones, and a node is in sync on one tip of its domain.
+    /// `TIP_LOGS` open ones. A node is in sync on one tip of its domain: a
+    /// join waits while the tip it leaves has a pending entry.
     pub fn working(
         &self,
         key: PublicKey,
         tip: TipId,
         action: &Action,
     ) -> std::result::Result<Log, CoordinationError> {
-        if matches!(action, Action::Join { .. })
-            && self
+        if matches!(action, Action::Join { .. }) {
+            for (_, log) in self
                 .logs
                 .iter()
-                .any(|(id, log)| *id != tip && log.head.member(key))
-        {
-            return Err(CoordinationError::Denied);
+                .filter(|(id, log)| *id != tip && log.head.member(key))
+            {
+                if log.head.pending.is_some() {
+                    return Err(CoordinationError::Backpressure);
+                }
+                if log.head.epoch == u64::MAX {
+                    return Err(CoordinationError::StaleEpoch);
+                }
+            }
         }
         if let Some(log) = self.get(tip) {
             return Ok(log.clone());
@@ -633,6 +640,18 @@ impl Logs {
             if let Some(index) = self.logs.iter().position(|(_, l)| !l.open()) {
                 self.logs.remove(index);
             }
+        }
+    }
+    /// After `key` joined `tip`, removes it from every other tip's in-sync
+    /// set and moves their epochs; `working` checked that none is pending.
+    pub fn leave_others(&mut self, key: PublicKey, tip: TipId) {
+        for (_, log) in self
+            .logs
+            .iter_mut()
+            .filter(|(id, log)| *id != tip && log.head.member(key))
+        {
+            log.head.members.retain(|member| member.key != key);
+            log.head.epoch = log.head.epoch.saturating_add(1);
         }
     }
     pub fn pending(&self) -> impl Iterator<Item = (TipId, &Pending)> {
@@ -920,6 +939,9 @@ impl MemoryLog {
             let acks = acknowledged.entry(log.tip).or_default();
             let result = f(&mut working, acks, time, owner);
             logs.store(log.tip, working);
+            if matches!(action, Action::Join { .. }) && result.is_ok() {
+                logs.leave_others(key, log.tip);
+            }
             result
         })
     }

@@ -1,8 +1,8 @@
 //! Revocation statements and the grow-only set a device holds of them. See
 //! `docs/decisions/0049-mergeable-revocation-set.md`.
 use crate::{
-    CredentialChain, Error, PrivateKey, PublicKey, SignedCapability, decode_bounded, denied,
-    encode, signing_bytes,
+    CredentialChain, Error, IdentityProvider, PublicKey, Purpose, SignedCapability, decode_bounded,
+    denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
 use rocky_core::{AppId, Commitment};
@@ -17,26 +17,29 @@ pub const MAX_CHAIN_LIFETIME: u64 = 366 * DAY;
 pub const LIFETIME_SKEW: u64 = DAY;
 /// Live statements a new revocation may join; `revoke` fails at the bound.
 pub const MAX_LIVE_REVOCATIONS: usize = 1024;
-/// Largest encoded signed statement.
-pub const MAX_REVOCATION_BYTES: usize = 2048;
-/// What the two signatures add to an encoded statement, at most.
+/// Largest encoded signed statement, its signer's issuer chain included.
+pub const MAX_REVOCATION_BYTES: usize = 8 * 1024;
+/// What the signature and the framing add to an encoded statement and
+/// its signer's chain, at most.
 pub const SIGNATURE_OVERHEAD: usize = 192;
 /// Largest encoded set, a bound on what any merge accepts.
 pub const MAX_REVOCATION_SET_BYTES: usize = 2 * 1024 * 1024;
 /// The named refusal of a revocation beyond the live bound.
 pub const REVOCATION_SET_FULL: &str = "revocation set full: 1,024 live statements";
 
-/// One revocation: the keys and capability IDs it ends, the issuer that
-/// made it and when. Its ID is its hash.
+/// One revocation: the identities, node certificates and capability IDs it
+/// ends, the identity that signed it and when. Its ID is its hash.
+/// Naming an identity ends every chain through it, so all its nodes;
+/// naming a node ends only that node's certificate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revocation {
     /// The application, under its publisher, the statement belongs to.
     pub app: AppId,
-    /// The issuer's node key; its co-signature attributes, never authorizes.
+    /// The signing identity: the owner's or an issuer's.
     pub issuer: PublicKey,
     pub time: u64,
     pub nodes: BTreeSet<crate::PeerId>,
-    pub users: BTreeSet<PublicKey>,
+    pub identities: BTreeSet<PublicKey>,
     pub capabilities: BTreeSet<Commitment>,
 }
 impl Revocation {
@@ -60,32 +63,35 @@ impl Revocation {
     }
     /// Every key the statement revokes as a credential subject.
     pub fn subjects(&self) -> impl Iterator<Item = &PublicKey> {
-        self.users.iter()
+        self.identities.iter()
     }
     fn empty(&self) -> bool {
-        self.nodes.is_empty() && self.users.is_empty() && self.capabilities.is_empty()
+        self.nodes.is_empty() && self.identities.is_empty() && self.capabilities.is_empty()
     }
 }
 
-/// A statement signed under the publisher key and co-signed by its issuer.
+/// A statement signed by the owner, or by an issuer identity whose chain
+/// it carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedRevocation {
     pub statement: Revocation,
-    publisher: Signature,
-    issuer: Signature,
+    /// The issuer links from the publisher to the signer; empty for the owner.
+    pub chain: CredentialChain,
+    signature: Signature,
 }
+const SIGNED: &str = "rocky.revocation.v3";
 impl SignedRevocation {
     pub fn sign(
         statement: Revocation,
-        publisher: &PrivateKey,
-        issuer: &PrivateKey,
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
     ) -> Result<Self, Error> {
-        if statement.issuer != issuer.public_key() || statement.empty() {
+        if statement.issuer != signer.public_key()? || statement.empty() {
             return Err(denied("invalid revocation"));
         }
         let signed = Self {
-            publisher: publisher.sign(&signing_bytes("rocky.revocation.v3", &statement)?),
-            issuer: issuer.sign(&signing_bytes("rocky.revocation-issuer.v3", &statement)?),
+            signature: signer.sign(Purpose::Revocation, &signing_bytes(SIGNED, &statement)?)?,
+            chain: chain.clone(),
             statement,
         };
         if encode(&signed)?.len() > MAX_REVOCATION_BYTES {
@@ -93,24 +99,39 @@ impl SignedRevocation {
         }
         Ok(signed)
     }
-    /// Checks both signatures and the application. Whether the issuer is
-    /// itself revoked does not matter. Returns the statement's ID.
+    /// Checks the signature, that the owner or an issuer whose chain was
+    /// valid at the statement's time signed, and the application. The owner
+    /// identity is never revoked. Whether the issuer is revoked later does
+    /// not matter. Returns the statement's ID.
     pub fn verify(&self, publisher: PublicKey, app: AppId) -> Result<Commitment, Error> {
-        if self.statement.app != app
-            || self.statement.empty()
+        let statement = &self.statement;
+        let time = statement.time;
+        let signer = if self.chain.0.is_empty() {
+            Ok(publisher)
+        } else if self
+            .chain
+            .0
+            .iter()
+            .all(|link| link.capability.not_before <= time && time < link.capability.expires)
+        {
+            self.chain.issuer(publisher, None)
+        } else {
+            Err(denied(
+                "the issuer chain was not valid at the statement's time",
+            ))
+        };
+        if statement.app != app
+            || statement.empty()
+            || statement.identities.contains(&publisher)
             || encode(self)?.len() > MAX_REVOCATION_BYTES
-            || !publisher.verify(
-                &signing_bytes("rocky.revocation.v3", &self.statement)?,
-                &self.publisher,
-            )
-            || !self.statement.issuer.verify(
-                &signing_bytes("rocky.revocation-issuer.v3", &self.statement)?,
-                &self.issuer,
-            )
+            || signer.ok() != Some(statement.issuer)
+            || !statement
+                .issuer
+                .verify(&signing_bytes(SIGNED, statement)?, &self.signature)
         {
             return Err(denied("invalid revocation signature"));
         }
-        self.statement.id()
+        statement.id()
     }
     pub fn id(&self) -> Result<Commitment, Error> {
         self.statement.id()
@@ -278,6 +299,23 @@ impl RevocationSet {
                 .node
                 .is_some_and(|node| self.revokes_reference(&node))
             || self.capabilities.contains(&link.id()?))
+    }
+    /// The first statement that revokes the holder of `chain`: its node
+    /// certificate or the identity that signed it. A statement ending an
+    /// issuer above them ends the chain too, yet another issuer renews it.
+    pub fn revoking_holder(
+        &self,
+        chain: &CredentialChain,
+    ) -> Result<Option<&SignedRevocation>, Error> {
+        let start = chain.0.len().saturating_sub(2);
+        for signed in self.statements.values() {
+            for link in &chain.0[start..] {
+                if signed.ends(link)? {
+                    return Ok(Some(signed));
+                }
+            }
+        }
+        Ok(None)
     }
     /// The first statement that ends `chain`, if any.
     pub fn revoking(&self, chain: &CredentialChain) -> Result<Option<&SignedRevocation>, Error> {

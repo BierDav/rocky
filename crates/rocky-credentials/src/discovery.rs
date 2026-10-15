@@ -1,5 +1,5 @@
 //! Publisher-bound discovery material; delivered only after session admission.
-use crate::{Error, PrivateKey, PublicKey, Signature, denied, signing_bytes};
+use crate::{CredentialChain, Endorsement, Error, IdentityProvider, PublicKey, denied};
 use rocky_core::{Commitment, Scope};
 use serde::{Deserialize, Serialize};
 
@@ -9,35 +9,30 @@ pub struct DiscoverySecret {
     /// None identifies the domain root; Some binds a revocation statement ID.
     pub statement: Option<Commitment>,
     pub value: [u8; 32],
-    signature: Signature,
+    endorsement: Endorsement,
 }
+const SECRET: &str = "rocky.discovery-secret.v2";
 impl DiscoverySecret {
+    /// The owner, or an issuer through `chain`, signs.
     pub fn sign(
         scope: Scope,
         statement: Option<Commitment>,
         value: [u8; 32],
-        publisher: &PrivateKey,
+        (signer, chain): (&dyn IdentityProvider, &CredentialChain),
     ) -> Result<Self, Error> {
-        let signature = publisher.sign(&signing_bytes(
-            "rocky.discovery-secret.v1",
-            &(scope, statement, value),
-        )?);
         Ok(Self {
             scope,
             statement,
             value,
-            signature,
+            endorsement: Endorsement::sign(signer, chain, SECRET, &(scope, statement, value))?,
         })
     }
     pub fn verify(&self, publisher: PublicKey, scope: Scope) -> Result<(), Error> {
         if self.scope != scope
-            || !publisher.verify(
-                &signing_bytes(
-                    "rocky.discovery-secret.v1",
-                    &(self.scope, self.statement, self.value),
-                )?,
-                &self.signature,
-            )
+            || self
+                .endorsement
+                .verify(publisher, SECRET, &(self.scope, self.statement, self.value))
+                .is_err()
         {
             return Err(denied("invalid discovery secret"));
         }

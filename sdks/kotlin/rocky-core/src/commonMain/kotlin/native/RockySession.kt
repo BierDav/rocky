@@ -110,8 +110,9 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     suspend fun invitationOpen(uri: String): Boolean = client.call(request("invitation_open") { put("uri", uri) }).getValue("open").jsonPrimitive.boolean
 
     /**
-     * Starter pairing of another device of this user. By default it becomes an issuer too, with its own keys and author
-     * numbers, so losing either device locks nobody out; `issuing = false` pairs a writer of every table instead.
+     * Starter pairing of another device under its own identity. By default that identity gets issuer authority, with
+     * its own author numbers, so losing either device locks nobody out; `issuing = false` pairs a writer of every table
+     * instead. A device sharing this identity's provider joins with `RockyDatabase.enrollIdentity` instead.
      */
     suspend fun pairDevice(issuing: Boolean = true): PairingInvitation = pairing(
         if (issuing) {
@@ -219,12 +220,20 @@ open class RockySession internal constructor(private val nativeSession: NativeDa
     suspend fun network(): NetworkStatus = nativeCall { nativeSession.network() }
 
     /**
-     * Signs a revocation statement ending a device's authority and starts a new key epoch for the tables it read;
-     * remaining devices receive both when they renew. Data it already decrypted stays with it. Another issuer, such as a
-     * lost creator, is revoked the same way, but keeps the publisher key it holds: revocation recovers from loss, not theft.
+     * Signs a revocation statement ending one node's certificate and starts a new key epoch for the tables it read;
+     * remaining devices receive both when they renew. Other nodes of its identity keep working. Data it already
+     * decrypted stays with it. Another issuer's node is revoked the same way; no issuer holds the publisher key.
      */
     suspend fun revoke(node: String) {
         client.call(request("revoke") { put("node", node) })
+    }
+
+    /**
+     * Revokes an identity: every chain through it ends, so all its nodes stop at once, and so does every grant it
+     * signed as an issuer. The owner's identity is never revoked.
+     */
+    suspend fun revokeIdentity(identity: String) {
+        client.call(request("revoke") { put("identity", identity) })
     }
 
     /** Deletes this device's keys and ends its sessions; `purge` also removes its local data on close. */

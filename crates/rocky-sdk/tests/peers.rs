@@ -300,8 +300,8 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
     let hub = Arc::new(Hub::default());
     let a = Device::create(&root.path().join("a"), Some(memory(&hub, "issuer")))?;
     let invite = decode(&a.invite().await, "rocky://join/")?;
-    assert_eq!(invite["v"], 4);
-    for version in [0, 1, 2, 3, 5, u32::MAX] {
+    assert_eq!(invite["v"], 5);
+    for version in [0, 1, 2, 3, 4, 6, u32::MAX] {
         let mut other = invite.clone();
         other["v"] = json!(version);
         let directory = root.path().join(format!("join-{version}"));
@@ -336,7 +336,25 @@ async fn other_identity_and_invitation_versions_are_refused_without_writes() -> 
         Ok(snapshot)
     }
     let mut errors = Vec::new();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, u32::MAX] {
+    for version in [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        15,
+        16,
+        u32::MAX,
+    ] {
         let mut identity: Value = serde_json::from_slice(&original)?;
         identity["version"] = json!(version);
         let bytes = serde_json::to_vec(&identity)?;

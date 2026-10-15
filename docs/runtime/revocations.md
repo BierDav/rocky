@@ -10,15 +10,17 @@ is in [credentials](credentials.md#key-epochs-and-rotation).
 
 ## Statements
 
-`Revocation` names the revoked node and user keys and capability
-IDs, the issuer's node key, a time and the application it belongs to. The
-publisher key signs it and the issuer's node key co-signs it:
-`SignedRevocation::sign(statement, publisher, issuer)`, or `Authority::revoke`.
-`verify(publisher, app)` checks both signatures, the application and the size
-(2,048 bytes encoded) and returns the statement's ID, the hash of the
-statement. The co-signature attributes; it authorizes nothing. A statement
-counts also when its issuer is itself revoked: two issuers revoking each other
-are both revoked.
+`Revocation` names revoked node references, identities and capability IDs, the signing identity, a time and the application it
+belongs to. Naming an identity ends every chain through it, so every node of
+that identity and every identity it granted as an issuer; naming a node
+ends only that node's certificate. The owner, or an issuer through its
+chain, signs it: `SignedRevocation::sign(statement, identity, chain)`, or
+`Authority::revoke`. `verify(publisher, app)` checks the signature, that the
+signer is the owner or an issuer whose chain was valid at the statement's
+time, the application and the size (8 KiB encoded, the chain included), and
+returns the statement's ID, the hash of the statement. A statement naming
+the owner's identity is refused. A statement counts also when its issuer is
+revoked later: two issuers revoking each other are both revoked.
 
 ## Sets and digests
 
@@ -30,10 +32,13 @@ are both revoked.
 - `digest(time)` identifies the live statements. Devices holding the same live
   statements share it, whatever order they learned them in.
 - `live(time)` counts the live statements; `revokes(key)`, `ends(link)` and
-  `revoking(chain)` answer for one key, one credential link or one chain.
+  `revoking(chain)` answer for one key, one credential link or one chain;
+  `revoking_holder(chain)` for the node and identity that hold it, which is
+  how a device tells its own revocation from its issuer's.
 
-A chain is ended when some statement names a link's subject key or a link's
-capability ID. A statement's time never enters admission.
+A chain is ended when some statement names a link's subject key, a node
+certificate's node or a link's capability ID. A statement's time enters
+only its own verification, never admission.
 
 ## Expiry and tombstones
 
@@ -44,11 +49,11 @@ plus skew has passed: every chain it could end has expired by then. Merges
 drop it and the digest leaves it out, by the same day-rounded cutoff on every
 device.
 
-What keeps a revoked user out afterwards is the issuers' tombstone: an issuer
-records every node and user key of every statement it learns in
+What keeps a revoked identity out afterwards is the issuers' tombstone: an
+issuer records every node and identity of every statement it learns in
 `authority.tombstones` and refuses their renewal for good. An issuer cut off
 from every other issuer for longer than a chain's lifetime may never learn a
-statement and readmit its user.
+statement and readmit the identity.
 
 ## Admission
 
@@ -75,12 +80,17 @@ own chain: its owner records it instead.
 
 ## In the SDK
 
-`revoke(node)` on an issuer builds the statement and each scope's target key
-epoch from the device's [registry](issuer-registry.md) record and saves them as
-the intent, then makes the keys, signs the statement, renews its own chain,
-commits the record's tombstone and then discards the redo intent
-([key rotation](credentials.md#revocation-in-the-sdk)). It refuses with
-`revocation_set_full` at 1,024 live statements, before anything is saved.
+`revoke` with a `node` or an `identity` on an issuer builds the statement and
+each scope's target key epoch from the nodes' [registry](issuer-registry.md)
+records and saves them as the intent, then makes the keys, signs the
+statement, renews its own chain, commits the records' tombstones and then
+discards the redo intent ([key rotation](credentials.md#revocation-in-the-sdk)).
+It refuses with `revocation_set_full` at 1,024 live statements, before
+anything is saved.
+
+A device reports itself revoked only for a statement naming its node, its
+identity or their capabilities. One that ends an issuer above it ends its
+chain too, and it renews at another issuer.
 
 Renewal answers, enrollments, supplied credentials and the answer to
 `rocky.sdk.policy.v1` carry the issuer's whole set; the receiver merges it.
@@ -118,19 +128,25 @@ Revocation is an authority fact, independent of links or networking controls.
 
 | Record | Content |
 | --- | --- |
-| `Revocation` | `app`, `issuer`, `time`, `nodes`, `users`, `capabilities`; ID `rocky.revocation.id.v3` |
-| `SignedRevocation` | Publisher signature `rocky.revocation.v3`, issuer signature `rocky.revocation-issuer.v3`; at most 2,048 bytes |
+| `Revocation` | `app`, `issuer` (the signing identity), `time`, `nodes`, `identities`, `capabilities`; ID `rocky.revocation.id.v3` |
+| `SignedRevocation` | The signer's issuer `chain`, empty for the owner, and its signature `rocky.revocation.v3`; at most 8 KiB |
 | `RevocationSet` | The signed statements in ID order, canonical CBOR, at most 2 MiB; digest `rocky.revocation-set.v1` over the live IDs |
 | Live link handshake | `rocky.link.v5`; the revocation exchange of [0051](../decisions/0051-roster-free-admission.md) |
 | Checkpoint statement | Format 12, `revocations` digest of its signer |
-| Horizon statement | Format 4, `revocations` digest of its declaring issuer |
+| Horizon statement | Format 6, `revocations` digest of its declaring issuer, endorsed by the owner or an issuer |
 | Encrypted replica | `rocky.encrypted-replica.v22`; `secure_metadata.revocations` |
 
 ## Qualification
 
 - `cargo test -p rocky-credentials --lib revocation`: every interleaving of
   merges gives one digest, expired statements leave it, a bad statement
-  changes nothing, mutual revocations both count.
+  (forged, another application or domain, a member's, signed outside its
+  issuer chain's validity, naming the owner) changes nothing, mutual
+  revocations both count and end both issuers' chains.
+- `cargo test -p rocky-credentials --test identities`: revoking an identity
+  stops all three of its nodes, revoking one node certificate only that node.
+- `cargo test -p rocky-sdk --test identities`: the same through the SDK, for
+  nodes that enrolled themselves and that no issuer recorded.
 - `cargo test -p rocky-secure --lib tests::revocations tests::admission`: a
   learned revocation refuses the revoked author and admits other authors'
   earlier frames; a handshake leaves both sides with the union; a revoked

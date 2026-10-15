@@ -278,7 +278,7 @@ impl SignedCheckpoint {
         if self
             .credentials
             .0
-            .first()
+            .last()
             .is_some_and(|root| root.capability.manifest != self.statement.definition)
         {
             return Err(denied(
@@ -605,7 +605,7 @@ impl<A: RowApplication> Inner<A> {
         };
         credentials
             .0
-            .first()
+            .last()
             .map_or(self.manifest, |root| root.capability.manifest)
     }
     pub(super) fn sign_checkpoint(

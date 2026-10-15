@@ -15,7 +15,9 @@ off. The device then asks that peer for its generations on
 the renewal protocol (`rocky.sdk.generations.v1`); every device answers, since
 all of it is public. Before anything is saved it verifies the reply:
 
-- every manifest is signed by the domain's publisher;
+- every manifest is endorsed by the domain's owner or an issuer through its
+  chain, and one met for the first time by a signer no statement this device
+  holds ended: a revoked issuer moves nobody to a generation;
 - each step's schema derives that step's manifest, and the offered schema the
   offered manifest;
 - the transitions chain from step to step, through this device's generation,
@@ -90,7 +92,7 @@ under, such as one it [dropped](generations.md#manifests-are-a-cache), learns
 it on demand: when a sync, or a live link the peer opened, meets a frame or
 credentials it cannot place and the peer is not newer, the device asks that
 peer for its generations. `EncryptedReplica::learn_generations` records each
-publisher-signed manifest whose transitions, the peer's or its own, lead to a
+endorsed manifest whose transitions, the peer's or its own, lead to a
 generation it knows, then admits the frames refused under it; the SDK keeps
 the manifest in its saved lineage again.
 

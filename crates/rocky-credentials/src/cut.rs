@@ -300,10 +300,7 @@ mod tests {
             rights: rights.iter().copied().collect(),
             fields: Default::default(),
         };
-        let authority = crate::Authority {
-            publisher: &publisher,
-            manifest: [0; 32],
-        };
+        let authority = crate::Authority::owner(&publisher, [0; 32]);
         let all = [Right::Read, Right::Insert, Right::Update, Right::Delete];
         let chain = CredentialChain(vec![
             authority

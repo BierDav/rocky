@@ -1,13 +1,14 @@
 //! Portable author provenance without partition selectors or extra signing keys.
 use crate::{
-    AuthorRange, Capability, Error, PrivateKey, PublicKey, Signature, denied, signing_bytes,
+    AuthorRange, Capability, Error, IdentityProvider, PublicKey, Purpose, Signature, denied,
+    signing_bytes,
 };
 use rocky_core::{Commitment, PrincipalKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// A separately signed projection of assignment authority, revealing no tuples.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorBinding {
     version: u8,
@@ -17,10 +18,17 @@ pub struct AuthorBinding {
     kind: PrincipalKind,
     authors: Option<AuthorRange>,
     tables: BTreeSet<Commitment>,
+    /// Issuer authority: every table, whichever manifest it named.
+    issues: bool,
     signature: Signature,
 }
+const VERSION: u8 = 2;
+const LABEL: &str = "rocky.credentials.author-binding.v2";
 impl AuthorBinding {
-    pub(crate) fn sign(capability: &Capability, issuer: &PrivateKey) -> Result<Self, Error> {
+    pub(crate) fn sign(
+        capability: &Capability,
+        issuer: &dyn IdentityProvider,
+    ) -> Result<Self, Error> {
         let extended = capability.extended()?;
         let tables = capability
             .grants
@@ -29,21 +37,23 @@ impl AuthorBinding {
             .chain(extended.partitions.iter().map(|grant| grant.table))
             .collect();
         let mut binding = Self {
-            version: 2,
+            version: VERSION,
             manifest: capability.manifest,
-            issuer: issuer.public_key(),
+            issuer: issuer.public_key()?,
             subject: capability.subject,
             kind: capability.kind,
             authors: extended.authors,
             tables,
-            signature: issuer.sign(b""),
+            issues: extended.issues,
+            // Replaced below: the signature covers every other field.
+            signature: crate::PrivateKey::new().sign(b""),
         };
-        binding.signature = issuer.sign(&binding.bytes()?);
+        binding.signature = issuer.sign(Purpose::Capability, &binding.bytes()?)?;
         Ok(binding)
     }
     fn bytes(&self) -> Result<Vec<u8>, Error> {
         signing_bytes(
-            "rocky.credentials.author-binding.v2",
+            LABEL,
             &(
                 self.version,
                 self.manifest,
@@ -52,6 +62,7 @@ impl AuthorBinding {
                 self.kind,
                 self.authors,
                 &self.tables,
+                self.issues,
             ),
         )
     }
@@ -69,23 +80,32 @@ impl AuthorBinding {
         }
         let mut issuer = publisher;
         let mut range = AuthorRange::ALL;
+        // Only the publisher or an issuer hands on issuer authority.
+        let mut authority = true;
         for (index, binding) in chain.iter().enumerate() {
             let assigned = binding
                 .authors
                 .ok_or_else(|| denied("author binding lacks range"))?;
             AuthorRange::new(assigned.first, assigned.last)?;
-            if binding.version != 2
-                || binding.manifest != manifest
+            if binding.version != VERSION
+                || (binding.manifest != manifest && !binding.issues)
                 || binding.issuer != issuer
                 || !range.includes(&assigned)
-                || !binding.tables.contains(&table)
+                || !(binding.issues || binding.tables.contains(&table))
+                || (binding.issues && (binding.kind != PrincipalKind::User || !authority))
                 || !issuer.verify(&binding.bytes()?, &binding.signature)
                 || (index + 1 < chain.len() && binding.kind == PrincipalKind::Node)
             {
                 return Err(denied("invalid portable author binding"));
             }
             issuer = binding.subject;
-            range = assigned;
+            // Issuer authority hands out any range, as the publisher does.
+            range = if binding.issues {
+                AuthorRange::ALL
+            } else {
+                assigned
+            };
+            authority = binding.issues;
         }
         let leaf = &chain[chain.len() - 1];
         if leaf.kind != PrincipalKind::Node || issuer != signer || range.single() != Some(author) {

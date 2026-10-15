@@ -181,17 +181,14 @@ impl Erp {
     ) -> (PrivateKey, CredentialChain) {
         let key = PrivateKey::new();
         let assigner = PrivateKey::new();
-        let issued = crate::credentials::Authority {
-            publisher: &self.publisher,
-            manifest: self.manifest_hash(),
-        }
-        .issue_terms(
-            assigner.public_key(),
-            grants.clone(),
-            (1, Some(crate::credentials::AuthorRange::ALL)),
-            crate::tests::validity(),
-        )
-        .unwrap();
+        let issued = crate::credentials::Authority::owner(&self.publisher, self.manifest_hash())
+            .issue_terms(
+                assigner.public_key(),
+                grants.clone(),
+                (1, Some(crate::credentials::AuthorRange::ALL)),
+                crate::tests::validity(),
+            )
+            .unwrap();
         let chain = CredentialChain(vec![issued])
             .complete(&assigner, key.public_key(), number)
             .unwrap();

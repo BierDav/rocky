@@ -31,6 +31,7 @@ const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -246,10 +247,13 @@ async fn a_member_renews_at_an_issuer_it_never_met_and_removes_the_lost_one() ->
     online(&b, true).await;
     assert!(!devices(&b).await.contains_key(&m_node));
 
-    let before = m.ok(json!({"type": "session"})).await;
     m.ok(json!({"type": "renew"})).await;
     let after = m.ok(json!({"type": "session"})).await;
-    assert!(after["expires"].as_str() >= before["expires"].as_str());
+    // Renewed through B's chain, it expires no later than B does.
+    assert_eq!(
+        after["expires"],
+        b.ok(json!({"type": "session"})).await["expires"]
+    );
     let record = devices(&b).await[&m_node].clone();
     assert_eq!(record["kind"], "renewed");
     assert_eq!(
@@ -417,9 +421,13 @@ async fn concurrent_enrollments_and_renewals_at_two_issuers_converge() -> Result
     synced(&a).await?;
     let (at_a, at_b) = (devices(&a).await, devices(&b).await);
     assert_eq!(at_a[&m_node], at_b[&m_node]);
-    assert_eq!(
-        at_a[&m_node]["expires"],
-        m.ok(json!({"type": "session"})).await["expires"]
+    // The record keeps the later renewal; a chain through the second
+    // issuer expires no later than that issuer's own.
+    let expires =
+        |value: &Value| -> Result<u64, Failure> { Ok(value.as_str().ok_or("expires")?.parse()?) };
+    assert!(
+        expires(&m.ok(json!({"type": "session"})).await["expires"])?
+            <= expires(&at_a[&m_node]["expires"])?
     );
     // One visible device entry per node in either file.
     for name in ["a", "b"] {

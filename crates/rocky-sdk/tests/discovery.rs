@@ -153,6 +153,7 @@ async fn simulator_peer() -> Result<(), Failure> {
     .await?;
     let host = Device::new(Database::join(
         Open {
+            identity: None,
             directory: &root.join("host"),
             schema: &schema,
             secrets: None,

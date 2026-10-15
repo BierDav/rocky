@@ -3,7 +3,7 @@
 use super::*;
 use crate::groups::{GroupPartition, record_key, secret_role};
 use rocky_core::{PartitionTuple, TableClass};
-use rocky_credentials::{Authority, GroupSecretEnvelope, PartitionGrant};
+use rocky_credentials::{GroupSecretEnvelope, PartitionGrant};
 use std::collections::BTreeSet;
 impl Node {
     fn group_partition(&self, request: &Value) -> Result<GroupPartition, Failure> {
@@ -121,9 +121,10 @@ impl Node {
                 }
                 let authors = settings.reserve_authors(device.user, Some(&registry), None)?;
                 let terms = (delegations, Some(authors));
-                if kind == "partition_delegate" {
+                let identity = settings.identity(&self.vault)?;
+                if kind == "partition_delegate" && !settings.issuer() {
                     Ok(settings.credentials.delegable().delegate_partitions(
-                        &PrivateKey::from_bytes(&self.vault.get("user")?),
+                        &*identity,
                         device.user,
                         rocky_core::PrincipalKind::User,
                         vec![],
@@ -132,20 +133,16 @@ impl Node {
                         validity,
                     )?)
                 } else {
-                    let issuer = PrivateKey::from_bytes(&self.vault.get("publisher")?);
-                    Ok(CredentialChain(vec![
-                        Authority {
-                            publisher: &issuer,
-                            manifest: self.domain().manifest().hash(),
-                        }
-                        .issue_partition_terms(
-                            device.user,
-                            vec![],
-                            grants.clone(),
-                            terms,
-                            validity,
-                        )?,
-                    ]))
+                    // An issuer grants and delegates through its authority.
+                    let links = settings.issuer_links();
+                    let authority = settings.authority(&*identity, &links, &self.domain())?;
+                    Ok(authority.chain_of(authority.issue_partition_terms(
+                        device.user,
+                        vec![],
+                        grants.clone(),
+                        terms,
+                        validity,
+                    )?))
                 }
             })
             .await?;
@@ -377,12 +374,9 @@ impl Node {
             .get(&secret_role(&record.address, epoch))
             .cloned()
             .unwrap_or_default();
-        let sender = (!settings.issuer()).then(|| settings.credentials.clone());
-        let signer = PrivateKey::from_bytes(&self.vault.get(if settings.issuer() {
-            "publisher"
-        } else {
-            "node"
-        })?);
+        // Every sharer, an issuer too, signs with its node key under its chain.
+        let sender = Some(settings.credentials.clone());
+        let signer = PrivateKey::from_bytes(&self.vault.get("node")?);
         let secret = self.vault.get(&secret_role(&record.address, epoch))?;
         let mut draft = settings.clone();
         let mut envelopes = Vec::new();
@@ -415,6 +409,7 @@ impl Node {
             "epoch": epoch,
             "recipients": recipients.iter().map(PublicKey::to_hex).collect::<Vec<_>>(),
             "envelopes": envelopes,
+            "sender": sender,
         }))
     }
     async fn group_status(&self, partition: GroupPartition) -> Result<Value, Failure> {
@@ -556,9 +551,12 @@ impl Node {
             "partition_install" => {
                 let bytes: Vec<u8> = serde_json::from_value(request["envelope"].clone())?;
                 let envelope = GroupSecretEnvelope::from_bytes(&bytes)?;
+                // The sharer's chain proves it reads the whole group.
+                let sender: CredentialChain = serde_json::from_value(request["sender"].clone())
+                    .map_err(|_| refused("an envelope installs with its sender's chain"))?;
                 let address = record_key(&partition.record.address);
                 let epoch = envelope.epoch();
-                self.install_envelope(partition, &envelope, None, false)
+                self.install_envelope(partition, &envelope, Some(&sender), false)
                     .await?;
                 json!({"address": address, "epoch": epoch})
             }

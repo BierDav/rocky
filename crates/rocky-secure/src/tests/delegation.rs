@@ -28,6 +28,7 @@ fn delegated(
             partitions: Vec::new(),
             authors: Some(rocky_credentials::AuthorRange::new(10, 20).unwrap()),
             node: None,
+            issues: false,
         })
         .unwrap(),
     };
@@ -86,6 +87,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 partitions: Vec::new(),
                 authors: Some(rocky_credentials::AuthorRange::new(10, 21).unwrap()),
                 node: None,
+                issues: false,
             })
             .unwrap()
         },

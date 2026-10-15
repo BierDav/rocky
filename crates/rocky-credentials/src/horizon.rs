@@ -1,11 +1,12 @@
 //! Issuer-declared mergeable cuts; `docs/runtime/mergeable-horizon.md`.
 use crate::{
-    Error, PrivateKey, PublicKey, Signature, decode_bounded, denied, encode, signing_bytes,
+    CredentialChain, Endorsement, Error, IdentityProvider, PrivateKey, PublicKey, Signature,
+    decode_bounded, denied, encode, signing_bytes,
 };
 use rocky_core::{Commitment, ResourceScope};
 use serde::{Deserialize, Serialize};
 
-pub const HORIZON_FORMAT: u32 = 5;
+pub const HORIZON_FORMAT: u32 = 6;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,30 +126,38 @@ impl HorizonStatement {
         Ok(())
     }
 }
+/// A horizon statement the owner or an issuer endorsed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedHorizon {
     pub statement: HorizonStatement,
-    signature: Signature,
+    endorsement: Endorsement,
 }
+const STATEMENT: &str = "rocky.horizon-statement.v2";
 impl SignedHorizon {
-    pub fn sign(statement: HorizonStatement, issuer: &PrivateKey) -> Result<Self, Error> {
+    /// The owner signs.
+    pub fn sign(statement: HorizonStatement, owner: &dyn IdentityProvider) -> Result<Self, Error> {
+        Self::endorse(statement, owner, &CredentialChain::default())
+    }
+    /// The owner, or an issuer through `chain`, signs.
+    pub fn endorse(
+        statement: HorizonStatement,
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
+    ) -> Result<Self, Error> {
         statement.validate()?;
-        let signature = issuer.sign(&signing_bytes("rocky.horizon-statement.v1", &statement)?);
         let signed = Self {
+            endorsement: Endorsement::sign(signer, chain, STATEMENT, &statement)?,
             statement,
-            signature,
         };
         signed.to_bytes()?;
         Ok(signed)
     }
-    pub fn verify(&self, issuer: PublicKey) -> Result<(), Error> {
+    /// Checks that the owner or an issuer of `publisher` signed it.
+    pub fn verify(&self, publisher: PublicKey) -> Result<(), Error> {
         self.statement.validate()?;
-        if !issuer.verify(
-            &signing_bytes("rocky.horizon-statement.v1", &self.statement)?,
-            &self.signature,
-        ) {
-            return Err(denied("invalid horizon issuer signature"));
-        }
+        self.endorsement
+            .verify(publisher, STATEMENT, &self.statement)
+            .map_err(|_| denied("invalid horizon issuer signature"))?;
         Ok(())
     }
     pub fn id(&self) -> Result<Commitment, Error> {
@@ -272,7 +281,7 @@ mod tests {
         let current = SignedHorizon::from_bytes(&signed.to_bytes().unwrap()).unwrap();
         current.verify(issuer.public_key()).unwrap();
         assert_eq!(current.statement, statement);
-        for format in [0, 2, 3, 4, 6, u32::MAX] {
+        for format in [0, 2, 3, 4, 5, 7, u32::MAX] {
             let mut other = signed.clone();
             other.statement.format = format;
             assert_eq!(

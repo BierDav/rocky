@@ -10,6 +10,7 @@ mod engine;
 mod enrollment;
 mod generation;
 mod groups;
+mod identities;
 mod mesh;
 mod node;
 mod owner;
@@ -18,6 +19,7 @@ mod rollout;
 mod scheduling;
 mod schema;
 mod secrets;
+mod self_enrollment;
 mod service;
 mod status;
 mod sync;
@@ -38,6 +40,8 @@ pub use rocky_coordinator::{certified::TrustBundle, service::NetworkCoordinator}
 pub use rocky_core::{NodeId, PrincipalId, Scope, SqlValue};
 /// Signed credentials, grant profiles and the key provider contract.
 pub use rocky_credentials as credentials;
+/// The identity port an application supplies, and a file-backed provider.
+pub use rocky_credentials::{FileIdentityProvider, IdentityProvider, Purpose};
 pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};

@@ -1,16 +1,29 @@
 use super::*;
+use crate::{Authority, PrivateKey};
 use rocky_core::AppId;
 
 const APP: AppId = AppId([7; 16]);
 const NOW: u64 = 2_000_000_000;
 
+/// An issuer identity of `publisher`: its key and issuer chain, valid for
+/// the statement times these tests use.
+fn issuer(publisher: &PrivateKey) -> (PrivateKey, CredentialChain) {
+    let key = PrivateKey::new();
+    let link = Authority::owner(publisher, [0; 32])
+        .issue_issuer(key.public_key(), None, (NOW - 5 * DAY, 300 * DAY, DAY))
+        .unwrap();
+    (key, CredentialChain(vec![link]))
+}
+fn signed(statement: Revocation, (key, chain): &(PrivateKey, CredentialChain)) -> SignedRevocation {
+    SignedRevocation::sign(statement, key, chain).unwrap()
+}
 fn statement(issuer: &PrivateKey, time: u64, node: PublicKey) -> Revocation {
     Revocation {
         app: APP,
         issuer: issuer.public_key(),
         time,
         nodes: [crate::PeerId::of(node)].into(),
-        users: [PrivateKey::new().public_key()].into(),
+        identities: [PrivateKey::new().public_key()].into(),
         capabilities: [[time as u8; 32]].into(),
     }
 }
@@ -21,20 +34,18 @@ fn single(signed: &SignedRevocation) -> RevocationSet {
 #[test]
 fn every_interleaving_of_merges_yields_one_digest() {
     let publisher = PrivateKey::new();
-    let issuers = [PrivateKey::new(), PrivateKey::new()];
+    let issuers = [issuer(&publisher), issuer(&publisher)];
     let statements: Vec<SignedRevocation> = (0..5)
         .map(|index| {
             let issuer = &issuers[index % 2];
-            SignedRevocation::sign(
+            signed(
                 statement(
-                    issuer,
+                    &issuer.0,
                     NOW - index as u64 * DAY,
                     PrivateKey::new().public_key(),
                 ),
-                &publisher,
                 issuer,
             )
-            .unwrap()
         })
         .collect();
     let mut digests = BTreeSet::new();
@@ -89,13 +100,13 @@ fn every_interleaving_of_merges_yields_one_digest() {
 
 #[test]
 fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
+    // The owner signs: its statements need no chain valid at their time.
     let publisher = PrivateKey::new();
-    let issuer = PrivateKey::new();
     let sign = |time| {
         SignedRevocation::sign(
-            statement(&issuer, time, PrivateKey::new().public_key()),
+            statement(&publisher, time, PrivateKey::new().public_key()),
             &publisher,
-            &issuer,
+            &CredentialChain::default(),
         )
         .unwrap()
     };
@@ -136,50 +147,80 @@ fn statements_past_the_cutoff_leave_the_digest_and_the_set() {
 #[test]
 fn a_bad_statement_is_refused_and_changes_nothing() {
     let publisher = PrivateKey::new();
-    let issuer = PrivateKey::new();
+    let issuing = issuer(&publisher);
+    let issuer = &issuing.0;
     let node = PrivateKey::new().public_key();
-    let good = SignedRevocation::sign(statement(&issuer, NOW, node), &publisher, &issuer).unwrap();
+    let good = signed(statement(issuer, NOW, node), &issuing);
     let mut set = single(&good);
     let before = set.clone();
-    let mut forged = SignedRevocation::sign(
-        statement(&issuer, NOW, PrivateKey::new().public_key()),
-        &publisher,
-        &issuer,
-    )
-    .unwrap();
+    let mut forged = signed(
+        statement(issuer, NOW, PrivateKey::new().public_key()),
+        &issuing,
+    );
     forged
         .statement
         .nodes
         .insert(crate::PeerId::of(PrivateKey::new().public_key()));
-    let other_app = SignedRevocation::sign(
+    let other_app = signed(
         Revocation {
             app: AppId([8; 16]),
-            ..statement(&issuer, NOW, PrivateKey::new().public_key())
+            ..statement(issuer, NOW, PrivateKey::new().public_key())
         },
-        &publisher,
-        &issuer,
-    )
-    .unwrap();
-    let other_publisher = SignedRevocation::sign(
-        statement(&issuer, NOW, PrivateKey::new().public_key()),
-        &PrivateKey::new(),
-        &issuer,
-    )
-    .unwrap();
-    let mut wrong_issuer = SignedRevocation::sign(
-        statement(&issuer, NOW, PrivateKey::new().public_key()),
-        &publisher,
-        &issuer,
-    )
-    .unwrap();
-    wrong_issuer.issuer = PrivateKey::new().sign(b"other");
-    let fresh = SignedRevocation::sign(
-        statement(&issuer, NOW, PrivateKey::new().public_key()),
-        &publisher,
-        &issuer,
-    )
-    .unwrap();
-    for bad in [forged, other_app, other_publisher, wrong_issuer] {
+        &issuing,
+    );
+    // Another domain's issuer, a member identity that holds no issuer
+    // authority and an issuer chain not valid at the statement's time.
+    let other_publisher = signed(
+        statement(issuer, NOW, PrivateKey::new().public_key()),
+        &(issuer.clone(), self::issuer(&PrivateKey::new()).1),
+    );
+    let member = {
+        let key = PrivateKey::new();
+        let link = Authority::owner(&publisher, [0; 32])
+            .issue_terms(
+                key.public_key(),
+                vec![rocky_core::ResourceGrant {
+                    scope: rocky_core::ResourceScope {
+                        domain: rocky_core::Scope {
+                            mesh: rocky_core::MeshId([0; 16]),
+                            app: APP,
+                            domain: rocky_core::DomainId([0; 16]),
+                        },
+                        table: [1; 32],
+                        encryption: [2; 32],
+                    },
+                    rows: rocky_core::RowSelection::All,
+                    rights: [rocky_core::Right::Read].into(),
+                    fields: BTreeSet::new(),
+                }],
+                (2, None),
+                (NOW, DAY, 0),
+            )
+            .unwrap();
+        signed(
+            statement(&key, NOW, PrivateKey::new().public_key()),
+            &(key, CredentialChain(vec![link])),
+        )
+    };
+    let expired = signed(
+        statement(issuer, NOW + 400 * DAY, PrivateKey::new().public_key()),
+        &issuing,
+    );
+    let mut owner_revoked = statement(issuer, NOW, node);
+    owner_revoked.identities.insert(publisher.public_key());
+    let owner_revoked = signed(owner_revoked, &issuing);
+    let fresh = signed(
+        statement(issuer, NOW, PrivateKey::new().public_key()),
+        &issuing,
+    );
+    for bad in [
+        forged,
+        other_app,
+        other_publisher,
+        member,
+        expired,
+        owner_revoked,
+    ] {
         // The good statement beside it is not learned either.
         let incoming = RevocationSet::try_from(vec![fresh.clone(), bad]).unwrap();
         assert!(
@@ -189,18 +230,18 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
         assert_eq!(set, before);
     }
     // Over the size limit: refused when signed and when decoded.
-    let mut huge = statement(&issuer, NOW, node);
-    huge.users = (0..160).map(|_| PrivateKey::new().public_key()).collect();
-    assert!(SignedRevocation::sign(huge, &publisher, &issuer).is_err());
-    // An issuer can only co-sign with its own key, and a statement names something.
-    assert!(SignedRevocation::sign(statement(&issuer, NOW, node), &publisher, &publisher).is_err());
+    let mut huge = statement(issuer, NOW, node);
+    huge.identities = (0..300).map(|_| PrivateKey::new().public_key()).collect();
+    assert!(SignedRevocation::sign(huge, issuer, &issuing.1).is_err());
+    // An identity signs only statements naming it, which name something.
+    assert!(SignedRevocation::sign(statement(issuer, NOW, node), &publisher, &issuing.1).is_err());
     let empty = Revocation {
         nodes: BTreeSet::new(),
-        users: BTreeSet::new(),
+        identities: BTreeSet::new(),
         capabilities: BTreeSet::new(),
-        ..statement(&issuer, NOW, node)
+        ..statement(issuer, NOW, node)
     };
-    assert!(SignedRevocation::sign(empty, &publisher, &issuer).is_err());
+    assert!(SignedRevocation::sign(empty, issuer, &issuing.1).is_err());
     // The encoding is canonical: a set in another order is refused.
     let pair = RevocationSet::try_from(vec![good.clone(), fresh.clone()]).unwrap();
     let mut reversed: Vec<SignedRevocation> = pair.clone().into();
@@ -215,22 +256,36 @@ fn a_bad_statement_is_refused_and_changes_nothing() {
 #[test]
 fn a_revoked_issuers_statement_counts_and_two_issuers_revoke_each_other() {
     let publisher = PrivateKey::new();
-    let (a, b) = (PrivateKey::new(), PrivateKey::new());
-    let revoke = |by: &PrivateKey, target: &PrivateKey| {
-        SignedRevocation::sign(statement(by, NOW, target.public_key()), &publisher, by).unwrap()
+    let (a, b) = (issuer(&publisher), issuer(&publisher));
+    let revoke = |by: &(PrivateKey, CredentialChain), target: &PrivateKey| {
+        let mut body = statement(&by.0, NOW, PrivateKey::new().public_key());
+        body.identities = [target.public_key()].into();
+        signed(body, by)
     };
-    let mut set = single(&revoke(&a, &b));
-    set.merge(&single(&revoke(&b, &a)), publisher.public_key(), APP, NOW)
+    let mut set = single(&revoke(&a, &b.0));
+    set.merge(&single(&revoke(&b, &a.0)), publisher.public_key(), APP, NOW)
         .unwrap();
-    assert!(set.revokes(&a.public_key()) && set.revokes(&b.public_key()));
+    assert!(set.revokes(&a.0.public_key()) && set.revokes(&b.0.public_key()));
     assert_eq!(set.len(), 2);
+    // Each issuer's chain is ended: neither signs a current statement.
+    assert!(
+        a.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_err()
+    );
+    assert!(
+        b.1.issuer(publisher.public_key(), Some((&set, NOW)))
+            .is_err()
+    );
 }
 
 #[test]
 fn signing_adds_a_bounded_overhead() {
-    let (publisher, issuer) = (PrivateKey::new(), PrivateKey::new());
-    let body = statement(&issuer, NOW, PrivateKey::new().public_key());
-    let signed = SignedRevocation::sign(body.clone(), &publisher, &issuer).unwrap();
-    let overhead = encode(&signed).unwrap().len() - encode(&body).unwrap().len();
+    let publisher = PrivateKey::new();
+    let issuing = issuer(&publisher);
+    let body = statement(&issuing.0, NOW, PrivateKey::new().public_key());
+    let signed = signed(body.clone(), &issuing);
+    let overhead = encode(&signed).unwrap().len()
+        - encode(&body).unwrap().len()
+        - encode(&issuing.1).unwrap().len();
     assert!(overhead <= SIGNATURE_OVERHEAD, "{overhead}");
 }

@@ -60,23 +60,24 @@ impl Discovery {
         Ok(())
     }
 }
-pub(crate) fn create_root(
-    vault: &Vault,
-    publisher: &PrivateKey,
-    scope: Scope,
-) -> Result<(), Failure> {
+/// The owner, or an issuer through its chain, signs discovery values.
+pub(crate) type Signer<'a> = (
+    &'a dyn rocky_credentials::IdentityProvider,
+    &'a rocky_credentials::CredentialChain,
+);
+pub(crate) fn create_root(vault: &Vault, signer: Signer<'_>, scope: Scope) -> Result<(), Failure> {
     let mut state = Discovery::load(vault)?;
     state.root = Some(DiscoverySecret::sign(
         scope,
         None,
         crate::enrollment::random(),
-        publisher,
+        signer,
     )?);
     state.save(vault)
 }
 pub(crate) fn mint_value(
     vault: &Vault,
-    publisher: PublicKey,
+    signer: Signer<'_>,
     scope: Scope,
     set: &rocky_credentials::RevocationSet,
     statement: &Revocation,
@@ -92,15 +93,11 @@ pub(crate) fn mint_value(
                 .is_some_and(|signed| signed.statement.live(time))
     });
     if let std::collections::btree_map::Entry::Vacant(entry) = state.values.entry(id) {
-        let key = PrivateKey::from_bytes(&vault.get("publisher")?);
-        if key.public_key() != publisher {
-            return Err("discovery publisher mismatch".into());
-        }
         entry.insert(DiscoverySecret::sign(
             scope,
             Some(statement.id()?),
             crate::enrollment::random(),
-            &key,
+            signer,
         )?);
         state.save(vault)?;
     }
@@ -477,26 +474,24 @@ mod tests {
             &Schema::parse(SCHEMA)?,
             &store,
             crate::enrollment::DEFAULT_TTL,
+            None,
         )?;
         let av = a.vault(&store);
-        let publisher = PrivateKey::from_bytes(&av.get("publisher")?);
+        let publisher = PrivateKey::from_bytes(&av.get("identity")?);
+        let owner = rocky_credentials::CredentialChain::default();
         let old = a.discovery_topics(&av, now()?)?.0;
         let statement = Revocation {
             app: a.domain()?.manifest().app,
-            issuer: PrivateKey::from_bytes(&av.get("node")?).public_key(),
+            issuer: publisher.public_key(),
             time: now()?,
             nodes: [rocky_credentials::PeerId::of(
                 PrivateKey::new().public_key(),
             )]
             .into(),
-            users: BTreeSet::new(),
+            identities: BTreeSet::new(),
             capabilities: BTreeSet::new(),
         };
-        let signed = SignedRevocation::sign(
-            statement.clone(),
-            &publisher,
-            &PrivateKey::from_bytes(&av.get("node")?),
-        )?;
+        let signed = SignedRevocation::sign(statement.clone(), &publisher, &owner)?;
         a.revocations.merge(
             &rocky_credentials::RevocationSet::try_from(vec![signed])?,
             a.publisher,
@@ -505,7 +500,7 @@ mod tests {
         )?;
         mint_value(
             &av,
-            a.publisher,
+            (&publisher, &owner),
             a.domain()?.scope,
             &a.revocations,
             &statement,
@@ -541,6 +536,7 @@ mod tests {
             &Schema::parse(SCHEMA)?,
             &store,
             crate::enrollment::DEFAULT_TTL,
+            None,
         )?;
         let vault = settings.vault(&store);
         let configured = PrivateKey::new().public_key();

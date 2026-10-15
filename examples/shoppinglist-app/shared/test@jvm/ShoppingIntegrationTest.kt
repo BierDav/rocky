@@ -442,7 +442,9 @@ class ShoppingIntegrationTest {
         var c: RockyDatabase? = null
         try {
             assertFalse(File(root, "a/secrets").exists())
-            assertTrue(keys.keys.any { it.endsWith(".publisher") })
+            // The owner's identity, whose key is the publisher key, stays in the supplied store.
+            assertTrue(keys.keys.any { it.endsWith(".identity") })
+            assertFalse(keys.keys.any { it.endsWith(".publisher") })
             val invitation = a.pairing(writer)
             b = RockyDatabase.join(File(root, "b"), ItemsSchema, invitation.uri, local(), automaticSync = false)
             assertTrue(File(root, "b/secrets").isDirectory)

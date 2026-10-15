@@ -1,5 +1,5 @@
 //! Partition grants; no runtime or storage. Keys travel as group envelopes.
-use crate::{Error, PrivateKey, PublicKey, denied};
+use crate::{Error, PublicKey, denied};
 use rocky_core::{
     Commitment, PartitionSelector, PartitionTuple, ResourceGrant, ResourceScope, Right,
     RowSelection, Scope,
@@ -135,7 +135,7 @@ impl crate::CredentialChain {
     #[allow(clippy::too_many_arguments)]
     pub fn delegate_partitions(
         &self,
-        holder: &PrivateKey,
+        holder: &dyn crate::IdentityProvider,
         subject: PublicKey,
         kind: rocky_core::PrincipalKind,
         grants: Vec<ResourceGrant>,
@@ -169,7 +169,7 @@ impl crate::CredentialChain {
     #[allow(clippy::too_many_arguments)]
     fn append_partition_link(
         &self,
-        holder: &PrivateKey,
+        holder: &dyn crate::IdentityProvider,
         subject: PublicKey,
         kind: rocky_core::PrincipalKind,
         grants: Vec<ResourceGrant>,
@@ -179,8 +179,11 @@ impl crate::CredentialChain {
     ) -> Result<Self, Error> {
         let root = self.0.first().ok_or_else(|| denied("credential depth"))?;
         let parent = self.links(root.issuer, root.capability.manifest, None)?;
-        if parent.subject != holder.public_key() {
+        if parent.subject != holder.public_key()? {
             return Err(denied("partition delegator holds another key"));
+        }
+        if parent.extended()?.issues {
+            return Err(denied("an issuer grants through its authority"));
         }
         let mut chain = self.clone();
         chain.0.push(crate::SignedCapability::sign(
@@ -236,27 +239,20 @@ impl crate::Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         partitions: Vec<PartitionGrant>,
-        terms: (u8, Option<crate::AuthorRange>),
+        (delegations, authors): (u8, Option<crate::AuthorRange>),
         validity: (u64, u64, u64),
     ) -> Result<crate::SignedCapability, Error> {
-        if partitions.is_empty() {
-            return self.issue_terms(subject, grants, terms, validity);
-        }
-        let mut capability = self
-            .issue_terms(subject, grants, terms, validity)?
-            .capability;
-        capability.extension = crate::Extension::new(crate::Extended {
-            authors: terms.1,
-            partitions,
-            ..crate::Extended::default()
-        })?;
-        let signed = crate::SignedCapability::sign(capability, self.publisher)?;
-        crate::CredentialChain(vec![signed.clone()]).links(
-            self.publisher.public_key(),
-            self.manifest,
-            None,
-        )?;
-        Ok(signed)
+        self.sign_link(
+            subject,
+            grants,
+            crate::Extended {
+                authors,
+                partitions,
+                ..crate::Extended::default()
+            },
+            delegations,
+            validity,
+        )
     }
 }
 

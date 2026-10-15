@@ -30,6 +30,7 @@ const SHOPPING: &str = r#"{"format":6,"application":"shopping","version":3,"tabl
 
 fn open<'a>(directory: &'a Path, network: Option<Network>) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: SHOPPING,
         secrets: Some(support::secrets::keys(directory)),
@@ -995,6 +996,7 @@ async fn room_reads_each_reference_action_when_references_share_a_partition_colu
     let root = tempfile::tempdir()?;
     let database = Database::create(
         Open {
+            identity: None,
             directory: root.path(),
             schema: GROUPED,
             secrets: None,
@@ -1057,6 +1059,7 @@ async fn a_member_installs_only_its_readable_tables_even_after_reopen() -> Resul
     let a_path = root.path().join("a");
     let b_path = root.path().join("b");
     let setup = |directory, name| Open {
+        identity: None,
         directory,
         schema: &schema,
         secrets: None,

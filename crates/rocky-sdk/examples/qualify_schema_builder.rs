@@ -91,6 +91,7 @@ async fn main() -> Result<(), Failure> {
         let handwritten = fs::read_to_string(directory.join(format!("{hand}-wire.json")))?;
         let imported = fs::read_to_string(directory.join(format!("{imported}-wire.json")))?;
         let options = |schema| Open {
+            identity: None,
             directory: &path,
             schema,
             secrets: None,

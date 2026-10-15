@@ -94,9 +94,10 @@ removed name back. An application older than its database keeps working on
 what is unchanged; its statements on what was removed fail with ordinary
 SQLite errors, under Room too ([Room integration](room-integration.md#older-applications-after-removal)).
 
-The first reader key of a table a generation adds derives from the publisher
-key, `rocky.sdk.generation-reader.v1`, the domain and the table name, so
-issuers that sign the same schema apart hold the same key.
+The first reader key of a table a generation adds derives from the
+registry's current key, `rocky.sdk.generation-reader.v1`, the domain and the
+table name, so issuers that sign the same schema apart hold the same key. A
+revoked issuer, which receives no later registry key, cannot derive it.
 
 ## Limits
 

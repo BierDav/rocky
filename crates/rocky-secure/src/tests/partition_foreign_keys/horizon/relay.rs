@@ -256,18 +256,17 @@ async fn revocation_during_a_pending_cut_removes_the_required_participant() {
         a.horizon_progress(scope).await.unwrap().waiting,
         vec![rocky_credentials::PeerId::of(node)]
     );
-    let issuer = PrivateKey::new();
     let signed = SignedRevocation::sign(
         Revocation {
             app: f.domain.app,
-            issuer: issuer.public_key(),
+            issuer: f.publisher.public_key(),
             time: now().unwrap(),
             nodes: [rocky_credentials::PeerId::of(node)].into(),
-            users: Default::default(),
+            identities: Default::default(),
             capabilities: Default::default(),
         },
         &f.publisher,
-        &issuer,
+        &rocky_credentials::CredentialChain::default(),
     )
     .unwrap();
     let set: RevocationSet = vec![signed].try_into().unwrap();
@@ -353,19 +352,18 @@ async fn a_verified_pending_policy_survives_revocation_set_expiry() {
     let root = tempfile::tempdir().unwrap();
     let f = Fixture::new();
     let a = reader(&f, root.path(), "a").await;
-    let issuer = PrivateKey::new();
     let revoked = PrivateKey::new().public_key();
     let signed = SignedRevocation::sign(
         Revocation {
             app: f.domain.app,
-            issuer: issuer.public_key(),
+            issuer: f.publisher.public_key(),
             time: now().unwrap(),
             nodes: [rocky_credentials::PeerId::of(revoked)].into(),
-            users: Default::default(),
+            identities: Default::default(),
             capabilities: Default::default(),
         },
         &f.publisher,
-        &issuer,
+        &rocky_credentials::CredentialChain::default(),
     )
     .unwrap();
     let set: RevocationSet = vec![signed].try_into().unwrap();

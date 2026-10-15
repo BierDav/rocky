@@ -58,7 +58,7 @@ invitation. Any issuer renews a granted device with the same grants.
 ## Delegation
 
 A device whose capability allows a further link delegates a narrowed
-capability to another device's user key, signed with its own user key. The
+capability to another identity, signed with its own identity. The
 issuer allows this with `delegations` above 1 when granting: 1 reaches only
 the device's own node key, 2 one delegate and its node, and so on, up to the
 chain depth of 8.
@@ -81,8 +81,9 @@ verifier refuses one that a holder signed anyway: opening a replica, renewing
 credentials, receiving a frame, serving a sync page, an acknowledgment, a
 remote read, a command or a recovery transfer all run the same chain check.
 
-An issuer renews only chains it issued directly, so a delegated chain is
-renewed by its delegator delegating again; the delegate calls `install`. A
+An issuer renews only identities the owner or an issuer granted, so a
+delegated chain is renewed by its delegator delegating again; the delegate
+calls `install`. A
 [revocation](revocations.md) naming the delegator's key or capability ends
 the chains delegated from it. The delegate's sync peers are configured with contacts, as for any member.
 
@@ -96,7 +97,7 @@ matters. A device granted `Execute` therefore executes once registered:
   `command_identity` as an executor.
 - With a [coordination service](public-coordination.md#register-a-domain),
   any device holding `Execute` calls `command_service_register` with the
-  tenant key and a coordination `grant` an issuer signed once with
+  tenant key and a coordination `grant` the owner signed once with
   `command_coordination_grant`. A device without `Execute`, a missing grant
   or one for another tenant is refused. Later control revisions need only
   the tenant key.
@@ -117,7 +118,13 @@ tuple. Every node leaf attenuates its principal's range; a leaf with no number,
 several numbers or an out-of-range number is refused. A replica durably binds a
 node to its first verified number and refuses a different number across tables,
 renewal and reopen. A principal's certificate allocator must give distinct
-numbers to its nodes and retain allocations after revocation or loss.
+numbers to its nodes and retain allocations after revocation or loss. In the
+SDK that principal is an [identity](credentials.md#identities): a stored
+identity's one node takes its range's first number; nodes of a supplied
+identity take numbers its `IdentityProvider` reserves from the bottom of the
+range, at most 256 and half of it, and the node hands out only numbers above
+them. Issuer authority may grant any range: ranges between issuers are an
+allocation discipline, and verifiers enforce them below an issuer.
 
 The SDK creator uses author 1 and starts allocating at 2. Ordinary enrollment
 and grants reserve up to 1,024 available numbers by default; `authors` supplies an explicit count.
@@ -139,7 +146,9 @@ are refused.
 | `version` | 4 |
 | `authors` | `{first, last}` within `1..=2³¹−1`; one number on a node leaf |
 | `node` | Node reference bound to the leaf subject; absent on principal links |
+| `issues` | Issuer authority of an identity's link; see [identities](credentials.md#identities) |
 | `partitions` | [Selector grants](partition-credentials.md#issuance-and-verification) |
+| `issues` | Issuer authority of an identity's link; see [identities](credentials.md#identities) |
 
 There are no table signing keys, assignment messages or sealed device bindings.
 Portable `AuthorBinding` provenance is version 2 and terminates at the node key.

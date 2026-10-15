@@ -27,7 +27,7 @@ writable counts exclude it.
 ## A record
 
 A device's record is every row whose `node` is its hexadecimal node key: its
-`device` entry (user key, how it was recorded, profile, enrolling issuer,
+`device` entry (its identity as `user`, how it was recorded, profile, enrolling issuer,
 command identity, enrollment time), a `revoked` tombstone, its capabilities
 with expiry and principal author range, its partition grants with delegation
 depth and an opaque label of at most 256 bytes. Each entry is its own row,
@@ -43,7 +43,7 @@ grant lists merge by union.
 | Renewal | Nothing | `device` when absent, capability | Renewal |
 | `grant`, `delegate` on an issuer | Carved author range | `device`, capability | `supplied` |
 | `partition_grant`, `partition_delegate` on an issuer | Nothing | `device` when absent, partition grants | `supplied` |
-| `revoke` | Intent with the statement and target epochs, then keys, the signed statement and tombstones | Tombstone | Statement ID and revocations |
+| `revoke` | Intent with the statement and target epochs, then keys, the signed statement and tombstones | Tombstone of each named node | Statement ID and revocations |
 
 Each commit also brings the issuer's own record up to date and writes a missing
 tombstone for any device a held statement or tombstone revoked. The issuer's
@@ -58,17 +58,19 @@ the range granted to the principal. No table-key mapping is recorded.
   ([roster-free admission](../decisions/0051-roster-free-admission.md)).
 - `peer_add` on an issuer refuses a tombstoned contact; any device refuses a
   contact a held [revocation](revocations.md) names.
-- Renewal refuses a node or user a held statement, a tombstone or the record
-  revoked and renews
+- Renewal refuses a node or identity a held statement, a tombstone or the
+  record revoked and renews
   an earlier generation into the record's profile. Without a record it renews
   the presented chain and writes one.
 - `logout` counts recorded issuers besides `issuers`.
-- `revoke(node)` builds its [statement](revocations.md) and target key epochs
-  from the record and saves them as its intent. It rotates the
-  collections the record's profile reads and the group partitions it reads or
-  holds grants for, revokes its user and capability, and rotates
-  every held collection key and every known partition secret held here when
-  there is no record. A device recorded only by partition grants selects
+- `revoke` builds its [statement](revocations.md) and target key epochs
+  from the records and saves them as its intent: with `node` that node's
+  record, naming its node; with `identity` every record of the identity,
+  naming it, their nodes and capabilities. It
+  rotates the collections the records' profiles read and the group partitions
+  they read or hold grants for, and every held collection key and every
+  known partition secret held here when there is no record, as for a node
+  that enrolled itself. A device recorded only by partition grants selects
   only those grants. It needs no previous contact with this issuer.
   The tombstone transaction completes revocation; the JSON redo intent is
   discarded only afterwards, and interrupted completion resumes on open.
@@ -90,6 +92,7 @@ issuer.
   The 257th pairing, grant, renewal or partition grant fails with
   `registry_full` and writes nothing; an invitation is not created then.
 - Two issuers recording one device at once keep one `device` entry; both name
-  the same user and node.
+  the same identity and node. Nodes of one identity are separate records;
+  one that enrolled itself has none until it renews at an issuer.
 - Non-issuer delegations remain unrecorded; revocation of an unknown delegate
   uses the broad key-rotation fallback described in [revocations](revocations.md).

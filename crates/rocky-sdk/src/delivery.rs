@@ -217,14 +217,15 @@ impl Settings {
             .iter()
             .filter(|(node, _)| {
                 **node != own
-                    && Some(**node) != rotation.node
+                    && !rotation.nodes.contains(node)
                     && !self.revoked_device(node, registry)
             })
             .collect();
         if rotation.groups.is_empty() || candidates.is_empty() {
             return Ok(());
         }
-        let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+        // The issuer's node signs under its chain, which recipients verify.
+        let signer = PrivateKey::from_bytes(&vault.get("node")?);
         let mut pending = Vec::new();
         for (address, generation) in &rotation.groups {
             let Some(record) = self.groups.get(address).cloned() else {
@@ -243,7 +244,7 @@ impl Settings {
                     continue;
                 }
                 let envelope = GroupSecretEnvelope::seal_recorded(
-                    &publisher,
+                    &signer,
                     domain.manifest().hash(),
                     record.address,
                     epoch.generation,
@@ -256,7 +257,7 @@ impl Settings {
                     Reason::Rotation,
                     &record,
                     envelope.to_bytes()?,
-                    None,
+                    Some(self.credentials.clone()),
                 )?;
                 pending.push((**node, record.clone(), epoch, delivery));
             }

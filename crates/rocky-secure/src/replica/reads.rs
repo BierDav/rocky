@@ -66,7 +66,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         // A peer of an earlier generation is sent nothing it cannot admit.
         let reach = credentials
             .0
-            .first()
+            .last()
             .map_or(Ok(inner.generation()), |root| {
                 inner.generation_of(root.capability.manifest, true)
             })?;

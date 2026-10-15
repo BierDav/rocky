@@ -537,7 +537,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let manifest = chain
             .0
-            .first()
+            .last()
             .map_or(self.manifest, |root| root.capability.manifest);
         let revocations = self.revocations_for(manifest, &self.config.revocations)?;
         chain
@@ -567,7 +567,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         let manifest = credentials
             .0
-            .first()
+            .last()
             .map_or(inner.manifest, |root| root.capability.manifest);
         // One chain verification per batch. A peer without custody, or of a
         // generation this replica cannot verify, gets no offer.

@@ -164,11 +164,11 @@ cannot mint an invitation, sign credentials or fail over to another upstream.
 When all issuers are offline, renewal reports retryable `unreachable`; existing
 invitation expiry and refusal rules still apply.
 
-Routed invitations use version 4 and enrollment-only contacts version 2; see
+Routed invitations use version 5 and enrollment-only contacts version 2; see
 [persisted formats](sdk-enrollment.md#persisted-formats).
 
-Custody grants confer no publisher key, so this peer cannot pair a new device or
-sign renewed credentials while all issuers are offline. Requests are refused,
+Custody grants confer no issuer authority, so this peer cannot pair a new
+device or sign renewed credentials while all issuers are offline. Requests are refused,
 never reported as successful. Existing devices still exchange encrypted rows
 through it while their credentials are valid. No issuer key is silently
 installed in a custody peer; see [issuer recovery](sdk-enrollment.md#issuer-recovery).

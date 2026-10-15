@@ -19,6 +19,7 @@ const NOTED: &str = r#"{"application":"shopping","version":1,"format":6,"tables"
 
 fn open<'a>(directory: &'a Path, schema: &'a str, network: Option<Network>) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema,
         secrets: None,

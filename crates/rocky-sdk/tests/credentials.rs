@@ -21,6 +21,7 @@ fn memory(hub: &Arc<Hub>, name: &str) -> Network {
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -255,17 +256,21 @@ async fn an_issuer_device_enrolls_and_renews_while_the_creator_is_closed() -> Re
     let (creator, issuer) = (session(&a).await, session(&i).await);
     assert_eq!(issuer["issuer"], json!(true));
     assert_eq!(issuer["profile"], json!({"kind": "issuer"}));
-    // The issuer signs with its own keys; only the publisher key is shared.
+    // The issuer signs with its own identity through its chain: the
+    // publisher key stays with the owner's identity and no copy exists.
     assert_ne!(issuer["node"], creator["node"]);
     assert_ne!(issuer["principal"], creator["principal"]);
-    assert_eq!(
-        identity(root, "i")?["publisher"],
-        identity(root, "a")?["publisher"]
+    let (owner, paired) = (identity(root, "a")?, identity(root, "i")?);
+    assert_eq!(paired["publisher"], owner["publisher"]);
+    assert_eq!(owner["identity"], owner["publisher"]);
+    assert_ne!(paired["identity"], paired["publisher"]);
+    assert_ne!(
+        secret(root, "i", "identity")?,
+        secret(root, "a", "identity")?
     );
-    assert_eq!(
-        secret(root, "i", "publisher")?,
-        secret(root, "a", "publisher")?
-    );
+    for name in ["publisher", "user"] {
+        assert_eq!(secret(root, "i", name)?, None);
+    }
     // Revoking another issuer is the recovery path of `tests/issuers.rs`.
     let scope = a.database.scope();
     a.close().await;
@@ -428,13 +433,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
         app: manifest
             .verify(serde_json::from_value(saved["publisher"].clone())?)?
             .app,
-        issuer: serde_json::from_value(
-            saved["credentials"]
-                .as_array()
-                .and_then(|chain| chain.last())
-                .ok_or("node credential")?["capability"]["subject"]
-                .clone(),
-        )?,
+        issuer: serde_json::from_value(saved["identity"].clone())?,
         time: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs(),
@@ -442,7 +441,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
             json!(c_node),
         )?)]
         .into(),
-        users: [serde_json::from_value(record["user"].clone())?].into(),
+        identities: [serde_json::from_value(record["user"].clone())?].into(),
         capabilities: [rocky_core::Commitment::try_from(
             data_encoding::HEXLOWER
                 .decode(
@@ -457,7 +456,7 @@ async fn an_interrupted_revocation_completes_once_at_the_next_open() -> Result<(
     };
     let statement_id = statement.id()?;
     saved["authority"]["rotation"] = json!({
-        "node": c_node,
+        "nodes": [c_node],
         "statement": statement,
         "keys": {"items": 2},
         "groups": {},
@@ -525,8 +524,7 @@ fn issued(
     grants_of: &str,
 ) -> Result<Credentials, Failure> {
     let creator = identity(root, "a")?;
-    let publisher_key =
-        PrivateKey::from_bytes(&secret(root, "a", "publisher")?.ok_or("publisher")?);
+    let publisher_key = PrivateKey::from_bytes(&secret(root, "a", "identity")?.ok_or("identity")?);
     let manifest = SignedManifest::from_bytes(
         &data_encoding::HEXLOWER
             .decode(creator["manifest"].as_str().ok_or("manifest")?.as_bytes())?,
@@ -537,10 +535,10 @@ fn issued(
     let model: CredentialChain =
         serde_json::from_value(identity(root, grants_of)?["credentials"].clone())?;
     let grants = model.0.first().ok_or("chain")?.capability.grants.clone();
-    let authority = Authority {
-        publisher: &publisher_key,
-        manifest: manifest.verify(publisher_key.public_key())?.hash(),
-    };
+    let authority = Authority::owner(
+        &publisher_key,
+        manifest.verify(publisher_key.public_key())?.hash(),
+    );
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();

@@ -146,6 +146,7 @@ async fn a_registered_service_domain_commits_ordinary_rows_and_closes() -> Resul
     let opened = tokio::task::spawn_blocking(move || {
         Database::create(
             Open {
+                identity: None,
                 directory: &directory,
                 schema: SCHEMA,
                 secrets: None,

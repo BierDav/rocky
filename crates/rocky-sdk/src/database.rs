@@ -23,12 +23,16 @@ use std::{
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
 /// What opening a database takes. Without `secrets`, keys are owner-only
-/// files in the data directory. Without `network`, nothing is dialed or
-/// listened on.
+/// files in the data directory. Without `identity`, the node's identity is
+/// made in, and kept in, the secret store. Without `network`, nothing is
+/// dialed or listened on.
 pub struct Open<'a> {
     pub directory: &'a Path,
     pub schema: &'a str,
     pub secrets: Option<Arc<dyn SecretStore>>,
+    /// The application's identity provider. A database installed under one
+    /// needs it at every open.
+    pub identity: Option<Arc<dyn crate::IdentityProvider>>,
     pub network: Option<Network>,
     /// Optional metadata log or coordination service.
     pub coordination: Option<Coordination>,
@@ -54,6 +58,11 @@ enum Install {
         invitation: String,
     },
     Supplied(Box<Supplied>),
+    /// Another node of the identity `open.identity` supplies, from a node
+    /// of that identity.
+    Identity {
+        contact: String,
+    },
     Installed,
     /// A backup archive, under a fresh identity the invitation enrolls.
     Restore {
@@ -65,6 +74,7 @@ struct Setup {
     directory: PathBuf,
     schema: Schema,
     secrets: Arc<dyn SecretStore>,
+    identity: Option<Arc<dyn crate::IdentityProvider>>,
     install: Install,
     coordination: Option<Coordination>,
     confirmation: Option<String>,
@@ -124,8 +134,8 @@ pub struct Database {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 impl Database {
-    /// Creates a domain in an empty directory. This device becomes its
-    /// first issuer and holds its publisher key. Credentials last
+    /// Creates a domain in an empty directory, owned by this node's
+    /// identity, whose key is the publisher key. Credentials last
     /// `credential_ttl` seconds, 30 days by default.
     pub fn create(open: Open<'_>, credential_ttl: Option<u64>) -> Result<Opened, Failure> {
         let ttl = credential_ttl.unwrap_or(DEFAULT_TTL);
@@ -147,12 +157,38 @@ impl Database {
             },
         )
     }
+    /// Installs another node of the identity `open.identity` supplies: a
+    /// node of that identity, which `contact` names, hands it what the
+    /// identity holds over `open.network`, and its provider certifies this
+    /// node. No issuer and no invitation is involved.
+    pub fn enroll_identity(open: Open<'_>, contact: &str) -> Result<Opened, Failure> {
+        if open.network.is_none() {
+            return Err(ServiceError::NetworkRequired("enroll an identity's node").into());
+        }
+        if open.identity.is_none() {
+            return Err("another node of an identity needs that identity's provider".into());
+        }
+        Self::start(
+            open,
+            Install::Identity {
+                contact: contact.into(),
+            },
+        )
+    }
     /// Makes the keys of a device that will receive credentials from
     /// outside the SDK, and returns their public halves for whoever issues
     /// them. Asking again returns the same keys. Nothing is contacted.
     pub fn device(
         directory: &Path,
         secrets: Option<Arc<dyn SecretStore>>,
+    ) -> Result<DeviceKeys, Failure> {
+        Self::device_of(directory, secrets, None)
+    }
+    /// As `device`, for a node of the identity `identity` supplies.
+    pub fn device_of(
+        directory: &Path,
+        secrets: Option<Arc<dyn SecretStore>>,
+        identity: Option<Arc<dyn crate::IdentityProvider>>,
     ) -> Result<DeviceKeys, Failure> {
         std::fs::create_dir_all(directory)?;
         let path = directory.join("identity.json");
@@ -161,7 +197,7 @@ impl Database {
         }
         let secrets =
             secrets.unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets"))));
-        Settings::prepare_install(&path, &secrets)
+        Settings::prepare_install(&path, &secrets, identity)
     }
     /// Installs credentials and reader keys supplied for the device that
     /// `device` prepared. They are verified like any others; no issuer is
@@ -233,6 +269,7 @@ impl Database {
             secrets: open
                 .secrets
                 .unwrap_or_else(|| Arc::new(FileSecretStore::new(directory.join("secrets")))),
+            identity: open.identity,
             directory,
             install,
             coordination: open.coordination,
@@ -633,7 +670,7 @@ async fn identity(
     }
     match install {
         Install::Create { ttl } => {
-            let settings = Settings::create(schema, secrets, *ttl)?;
+            let settings = Settings::create(schema, secrets, *ttl, setup.identity.clone())?;
             let vault = settings.vault(secrets);
             let started = async {
                 let Some(network) = network else {
@@ -653,7 +690,8 @@ async fn identity(
         }
         Install::Join { invitation } => {
             let network = network.ok_or(ServiceError::NetworkRequired("join"))?;
-            let joining = Settings::prepare_join(path, invitation, secrets)?;
+            let joining =
+                Settings::prepare_join(path, invitation, secrets, setup.identity.clone())?;
             let key = Settings::transport_key(&joining.vault)?;
             let (transport, owned) = network.start(false, key).await?;
             match joining.enroll(path, schema, &*transport).await {
@@ -666,8 +704,29 @@ async fn identity(
                 }
             }
         }
+        Install::Identity { contact } => {
+            let network =
+                network.ok_or(ServiceError::NetworkRequired("enroll an identity's node"))?;
+            let provider = setup
+                .identity
+                .clone()
+                .ok_or("another node of an identity needs that identity's provider")?;
+            let prepared = Settings::prepare_identity(path, secrets, &provider, contact)?;
+            let key = Settings::transport_key(&prepared.1)?;
+            let (transport, owned) = network.start(false, key).await?;
+            match Settings::enroll_identity(path, prepared, provider, contact, &*transport).await {
+                Ok(settings) => Ok((settings, Some((transport, owned)))),
+                Err(error) => {
+                    if owned {
+                        transport.close().await;
+                    }
+                    Err(error)
+                }
+            }
+        }
         Install::Supplied(supplied) => {
-            let settings = Settings::install(path, schema, secrets, supplied)?;
+            let settings =
+                Settings::install(path, schema, secrets, supplied, setup.identity.clone())?;
             let Some(network) = network else {
                 return Ok((settings, None));
             };
@@ -686,6 +745,7 @@ async fn identity(
         }
         Install::Installed => {
             let mut settings = Settings::load(path)?;
+            settings.provider = setup.identity.clone();
             if settings.logged_out {
                 return Err("this device logged out; join the domain again".into());
             }
@@ -988,7 +1048,8 @@ async fn restore(
         let link = network.start(settings.issuer(), key).await?;
         (settings, link)
     } else {
-        let joining = Settings::prepare_join(path, invitation, secrets)?;
+        // A restored node's identity is made in the secret store.
+        let joining = Settings::prepare_join(path, invitation, secrets, None)?;
         let key = Settings::transport_key(&joining.vault)?;
         let (transport, owned) = network.start(false, key).await?;
         match joining.enroll(path, schema, &*transport).await {
@@ -1054,7 +1115,11 @@ async fn run(
     rocky_secure::check_replica_format(&directory.join("rocky.sqlite")).await?;
     let path = directory.join("identity.json");
     // Record checkpoint-first intent before enrollment can persist the identity.
-    if matches!(setup.install, Install::Join { .. }) && !path.exists() {
+    if matches!(
+        setup.install,
+        Install::Join { .. } | Install::Identity { .. }
+    ) && !path.exists()
+    {
         rocky_credentials::write_private(&directory.join("bootstrap.json"), b"true")?;
     }
     let (mut settings, link) = identity(&path, &setup, network).await?;
@@ -1400,6 +1465,7 @@ mod tests {
             let before = std::fs::read(&path)?;
             for create in [false, true] {
                 let options = Open {
+                    identity: None,
                     directory: directory.path(),
                     schema: SCHEMA,
                     secrets: None,
@@ -1450,6 +1516,7 @@ mod tests {
         }
         let directory = tempfile::tempdir()?;
         let options = || Open {
+            identity: None,
             directory: directory.path(),
             schema: SCHEMA,
             secrets: None,
@@ -1514,6 +1581,7 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let opened = Database::create(
             Open {
+                identity: None,
                 directory: directory.path(),
                 schema: r#"{"application":"saturation","version":1,"format":6,"tables":[{"name":"items","class":"mergeable","columns":[{"name":"key","type":"text","not_null":true},{"name":"title","type":"text","not_null":true}],"primary_key":["key"]}]}"#,
                 secrets: None,

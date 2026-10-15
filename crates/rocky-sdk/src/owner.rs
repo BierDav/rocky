@@ -51,8 +51,8 @@ mod service {
         pub application: String,
         /// The domain's publisher, whose coordination grant registering needs.
         pub anchor: PublicKey,
-        /// Present on an issuer only, which signs that grant itself.
-        pub publisher: Option<PrivateKey>,
+        /// Present on the owner only, whose identity signs that grant itself.
+        pub publisher: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
         pub transport: Option<Arc<dyn Transport>>,
         pub request: &'a Value,
     }
@@ -166,7 +166,11 @@ mod service {
                 "rocky.sdk.service-request.v1",
                 &serde_json::to_vec(&(
                     control(0)?,
-                    domain.publisher.as_ref().map(PrivateKey::public_key),
+                    domain
+                        .publisher
+                        .as_ref()
+                        .map(|owner| owner.public_key())
+                        .transpose()?,
                     &supplied,
                     &admission,
                 ))?,
@@ -174,22 +178,22 @@ mod service {
             let time = self.signing_time(tenant.public_key(), request_id, inputs)?;
             let certificate = ControlCertificate::sign(control(time)?, &tenant)?;
             let reference = if revision == 1 {
-                // The publisher's grant names this tenant for the application:
-                // signed here on an issuer, or one an issuer signed earlier.
+                // The owner's grant names this tenant for the application:
+                // signed here on the owner, or one it signed earlier.
                 let grant = match (supplied, domain.publisher) {
-                    (None, Some(publisher)) => SignedCoordinationGrant::sign(
+                    (None, Some(owner)) => SignedCoordinationGrant::sign(
                         CoordinationGrant {
-                            publisher: Publisher(publisher.public_key()),
+                            publisher: Publisher(owner.public_key()?),
                             application: domain.application.clone(),
                             tenant: CoordinatorControl(tenant.public_key()),
                             not_before: time.saturating_sub(60),
                             expires: time.saturating_add(3600),
                         },
-                        &publisher,
+                        &*owner,
                     )?,
                     (None, None) => {
                         return Err(refused(
-                            "registering needs the publisher's coordination grant: an issuer signs one with coordination_grant",
+                            "registering needs the owner's coordination grant: the owner signs one with coordination_grant",
                         ));
                     }
                     (Some(supplied), _) => supplied,

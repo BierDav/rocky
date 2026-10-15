@@ -1,7 +1,10 @@
 //! Control tokens of a coordination service. They delegate coordination
 //! metadata only: no row, key, command or enrollment right follows from
 //! either. See `docs/runtime/public-coordination.md`.
-use crate::{CoordinatorControl, Error, PrivateKey, PublicKey, Publisher, denied, signing_bytes};
+use crate::{
+    CoordinatorControl, Error, IdentityProvider, PrivateKey, PublicKey, Publisher, Purpose, denied,
+    signing_bytes,
+};
 use p2panda_core::Signature;
 use rocky_core::{AppId, ApplicationManifest};
 use serde::{Deserialize, Serialize};
@@ -16,8 +19,9 @@ fn current(not_before: u64, expires: u64, time: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// The publisher lets a tenant control key register and control the
-/// coordinator domains of one application. The application id is derived
+/// The owner, whose identity key is the publisher key, lets a tenant
+/// control key register and control the coordinator domains of one
+/// application. The application id is derived
 /// from the publisher and name, so nobody else can claim it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinationGrant {
@@ -33,12 +37,16 @@ pub struct SignedCoordinationGrant {
     signature: Signature,
 }
 impl SignedCoordinationGrant {
-    pub fn sign(grant: CoordinationGrant, publisher: &PrivateKey) -> Result<Self, Error> {
-        if grant.publisher.0 != publisher.public_key() {
+    /// The owner's identity signs.
+    pub fn sign(grant: CoordinationGrant, owner: &dyn IdentityProvider) -> Result<Self, Error> {
+        if grant.publisher.0 != owner.public_key()? {
             return Err(denied("grant publisher mismatch"));
         }
         Ok(Self {
-            signature: publisher.sign(&signing_bytes("rocky.coordination-grant.v1", &grant)?),
+            signature: owner.sign(
+                Purpose::Statement,
+                &signing_bytes("rocky.coordination-grant.v1", &grant)?,
+            )?,
             grant,
         })
     }

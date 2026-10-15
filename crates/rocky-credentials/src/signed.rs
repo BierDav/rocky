@@ -1,45 +1,168 @@
-//! Signed manifests, capabilities and credential chains.
+//! Signed manifests, capabilities and credential chains, and the
+//! endorsement by which the owner or an issuer signs a domain statement.
 use crate::{
-    AuthorRange, Error, Extended, Extension, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
-    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PrivateKey, PublicKey,
+    AuthorRange, Error, Extended, Extension, IdentityProvider, LIFETIME_SKEW, MAX_CHAIN_LIFETIME,
+    MAX_CREDENTIAL_BYTES, MAX_CREDENTIAL_DEPTH, MAX_REVOCATION_SET_BYTES, PublicKey, Purpose,
     RevocationSet, decode_bounded, denied, encode, signing_bytes,
 };
 use p2panda_core::Signature;
 use rocky_core::{ApplicationManifest, Commitment, PrincipalKind, ResourceGrant};
 use serde::{Deserialize, Serialize};
 
+/// Most bytes an issuer chain adds to an endorsed statement.
+pub const MAX_ENDORSEMENT_BYTES: usize = 16 * 1024;
+
+/// A domain statement's signature: by the owner, whose identity key is the
+/// publisher key, or by an issuer identity through its chain of issuer
+/// links from the publisher. Nobody else endorses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endorsement {
+    /// The issuer links from the publisher to the signer; empty when the
+    /// owner signs.
+    pub chain: CredentialChain,
+    signature: Signature,
+}
+impl Endorsement {
+    /// `signer` signs `value` under `label`; `chain` ends at its identity,
+    /// or is empty when it is the owner's.
+    pub fn sign<T: Serialize>(
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
+        label: &str,
+        value: &T,
+    ) -> Result<Self, Error> {
+        let key = signer.public_key()?;
+        if chain
+            .0
+            .last()
+            .is_some_and(|last| last.capability.subject != key)
+        {
+            return Err(denied("the issuer chain ends at another identity"));
+        }
+        Ok(Self {
+            chain: chain.clone(),
+            signature: signer.sign(Purpose::Statement, &signing_bytes(label, value)?)?,
+        })
+    }
+    /// Checks that the owner or an issuer of `publisher` signed `value`,
+    /// whatever the time and later revocations, and returns the signer.
+    pub fn verify<T: Serialize>(
+        &self,
+        publisher: PublicKey,
+        label: &str,
+        value: &T,
+    ) -> Result<PublicKey, Error> {
+        self.check(publisher, label, value, None)
+    }
+    /// As `verify`, with the signer's chain valid at `time` and ended by no
+    /// statement of `revocations`: what a newly met statement needs. A
+    /// revoked issuer signs nothing that verifies here.
+    pub fn verify_current<T: Serialize>(
+        &self,
+        publisher: PublicKey,
+        label: &str,
+        value: &T,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<PublicKey, Error> {
+        self.check(publisher, label, value, Some((revocations, time)))
+    }
+    fn check<T: Serialize>(
+        &self,
+        publisher: PublicKey,
+        label: &str,
+        value: &T,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<PublicKey, Error> {
+        let signer = if self.chain.0.is_empty() {
+            publisher
+        } else {
+            self.chain.issuer(publisher, current)?
+        };
+        if !signer.verify(&signing_bytes(label, value)?, &self.signature) {
+            return Err(denied("invalid endorsement signature"));
+        }
+        Ok(signer)
+    }
+    /// The signing identity, as the endorsement names it, unverified.
+    pub fn signer(&self, publisher: PublicKey) -> PublicKey {
+        self.chain
+            .0
+            .last()
+            .map_or(publisher, |last| last.capability.subject)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignedManifest {
     body: Vec<u8>,
-    signature: Signature,
+    endorsement: Endorsement,
 }
+const MANIFEST: &str = "rocky.signed-manifest.v2";
 impl SignedManifest {
-    pub fn sign(manifest: &ApplicationManifest, publisher: &PrivateKey) -> Result<Self, Error> {
-        manifest.validate()?;
-        if manifest.publisher != *publisher.public_key().as_bytes() {
-            return Err(denied("manifest publisher mismatch"));
-        }
-        let body = manifest.canonical_body();
-        let signature = publisher.sign(&signing_bytes("rocky.signed-manifest.v1", &body)?);
-        Ok(Self { body, signature })
+    /// The owner signs.
+    pub fn sign(
+        manifest: &ApplicationManifest,
+        owner: &dyn IdentityProvider,
+    ) -> Result<Self, Error> {
+        Self::endorse(manifest, owner, &CredentialChain(Vec::new()))
     }
+    /// The owner, or an issuer through `chain`, signs.
+    pub fn endorse(
+        manifest: &ApplicationManifest,
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
+    ) -> Result<Self, Error> {
+        manifest.validate()?;
+        let body = manifest.canonical_body();
+        let endorsement = Endorsement::sign(signer, chain, MANIFEST, &body)?;
+        let signed = Self { body, endorsement };
+        let publisher = PublicKey::from_bytes(&manifest.publisher)
+            .map_err(|_| denied("invalid manifest publisher"))?;
+        signed.verify(publisher)?;
+        Ok(signed)
+    }
+    /// An authentic manifest of `trusted_publisher`, signed by its owner or
+    /// by an issuer whatever became of it later.
     pub fn verify(&self, trusted_publisher: PublicKey) -> Result<ApplicationManifest, Error> {
         let manifest = ApplicationManifest::from_body(&self.body)?;
-        if manifest.publisher != *trusted_publisher.as_bytes()
-            || !trusted_publisher.verify(
-                &signing_bytes("rocky.signed-manifest.v1", &self.body)?,
-                &self.signature,
-            )
-        {
+        if manifest.publisher != *trusted_publisher.as_bytes() {
             return Err(denied("invalid manifest signature"));
         }
+        self.endorsement
+            .verify(trusted_publisher, MANIFEST, &self.body)
+            .map_err(|_| denied("invalid manifest signature"))?;
         Ok(manifest)
+    }
+    /// As `verify`, by a signer no statement of `revocations` ended: what
+    /// adopting a newly met manifest needs.
+    pub fn verify_current(
+        &self,
+        trusted_publisher: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<ApplicationManifest, Error> {
+        let manifest = self.verify(trusted_publisher)?;
+        self.endorsement.verify_current(
+            trusted_publisher,
+            MANIFEST,
+            &self.body,
+            revocations,
+            time,
+        )?;
+        Ok(manifest)
+    }
+    pub fn endorsement(&self) -> &Endorsement {
+        &self.endorsement
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, rocky_core::MAX_MANIFEST_BYTES * 2 + 1024)
+        decode_bounded(
+            bytes,
+            rocky_core::MAX_MANIFEST_BYTES * 2 + 1024 + MAX_ENDORSEMENT_BYTES,
+        )
     }
 }
 
@@ -48,33 +171,57 @@ impl SignedManifest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedTransition {
     body: Vec<u8>,
-    signature: Signature,
+    endorsement: Endorsement,
 }
+const TRANSITION: &str = "rocky.signed-transition.v2";
 impl SignedTransition {
+    /// The owner signs.
     pub fn sign(
         transition: &rocky_core::GenerationTransition,
-        publisher: &PrivateKey,
+        owner: &dyn IdentityProvider,
+    ) -> Result<Self, Error> {
+        Self::endorse(transition, owner, &CredentialChain(Vec::new()))
+    }
+    /// The owner, or an issuer through `chain`, signs.
+    pub fn endorse(
+        transition: &rocky_core::GenerationTransition,
+        signer: &dyn IdentityProvider,
+        chain: &CredentialChain,
     ) -> Result<Self, Error> {
         transition.validate()?;
         let body = transition.canonical();
-        let signature = publisher.sign(&signing_bytes("rocky.signed-transition.v1", &body)?);
-        Ok(Self { body, signature })
+        Ok(Self {
+            endorsement: Endorsement::sign(signer, chain, TRANSITION, &body)?,
+            body,
+        })
     }
     pub fn verify(&self, publisher: PublicKey) -> Result<rocky_core::GenerationTransition, Error> {
         let transition = rocky_core::GenerationTransition::from_canonical(&self.body)?;
-        if !publisher.verify(
-            &signing_bytes("rocky.signed-transition.v1", &self.body)?,
-            &self.signature,
-        ) {
-            return Err(denied("invalid transition signature"));
-        }
+        self.endorsement
+            .verify(publisher, TRANSITION, &self.body)
+            .map_err(|_| denied("invalid transition signature"))?;
+        Ok(transition)
+    }
+    /// As `verify`, by a signer no statement of `revocations` ended.
+    pub fn verify_current(
+        &self,
+        publisher: PublicKey,
+        revocations: &RevocationSet,
+        time: u64,
+    ) -> Result<rocky_core::GenerationTransition, Error> {
+        let transition = self.verify(publisher)?;
+        self.endorsement
+            .verify_current(publisher, TRANSITION, &self.body, revocations, time)?;
         Ok(transition)
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
         encode(self)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        decode_bounded(bytes, rocky_core::MAX_TRANSITION_IDS * 34 + 1024)
+        decode_bounded(
+            bytes,
+            rocky_core::MAX_TRANSITION_IDS * 34 + 1024 + MAX_ENDORSEMENT_BYTES,
+        )
     }
 }
 
@@ -100,7 +247,7 @@ impl Capability {
         Ok(self.extended()?.authors)
     }
 }
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedCapability {
     /// Portable assignment provenance; carries no partition tuples.
     pub author_binding: crate::AuthorBinding,
@@ -109,11 +256,17 @@ pub struct SignedCapability {
     signature: Signature,
 }
 impl SignedCapability {
-    pub fn sign(capability: Capability, issuer: &PrivateKey) -> Result<Self, Error> {
-        let signature = issuer.sign(&signing_bytes("rocky.capability.v1", &capability)?);
+    /// `issuer` signs: a node certificate when `capability` names a node.
+    pub fn sign(capability: Capability, issuer: &dyn IdentityProvider) -> Result<Self, Error> {
+        let purpose = match capability.kind {
+            PrincipalKind::Node => Purpose::NodeCertificate,
+            _ => Purpose::Capability,
+        };
+        let signature =
+            issuer.sign(purpose, &signing_bytes("rocky.capability.v1", &capability)?)?;
         Ok(Self {
             author_binding: crate::AuthorBinding::sign(&capability, issuer)?,
-            issuer: issuer.public_key(),
+            issuer: issuer.public_key()?,
             capability,
             signature,
         })
@@ -124,9 +277,30 @@ impl SignedCapability {
             &encode(self)?,
         ))
     }
+    /// The identity whose certificate this is for the node key `node`,
+    /// valid at `time`: what a coordinator checks without the rest of the
+    /// chain. Revocation is the domain's to enforce.
+    pub fn certifies(&self, node: PublicKey, time: u64) -> Result<PublicKey, Error> {
+        let capability = &self.capability;
+        if capability.kind != PrincipalKind::Node
+            || capability.delegations != 0
+            || capability.extended()?.node != Some(crate::PeerId::of(node))
+            || capability.not_before > time
+            || capability.expires <= time
+            || !self.issuer.verify(
+                &signing_bytes("rocky.capability.v1", capability)?,
+                &self.signature,
+            )
+        {
+            return Err(denied("not a current certificate of this node"));
+        }
+        Ok(self.issuer)
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Links from the publisher to a node: issuer identities, the identity
+/// that holds the grants and the node certificate it signed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialChain(pub Vec<SignedCapability>);
 impl CredentialChain {
     /// Concrete grants of a node under `revocations` at `time`.
@@ -142,9 +316,9 @@ impl CredentialChain {
         self.check(publisher, manifest, subject, Some((revocations, time)))
     }
     /// Whether the publisher once delegated to the node `subject` through
-    /// this chain, whatever the time and later revocations. It
-    /// proves who a renewal is for; it authorizes nothing. Returns the
-    /// root capability.
+    /// this chain, whatever the time and later revocations. It proves who a
+    /// renewal is for; it authorizes nothing. Returns the identity's link:
+    /// the one its node certificate names.
     pub fn provenance(
         &self,
         publisher: PublicKey,
@@ -153,8 +327,10 @@ impl CredentialChain {
     ) -> Result<&Capability, Error> {
         self.check(publisher, manifest, subject, None)?;
         self.0
-            .first()
-            .map(|root| &root.capability)
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|identity| &identity.capability)
             .ok_or_else(|| denied("credential depth"))
     }
     fn check(
@@ -195,10 +371,36 @@ impl CredentialChain {
         }
         Ok((leaf.grants.clone(), extension.partitions))
     }
+    /// The issuer identity a chain of issuer links ends at: every link is
+    /// signed by its parent's subject, the first by the publisher, and
+    /// carries issuer authority. With `current`, each is valid at its time
+    /// and ended by no statement of its set. Manifests do not bind it.
+    pub fn issuer(
+        &self,
+        publisher: PublicKey,
+        current: Option<(&RevocationSet, u64)>,
+    ) -> Result<PublicKey, Error> {
+        let manifest = self
+            .0
+            .first()
+            .map(|root| root.capability.manifest)
+            .ok_or_else(|| denied("an issuer chain needs a link"))?;
+        let leaf = self.links(publisher, manifest, current)?;
+        if self
+            .0
+            .iter()
+            .any(|link| !link.capability.extended().is_ok_and(|e| e.issues))
+        {
+            return Err(denied("the chain ends at no issuer"));
+        }
+        Ok(leaf.subject)
+    }
     /// Checks every link and returns the leaf: each is signed by its
     /// parent's subject, narrows it in grants, validity, depth and author
     /// range, lives at most `MAX_CHAIN_LIFETIME` and, with `current`, is
-    /// valid at its time and ended by no statement of its set.
+    /// valid at its time and ended by no statement of its set. A link with
+    /// issuer authority may delegate any grant and author range, and names
+    /// no manifest.
     pub(crate) fn links(
         &self,
         publisher: PublicKey,
@@ -209,7 +411,7 @@ impl CredentialChain {
             return Err(denied("credential depth"));
         }
         let mut issuer = publisher;
-        let mut parent: Option<(&Capability, Option<AuthorRange>)> = None;
+        let mut parent: Option<(&Capability, Extended)> = None;
         for signed in &self.0 {
             let capability = &signed.capability;
             let extended = capability.extended()?;
@@ -221,14 +423,15 @@ impl CredentialChain {
                 }
                 None => false,
             };
+            let held = capability.grants.len() + extended.partitions.len();
             if signed.issuer != issuer
-                || capability.manifest != manifest
+                || (capability.manifest != manifest && !extended.issues)
                 || stale
                 || capability.not_before >= capability.expires
                 || capability.expires - capability.not_before > MAX_CHAIN_LIFETIME + LIFETIME_SKEW
                 || capability.delegations as usize >= MAX_CREDENTIAL_DEPTH
-                || capability.grants.len() + extended.partitions.len() == 0
-                || capability.grants.len() + extended.partitions.len() > 64
+                || (held == 0 && !extended.issues)
+                || held > 64
                 || !signed.issuer.verify(
                     &signing_bytes("rocky.capability.v1", capability)?,
                     &signed.signature,
@@ -240,8 +443,9 @@ impl CredentialChain {
                 return Err(denied("credential resource quota"));
             }
             Self::shape(capability, &extended, parent.is_none())?;
-            if let Some((parent, authors)) = parent {
-                let parent_partitions = parent.extended()?.partitions;
+            if let Some((parent, parent_extended)) = &parent {
+                // Issuer authority grants anything; other links narrow.
+                let authority = parent_extended.issues;
                 if parent.kind == PrincipalKind::Node
                     || parent.delegations == 0
                     || capability.delegations >= parent.delegations
@@ -249,18 +453,24 @@ impl CredentialChain {
                     || capability.expires > parent.expires
                     || (parent.kind == PrincipalKind::Deployment
                         && capability.kind == PrincipalKind::User)
-                    || capability
-                        .grants
-                        .iter()
-                        .any(|grant| !parent.grants.iter().any(|allowed| allowed.includes(grant)))
-                    || extended.partitions.iter().any(|grant| {
-                        !parent_partitions
-                            .iter()
-                            .any(|allowed| allowed.includes(grant))
-                    })
-                    || extended
-                        .authors
-                        .is_some_and(|range| !authors.is_some_and(|parent| parent.includes(&range)))
+                    || (extended.issues && !authority)
+                    || (!authority
+                        && capability.grants.iter().any(|grant| {
+                            !parent.grants.iter().any(|allowed| allowed.includes(grant))
+                        }))
+                    || (!authority
+                        && extended.partitions.iter().any(|grant| {
+                            !parent_extended
+                                .partitions
+                                .iter()
+                                .any(|allowed| allowed.includes(grant))
+                        }))
+                    || (!authority
+                        && extended.authors.is_some_and(|range| {
+                            !parent_extended
+                                .authors
+                                .is_some_and(|parent| parent.includes(&range))
+                        }))
                 {
                     return Err(denied("delegation expands authority"));
                 }
@@ -268,13 +478,15 @@ impl CredentialChain {
                 return Err(denied("publisher must delegate to user"));
             }
             issuer = capability.subject;
-            parent = Some((capability, extended.authors));
+            parent = Some((capability, extended));
         }
         parent
             .map(|(leaf, _)| leaf)
             .ok_or_else(|| denied("missing leaf credential"))
     }
-    /// Nodes carry exactly one number, attenuated from their principal's range.
+    /// Node certificates carry exactly one number, attenuated from their
+    /// identity's range, and name their subject. Only identities hold issuer
+    /// authority.
     fn shape(capability: &Capability, extended: &Extended, _root: bool) -> Result<(), Error> {
         let valid = match capability.kind {
             PrincipalKind::Node => {
@@ -282,8 +494,10 @@ impl CredentialChain {
                     .authors
                     .is_some_and(|range| range.single().is_some())
                     && extended.node == Some(crate::PeerId::of(capability.subject))
+                    && !extended.issues
             }
-            PrincipalKind::User | PrincipalKind::Deployment => extended.node.is_none(),
+            PrincipalKind::User => extended.node.is_none(),
+            PrincipalKind::Deployment => extended.node.is_none() && !extended.issues,
         };
         if valid {
             Ok(())
@@ -349,9 +563,14 @@ impl CredentialChain {
         }
         Ok(())
     }
-    /// The user the chain delegates from: the login principal.
+    /// The identity whose node the chain certifies: the subject of the
+    /// link its leaf certificate names, or of the last link without one.
     pub fn principal(&self) -> Option<PublicKey> {
-        self.0.first().map(|root| root.capability.subject)
+        let leaf = self.0.last()?;
+        match leaf.capability.kind {
+            PrincipalKind::Node => Some(leaf.issuer),
+            _ => Some(leaf.capability.subject),
+        }
     }
     /// The earliest expiry in the chain; zero for an empty chain.
     pub fn expires(&self) -> u64 {
@@ -377,6 +596,7 @@ pub struct Credentials {
 #[derive(Clone, Debug)]
 pub struct Verified {
     pub manifest: ApplicationManifest,
+    /// The identity that holds the grants.
     pub principal: PublicKey,
     pub device: PublicKey,
     /// The digest of the live revocations verified against.

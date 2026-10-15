@@ -68,6 +68,7 @@ impl CustodyPeer {
         }
         let schema = config.schema.to_string();
         let open = Open {
+            identity: None,
             directory,
             schema: &schema,
             secrets: None,

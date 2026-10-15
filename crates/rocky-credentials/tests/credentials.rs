@@ -69,29 +69,22 @@ impl Domain {
         }
     }
     fn authority(&self) -> Authority<'_> {
-        Authority {
-            publisher: &self.publisher,
-            manifest: self.manifest.hash(),
-        }
+        Authority::owner(&self.publisher, self.manifest.hash())
     }
     fn policy(&self) -> RevocationSet {
         RevocationSet::new()
     }
-    /// A set whose one statement revokes `subjects` as users.
+    /// A set whose one statement revokes `subjects` as identities.
     fn revoking(&self, subjects: &[PublicKey]) -> RevocationSet {
-        let issuer = PrivateKey::new();
         let statement = Revocation {
             app: self.manifest.app,
-            issuer: issuer.public_key(),
+            issuer: self.publisher.public_key(),
             time: NOW,
             nodes: BTreeSet::new(),
-            users: subjects.iter().copied().collect(),
+            identities: subjects.iter().copied().collect(),
             capabilities: BTreeSet::new(),
         };
-        let signed = self
-            .authority()
-            .revoke(statement, &issuer)
-            .expect("revocation");
+        let signed = self.authority().revoke(statement).expect("revocation");
         RevocationSet::try_from(vec![signed]).expect("set")
     }
     fn names(names: &[&str]) -> BTreeSet<String> {
@@ -316,17 +309,14 @@ fn a_login_principal_alone_grants_nothing() {
     // The user signs itself the capability it would like to hold.
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let grants = Profile::Issuer.grants(&domain.resources).expect("grants");
-    let claimed = Authority {
-        publisher: &user,
-        manifest: domain.manifest.hash(),
-    }
-    .issue(
-        user.public_key(),
-        grants,
-        rocky_credentials::AuthorRange::ALL,
-        VALIDITY,
-    )
-    .expect("self-signed");
+    let claimed = Authority::owner(&user, domain.manifest.hash())
+        .issue(
+            user.public_key(),
+            grants,
+            rocky_credentials::AuthorRange::ALL,
+            VALIDITY,
+        )
+        .expect("self-signed");
     let chain = device_chain(claimed, &user, node.public_key(), 1).expect("chain");
     assert!(domain.verify(&chain, &node, &policy, NOW).is_err());
     assert!(
@@ -339,7 +329,7 @@ fn a_login_principal_alone_grants_nothing() {
             .is_err()
     );
     // Distinct identities are distinct types over distinct keys.
-    let principal = LoginPrincipal(user.public_key());
+    let principal = Identity(user.public_key());
     let device = SigningDevice(node.public_key());
     assert_ne!(principal.0, device.0);
     assert_ne!(Publisher(domain.publisher.public_key()).0, principal.0);
@@ -556,10 +546,7 @@ fn renewal_keeps_the_grants_refuses_the_revoked_and_seals_to_the_device() {
     assert!(renewal.open(anchor.0, &again, &again_secret).is_err());
     let impostor = PrivateKey::new();
     let forged = Renewal::seal(
-        &Authority {
-            publisher: &impostor,
-            manifest: domain.manifest.hash(),
-        },
+        &Authority::owner(&impostor, domain.manifest.hash()),
         &request,
         prior,
         policy.clone(),
@@ -980,6 +967,7 @@ fn ranges_narrow_by_delegation_and_unknown_extension_versions_are_refused() {
         partitions: Vec::new(),
         authors: Some(AuthorRange::new(5, 15).expect("range")),
         node: None,
+        issues: false,
     })
     .expect("extension");
     let widened = CredentialChain(vec![

@@ -14,24 +14,50 @@ two stalled routes do not prevent trying a later route.
 
 ## Domain and identities
 
-A schema's collections become typed secure tables in one domain. Each
-collection is its own reader scope with its own key epochs.
+A schema's collections become typed secure tables in one domain: the owner
+identity's key and the application. Each collection is its own reader scope
+with its own key epochs.
 
 | Key | Held by | Purpose |
 | --- | --- | --- |
-| Publisher | Issuers | Trust anchor: signs manifest, revocation statements and user capabilities |
-| User | Each device | Subject of the capability the publisher issues |
-| Node | Each device | Signs operations, session frames and renewal requests |
-| Transport | Each device | Stable key of its routes where the transport has one; no authority |
-| Reader, per collection and epoch | Devices whose grants read it | Encrypts and decrypts that collection's rows |
+| Identity | The node's identity provider, or the secret store | Holds the grants; signs its nodes' certificates and, with issuer authority, capabilities, renewals, revocations and the domain's statements. The owner's is the publisher key |
+| Node | Each node | Signs operations, session frames and requests under its identity's certificate |
+| Transport | Each node | Stable key of its routes where the transport has one; no authority |
+| Reader, per collection and epoch | Nodes whose grants read it | Encrypts and decrypts that collection's rows |
 | Invitation token | Issuers | Secret of the active invitation |
 
-The creating device is the first issuer. Each device is enrolled as a
-[grant profile](credentials.md#grant-profiles): reader or writer of named
-collections, custody-only holder ([always-on peer](always-on-peer.md), no
-reader keys or publishing authority), or issuer. An issuer enrolls, renews
-and revokes; no issuer needs to serve every sync. Issuers share one record per
-device in the replicated [issuer registry](issuer-registry.md).
+The creating node's identity owns the domain: its key is the publisher key,
+which no other node, invitation or enrollment ever carries. Each identity is
+enrolled as a [grant profile](credentials.md#grant-profiles): reader or
+writer of named collections, custody-only holder
+([always-on peer](always-on-peer.md), no reader keys or issuer authority),
+or issuer. An issuer enrolls, renews and revokes through its own chain; no
+issuer needs to serve every sync. Issuers share one record per node in the
+replicated [issuer registry](issuer-registry.md).
+
+### Identities
+
+`Open.identity` (Kotlin `identity`, native `NativeIdentityProvider`) supplies
+the node's identity from an `IdentityProvider`; without one, an identity is
+made in the secret store and stays with that installation. A database
+installed under a supplied identity needs the same provider at every open;
+another one is refused. `FileIdentityProvider` keeps an identity in one
+directory for tests and servers: every node process that opens it is a node
+of that identity, and it hands out each author number once.
+
+### Another node of an identity
+
+A node of an identity that already holds grants enrolls with
+`Database::enroll_identity(open, contact)` (Kotlin
+`RockyDatabase.enrollIdentity`): it asks the node `contact` names, which must
+be a node of the same identity, signing an `IdentityRequest` with its node key
+and its identity. That node answers with the identity's chain, the domain,
+its reader keys of every epoch and group secrets, sealed to the new node
+alone (`rocky.sdk.identity.v1` on the renewal lane). The new node's provider
+certifies it, with an author number of the identity's range; no issuer and
+no invitation is involved, and no issuer records the node until it renews.
+A request for another identity is refused. A node of an issuer identity is
+an issuer too.
 
 An issuer's `invitationOpen(uri)` checks persisted invitation state without
 network I/O or an enrollment attempt. It returns false for consumed, replaced,
@@ -54,7 +80,9 @@ No author-installation API or renewal-protocol assignment request exists.
 Keys never enter replicated tables or `identity.json`. They live in a
 `SecretStore` ([key provider](credentials.md#key-providers)) under
 `rocky.<installation>.<role>`: reader keys use `reader.<collection>` for epoch 1
-and `reader.<collection>.<epoch>` after.
+and `reader.<collection>.<epoch>` after; an identity the store holds uses
+`identity`. That installation is its only node, which takes the first author
+number of the identity's range.
 
 ```kotlin
 val store = object : SecretStore {
@@ -75,8 +103,8 @@ rows are plaintext at rest.
 
 | Record | Version | Content |
 | --- | --- | --- |
-| `identity.json` | 17 | Pinned publisher key, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, pending deliveries, and `contact_refs` indexed by opaque peer references with routes, issuer flags and local metadata; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
-| Invitation `rocky://join/` | 4 | Issuer routes, publisher key, profile, secret token, expiry, explicit `via_custody` flag |
+| `identity.json` | 17 | Pinned publisher key, this node's identity and whether the secret store holds it, signed manifest, revocation set, lineage, credential chain, profile, held key epochs, group partition secrets, author range and counter, pending deliveries, and `contact_refs` indexed by opaque peer references with routes, issuer flags and local metadata; an issuer adds its invitation and the device that claimed it, a pending revocation with its statement and target key epochs, and its tombstones |
+| Invitation `rocky://join/` | 5 | Issuer routes, the pinned publisher key, profile, secret token, expiry, explicit `via_custody` flag; it grants to the joining identity |
 | Contact `rocky://peer/` | 2 | Publisher key, node key, routes, issuer and `enrollment_only` flags |
 
 An `identity.json` restored without its database may lack group partitions the
@@ -100,11 +128,14 @@ subsequent `DeviceEnrolled` events before another invitation replaces it.
 
 - It lasts ten minutes and enrolls one device. A new one replaces it. Ten
   wrong tokens lock it.
-- The joiner generates its own user and node keys and proves the token. The
-  issuer answers with a capability, the current reader keys the profile reads
-  and, for an issuer profile, the publisher key, sealed under a token-derived key.
-- The joiner verifies manifest, revocations and capability against the invitation's
-  publisher key, and that grants equal the profile. It pins the issuer's node key.
+- The joiner brings its identity, its provider's or a new one, makes its node
+  key and proves the token. The issuer grants the profile to that identity:
+  a capability signed through the issuer's own chain, the current reader keys
+  the profile reads and, for an issuer profile, issuer authority and an
+  author range, sealed under a token-derived key. No key travels.
+- The joiner verifies manifest, revocations and the capability's chain from
+  the invitation's publisher key, and that grants equal the profile. Its
+  identity certifies its node. It pins the issuer's node key.
 - A join persists its nonce and keys before contacting the issuer, so a lost
   answer retries as the same device; nobody else can reuse the invitation.
   Joining with another invitation abandons the unfinished join and its keys
@@ -125,14 +156,16 @@ subsequent `DeviceEnrolled` events before another invitation replaces it.
 
 ### Supplied credentials
 
-`Database::device(directory, secrets)` makes a device's keys and returns their
-public halves, the same ones when asked again. A publisher-key holder issues a
-capability with `credentials::Authority`, or an issuer answers the `grant`
-call with [raw grants](credential-primitives.md#raw-grants). `Database::install`
-takes the result as `Supplied`: mesh and domain IDs, `Credentials`, reader keys
-by collection and epoch, and renewing issuers' contacts. A chain ending at the
-device's user is completed with its node key. Everything is verified first; a
-chain for another device, a key for an unread collection or a missing reader
+`Database::device(directory, secrets)` makes a node's keys, and
+`Database::device_of` with an identity provider uses that identity; both
+return the public identity (`user`) and node keys, the same ones when asked
+again. The owner or an issuer signs a capability with
+`credentials::Authority`, or an issuer answers the `grant` call with
+[raw grants](credential-primitives.md#raw-grants). `Database::install` takes
+the result as `Supplied`: mesh and domain IDs, `Credentials`, reader keys by
+collection and epoch, and renewing issuers' contacts. A chain ending at the
+node's identity is certified for its node. Everything is verified first; a
+chain for another node, a key for an unread collection or a missing reader
 key installs nothing. No network is needed.
 
 ## Confirm a removing rollout
@@ -152,24 +185,32 @@ Credentials last 30 days by default (`credential_ttl`, a minute to a year). A
 sync renews them past half their lifetime: the device signs a timestamped
 request for one issuer, which answers with the same grants, the
 [revocations](revocations.md) it holds and the current reader key epochs,
-sealed to a one-time key. Any issuer renews any unrevoked device: it takes the
-tombstone and profile from the device's registry record, or renews the
-presented chain and records it when the record has not reached it yet. An
-issuer renews itself after asking known issuers, which is how it learns their
-revocations. Expired credentials cannot open a member until an issuer is
-reachable. Clock skew up to five minutes is accepted.
+sealed to a one-time key. Any issuer renews any unrevoked identity below it:
+it takes the tombstone and profile from the node's registry record, or renews
+the presented chain and records it when the record has not reached it yet.
+The renewed chain runs through the answering issuer and expires no later than
+its own. The owner signs its own authority again after asking known issuers,
+which is how it learns their revocations; another issuer asks the issuers it
+knows and, when none above it answers, certifies its node again under the
+authority it holds. Expired credentials cannot open a member until an issuer
+is reachable. Clock skew up to five minutes is accepted.
 
-`revoke(node)` on an issuer starts a new key epoch for every collection the
-device could read, and a new secret for every group partition it could read or
-was granted ([group secrets](partitioned-scopes.md#group-secrets)), and signs a
-statement revoking its node, its user and its capability. The
+`revoke` on an issuer starts a new key epoch for every collection the nodes
+it names could read, and a new secret for every group partition they could
+read or were granted ([group secrets](partitioned-scopes.md#group-secrets)),
+and signs a statement. With `node` it names that node's certificate: other
+nodes of its identity keep working. With `identity` it names the identity
+and the nodes and capabilities its records list: every node of the identity
+stops, recorded or not, and every
+identity it granted as an issuer renews elsewhere. The owner's identity is
+never revoked, and an issuer revokes neither itself nor its own identity. The
 intent is saved first; an interruption completes at the next open with the
-same statement and keys. Selection comes from the replicated record, whoever
-enrolled the device: a profile selects collections and group partitions;
-a partition-only record selects only its grants. An unrecorded device,
-including a non-issuer's delegate, rotates all held collection keys and known
-partition secrets held here; only its node can be named without a record.
-The tombstone commits before intent cleanup and before success is returned.
+same statement and keys. Selection comes from the replicated records, whoever
+enrolled the nodes: a profile selects collections and group partitions;
+a partition-only record selects only its grants. An unrecorded node,
+including a non-issuer's delegate or a node that enrolled itself, rotates all
+held collection keys and known partition secrets held here.
+The tombstones commit before intent cleanup and before success is returned.
 Open completes interrupted cleanup before serving sessions. Any issuer
 revokes while others do: their statements
 merge. Others learn it on their next sync, which a differing revocation set
@@ -181,26 +222,30 @@ only what it already decrypted. See [key rotation](credentials.md#revocation-in-
 
 After a refused renewal, a device requests the issuer's public revocation set
 with `rocky.sdk.policy.v1`. It verifies the pinned publisher and application
-and finds the statement that revokes its credential chain before reporting
-`revoked`. That statement is kept in `revoked.json` (version 2), so status
+and finds the statement that revokes its node or identity before reporting
+`revoked`; one that ends only an issuer above it sends it to another issuer. That statement is kept in `revoked.json` (version 2), so status
 remains revoked after reopening; sync returns the non-retryable `revoked`
 error. Earlier decrypted data stays readable locally. Offline devices learn
 this only when an issuer becomes reachable. A fresh invitation enrolls a new
-identity; the revoked user key never renews again at an issuer that learned
+identity; a revoked identity never renews again at an issuer that learned
 the statement.
 
 `logout()` ends sessions and deletes keys; `logout(purge = true)` also removes
 local data on close. Rejoining needs a new invitation. An issuer that knows no
-other issuer cannot log out: it holds the only known publisher key.
+other issuer cannot log out: it holds the only known issuer authority, and
+the owner's identity in the secret store is the publisher key.
 
 ## Issuer recovery
 
-If the only issuer is lost, nobody can invite, renew or revoke. Kotlin's
-`pairDevice()` therefore pairs a user's further devices as issuers by default;
-`pairDevice(issuing = false)` makes a writer of every table that cannot pair,
-grant, delegate or revoke. A paired issuer holds the publisher key in its own
-`SecretStore` with its own keys and an author range split from the enrolling
-issuer's; no identity or author log is cloned.
+If the only issuer is lost, nobody can invite, renew or revoke. The owner's
+identity provider is the domain's backup: a provider that derives the owner's
+key, such as a passkey, brings it back on another node with
+`enroll_identity`, from any node of the owner's identity. Kotlin's
+`pairDevice()` pairs a further device under its own identity with issuer
+authority by default; `pairDevice(issuing = false)` makes a writer of every
+table that cannot pair, grant, delegate or revoke. A paired issuer signs
+through its own chain, with an author range split from the enrolling
+issuer's; it never holds the publisher key, and no author log is cloned.
 
 Enrollments, renewal answers and `grant` bundles carry contacts of the other
 issuers the answering issuer reaches; receivers add them as peers and issuers
@@ -209,19 +254,21 @@ next renewal. An issuer serves every device its registry records; one that
 refuses a sync from a device whose record has not reached it first answers the
 renewal that sync starts, then serves it.
 
-When the creator is lost, a remaining issuer calls `revoke(node)` with its
-node key: a statement ending its chains, rotated reader keys. Others renew
-from remaining issuers. An issuer cannot revoke itself.
+When the creator's node is lost, a remaining issuer revokes that node: its
+certificate ends, the owner's identity stays. Others renew from remaining
+issuers. A stolen issuer is revoked by identity: it signs nothing that
+verifies where the statement is known, and the identities it granted renew
+at another issuer.
 
 Unrecoverable:
 
-- **A revoked issuer's publisher key.** Revocation recovers from loss, not
-  theft; a stolen issuer needs a new domain.
+- **The owner's identity**, when no provider can bring it back: issuers
+  below it keep working until their chains expire.
 - **The last issuer.** Members sync until credentials expire, then stop for
   good. A member that removed every issuer lists no known renewal candidates.
 - **A device that knew only the lost issuer** and did not renew since: add a
   remaining issuer's contact with `addPeer`.
-- **The revoked issuer's own writes**, earlier ones included. Peers that
+- **The revoked node's own writes**, earlier ones included. Peers that
   learned the revocation refuse them; its rows they lacked arrive by checkpoint.
 
 ## Peers and contacts
@@ -342,7 +389,7 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `pairing` with `profile` | `uri`, `expires`, `profile`, invitation activity `sequence` (issuer) |
 | `grant` / `delegate` with `device` and `grants` or `profile` | `supplied` for `install`; `delegate` narrows this device's grants |
 | `install` with `supplied` | Replaces credentials; the new `session` |
-| `devices`, `device_label`, `revoke` with `node` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
+| `devices`, `device_label`, `revoke` with `node` or `identity` | [Registry](issuer-registry.md#calls) records; a label set; the new revocation set (issuer) |
 | `renew` | The renewed `session` |
 | `activity`, `activity_next` | Bounded [background activity](activity.md) |
 | `logout` with `purge` | Ends membership |

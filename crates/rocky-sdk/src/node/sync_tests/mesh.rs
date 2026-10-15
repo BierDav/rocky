@@ -171,7 +171,7 @@ async fn revoked_peers_receive_no_contact_or_discovery_material_and_are_unknown_
             let b = enrolled(&root.path().join("b"), &hub, "b", Some((&a, writer()))).await?;
             let c = enrolled(&root.path().join("c"), &hub, "c", Some((&a, writer()))).await?;
             let c_key = PrivateKey::from_bytes(&c.vault.get("node")?).public_key();
-            a.revoke(c_key).await?;
+            a.revoke(crate::enrollment::Revoke::Node(c_key)).await?;
             assert!(c.vault.load_bytes("discovery")?.is_none());
             let link = c.network.read().await;
             let stream = link
@@ -406,7 +406,7 @@ async fn a_needed_partition_reaches_its_keyless_custody_peer_within_two_passes()
         command(&a, json!({"type":"partition_create","table":"items","values":values})).await?;
         let b_key = PrivateKey::from_bytes(&b.vault.get("node")?).public_key();
         let shared = command(&a, json!({"type":"partition_share","table":"items","values":values,"recipients":[b_key]})).await?;
-        command(&b, json!({"type":"partition_install","table":"items","values":values,"envelope":shared["envelopes"][0]["envelope"]})).await?;
+        command(&b, json!({"type":"partition_install","table":"items","values":values,"envelope":shared["envelopes"][0]["envelope"],"sender":shared["sender"]})).await?;
         command(&d, json!({"type":"partition_register","table":"items","values":values})).await?;
         command(&a, json!({"type":"sql","sql":"BEGIN"})).await?;
         let id = command(&a, json!({"type":"next_id","table":"items","partition_values":values})).await?["id"].clone();

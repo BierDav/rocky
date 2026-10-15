@@ -487,6 +487,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
     let a_path = root.path().join("a");
     let a = Device::new(Database::create(
         Open {
+            identity: None,
             directory: &a_path,
             schema,
             secrets: None,
@@ -511,6 +512,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
         .await;
     let member = Device::new(Database::join(
         Open {
+            identity: None,
             directory: &path,
             schema,
             secrets: None,
@@ -534,6 +536,7 @@ async fn interrupted_join_resumes_only_incomplete_scopes_after_reopen() -> Resul
     assert_eq!(member.titles().await, ["first scope"]);
     member.close().await;
     let member = Device::new(Database::open(Open {
+        identity: None,
         directory: &path,
         schema,
         secrets: None,
@@ -582,6 +585,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
     let a_path = root.path().join("a");
     let a = Device::new(Database::create(
         Open {
+            identity: None,
             directory: &a_path,
             schema,
             secrets: None,
@@ -606,6 +610,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         .await;
     let member = Device::new(Database::join(
         Open {
+            identity: None,
             directory: &path,
             schema,
             secrets: None,
@@ -631,6 +636,7 @@ async fn an_old_bootstrap_cannot_clear_newer_authority_intent() -> Result<(), Fa
         .await;
     let c = Device::new(Database::join(
         Open {
+            identity: None,
             directory: &c_path,
             schema,
             secrets: None,

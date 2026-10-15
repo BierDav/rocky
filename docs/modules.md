@@ -55,15 +55,16 @@ Start at `crates/rocky-core/src/lib.rs`.
 ## rocky-credentials
 
 Verifies and issues credentials without a database or endpoint: the signed
-manifest, capability chain and the mergeable set of signed revocation
-statements ([revocations](runtime/revocations.md)), the
-distinct identities, raw grants and chain delegation, node author numbers and principal range verification,
-grant profiles built on
-raw grants with read and write rights,
-`Authority` issuance, the `KeyProvider`
-contract with its file fallback, transport-free invitation, pairing and
-renewal messages, and the coordination grant and tenant admission control
-tokens of a coordination service. Runtimes enforce what it verifies. See
+manifest, capability chain, node certificates, endorsements and the
+mergeable set of signed revocation statements
+([revocations](runtime/revocations.md)), the distinct identities and the
+`IdentityProvider` port with its file provider, raw grants and chain
+delegation, node author numbers and identity range verification, grant profiles built on
+raw grants with read and write rights, `Authority` issuance by the owner or
+an issuer, the `KeyProvider` contract with its file fallback, transport-free
+invitation, pairing, renewal and self-enrollment messages, and the
+coordination grant and tenant admission control tokens of a coordination
+service. Runtimes enforce what it verifies. See
 [credentials](runtime/credentials.md), [credential primitives](runtime/credential-primitives.md) and
 [design rationale](runtime/credentials.md#design-rationale).
 
@@ -266,8 +267,9 @@ Their verification is recorded separately from library package tests. See [Phase
 `crates/rocky-sdk` also packages the configuration-only `rocky-peer` custody
 launcher and its container; see [always-on peer](runtime/always-on-peer.md).
 `crates/rocky-sdk` owns the native reactor over `EncryptedReplica`: a schema's
-typed secure tables, enrollment with grant profiles, the replicated
-[issuer registry](runtime/issuer-registry.md), renewal,
+typed secure tables, the node's identity (stored or the application's
+`IdentityProvider`), enrollment with grant profiles and of further nodes of an
+identity, the replicated [issuer registry](runtime/issuer-registry.md), renewal,
 revocation statements with key rotation and issuer tombstones, envelope delivery
 from its outbox in `identity.json` and a mailbox's deposits
 ([decision 0054](decisions/0054-envelope-delivery.md)), supplied credentials, principal author ranges
@@ -281,7 +283,7 @@ network, `Session` handles share it, `Connection` serves a database
 driver's writer and readers ([SQL driver](runtime/sql-driver.md)) and a `NetworkService` owns or borrows its
 transport; `Engine` is the starter composition of the three
 ([SDK composition](runtime/sdk-composition.md)). `Open::coordination` composes an application-owned `DomainLog` or a service trust
-bundle. The `owner` module signs trusted-node control certificates under the
+bundle. The `owner` module signs control certificates naming trusted identities under the
 tenant key; the coordinator receives only generic metadata.
 
 `sdks/native` is the

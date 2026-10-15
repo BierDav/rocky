@@ -3,7 +3,7 @@ use crate::{
     AuthorRange, Authority, CredentialChain, Extended, Extension, Revocation, RevocationSet,
     SignedCapability, SignedRevocation,
 };
-use crate::{decode_bounded, encode};
+use crate::{PrivateKey, decode_bounded, encode};
 use rocky_core::{
     Affinity, AppId, Collation, DomainId, KeyColumn, MeshId, PartitionSelection, PartitionValue,
     PrincipalKind, ResourceScope, RowChange, RowWrite, SqlValue,
@@ -57,25 +57,21 @@ fn policy() -> RevocationSet {
 }
 /// A set whose one statement revokes `key`.
 fn revoking(publisher: &PrivateKey, key: PublicKey) -> RevocationSet {
-    let issuer = PrivateKey::new();
     let statement = Revocation {
         app: AppId([2; 16]),
-        issuer: issuer.public_key(),
+        issuer: publisher.public_key(),
         time: NOW,
         nodes: BTreeSet::new(),
-        users: [key].into(),
+        identities: [key].into(),
         capabilities: BTreeSet::new(),
     };
     RevocationSet::try_from(vec![
-        SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
+        SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),
     ])
     .unwrap()
 }
 fn authority(key: &PrivateKey) -> Authority<'_> {
-    Authority {
-        publisher: key,
-        manifest: [9; 32],
-    }
+    Authority::owner(key, [9; 32])
 }
 
 struct SelectorFixture {
@@ -452,6 +448,7 @@ fn paired_grants_and_partition_nodes_never_expand_authority() {
         authors: Some(AuthorRange::new(11, 11).unwrap()),
         node: Some(crate::PeerId::of(node_signer.public_key())),
         partitions: vec![cross],
+        issues: false,
     })
     .unwrap();
     chain.0.push(SignedCapability::sign(leaf, &holder).unwrap());

@@ -1190,7 +1190,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         for signed in statements {
             signed.verify(publisher, app).map_err(credential)?;
             let single = RevocationSet::try_from(vec![signed.clone()]).map_err(credential)?;
-            if single.revoking(own).map_err(credential)?.is_some() {
+            if single.revoking_holder(own).map_err(credential)?.is_some() {
                 revoking.get_or_insert(signed);
             } else {
                 others.push(signed);
@@ -1391,7 +1391,7 @@ impl<A: RowApplication> Inner<A> {
             || !self.tables.contains(&extension.scope.table)
             || credentials
                 .0
-                .first()
+                .last()
                 .is_some_and(|root| root.capability.manifest != extension.manifest)
         {
             return Err(denied("wrong app/domain/table/manifest"));

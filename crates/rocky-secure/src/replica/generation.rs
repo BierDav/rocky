@@ -447,7 +447,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let manifest = chain
             .0
-            .first()
+            .last()
             .map_or(self.manifest, |root| root.capability.manifest);
         let revocations = self.revocations_for(manifest, &self.config.revocations)?;
         self.resolve_chain_scopes_at(chain, manifest, key, revocations, time, scopes)
@@ -462,7 +462,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<Vec<rocky_core::ResourceGrant>, Error> {
         let manifest = chain
             .0
-            .first()
+            .last()
             .map_or(self.manifest, |root| root.capability.manifest);
         let revocations = self.revocations_for(manifest, revocations)?;
         self.resolve_chain_at(chain, manifest, key, revocations, time)

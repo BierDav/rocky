@@ -8,8 +8,9 @@ formats. The trusted runtime's earlier same-definition APIs remain separate.
 
 - Local version, SQL spelling, local tables and indexes do not authorize a new
   replicated definition. A local plan keeps the manifest and row identities.
-- Adding a mergeable table or nullable field requires a publisher-signed
-  `GenerationTransition`. Rows from an older definition supply null for newly
+- Adding a mergeable table or nullable field requires a
+  `GenerationTransition` the owner or an issuer endorsed
+  ([identities](credentials.md#identities)). Rows from an older definition supply null for newly
   added nullable fields. Names are the identities of tables and fields
   ([decision 0067](../decisions/0067-names-are-identities.md)).
 - Requiring a field of an existing table, newly added or once nullable, is

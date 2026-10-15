@@ -173,9 +173,7 @@ impl<A: RowApplication> Inner<A> {
             principal: self
                 .config
                 .credentials
-                .0
-                .first()
-                .map(|root| root.capability.subject)
+                .principal()
                 .ok_or_else(|| denied("missing user credential"))?,
             node: self.config.node.public_key(),
             manifest: self.manifest,

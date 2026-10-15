@@ -15,8 +15,8 @@ use crate::{
 };
 use data_encoding::HEXLOWER;
 use rocky_core::{Commitment, Generation, GenerationTransition, ItemChanges};
-use rocky_credentials::{Profile, SignedTransition};
-use rocky_secure::{GenerationStep, PrivateKey, RevocationSet, SignedManifest, Upgrade};
+use rocky_credentials::SignedTransition;
+use rocky_secure::{GenerationStep, RevocationSet, SignedManifest, Upgrade};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 
@@ -293,7 +293,8 @@ impl Settings {
         vault: &Vault,
         schema: &Schema,
     ) -> Result<(), Failure> {
-        let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+        let identity = self.identity(vault)?;
+        let links = self.issuer_links();
         let old = self.domain()?;
         let before = old.manifest();
         let new = logical(schema, *self.publisher.as_bytes())?;
@@ -326,17 +327,20 @@ impl Settings {
             fields: ItemChanges::between(&before.fields, &after.fields),
             time: crate::enrollment::now_micros()?,
         };
-        let signed = SignedTransition::sign(&transition, &publisher)?;
+        // The owner, or an issuer through its chain, signs.
+        let signed = SignedTransition::endorse(&transition, &*identity, &links)?;
         let mut draft = self.clone();
         draft.lineage.push(Step {
             manifest: Some(self.manifest.clone()),
             transition: HEXLOWER.encode(&signed.to_bytes()?),
         });
         draft.schema = schema.clone();
-        draft.manifest = HEXLOWER.encode(&SignedManifest::sign(&after, &publisher)?.to_bytes()?);
+        draft.manifest =
+            HEXLOWER.encode(&SignedManifest::endorse(&after, &*identity, &links)?.to_bytes()?);
+        let registry = self.registry_key(vault)?;
         for (name, _) in domain.scopes() {
             if !draft.keys.contains_key(name) {
-                let key = reader_key(&publisher, self.domain, name);
+                let key = reader_key(&registry, self.domain, name);
                 let epoch = rocky_core::KeyEpoch::new(1, &key);
                 let role = key_role(name, epoch);
                 if vault.find(&role)?.is_none() {
@@ -352,13 +356,26 @@ impl Settings {
                 draft.keys.insert(name.to_owned(), vec![epoch]);
             }
         }
-        draft.credentials = draft.issue_own(
-            vault,
-            crate::enrollment::grants_of(&Profile::Issuer, &domain)?,
-        )?;
+        draft.credentials = draft.issue_own(vault)?;
         draft.save(path)?;
         *self = draft;
         Ok(())
+    }
+    /// The registry's current key: its highest epoch, the lowest of
+    /// siblings, as writers choose it.
+    fn registry_key(&self, vault: &Vault) -> Result<[u8; 32], Failure> {
+        let epoch = self
+            .keys
+            .get(crate::domain::REGISTRY)
+            .and_then(|epochs| {
+                epochs.iter().copied().max_by(|a, b| {
+                    a.generation
+                        .cmp(&b.generation)
+                        .then(b.secret_hash.cmp(&a.secret_hash))
+                })
+            })
+            .ok_or("an issuer holds the registry key")?;
+        Ok(vault.get(&key_role(crate::domain::REGISTRY, epoch))?)
     }
     async fn fetch_generation(
         &mut self,
@@ -405,7 +422,10 @@ impl Settings {
         addresses: &[String],
     ) -> Result<bool, Failure> {
         let offer = ask(transport, addresses).await?;
-        if offer.manifest == self.manifest {
+        // Endorsers differ in bytes; the manifest is the generation.
+        if manifest_hash(&offer.manifest, self.publisher)?
+            == manifest_hash(&self.manifest, self.publisher)?
+        {
             return Ok(false);
         }
         let draft = self.adopt_offer(offer, None)?;
@@ -575,6 +595,25 @@ impl Settings {
         // A step this device holds signed earlier keeps its baseline.
         keep_earlier(&mut draft.lineage, &self.lineage, self.publisher)?;
         draft.learn_revocations(&offer.revocations)?;
+        // What this device meets for the first time needs a signer no held
+        // statement ended: a revoked issuer moves nobody to a generation.
+        let time = crate::enrollment::now()?;
+        draft
+            .manifest()?
+            .verify_current(self.publisher, &draft.revocations, time)?;
+        for step in &draft.lineage {
+            if !self
+                .lineage
+                .iter()
+                .any(|held| held.transition == step.transition)
+            {
+                step.signed_transition()?.verify_current(
+                    self.publisher,
+                    &draft.revocations,
+                    time,
+                )?;
+            }
+        }
         Ok(draft)
     }
     /// This identity with the transitions another device at the same
@@ -586,7 +625,8 @@ impl Settings {
         reply: &[u8],
     ) -> Result<Option<(Self, Vec<SignedTransition>)>, Failure> {
         let offer: Offer = serde_json::from_slice(reply)?;
-        if offer.manifest != self.manifest
+        if manifest_hash(&offer.manifest, self.publisher)?
+            != manifest_hash(&self.manifest, self.publisher)?
             || offer.lineage.len() != self.lineage.len()
             || offer
                 .lineage
@@ -725,10 +765,11 @@ fn field_ids(
 }
 
 /// The first reader key of a table a generation adds: derived from the
-/// publisher key, so issuers that sign the same schema apart hold the same
-/// key. Revocation rotates it to random later epochs as any other.
-fn reader_key(publisher: &PrivateKey, domain: rocky_core::DomainId, table: &str) -> [u8; 32] {
-    let mut input = publisher.as_bytes().to_vec();
+/// registry's current key, which every issuer holds and a revoked one no
+/// longer receives, so issuers that sign the same schema apart hold the
+/// same key. Revocation rotates it to random later epochs as any other.
+fn reader_key(registry: &[u8; 32], domain: rocky_core::DomainId, table: &str) -> [u8; 32] {
+    let mut input = registry.to_vec();
     input.extend(domain.0);
     input.extend(table.as_bytes());
     rocky_core::commitment("rocky.sdk.generation-reader.v1", &input)

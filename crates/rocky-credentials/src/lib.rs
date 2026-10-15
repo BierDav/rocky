@@ -1,6 +1,7 @@
 //! Credentials independent of a database or a network: signed manifests,
-//! capabilities and revocations, the identities they bind, key providers,
-//! issuance and the enrollment and renewal messages. A runtime enforces
+//! capabilities and revocations, the identities they bind and the provider
+//! port that supplies them, key providers, issuance and the enrollment and
+//! renewal messages. A runtime enforces
 //! what these verify. See `docs/runtime/credentials.md`.
 mod author_binding;
 mod coordination;
@@ -28,8 +29,8 @@ pub use cut::{CutPoint, CutStatement, MAX_CUT_AUTHORITY_BYTES, MAX_CUT_BYTES, Si
 pub use delivery::{DeliveryReceipt, MAX_DELIVERY_PAYLOAD, SealedDelivery};
 pub use discovery::{DiscoverySecret, open_discovery, seal_discovery};
 pub use enroll::{
-    Admission, Exchange, Invitation, PairRequest, RenewRequest, Renewal, open_enrollment,
-    seal_enrollment,
+    Admission, Exchange, IdentityAnswer, IdentityRequest, Invitation, PairRequest, RenewRequest,
+    Renewal, open_enrollment, seal_enrollment,
 };
 pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
@@ -38,8 +39,8 @@ pub use horizon::{
     HorizonLog, HorizonPeer, HorizonStatement, SignedHorizon,
 };
 pub use identity::{
-    CoordinatorControl, ExternalLogin, LoginPrincipal, LoginProvider, Publisher, ReaderScope,
-    SigningDevice, TransportEndpoint,
+    CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,
+    LoginProvider, Publisher, Purpose, ReaderScope, SigningDevice, TransportEndpoint,
 };
 pub use issue::{Authority, Grant, MAX_GRANTS, Profile, Resource, device_chain};
 pub use keys::{FileKeyProvider, KeyProvider, ProviderError, Vault, write_private};
@@ -52,13 +53,13 @@ pub use revocation::{
     SignedRevocation,
 };
 pub use signed::{
-    Capability, CredentialChain, Credentials, SignedCapability, SignedManifest, SignedTransition,
-    Verified,
+    Capability, CredentialChain, Credentials, Endorsement, MAX_ENDORSEMENT_BYTES, SignedCapability,
+    SignedManifest, SignedTransition, Verified,
 };
 
 use serde::{Serialize, de::DeserializeOwned};
 
-/// Longest delegation chain, publisher to node.
+/// Longest delegation chain: publisher, issuer identities, identity, node.
 pub const MAX_CREDENTIAL_DEPTH: usize = 8;
 /// Largest signed credential structure.
 pub const MAX_CREDENTIAL_BYTES: usize = 256 * 1024;

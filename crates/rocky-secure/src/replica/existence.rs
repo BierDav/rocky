@@ -263,7 +263,7 @@ impl<A: RowApplication> Inner<A> {
             || statement
                 .credentials
                 .0
-                .first()
+                .last()
                 .is_some_and(|root| root.capability.manifest != statement.manifest)
         {
             return Err(denied(

@@ -51,6 +51,7 @@ pub(super) fn keys(directory: &Path) -> Arc<dyn SecretStore> {
 }
 pub(super) fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory: root,
         schema: SCHEMA,
         secrets: Some(keys(root)),

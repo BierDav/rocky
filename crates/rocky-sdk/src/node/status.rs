@@ -223,14 +223,7 @@ impl Node {
             token: String::new(),
             observed_at_epoch_millis: epoch_millis(),
             authority: AuthorityStatus {
-                principal: settings
-                    .credentials
-                    .0
-                    .first()
-                    .ok_or("missing principal credential")?
-                    .capability
-                    .subject
-                    .to_hex(),
+                principal: settings.identity.to_hex(),
                 node: self
                     .node_identity
                     .clone()

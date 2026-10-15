@@ -171,6 +171,7 @@ fn values(list: &str) -> Value {
 }
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,

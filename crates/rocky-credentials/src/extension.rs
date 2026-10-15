@@ -53,6 +53,7 @@ struct Body {
     authors: Option<AuthorRange>,
     node: Option<crate::PeerId>,
     partitions: Vec<crate::PartitionGrant>,
+    issues: bool,
 }
 /// Reads only the version, whatever else a later body holds.
 #[derive(Deserialize)]
@@ -67,6 +68,9 @@ pub struct Extended {
     pub node: Option<crate::PeerId>,
     /// Selector grants (extension version 2).
     pub partitions: Vec<crate::PartitionGrant>,
+    /// Issuer authority: the identity grants, renews, revokes and signs the
+    /// domain's statements through this link.
+    pub issues: bool,
 }
 impl Extension {
     pub fn new(extended: Extended) -> Result<Self, Error> {
@@ -75,6 +79,7 @@ impl Extension {
             partitions: extended.partitions,
             authors: extended.authors,
             node: extended.node,
+            issues: extended.issues,
         };
         let extension = Self(encode(&body)?);
         extension.read()?;
@@ -104,6 +109,7 @@ impl Extension {
             partitions: body.partitions,
             authors: body.authors,
             node: body.node,
+            issues: body.issues,
         })
     }
 }
@@ -125,6 +131,7 @@ mod tests {
                     version,
                     authors: None,
                     partitions: Vec::new(),
+                    issues: false,
                 })
                 .unwrap(),
             );

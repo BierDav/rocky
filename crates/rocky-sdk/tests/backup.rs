@@ -8,6 +8,7 @@ use std::{path::Path, sync::Arc};
 
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,

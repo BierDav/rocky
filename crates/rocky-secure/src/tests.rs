@@ -71,17 +71,16 @@ pub(crate) fn revoking(
     users: &[PublicKey],
     capabilities: &[Commitment],
 ) -> RevocationSet {
-    let issuer = PrivateKey::new();
     let statement = Revocation {
         app,
-        issuer: issuer.public_key(),
+        issuer: publisher.public_key(),
         time: now().unwrap(),
         nodes: BTreeSet::new(),
-        users: users.iter().copied().collect(),
+        identities: users.iter().copied().collect(),
         capabilities: capabilities.iter().copied().collect(),
     };
     RevocationSet::try_from(vec![
-        SignedRevocation::sign(statement, publisher, &issuer).unwrap(),
+        SignedRevocation::sign(statement, publisher, &CredentialChain::default()).unwrap(),
     ])
     .unwrap()
 }

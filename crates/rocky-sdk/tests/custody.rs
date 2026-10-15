@@ -313,7 +313,7 @@ async fn routed_records_preserve_authority_with_the_current_version() -> Result<
     };
     let original = decode(&invitation)?;
     let routed = decode(&route_enrollment(&invitation, &contact)?)?;
-    assert_eq!(routed["v"], 4);
+    assert_eq!(routed["v"], 5);
     for name in ["token", "publisher", "profile", "expires"] {
         assert_eq!(routed[name], original[name]);
     }

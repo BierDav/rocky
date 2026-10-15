@@ -12,7 +12,7 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     let domain = issuer.domain()?;
     let logical = domain.logical();
@@ -37,10 +37,10 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
         user: user.public_key(),
         node: node.public_key(),
     };
-    let capability = Authority {
-        publisher: &PrivateKey::from_bytes(&vault.get("publisher")?),
-        manifest: domain.manifest().hash(),
-    }
+    let capability = Authority::owner(
+        &PrivateKey::from_bytes(&vault.get("identity")?),
+        domain.manifest().hash(),
+    )
     .issue_partition_terms(
         user.public_key(),
         vec![],
@@ -73,10 +73,17 @@ fn revoking_a_device_known_only_by_its_grant_ends_its_user_under_any_node_key()
     renew(&issuer, &node)?;
     renew(&issuer, &PrivateKey::new())?;
 
-    issuer.begin_revocation(node.public_key(), &registry)?;
+    // Revoking the node ends its certificate only: another node of the
+    // same identity still renews.
+    issuer.begin_revocation(Revoke::Node(node.public_key()), &registry)?;
     issuer.rotate(&vault)?;
+    issuer.authority.as_mut().ok_or("authority")?.rotation = None;
     assert!(issuer.revoked_device(&node.public_key(), &registry));
     assert!(renew(&issuer, &node).is_err());
+    renew(&issuer, &PrivateKey::new())?;
+    // Revoking the identity ends every node of it, a fresh one too.
+    issuer.begin_revocation(Revoke::Identity(user.public_key()), &registry)?;
+    issuer.rotate(&vault)?;
     assert!(renew(&issuer, &PrivateKey::new()).is_err());
     let renamed = DeviceKeys {
         user: user.public_key(),
@@ -96,7 +103,7 @@ fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), F
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     let node = PrivateKey::new().public_key();
     let record = ContactRecord {
@@ -116,7 +123,7 @@ fn revoking_a_configured_contact_keeps_the_identity_reopenable() -> Result<(), F
     );
     issuer.add_peer(&vault, &uri)?;
     assert!(issuer.contact_meta.contains_key(&node));
-    issuer.begin_revocation(node, &Registry::default())?;
+    issuer.begin_revocation(Revoke::Node(node), &Registry::default())?;
     issuer.rotate(&vault)?;
     let path = directory.path().join("identity.json");
     issuer.save(&path)?;
@@ -169,7 +176,7 @@ fn a_granted_profile_reads_every_partition_as_an_enrolled_one_does() -> Result<(
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     let (user, node) = (PrivateKey::new(), PrivateKey::new());
     let device = DeviceKeys {
@@ -233,7 +240,7 @@ fn registry_grants_follow_only_the_issuer_and_custody_profiles() -> Result<(), F
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let domain = issuer.domain()?;
     let registry = domain.registry();
     let lists: std::collections::BTreeSet<String> = ["lists".into()].into();
@@ -281,7 +288,7 @@ fn issuer_at(
 ) -> Result<(Settings, Vault, std::path::PathBuf), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> =
         std::sync::Arc::new(crate::FileSecretStore::new(directory.join("secrets")));
-    let issuer = Settings::create(&Schema::parse(schema)?, &store, DEFAULT_TTL)?;
+    let issuer = Settings::create(&Schema::parse(schema)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     let path = directory.join("identity.json");
     issuer.save(&path)?;
@@ -306,7 +313,7 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
         let directory = tempfile::tempdir()?;
         let (mut issuer, vault, path) = issuer_at(TWO, directory.path())?;
         let node = PrivateKey::new().public_key();
-        issuer.begin_revocation(node, &Registry::default())?;
+        issuer.begin_revocation(Revoke::Node(node), &Registry::default())?;
         issuer.save(&path)?;
         let intent = issuer
             .authority
@@ -376,9 +383,8 @@ fn a_revocation_stopped_at_any_step_completes_with_the_same_statement_and_keys()
 fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<(), Failure> {
     let directory = tempfile::tempdir()?;
     let (mut issuer, vault, _) = issuer_at(TWO, directory.path())?;
-    let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+    let publisher = PrivateKey::from_bytes(&vault.get("identity")?);
     let app = issuer.domain()?.manifest().app;
-    let other = PrivateKey::new();
     let time = now()?;
     let full = RevocationSet::try_from(
         (0..MAX_LIVE_REVOCATIONS)
@@ -386,17 +392,17 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
                 rocky_credentials::SignedRevocation::sign(
                     Revocation {
                         app,
-                        issuer: other.public_key(),
+                        issuer: publisher.public_key(),
                         time,
                         nodes: [rocky_credentials::PeerId::of(
                             PrivateKey::new().public_key(),
                         )]
                         .into(),
-                        users: BTreeSet::new(),
+                        identities: BTreeSet::new(),
                         capabilities: BTreeSet::new(),
                     },
                     &publisher,
-                    &other,
+                    &CredentialChain::default(),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -405,7 +411,10 @@ fn the_1025th_live_statement_is_refused_by_name_and_rotates_nothing() -> Result<
     assert_eq!(issuer.revocations.live(time), MAX_LIVE_REVOCATIONS);
     let (keys, groups) = (issuer.keys.clone(), issuer.groups.len());
     let error = issuer
-        .begin_revocation(PrivateKey::new().public_key(), &Registry::default())
+        .begin_revocation(
+            Revoke::Node(PrivateKey::new().public_key()),
+            &Registry::default(),
+        )
         .unwrap_err();
     assert!(error.is::<RevocationSetFull>());
     assert_eq!(error.to_string(), REVOCATION_SET_FULL);
@@ -457,11 +466,11 @@ fn a_tombstoned_user_renews_at_no_issuer_also_after_its_statement_left_the_set()
     };
     let (revoked_user, revoked_node, revoked_root) = enroll(&mut a, &mut registry)?;
     let (kept_user, _, kept_root) = enroll(&mut a, &mut registry)?;
-    // B holds the publisher key but never saw either device or its record.
+    // B is an issuer too but never saw either device or its record.
     let mut b = a.clone();
     b.authority = Some(Issuing::default());
     b.revocations = RevocationSet::new();
-    a.begin_revocation(revoked_node, &registry)?;
+    a.begin_revocation(Revoke::Identity(revoked_user.public_key()), &registry)?;
     a.rotate(&vault)?;
     // B learns the statement as a renewal answer brings it.
     b.learn_revocations(&a.revocations)?;
@@ -531,7 +540,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
 -> Result<(), Failure> {
     let root = tempfile::tempdir()?;
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
-    let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut a = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let av = a.vault(&store);
     let domain = a.domain()?;
     let mut partition = GroupPartition::resolve(
@@ -553,14 +562,14 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     b.installation = "second-issuer".into();
     let bv = b.vault(&store);
     for role in a.roles() {
-        if !matches!(role.as_str(), "node" | "user")
+        // A second node of the owner's identity, with its own node key.
+        if role != "node"
             && let Some(key) = av.load_bytes(&role)?
         {
             bv.store_bytes(&role, &key)?;
         }
     }
     bv.create("node")?;
-    bv.create("user")?;
     b.credentials = b.renew_locally(&bv)?;
     let mut registry = Registry::default();
     let readers = [
@@ -585,10 +594,10 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
             },
         );
     }
-    a.begin_revocation(readers[0], &registry)?;
+    a.begin_revocation(Revoke::Node(readers[0]), &registry)?;
     a.rotate(&av)?;
     a.authority.as_mut().ok_or("authority")?.rotation = None;
-    b.begin_revocation(readers[1], &registry)?;
+    b.begin_revocation(Revoke::Node(readers[1]), &registry)?;
     b.rotate(&bv)?;
     b.authority.as_mut().ok_or("authority")?.rotation = None;
     let sibling_a = a.groups[&address].current().ok_or("epoch")?;
@@ -706,7 +715,7 @@ fn concurrent_reader_revocations_supersede_both_exposures_and_equal_statements_s
     let before = a.groups[&address].epochs.clone();
     let before_keys = a.keys.clone();
     assert_eq!(b.keys, before_keys);
-    a.begin_revocation(nonreader, &registry)?;
+    a.begin_revocation(Revoke::Node(nonreader), &registry)?;
     a.rotate(&av)?;
     a.authority.as_mut().ok_or("authority")?.rotation = None;
     b.learn_revocations(&a.revocations)?;
@@ -725,7 +734,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut settings = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut settings = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = settings.vault(&store);
     let node = PrivateKey::new().public_key();
     let record = ContactRecord {
@@ -771,7 +780,7 @@ fn saved_contacts_keep_routes_and_flags_without_foreign_node_keys() -> Result<()
 #[test]
 fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     let domain = issuer.domain()?;
     let mut partition = GroupPartition::resolve(
@@ -793,13 +802,14 @@ fn wildcard_member_renewal_does_not_deliver_unshared_group_keys() -> Result<(), 
     let profile = Profile::Reader {
         scopes: ["lists".into()].into(),
     };
-    let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+    let identity = issuer.identity(&vault)?;
+    let links = issuer.issuer_links();
     let capability = issuer.issue(
-        &publisher,
+        &issuer.authority(&*identity, &links, &domain)?,
         &domain,
         user.public_key(),
         grants_of(&profile, &domain)?,
-        Some(AuthorRange::new(2, 1025)?),
+        (false, Some(AuthorRange::new(2, 1025)?)),
     )?;
     let chain = device_chain(
         capability.clone(),
@@ -834,7 +844,7 @@ async fn a_forged_generation_offer_is_refused_before_anything_changes() -> Resul
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let installed = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = installed.vault(&store);
     let mut newer = installed.clone();
     newer
@@ -850,7 +860,7 @@ async fn a_forged_generation_offer_is_refused_before_anything_changes() -> Resul
     assert_eq!(adopted.schema, newer.schema);
     assert_eq!(adopted.lineage.len(), 1);
 
-    let other = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let other = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let mut moved = other.clone();
     moved
         .evolve(
@@ -894,7 +904,7 @@ async fn an_earlier_signed_step_moves_the_baseline() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(
         crate::FileSecretStore::new(directory.path().join("secrets")),
     );
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let vault = issuer.vault(&store);
     issuer
         .evolve(
@@ -911,7 +921,7 @@ async fn an_earlier_signed_step_moves_the_baseline() -> Result<(), Failure> {
         )
     };
     let signed = decode(&issuer.lineage[0].transition)?;
-    let publisher = PrivateKey::from_bytes(&vault.get("publisher")?);
+    let publisher = PrivateKey::from_bytes(&vault.get("identity")?);
     let at = |time: u64| -> Result<Vec<u8>, Failure> {
         let transition = rocky_core::GenerationTransition {
             time,
@@ -943,7 +953,7 @@ async fn an_earlier_signed_step_moves_the_baseline() -> Result<(), Failure> {
 #[test]
 fn an_issuer_without_the_key_of_a_known_partition_may_not_migrate() -> Result<(), Failure> {
     let store: std::sync::Arc<dyn crate::SecretStore> = std::sync::Arc::new(EpochKeys::default());
-    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL)?;
+    let mut issuer = Settings::create(&Schema::parse(SCHEMA)?, &store, DEFAULT_TTL, None)?;
     let domain = issuer.domain()?;
     assert!(issuer.may_migrate(&domain)?);
     // A group whose secret this issuer never received: it cannot read it.

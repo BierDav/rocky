@@ -16,6 +16,7 @@ async fn supplied_numbered_node_writes_offline_reopens_and_keeps_its_granted_ran
     let grant = json!({"type":"grant","device":keys,"profile":profile,"authors":2});
     let supplied = issuer.ok(grant.clone()).await["supplied"].clone();
     let open = || Open {
+        identity: None,
         directory: &path,
         schema: common::SCHEMA,
         secrets: None,

@@ -29,7 +29,7 @@ impl<A: RowApplication> Inner<A> {
         }
         let manifest = chain
             .0
-            .first()
+            .last()
             .map_or(self.manifest, |root| root.capability.manifest);
         // A generation whose manifest this replica lacks, newer or dropped:
         // the session proceeds and the sync fetches it.

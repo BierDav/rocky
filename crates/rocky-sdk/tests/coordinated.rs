@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 fn open<'a>(directory: &'a std::path::Path, network: Option<Network>) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: common::SCHEMA,
         secrets: None,

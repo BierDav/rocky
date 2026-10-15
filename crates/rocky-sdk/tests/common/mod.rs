@@ -20,6 +20,7 @@ pub struct Device {
 }
 fn open(directory: &Path, network: Option<Network>) -> Open<'_> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -200,6 +201,7 @@ pub fn confirmed(open: Open<'_>) -> Result<Opened, Failure> {
     let schema = open.schema;
     let secrets = open.secrets.clone();
     let report = Database::open(Open {
+        identity: None,
         directory,
         schema,
         secrets,

@@ -386,7 +386,7 @@ impl NativeSession {
         let own = match sent {
             Some(statement) => Some(statement),
             None => held
-                .revoking(&hello.credentials)
+                .revoking_holder(&hello.credentials)
                 .map_err(credential)?
                 .cloned(),
         };

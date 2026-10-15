@@ -2190,20 +2190,18 @@ async fn two_nodes_of_one_principal_write_every_table_and_refuse_number_changes(
     let directory = tempfile::tempdir().unwrap();
     let principal = PrivateKey::new();
     let nodes = [PrivateKey::new(), PrivateKey::new()];
-    let root = crate::credentials::Authority {
-        publisher: &fixture.publisher,
-        manifest: fixture.app().manifest().hash(),
-    }
-    .issue_terms(
-        principal.public_key(),
-        fixture.full(),
-        (
-            1,
-            Some(crate::credentials::AuthorRange::new(100, 110).unwrap()),
-        ),
-        crate::tests::validity(),
-    )
-    .unwrap();
+    let root =
+        crate::credentials::Authority::owner(&fixture.publisher, fixture.app().manifest().hash())
+            .issue_terms(
+                principal.public_key(),
+                fixture.full(),
+                (
+                    1,
+                    Some(crate::credentials::AuthorRange::new(100, 110).unwrap()),
+                ),
+                crate::tests::validity(),
+            )
+            .unwrap();
     let prefix = CredentialChain(vec![root]);
     let open = async |name: &str, index: usize, number: u32| {
         let replica = EncryptedReplica::open(

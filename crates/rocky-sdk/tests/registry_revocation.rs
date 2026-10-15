@@ -42,7 +42,11 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     let old_chain: CredentialChain =
         serde_json::from_value(identity(root, "m")?["credentials"].clone())?;
     a.close().await;
-    let response = b.ok(json!({"type":"revoke","node":node})).await;
+    // Revoking the identity names its recorded node, capability and
+    // pseudonyms, so no node of it renews again.
+    let response = b
+        .ok(json!({"type":"revoke","identity":recorded["user"]}))
+        .await;
     let state = identity(root, "b")?;
     assert_eq!(
         state["keys"],
@@ -60,7 +64,7 @@ async fn another_issuer_revokes_a_writer_and_its_recorded_partition_precisely_wi
     assert!(
         statement
             .statement
-            .users
+            .identities
             .contains(&recorded["user"].as_str().ok_or("user")?.parse()?)
     );
     let capability: [u8; 32] = data_encoding::HEXLOWER

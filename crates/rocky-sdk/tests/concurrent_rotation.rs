@@ -14,6 +14,7 @@ const SCHEMA: &str = r#"{"application":"siblings","version":1,"format":6,"tables
  {"name":"attachments","class":"mergeable","columns":[{"name":"list","type":"text","not_null":true},{"name":"key","type":"text","not_null":true}],"primary_key":["list","key"],"partition_by":["list"],"partition_group":"list"}]}"#;
 fn open<'a>(root: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory: root,
         schema: SCHEMA,
         secrets: Some(fixture::keys(root)),

@@ -1,8 +1,9 @@
-//! Issuance: raw grants, the grant profiles built on them and what a
-//! holder of the publisher key signs.
+//! Issuance: raw grants, the grant profiles built on them and what an
+//! identity with issuer authority signs.
 use crate::{
-    AuthorRange, Capability, CredentialChain, Error, Extended, Extension, MAX_CHAIN_LIFETIME,
-    PrivateKey, PublicKey, Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
+    AuthorRange, Capability, CredentialChain, Endorsement, Error, Extended, Extension,
+    IdentityProvider, MAX_CHAIN_LIFETIME, MAX_CREDENTIAL_DEPTH, PartitionGrant, PublicKey,
+    Revocation, RevocationSet, SignedCapability, SignedRevocation, denied,
 };
 use rocky_core::{Commitment, PrincipalKind, ResourceGrant, ResourceScope, Right, RowSelection};
 use serde::{Deserialize, Serialize};
@@ -149,8 +150,8 @@ pub enum Profile {
     Reader { scopes: BTreeSet<String> },
     /// Reads and writes the named reader scopes.
     Writer { scopes: BTreeSet<String> },
-    /// A writer of every reader scope that also holds the publisher key:
-    /// it enrolls, renews and revokes devices.
+    /// A writer of every reader scope with issuer authority: it enrolls,
+    /// renews and revokes identities and signs the domain's statements.
     Issuer,
     /// Exactly these raw grants.
     Grants { grants: Vec<Grant> },
@@ -185,7 +186,7 @@ const WRITE: [Right; 5] = [
     Right::Custody,
 ];
 impl Profile {
-    /// Whether the profile holds the publisher key.
+    /// Whether the profile holds issuer authority.
     pub fn issues(&self) -> bool {
         matches!(self, Self::Issuer)
     }
@@ -281,17 +282,50 @@ fn same_set(left: &[ResourceGrant], right: &[ResourceGrant]) -> bool {
         && right.iter().all(|grant| left.contains(grant))
 }
 
-/// What the publisher key signs for one manifest. Whoever holds the key is
-/// an issuer; the key never leaves its `KeyProvider` except sealed to an
-/// invited issuer device.
+/// What an identity with issuer authority signs for one manifest: the
+/// owner's, whose key is the publisher key, or an issuer's through its
+/// chain of issuer links. The identity's provider signs; no key is copied.
 pub struct Authority<'a> {
-    pub publisher: &'a PrivateKey,
+    pub identity: &'a dyn IdentityProvider,
+    /// The issuer links from the publisher to `identity`; empty for the owner.
+    pub chain: &'a CredentialChain,
     pub manifest: Commitment,
 }
-impl Authority<'_> {
-    /// A user capability for `subject`, valid from `skew` seconds before
-    /// `time` for `ttl` seconds. Its subject delegates only to its own
-    /// node key.
+static OWNER: CredentialChain = CredentialChain(Vec::new());
+impl<'a> Authority<'a> {
+    /// The owner: its identity key is the publisher key.
+    pub fn owner(identity: &'a dyn IdentityProvider, manifest: Commitment) -> Self {
+        Self {
+            identity,
+            chain: &OWNER,
+            manifest,
+        }
+    }
+    /// An issuer whose issuer links `chain` ends at `identity`.
+    pub fn issuer(
+        identity: &'a dyn IdentityProvider,
+        chain: &'a CredentialChain,
+        manifest: Commitment,
+    ) -> Self {
+        Self {
+            identity,
+            chain,
+            manifest,
+        }
+    }
+    /// The links a capability this authority signs follows.
+    pub fn prefix(&self) -> &CredentialChain {
+        self.chain
+    }
+    /// A capability this authority signed, with the links it follows.
+    pub fn chain_of(&self, capability: SignedCapability) -> CredentialChain {
+        let mut chain = self.chain.clone();
+        chain.0.push(capability);
+        chain
+    }
+    /// An identity capability for `subject`, valid from `skew` seconds
+    /// before `time` for `ttl` seconds. Its subject certifies only its own
+    /// nodes.
     pub fn issue(
         &self,
         subject: PublicKey,
@@ -302,7 +336,7 @@ impl Authority<'_> {
         self.issue_delegable(subject, grants, 1, authors, validity)
     }
     /// As `issue`, with `delegations` links allowed below it: 1 reaches
-    /// the subject's own node key, 2 one further delegate and its node.
+    /// the subject's own node certificates, 2 one further delegate.
     pub fn issue_delegable(
         &self,
         subject: PublicKey,
@@ -320,31 +354,104 @@ impl Authority<'_> {
         subject: PublicKey,
         grants: Vec<ResourceGrant>,
         (delegations, authors): (u8, Option<AuthorRange>),
+        validity: (u64, u64, u64),
+    ) -> Result<SignedCapability, Error> {
+        self.sign_link(
+            subject,
+            grants,
+            Extended {
+                authors,
+                ..Extended::default()
+            },
+            delegations,
+            validity,
+        )
+    }
+    /// Issuer authority for `subject`, one level below this authority,
+    /// with the author numbers `authors` to hand out.
+    pub fn issue_issuer(
+        &self,
+        subject: PublicKey,
+        authors: Option<AuthorRange>,
+        validity: (u64, u64, u64),
+    ) -> Result<SignedCapability, Error> {
+        let delegations = self
+            .delegations()?
+            .checked_sub(1)
+            .filter(|delegations| *delegations > 1)
+            .ok_or_else(|| denied("issuers nest too deep"))?;
+        self.sign_link(
+            subject,
+            Vec::new(),
+            Extended {
+                authors,
+                issues: true,
+                ..Extended::default()
+            },
+            delegations,
+            validity,
+        )
+    }
+    /// The delegations this authority's identity holds.
+    fn delegations(&self) -> Result<u8, Error> {
+        match self.chain.0.last() {
+            None => Ok(MAX_CREDENTIAL_DEPTH as u8),
+            Some(last) => Ok(last.capability.delegations),
+        }
+    }
+    /// Signs one link below this authority's identity.
+    pub(crate) fn sign_link(
+        &self,
+        subject: PublicKey,
+        grants: Vec<ResourceGrant>,
+        extended: Extended,
+        delegations: u8,
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<SignedCapability, Error> {
-        if delegations == 0 || usize::from(delegations) >= crate::MAX_CREDENTIAL_DEPTH {
+        if delegations == 0 || usize::from(delegations) >= MAX_CREDENTIAL_DEPTH {
             return Err(denied("a user capability allows 1 to 7 delegations"));
         }
         if ttl > MAX_CHAIN_LIFETIME || skew > crate::LIFETIME_SKEW {
             return Err(denied("a credential lives at most 366 days"));
         }
-        SignedCapability::sign(
+        let (mut not_before, mut expires) = (time.saturating_sub(skew), time.saturating_add(ttl));
+        if let Some(parent) = self.chain.0.last() {
+            let parent = &parent.capability;
+            let held = parent.extended()?;
+            // Ranges between issuers are an allocation discipline, as
+            // between the owner and its issuers.
+            if !held.issues
+                || parent.subject != self.identity.public_key()?
+                || delegations >= parent.delegations
+                || self.chain.0.len() + usize::from(delegations) >= MAX_CREDENTIAL_DEPTH
+            {
+                return Err(denied("delegation expands authority"));
+            }
+            not_before = not_before.max(parent.not_before);
+            expires = expires.min(parent.expires);
+            if not_before >= expires {
+                return Err(denied("delegation outlives its parent"));
+            }
+        }
+        let signed = SignedCapability::sign(
             Capability {
                 manifest: self.manifest,
                 subject,
                 kind: PrincipalKind::User,
                 grants,
-                not_before: time.saturating_sub(skew),
-                expires: time.saturating_add(ttl),
+                not_before,
+                expires,
                 delegations,
-                extension: ranged(authors)?,
+                extension: Extension::new(extended)?,
             },
-            self.publisher,
-        )
+            self.identity,
+        )?;
+        Ok(signed)
     }
     /// The capability `prior` renewed: the same subject, grants,
-    /// delegations and author range, never more. A subject `revocations`
-    /// revokes is refused.
+    /// delegations, author range and authority, never more. A subject
+    /// `revocations` revokes is refused, as is one this authority sits
+    /// below: it is renewed by an issuer above it.
     pub fn renew(
         &self,
         prior: &Capability,
@@ -357,30 +464,34 @@ impl Authority<'_> {
         {
             return Err(denied("invalid or revoked credential"));
         }
-        if !prior.extended()?.partitions.is_empty() {
-            return self.issue_partition_terms(
-                prior.subject,
-                prior.grants.clone(),
-                prior.extended()?.partitions,
-                (prior.delegations, prior.authors()?),
-                validity,
-            );
+        if prior.delegations >= self.delegations()? {
+            return Err(denied("an issuer above this one renews the credential"));
         }
-        self.issue_terms(
+        let extended = prior.extended()?;
+        self.sign_link(
             prior.subject,
             prior.grants.clone(),
-            (prior.delegations, prior.authors()?),
+            Extended {
+                authors: extended.authors,
+                partitions: extended.partitions,
+                issues: extended.issues,
+                ..Extended::default()
+            },
+            prior.delegations,
             validity,
         )
     }
-    /// Signs `statement` under the publisher key, co-signed by `issuer`,
-    /// the node key it names.
-    pub fn revoke(
+    /// Signs `statement`, which names this authority's identity as issuer.
+    pub fn revoke(&self, statement: Revocation) -> Result<SignedRevocation, Error> {
+        SignedRevocation::sign(statement, self.identity, self.chain)
+    }
+    /// Endorses a domain statement under `label`.
+    pub fn endorse<T: serde::Serialize>(
         &self,
-        statement: Revocation,
-        issuer: &PrivateKey,
-    ) -> Result<SignedRevocation, Error> {
-        SignedRevocation::sign(statement, self.publisher, issuer)
+        label: &str,
+        value: &T,
+    ) -> Result<Endorsement, Error> {
+        Endorsement::sign(self.identity, self.chain, label, value)
     }
 }
 
@@ -392,50 +503,91 @@ fn ranged(authors: Option<AuthorRange>) -> Result<Extension, Error> {
     })
 }
 
-/// A device's chain under its user capability: the user delegates the
-/// same grants to its node key.
+/// A node's chain under its identity capability: the identity certifies
+/// its node key.
 pub fn device_chain(
     root: SignedCapability,
-    user: &PrivateKey,
+    identity: &dyn IdentityProvider,
     node: PublicKey,
     author: u32,
 ) -> Result<CredentialChain, Error> {
-    CredentialChain(vec![root]).complete(user, node, author)
+    CredentialChain(vec![root]).complete(identity, node, author)
 }
 
 impl CredentialChain {
-    /// Completes a chain that ends at `holder` with its node key: the same
-    /// grants and validity, delegating nothing further.
+    /// Completes a chain that ends at `holder` with a certificate for its
+    /// node key: the same grants and validity, delegating nothing further.
     pub fn complete(
         self,
-        holder: &PrivateKey,
+        holder: &dyn IdentityProvider,
         node: PublicKey,
         author: u32,
     ) -> Result<Self, Error> {
-        self.complete_with_alias(holder, node, node, author)
+        self.certify(holder, node, author)
     }
     /// Completes a node leaf; the signing key must be the node key.
     pub fn complete_with_alias(
-        mut self,
-        holder: &PrivateKey,
+        self,
+        holder: &dyn IdentityProvider,
         node: PublicKey,
         alias: PublicKey,
         author: u32,
     ) -> Result<Self, Error> {
+        if alias != node {
+            return Err(denied("the node signs as its own key"));
+        }
+        self.certify(holder, node, author)
+    }
+    /// The identity `holder` signs a node certificate for `node` with one
+    /// `author` number of its range. It adds no rights: it carries the
+    /// identity's grants.
+    pub fn certify(
+        self,
+        holder: &dyn IdentityProvider,
+        node: PublicKey,
+        author: u32,
+    ) -> Result<Self, Error> {
+        let last = self.holder(holder)?.clone();
+        let extended = last.extended()?;
+        self.certify_with(
+            holder,
+            (node, author),
+            (last.grants.clone(), extended.partitions),
+            last.manifest,
+        )
+    }
+    /// As `certify`, with `grants` and `partitions` of the identity's, for
+    /// `manifest`: an issuer identity's certificate names what its node
+    /// holds, in whichever generation its node runs.
+    pub fn certify_with(
+        mut self,
+        holder: &dyn IdentityProvider,
+        (node, author): (PublicKey, u32),
+        (grants, partitions): (Vec<ResourceGrant>, Vec<PartitionGrant>),
+        manifest: Commitment,
+    ) -> Result<Self, Error> {
         let last = self.holder(holder)?;
-        if alias != node || !last.authors()?.is_some_and(|range| range.contains(author)) {
+        let authors = AuthorRange::new(author, author)?;
+        if !last
+            .extended()?
+            .authors
+            .is_some_and(|held| held.includes(&authors))
+        {
             return Err(denied(
                 "node number is outside the principal's range or signer differs from node",
             ));
         }
         let leaf = Capability {
-            subject: alias,
+            manifest,
+            subject: node,
             kind: PrincipalKind::Node,
             delegations: 0,
+            grants,
             extension: Extension::new(Extended {
-                authors: Some(AuthorRange::new(author, author)?),
-                partitions: last.extended()?.partitions,
+                partitions,
                 node: Some(crate::PeerId::of(node)),
+                authors: Some(authors),
+                ..Extended::default()
             })?,
             ..last.clone()
         };
@@ -446,11 +598,11 @@ impl CredentialChain {
     /// a user or deployment link with `delegations` fewer than the
     /// holder's, `grants` it holds, validity inside its own and `authors`
     /// inside its range. Widening any of them is refused here and by every
-    /// verifier.
+    /// verifier. An issuer grants through its `Authority` instead.
     #[allow(clippy::too_many_arguments)]
     pub fn delegate(
         &self,
-        holder: &PrivateKey,
+        holder: &dyn IdentityProvider,
         subject: PublicKey,
         kind: PrincipalKind,
         grants: Vec<ResourceGrant>,
@@ -459,8 +611,11 @@ impl CredentialChain {
         (time, ttl, skew): (u64, u64, u64),
     ) -> Result<Self, Error> {
         let parent = self.holder(holder)?;
-        let held = parent.authors()?;
-        if authors.is_some_and(|range| !held.is_some_and(|held| held.includes(&range))) {
+        let held = parent.extended()?;
+        if held.issues {
+            return Err(denied("an issuer grants through its authority"));
+        }
+        if authors.is_some_and(|range| !held.authors.is_some_and(|held| held.includes(&range))) {
             return Err(denied("delegation expands authority"));
         }
         if !matches!(kind, PrincipalKind::User | PrincipalKind::Deployment)
@@ -499,10 +654,11 @@ impl CredentialChain {
             .map_or(Ok(None), |last| last.capability.authors())
     }
     /// The last link, which `holder` must hold and which may delegate.
-    fn holder(&self, holder: &PrivateKey) -> Result<&Capability, Error> {
+    fn holder(&self, holder: &dyn IdentityProvider) -> Result<&Capability, Error> {
+        let key = holder.public_key()?;
         match self.0.last() {
             Some(last)
-                if last.capability.subject == holder.public_key()
+                if last.capability.subject == key
                     && last.capability.kind != PrincipalKind::Node
                     && last.capability.delegations > 0 =>
             {

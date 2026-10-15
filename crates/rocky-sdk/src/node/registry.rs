@@ -163,11 +163,16 @@ impl Node {
             .await
             .authority
             .as_ref()
-            .and_then(|authority| authority.rotation.as_ref().map(|rotation| rotation.node));
-        let Some(node) = pending else {
+            .and_then(|authority| {
+                authority
+                    .rotation
+                    .as_ref()
+                    .map(|rotation| rotation.nodes.clone())
+            });
+        let Some(nodes) = pending else {
             return Ok(());
         };
-        if let Some(node) = node {
+        for node in nodes {
             self.record_revocation(node).await?;
         }
         crate::enrollment::fault::check(crate::enrollment::fault::Stage::Committed)?;

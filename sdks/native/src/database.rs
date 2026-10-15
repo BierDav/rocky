@@ -2,7 +2,7 @@
 //! sessions and an optional network service, each closed on its own. The
 //! starter `NativeSession` composes the same services. See
 //! `docs/runtime/sdk-composition.md`.
-use crate::{NativeError, NativeSecretStore, failure, foreign};
+use crate::{NativeError, NativeIdentityProvider, NativeSecretStore, failure, foreign};
 use rocky_sdk::Network;
 use std::{
     path::Path,
@@ -161,12 +161,14 @@ struct Parts<'a> {
     directory: &'a str,
     schema: &'a str,
     secrets: Option<Arc<dyn NativeSecretStore>>,
+    identity: Option<Arc<dyn NativeIdentityProvider>>,
     network: Option<Arc<NativeNetwork>>,
     coordinator: Option<String>,
 }
 impl<'a> Parts<'a> {
     fn open(self) -> Result<rocky_sdk::Open<'a>, NativeError> {
         Ok(rocky_sdk::Open {
+            identity: crate::identity(self.identity),
             directory: Path::new(self.directory),
             schema: self.schema,
             secrets: foreign(self.secrets),
@@ -198,6 +200,7 @@ impl NativeDatabase {
         directory: String,
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
+        identity: Option<Arc<dyn NativeIdentityProvider>>,
         network: Option<Arc<NativeNetwork>>,
         coordinator: Option<String>,
         credential_ttl: Option<u64>,
@@ -206,6 +209,7 @@ impl NativeDatabase {
             directory: &directory,
             schema: &schema,
             secrets,
+            identity,
             network,
             coordinator,
         }
@@ -219,6 +223,7 @@ impl NativeDatabase {
         schema: String,
         supplied: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
+        identity: Option<Arc<dyn NativeIdentityProvider>>,
         network: Option<Arc<NativeNetwork>>,
         coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
@@ -230,6 +235,7 @@ impl NativeDatabase {
             directory: &directory,
             schema: &schema,
             secrets,
+            identity,
             network,
             coordinator,
         }
@@ -243,6 +249,7 @@ impl NativeDatabase {
         directory: String,
         schema: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
+        identity: Option<Arc<dyn NativeIdentityProvider>>,
         network: Option<Arc<NativeNetwork>>,
         coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
@@ -250,6 +257,7 @@ impl NativeDatabase {
             directory: &directory,
             schema: &schema,
             secrets,
+            identity,
             network,
             coordinator,
         }
@@ -263,6 +271,7 @@ impl NativeDatabase {
         schema: String,
         digest: String,
         secrets: Option<Arc<dyn NativeSecretStore>>,
+        identity: Option<Arc<dyn NativeIdentityProvider>>,
         network: Option<Arc<NativeNetwork>>,
         coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
@@ -270,6 +279,7 @@ impl NativeDatabase {
             directory: &directory,
             schema: &schema,
             secrets,
+            identity,
             network,
             coordinator,
         }
@@ -285,17 +295,43 @@ impl NativeDatabase {
         invitation: String,
         network: Arc<NativeNetwork>,
         secrets: Option<Arc<dyn NativeSecretStore>>,
+        identity: Option<Arc<dyn NativeIdentityProvider>>,
         coordinator: Option<String>,
     ) -> Result<Arc<Self>, NativeError> {
         let open = Parts {
             directory: &directory,
             schema: &schema,
             secrets,
+            identity,
             network: Some(network),
             coordinator,
         }
         .open()?;
         Self::wrap(rocky_sdk::Database::join(open, &invitation))
+    }
+    /// Installs another node of the identity `identity` supplies, from the
+    /// node of it `contact` names, over `network`: no issuer and no
+    /// invitation is involved.
+    #[uniffi::constructor]
+    pub fn enroll_identity(
+        directory: String,
+        schema: String,
+        contact: String,
+        network: Arc<NativeNetwork>,
+        identity: Arc<dyn NativeIdentityProvider>,
+        secrets: Option<Arc<dyn NativeSecretStore>>,
+        coordinator: Option<String>,
+    ) -> Result<Arc<Self>, NativeError> {
+        let open = Parts {
+            directory: &directory,
+            schema: &schema,
+            secrets,
+            identity: Some(identity),
+            network: Some(network),
+            coordinator,
+        }
+        .open()?;
+        Self::wrap(rocky_sdk::Database::enroll_identity(open, &contact))
     }
     /// Restores a backup archive under a fresh identity `invitation`
     /// enrolls over `network`.
@@ -313,6 +349,8 @@ impl NativeDatabase {
             directory: &directory,
             schema: &schema,
             secrets,
+            // A restored node's identity is made in the secret store.
+            identity: None,
             network: Some(network),
             coordinator,
         }
@@ -364,13 +402,19 @@ impl NativeDatabase {
     }
 }
 
-/// Prepares fresh signing keys without opening a database or contacting a network.
+/// Prepares a fresh node key, and an identity unless `identity` supplies
+/// one, without opening a database or contacting a network.
 #[uniffi::export]
 pub fn prepare_device(
     directory: String,
     secrets: Option<Arc<dyn NativeSecretStore>>,
+    identity: Option<Arc<dyn NativeIdentityProvider>>,
 ) -> Result<String, NativeError> {
-    let keys =
-        rocky_sdk::Database::device(Path::new(&directory), foreign(secrets)).map_err(failure)?;
+    let keys = rocky_sdk::Database::device_of(
+        Path::new(&directory),
+        foreign(secrets),
+        crate::identity(identity),
+    )
+    .map_err(failure)?;
     serde_json::to_string(&keys).map_err(message)
 }

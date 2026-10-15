@@ -97,6 +97,105 @@ impl rocky_sdk::SecretStore for Foreign {
     }
 }
 
+/// An identity the application supplies, such as a passkey's: its public
+/// key, signatures and author numbers. It never hands out the private key.
+/// `purpose` is `node_certificate`, `capability`, `revocation` or
+/// `statement`.
+#[uniffi::export(with_foreign)]
+pub trait NativeIdentityProvider: Send + Sync {
+    fn public_key(&self) -> Result<Vec<u8>, NativeError>;
+    fn sign(&self, purpose: String, message: Vec<u8>) -> Result<Vec<u8>, NativeError>;
+    /// An author number of `first..=last` never handed out before.
+    fn reserve_author(&self, first: u32, last: u32) -> Result<u32, NativeError>;
+}
+struct ForeignIdentity(Arc<dyn NativeIdentityProvider>);
+fn provider(error: NativeError) -> rocky_sdk::credentials::Error {
+    rocky_sdk::credentials::Error::Provider(error.to_string().into())
+}
+impl rocky_sdk::IdentityProvider for ForeignIdentity {
+    fn public_key(
+        &self,
+    ) -> Result<rocky_sdk::credentials::PublicKey, rocky_sdk::credentials::Error> {
+        let bytes: [u8; 32] = self
+            .0
+            .public_key()
+            .map_err(provider)?
+            .try_into()
+            .map_err(|_| rocky_sdk::credentials::Error::Denied("invalid identity key".into()))?;
+        rocky_sdk::credentials::PublicKey::from_bytes(&bytes)
+            .map_err(|_| rocky_sdk::credentials::Error::Denied("invalid identity key".into()))
+    }
+    fn sign(
+        &self,
+        purpose: rocky_sdk::Purpose,
+        message: &[u8],
+    ) -> Result<rocky_sdk::credentials::Signature, rocky_sdk::credentials::Error> {
+        let purpose = match purpose {
+            rocky_sdk::Purpose::NodeCertificate => "node_certificate",
+            rocky_sdk::Purpose::Capability => "capability",
+            rocky_sdk::Purpose::Revocation => "revocation",
+            rocky_sdk::Purpose::Statement => "statement",
+        };
+        let bytes: [u8; 64] = self
+            .0
+            .sign(purpose.into(), message.to_vec())
+            .map_err(provider)?
+            .try_into()
+            .map_err(|_| {
+                rocky_sdk::credentials::Error::Denied("invalid identity signature".into())
+            })?;
+        Ok(rocky_sdk::credentials::Signature::from_bytes(&bytes))
+    }
+    fn reserve_author(
+        &self,
+        range: rocky_sdk::credentials::AuthorRange,
+    ) -> Result<u32, rocky_sdk::credentials::Error> {
+        self.0
+            .reserve_author(range.first, range.last)
+            .map_err(provider)
+    }
+}
+pub(crate) fn identity(
+    identity: Option<Arc<dyn NativeIdentityProvider>>,
+) -> Option<Arc<dyn rocky_sdk::IdentityProvider>> {
+    identity
+        .map(|identity| Arc::new(ForeignIdentity(identity)) as Arc<dyn rocky_sdk::IdentityProvider>)
+}
+/// The file-backed identity in `directory`, made there when absent: for
+/// tests and servers. Its key is plaintext at rest.
+struct FileIdentity(rocky_sdk::FileIdentityProvider);
+fn described(detail: impl std::fmt::Display) -> NativeError {
+    NativeError::Failure {
+        detail: detail.to_string(),
+    }
+}
+impl NativeIdentityProvider for FileIdentity {
+    fn public_key(&self) -> Result<Vec<u8>, NativeError> {
+        use rocky_sdk::IdentityProvider;
+        Ok(self.0.public_key().map_err(described)?.as_bytes().to_vec())
+    }
+    fn sign(&self, _: String, message: Vec<u8>) -> Result<Vec<u8>, NativeError> {
+        use rocky_sdk::IdentityProvider;
+        Ok(self
+            .0
+            .sign(rocky_sdk::Purpose::Statement, &message)
+            .map_err(described)?
+            .to_bytes()
+            .to_vec())
+    }
+    fn reserve_author(&self, first: u32, last: u32) -> Result<u32, NativeError> {
+        use rocky_sdk::IdentityProvider;
+        let range = rocky_sdk::credentials::AuthorRange::new(first, last).map_err(described)?;
+        self.0.reserve_author(range).map_err(described)
+    }
+}
+#[uniffi::export]
+pub fn file_identity(directory: String) -> Result<Arc<dyn NativeIdentityProvider>, NativeError> {
+    Ok(Arc::new(FileIdentity(
+        rocky_sdk::FileIdentityProvider::open(directory).map_err(described)?,
+    )))
+}
+
 /// One reliable ordered byte stream, as chunks: an application protocol's
 /// stream on a `NativeEndpoint`.
 #[uniffi::export(with_foreign)]

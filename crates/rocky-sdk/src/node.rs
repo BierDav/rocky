@@ -1039,13 +1039,28 @@ impl Node {
                 Ok(json!({}))
             }
             "revoke" => {
-                let node: PublicKey = request["node"]
-                    .as_str()
-                    .ok_or("node must be a public key")?
-                    .parse()?;
-                let revoked = self.revoke(node).await?;
-                self.activity
-                    .record("device_revoked", json!({"node": node.to_hex()}));
+                // One node's certificate, or an identity and all its nodes.
+                let key = |name: &str| -> Result<Option<PublicKey>, Failure> {
+                    match request[name].as_str() {
+                        Some(key) => Ok(Some(key.parse()?)),
+                        None => Ok(None),
+                    }
+                };
+                let target = match (key("node")?, key("identity")?) {
+                    (Some(node), None) => crate::enrollment::Revoke::Node(node),
+                    (None, Some(identity)) => crate::enrollment::Revoke::Identity(identity),
+                    _ => return Err(refused("revoke names one node or one identity")),
+                };
+                let revoked = self.revoke(target).await?;
+                self.activity.record(
+                    "device_revoked",
+                    match target {
+                        crate::enrollment::Revoke::Node(node) => json!({"node": node.to_hex()}),
+                        crate::enrollment::Revoke::Identity(identity) => {
+                            json!({"identity": identity.to_hex()})
+                        }
+                    },
+                );
                 Ok(revoked)
             }
             "logout" => {
@@ -1337,8 +1352,12 @@ impl Node {
                     .chain(statement.related.iter().map(|cut| cut.scope))
                     .collect::<Vec<_>>();
                 statement.peers = self.horizon_participants(request, &scopes).await?;
-                let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
-                let signed = rocky_credentials::SignedHorizon::sign(statement, &publisher)?;
+                let (identity, links) = {
+                    let settings = self.settings.lock().await;
+                    (settings.identity(&self.vault)?, settings.issuer_links())
+                };
+                let signed =
+                    rocky_credentials::SignedHorizon::endorse(statement, &*identity, &links)?;
                 let own = PrivateKey::from_bytes(&self.vault.get("node")?).public_key();
                 let participates = signed
                     .statement
@@ -1608,15 +1627,16 @@ impl Node {
             "migration": migration,
         }))
     }
-    /// Revokes a device and rotates the keys it could read. The intent,
-    /// the new keys and the identity are saved before the replica learns
-    /// them, so an interruption completes at the next open.
-    async fn revoke(&self, node: PublicKey) -> Result<Value, Failure> {
+    /// Revokes a node, or an identity with every node of it, and rotates
+    /// the keys they could read. The intent, the new keys and the identity
+    /// are saved before the replica learns them, so an interruption
+    /// completes at the next open.
+    async fn revoke(&self, target: crate::enrollment::Revoke) -> Result<Value, Failure> {
         let registry = self.registry().await?;
         let mut settings = self.settings.lock().await;
         let mut draft = settings.clone();
         draft
-            .begin_revocation(node, &registry)
+            .begin_revocation(target, &registry)
             .map_err(|error| -> Failure {
                 if error.is::<crate::enrollment::RevocationSetFull>() {
                     error
@@ -3069,6 +3089,12 @@ impl Node {
                     if request == crate::generation::OFFER {
                         return settings.offer();
                     }
+                    // Any node answers another node of its own identity.
+                    if let Some(asked) = request.strip_prefix(crate::enrollment::IDENTITY) {
+                        let reply = settings.answer_identity(&self.vault, asked)?;
+                        self.activity.record("identity_node_enrolled", json!({}));
+                        return Ok(reply);
+                    }
                     if !settings.issuer() {
                         return Err(refused("only an issuer renews devices"));
                     }
@@ -3163,7 +3189,7 @@ impl Node {
         service: &crate::owner::Service,
         kind: &str,
         request: &Value,
-        publisher: Option<PrivateKey>,
+        publisher: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
     ) -> Result<Value, Failure> {
         let transport = self
             .network
@@ -3206,7 +3232,7 @@ impl Node {
         service: &crate::owner::Service,
         _: &str,
         _: &Value,
-        _: Option<PrivateKey>,
+        _: Option<Arc<dyn rocky_credentials::IdentityProvider>>,
     ) -> Result<Value, Failure> {
         match *service {}
     }
@@ -3229,17 +3255,22 @@ impl Node {
                         "registering a domain's trusted nodes needs an issuer",
                     ));
                 }
-                let publisher = if settings.issuer() {
-                    Some(PrivateKey::from_bytes(&self.vault.get("publisher")?))
+                // Only the owner's identity signs a coordination grant here.
+                let publisher = if settings.owner() {
+                    Some(settings.identity(&self.vault)?)
                 } else {
                     None
                 };
                 self.service_call(service, kind, request, publisher).await
             }
             "coordination_grant" => {
-                if !self.settings.lock().await.issuer() {
-                    return Err(refused("only an issuer holds the publisher key"));
-                }
+                let owner = {
+                    let settings = self.settings.lock().await;
+                    if !settings.owner() {
+                        return Err(refused("only the owner's identity holds the publisher key"));
+                    }
+                    settings.identity(&self.vault)?
+                };
                 // The tenant's public key, or its secret in this process.
                 let hex32 = |name: &str| -> Option<[u8; 32]> {
                     HEXLOWER
@@ -3259,11 +3290,10 @@ impl Node {
                     .as_u64()
                     .filter(|seconds| (1..=366 * 86_400).contains(seconds))
                     .ok_or_else(|| refused("lifetime must be 1 s to 366 days"))?;
-                let publisher = PrivateKey::from_bytes(&self.vault.get("publisher")?);
                 let time = now()?;
                 let grant = rocky_credentials::SignedCoordinationGrant::sign(
                     rocky_credentials::CoordinationGrant {
-                        publisher: rocky_credentials::Publisher(publisher.public_key()),
+                        publisher: rocky_credentials::Publisher(owner.public_key()?),
                         application: self.domain().manifest().name,
                         tenant: rocky_credentials::CoordinatorControl(
                             PublicKey::from_bytes(&tenant)
@@ -3272,7 +3302,7 @@ impl Node {
                         not_before: time.saturating_sub(60),
                         expires: time.saturating_add(lifetime),
                     },
-                    &publisher,
+                    &*owner,
                 )?;
                 Ok(json!({ "grant": grant }))
             }

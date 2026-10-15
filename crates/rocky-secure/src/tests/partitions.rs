@@ -119,18 +119,15 @@ impl Fixture {
     ) -> EncryptedReplica<TypedRows> {
         let user = PrivateKey::new();
         let time = now().unwrap();
-        let root = Authority {
-            publisher: &self.publisher,
-            manifest: self.app().manifest().hash(),
-        }
-        .issue_partition_terms(
-            user.public_key(),
-            vec![],
-            vec![grant.clone()],
-            (1, Some(AuthorRange::new(1, 1000).unwrap())),
-            (time, 3600, 5),
-        )
-        .unwrap();
+        let root = Authority::owner(&self.publisher, self.app().manifest().hash())
+            .issue_partition_terms(
+                user.public_key(),
+                vec![],
+                vec![grant.clone()],
+                (1, Some(AuthorRange::new(1, 1000).unwrap())),
+                (time, 3600, 5),
+            )
+            .unwrap();
         let prefix = CredentialChain(vec![root]);
         let recorded = if path.exists() {
             let (owner, conn) = crate::database::DatabaseOwner::open(path).await.unwrap();

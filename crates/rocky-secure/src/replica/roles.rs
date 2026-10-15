@@ -464,7 +464,7 @@ impl<A: RowApplication> Inner<A> {
         }
         if credentials
             .0
-            .first()
+            .last()
             .is_some_and(|root| self.known(root.capability.manifest).is_err())
         {
             return Ok(());
@@ -619,12 +619,9 @@ impl<A: RowApplication> Inner<A> {
         self.authorize_peer(peer, credentials, scope)?;
         // A peer of an earlier generation is sent nothing it cannot admit:
         // a log stops at its first newer frame.
-        let reach = credentials
-            .0
-            .first()
-            .map_or(Ok(self.generation()), |root| {
-                self.generation_of(root.capability.manifest, true)
-            })?;
+        let reach = credentials.0.last().map_or(Ok(self.generation()), |root| {
+            self.generation_of(root.capability.manifest, true)
+        })?;
         if byte_quota == 0 || byte_quota > MAX_SECURE_FRAME {
             return Err(denied("sync quota"));
         }
@@ -1185,7 +1182,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
         let inner = self.inner.lock().await;
         if credentials
             .0
-            .first()
+            .last()
             .is_some_and(|root| inner.known(root.capability.manifest).is_err())
         {
             return Ok(scopes.to_vec());

@@ -84,6 +84,7 @@ struct Peer {
 fn open<'a>(directory: &'a Path, schema: &'a str, store: &Arc<Store>, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
+        identity: None,
         directory,
         schema,
         secrets: Some(store.clone() as Arc<dyn SecretStore>),
@@ -396,7 +397,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
 
     // The issuer knows the removed device only through its partition grant.
     let revoked = issuer
-        .ok(json!({"type":"revoke","node":removed_device.node.to_string()}))
+        .ok(json!({"type":"revoke","identity":removed_device.user.to_string()}))
         .await;
     assert_eq!(revoked["revocations"]["statements"], 1);
     for (list, expected) in [("A", json!([1, 2])), ("B", json!([1]))] {
@@ -420,7 +421,7 @@ async fn revocation_rotates_the_group_once_and_shares_only_the_current_epoch_to_
         .await
         .unwrap_err();
     assert!(refused.contains("current epoch"), "{refused}");
-    // Its user is revoked too: a fresh node key under it gets no grant.
+    // Its identity is revoked: a fresh node of it gets no grant.
     let (_, fresh) = prepare(&root.path().join("fresh"));
     let renamed = DeviceKeys {
         user: removed_device.user,
@@ -483,7 +484,7 @@ async fn a_partition_granted_after_enrollment_rotates_with_its_device() {
         .await
         .unwrap();
     issuer
-        .ok(json!({"type":"revoke","node":device.node.to_string()}))
+        .ok(json!({"type":"revoke","identity":device.user.to_string()}))
         .await;
     let (secrets, tables) = issuer.epochs("A").await;
     assert_eq!(secrets, json!([1, 2]), "the granted partition rotates");

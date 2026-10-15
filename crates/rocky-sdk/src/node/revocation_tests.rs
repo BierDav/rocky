@@ -50,6 +50,7 @@ async fn issuer(
         &Schema::parse(SCHEMA)?,
         &store,
         crate::enrollment::DEFAULT_TTL,
+        None,
     )?;
     let vault = settings.vault(&store);
     let domain = settings.domain()?;
@@ -203,7 +204,12 @@ async fn stop_at(
     let client = node.client(1)?;
     let revoked = PrivateKey::new().public_key();
     fault::STOP.with(|at| at.set(Some(stop)));
-    assert!(node.revoke(revoked).await.is_err(), "{stop:?}");
+    assert!(
+        node.revoke(crate::enrollment::Revoke::Node(revoked))
+            .await
+            .is_err(),
+        "{stop:?}"
+    );
     assert!(
         fault::STOP.with(|at| at.get()).is_none(),
         "stop not reached: {stop:?}"
@@ -236,6 +242,7 @@ async fn stop_at(
     drop(node);
     // Exercise the real database open, before any network attaches.
     let open = || crate::Open {
+        identity: None,
         directory: root.path(),
         schema: SCHEMA,
         secrets: Some(store.clone()),
@@ -325,7 +332,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
     let record = settings.groups.values().next().ok_or("group")?;
     let secret = [245; 32];
     let envelope = rocky_credentials::GroupSecretEnvelope::seal(
-        &PrivateKey::from_bytes(&node.vault.get("publisher")?),
+        &PrivateKey::from_bytes(&node.vault.get("identity")?),
         node.domain().manifest().hash(),
         record.address,
         1,
@@ -351,6 +358,7 @@ async fn received_sibling_resumes_after_each_table_installation() -> Result<(), 
         );
         drop(node);
         let database = crate::Database::open(crate::Open {
+            identity: None,
             directory: root.path(),
             schema: SCHEMA,
             secrets: Some(store),

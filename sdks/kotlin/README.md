@@ -28,7 +28,10 @@ application-specific operation codec is needed. Start with the
 `attach` returns a separately closable network service; borrowed endpoints stay
 application-owned. Starter `create/join/resume` share this implementation.
 `ServiceCoordinator` pins a certified service trust bundle. Independent credential
-issuers use `Credentials.prepare` and `RockyDatabase.install`.
+issuers use `Credentials.prepare` and `RockyDatabase.install`. An `IdentityProvider`
+(`FileIdentityProvider` for tests and servers) supplies the identity that holds the
+grants; `RockyDatabase.enrollIdentity` adds a further node of it without an issuer
+([SDK enrollment](../../docs/runtime/sdk-enrollment.md#identities)).
 
 Applications depend on `rocky:rocky-core`, `rocky:rocky-sqlite` or `rocky:rocky-room`;
 the Android variant brings the native runtime. They need no Rust tools.

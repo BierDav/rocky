@@ -11,6 +11,7 @@ const SCHEMA: &str = r#"{"application":"shopping","version":1,"format":6,"tables
 
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,

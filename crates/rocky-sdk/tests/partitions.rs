@@ -5,6 +5,7 @@ const SCHEMA: &str = r#"{"format":6,"application":"partitionsdk","version":1,"ta
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>) -> Open<'a> {
     let name = directory.file_name().unwrap().to_str().unwrap();
     Open {
+        identity: None,
         directory,
         schema: SCHEMA,
         secrets: None,
@@ -225,6 +226,7 @@ async fn own_id_partitions_continue_the_table_log() {
     let root = tempfile::tempdir().unwrap();
     let schema = r#"{"format":6,"application":"ownid","version":1,"tables":[{"name":"lists","class":"mergeable","columns":[{"name":"title","type":"text","not_null":true}],"primary_key":["id"],"partition_by":["id"]}]}"#;
     let options = || Open {
+        identity: None,
         directory: root.path(),
         schema,
         secrets: None,

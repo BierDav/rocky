@@ -1,8 +1,11 @@
 # One identity and passkeys
 
-Status: identities, node certificates and the `IdentityProvider` port are
-planned in [phase 13](../features_09/13-identities-and-domain-credentials.md);
-the passkey module remains an idea.
+Status: identities, node certificates, self-enrollment and the
+`IdentityProvider` port are implemented
+([phase 13](../features_09/13-identities-and-domain-credentials.md),
+[credentials](../runtime/credentials.md#identities)); the passkey module, a
+provider that derives the key with PRF, remains an idea. It must also hand
+out each author number of its range once across the identity's nodes.
 
 parings should be not by device, but by identity. A identity = passkey. With the use of PRF (Pseudo-Random Function)
 extension we can obtain a deterministic private key. Permissions are given to a identity, this means when I have a

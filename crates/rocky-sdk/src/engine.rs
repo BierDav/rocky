@@ -86,6 +86,7 @@ impl Engine {
         let network =
             network.unwrap_or_else(|| Network::Owned(Arc::new(options.transport.clone())));
         let open = Open {
+            identity: None,
             directory: Path::new(&options.directory),
             schema,
             secrets,

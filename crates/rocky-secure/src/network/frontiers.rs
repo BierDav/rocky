@@ -109,7 +109,7 @@ impl NativeSession {
                 let newer = self
                     .credentials
                     .0
-                    .first()
+                    .last()
                     .is_some_and(|root| inner.known(root.capability.manifest).is_err());
                 inner
                     .record_frontiers(self.peer, &self.credentials, &remote)

@@ -130,6 +130,25 @@ interface SecretStore {
     fun delete(name: String)
 }
 
+/** What an identity signs; a provider may show it to its user or refuse it. */
+enum class IdentityPurpose(internal val wire: String) {
+    NodeCertificate("node_certificate"),
+    Capability("capability"),
+    Revocation("revocation"),
+    Statement("statement"),
+}
+
+/**
+ * The identity that holds a database's permissions, such as a passkey's: every node of it signs under a certificate
+ * the identity signed. It returns its 32-byte public key and 64-byte Ed25519 signatures and never the private key;
+ * [reserveAuthor] hands each author number of `first..last` out once. See `docs/runtime/sdk-enrollment.md#identities`.
+ */
+interface IdentityProvider {
+    fun publicKey(): ByteArray
+    fun sign(purpose: IdentityPurpose, message: ByteArray): ByteArray
+    fun reserveAuthor(first: Int, last: Int): Int
+}
+
 /** The authority this device holds. Keys are lowercase hex; `expiresAtEpochSeconds` ends its credentials. `transport` is the attached network's kind. */
 data class SessionStatus(val principal: String, val node: String, val revocations: RevocationStatus, val expiresAtEpochSeconds: Long, val isIssuer: Boolean, val profile: GrantProfile, val transport: String)
 

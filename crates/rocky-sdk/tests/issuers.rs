@@ -9,6 +9,7 @@ mod common;
 
 fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema: common::SCHEMA,
         secrets: None,
@@ -171,7 +172,8 @@ async fn a_second_issuer_carries_the_domain_after_the_creator_is_lost() -> Resul
     early.ok(json!({"type": "renew"})).await;
     let after = session(&early).await;
     assert_eq!(after["revocations"]["statements"], 1);
-    assert!(after["expires"].as_str() >= before["expires"].as_str());
+    // A chain through the second issuer expires no later than its own.
+    assert_eq!(after["expires"], session(&b).await["expires"]);
     assert_issuers(root, "early", &[&b_node])?;
     assert!(
         identity(root, "early")?["contact_refs"]

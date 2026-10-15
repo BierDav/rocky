@@ -110,6 +110,7 @@ fn open<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str) -> Open<'a> {
 }
 fn at<'a>(directory: &'a Path, hub: &Arc<Hub>, name: &str, schema: &'a str) -> Open<'a> {
     Open {
+        identity: None,
         directory,
         schema,
         secrets: Some(secrets::keys(directory)),

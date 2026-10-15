@@ -439,6 +439,10 @@ impl Node {
             )
             .await
         };
+        // A received move may have switched this device to another line.
+        if result.is_ok() {
+            self.try_ensure_tip_node().await;
+        }
         let peers = peers.into_inner().unwrap_or_else(PoisonError::into_inner);
         let report = ReconciliationReport {
             contact_resolutions: self

@@ -1081,6 +1081,7 @@ impl Settings {
             "credential",
             "invitation",
             "author-issuer",
+            "tip-nodes",
             "discovery",
         ]
         .into_iter()

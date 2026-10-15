@@ -35,6 +35,8 @@ pub(super) mod roles;
 mod session;
 mod sql;
 mod tip_drop;
+mod tip_observation;
+pub use tip_observation::{PeerScopeFrontier, TipDevice, TipNodeObservation, TipObservation};
 pub(crate) mod tips;
 pub use tips::{LineNode, TipStatement};
 mod typed;

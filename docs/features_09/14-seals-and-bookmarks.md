@@ -1,7 +1,9 @@
 # 14. Seals, tips and bookmarks
 
-Status: in progress. Slices 1–4 are implemented, with
-[evidence](14-seals-and-bookmarks-evidence.md); slices 5 and 6 are open.
+Status: in progress. Slices 1–6 are implemented and merged, with
+[evidence](14-seals-and-bookmarks-evidence.md); the
+[merge's open items](14-seals-and-bookmarks-evidence.md#open-after-the-merge)
+remain.
 Revised 2026-10-15 for tips and branches.
 Owner: `rocky-credentials` seal, tip and bookmark statements; `rocky-secure`
 admission, sync and late frames; `rocky-coordinator` per-tip logs;
@@ -79,13 +81,14 @@ amount, whatever the domain holds. Compaction follows in
   as new writes. A relay never re-signs another author's frame.
 - **Coordinated writes per tip.** Each tip has its own coordinated log at
   the coordinator; its in-sync set is the trusted nodes that follow the tip.
-  A seal of a coordinated tip and every move of a bookmark off it are
-  entries in that tip's log, so neither diverges there. Sealing covers every
+  A seal of a coordinated tip is that log's terminal entry, so seals never
+  diverge there; a move off an open tip carries the `close` seal that ends
+  its log, and deleting a bookmark leaves its tip open. Sealing covers every
   entry committed before it; a pending entry aborts and retries in the
-  continuation, or returns as a held change after a `close`. Forwarded
-  commands go to a trusted node that follows the tip, so a branch's commands
-  never reach other tips' trusted nodes. A tip no trusted node follows
-  refuses coordinated writes with an expected error.
+  continuation, or returns as a held change after a `close`. Slots and
+  stores serve only the followed tip's log, so a branch's writes never reach
+  other tips' trusted nodes. A tip no trusted node follows refuses
+  coordinated writes with an expected error.
 - **One format version.** Frames, existence records, checkpoints and the
   encrypted replica file identity name the tip instead of the manifest and
   move to their next version; seal, tip and bookmark statements start at

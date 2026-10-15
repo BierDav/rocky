@@ -82,7 +82,9 @@ Keys never enter replicated tables or `identity.json`. They live in a
 `rocky.<installation>.<role>`: reader keys use `reader.<collection>` for epoch 1
 and `reader.<collection>.<epoch>` after; an identity the store holds uses
 `identity`. That installation is its only node, which takes the first author
-number of the identity's range.
+number of the identity's range. Nodes it writes under on other
+[lines](tips-and-bookmarks.md#branches) are kept under `tip-nodes` and take
+the next free numbers of its range.
 
 ```kotlin
 val store = object : SecretStore {
@@ -409,6 +411,7 @@ The internal `discovery_topics` call reports current and previous topics, with
 | `network` | See [network status](sdk-composition.md#network-status) |
 | `mutate`, `mutation_progress` | A durable create, set or delete by handle |
 | `read`, `subscribe`, `next`, `unsubscribe` | Pages of a `SELECT` over the collections |
+| `tips` with `action` | Seals, tips and bookmarks: status, inspection, seal, open, bookmark moves, follow, drop ([calls](tips-and-bookmarks.md#status-and-inspection)) |
 
 A mutation is one secure transaction, flushed before it is acknowledged; the
 same handle reports its earlier commit. Errors carry `rejected`, `denied`,

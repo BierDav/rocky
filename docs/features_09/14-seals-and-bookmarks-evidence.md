@@ -290,7 +290,132 @@ were not run; no Kotlin or native ABI source changed.
   again until its seal arrives.
 - An own write a crash left undecided on a tip the node left for another
   line stays unsent, with its effects.
-- Moves are not log entries of their own, unlike the brief's wording; the
-  close seal a move off an open tip requires is.
-- Kotlin and the JSON API expose no seal call yet (slice 5, in progress
-  separately).
+- Moves are not log entries of their own; the close seal a move off an
+  open tip requires is. The brief now says so.
+
+## Lane S wave 2 — developer calls and guides
+
+### Slice 5: SDK, JSON and Kotlin
+
+`rocky-secure` adds `seal_frontier`, `tip_observation`, `tip_nodes` and
+`line_node_needed`. The seal frontier takes the global author marks of every
+locally held operation or void visible in the followed tip, at least its parent
+seal's, and refuses pruned logs, whose global positions are gone. Status and
+inspection decode operation headers, never rows. Peer frontiers come from
+`secure_peer_frontiers` and peer tips from open links; neither invents a value
+the protocol does not report.
+
+The JSON request `{"type":"tips","action":...}` provides `status`, `inspect`,
+`seal` (`close` defaults to false), `open` (`seal`, `minimum_in_sync`),
+`create` (`name`, optional `tip`), `move`, `delete`, `follow` and `drop`.
+`open` returns `{tip}`, `inspect` the graph and every other action the status.
+`rocky_sdk::Session` has the same typed calls (`tip_status`, `inspect_tips`,
+`seal`, `open_tip`, `create_bookmark`, `move_bookmark`, `delete_bookmark`,
+`follow`, `drop_tip`) over `rocky_sdk::tips` records. Kotlin `Tips`, reachable
+from `RockyClient.tips` and `RockySession.tips`, decodes them to typed values
+with unsigned counters. The records are not UniFFI records; both Kotlin
+clients use the JSON call.
+
+The owner signs with no links, an identity holding a trusted grant for the
+domain through that grant, and an issuer through its issuer links; others are
+refused before signing, and admission verifies the authority again. A
+`continue` seal and its bookmark move publish as one batch through
+`publish_tip_statements`; a backward or sideways move off an open tip adds that
+tip's `close` seal to the same batch. Only a device following a tip seals it,
+so the frontier is its own. Each batch is checked against the graph it extends
+first: a call the graph would not resolve to, such as a move losing to a lower
+digest, is refused instead of published.
+
+Rocky creates no bookmark. The owner creates `main` on the genesis tip and
+follows it; other devices follow it once the graph reaches them. Until a device
+follows a bookmark, status reports a null bookmark and sealing is refused.
+Existing graphs keep refusing explicit generation upgrades, as before.
+
+Each line other than the original node's gets its own node. Its key and
+certificate are stored before registration in the secret-store role
+`tip-nodes` (format 1; logout forgets it). A stored identity takes the next
+free number of its minting ledger, saved before signing; a supplied identity's
+provider reserves one of its node numbers. Certification uses the SDK's own
+node certification, so issuer identities' line nodes carry their grants.
+Nodes are registered after `follow`, after publishing, at open and after each
+reconciliation pass; background failures are recorded as
+`line_node_failed` activity and writes stay refused until a node exists.
+
+Not provided, deliberately: `evidence_releasable` is null until
+[phase 15](15-lazy-compaction.md) can compute it; remote kept tips and seals
+are null because peers do not report them; the local node keeps no seal state
+before [phase 16](16-kept-seals-and-views.md), so its `kept_seals` is empty.
+`minimum_in_sync` is required because a device cannot know the coordinator's
+domain minimum. The SDK has no call that grants a trusted identity, so through
+the SDK only the owner opens tips and creates, deletes or moves bookmarks off
+their line. A link attempt made while two peers follow different tips fails
+and leaves a retry backoff, so the next explicit sync after following may
+report `skip: backoff`; once on the same tip, rows sealed earlier arrive.
+
+Targeted verification: `cargo test -p rocky-sdk --test tips` passed 7 tests:
+continue seals keep every row and move `main`; `close` refuses writes;
+a writer's seal and bookmark calls are refused; an issuer seals and moves
+`main` forward but neither opens a tip nor moves `main` back; malformed
+requests fail; a
+branch writes under its own node, keeps it across reopen and returns to `main`,
+and dropping it with unsent writes is refused; moving `main` back closes its
+tip, holds the abandoned write and accepts new writes on a fresh line node;
+a device on `main` receives none of `dev`'s frames while the graph lists both
+bookmarks; the typed `Session` calls match the JSON contract.
+`sdks/kotlin/gradlew -p sdks/kotlin :rocky-core:jvmTest` passed, including 7
+`TipsTest` cases for request shapes, unsigned values beyond 2^53 and errors.
+
+### Slice 6: guides
+
+[Seals, tips and bookmarks](../runtime/tips-and-bookmarks.md) now starts with
+the developer tasks: the first bookmark, sealing, branches and line nodes,
+bookmark moves, and the status and inspection calls in Kotlin, Rust and JSON,
+followed by the replica boundary and late and held writes. The docs index lists
+it before generations; the checkpoint entry links the
+[horizon](../runtime/mergeable-horizon.md) as the release mechanism until
+phase 15, and the horizon and generation guides say what replaces them. SDK
+enrollment lists the `tips` native call and the `tip-nodes` secret.
+
+### Final wave 2 verification
+
+`./scripts/lint` passed. `./scripts/check` passed Clippy, 167 unit checks and
+952 integration checks: 704 workspace tests plus 248 SDK tests without default
+features, in 143.20 seconds against the 300-second budget. The three tips tests
+slower than 2 seconds under load confirmed alone at 0.22, 0.39 and 0.50
+seconds; no budget exception was added. `sdks/kotlin/gradlew -p sdks/kotlin
+check` passed, running `rocky-core`'s JVM and iOS simulator tests, and
+`./examples/shoppinglist-app/check` passed.
+
+A plain `cargo test -p rocky-sdk`, run alongside other builds, failed the
+e2e-tier `a_migration_of_100000_rows_converges_on_every_member` (no convergence
+within 64 syncs). It uses an explicit generation upgrade without a tip graph,
+which the new calls do not reach, but it was neither rerun alone nor compared
+with the parent. E2E, Android device and packaged iOS qualification were not
+run. Coordinated seals and moves, trusted-identity grants through the SDK and
+the completion gate's coordinated-write items remain open.
+
+## Merge of wave 2 with lane L's integration
+
+`nnkonlnp` merges `tuqztmkk` (slices 5–6) into `xlmtnmlu`. Both sides widened
+`scope_graph`'s visibility; the merge keeps `pub(in crate::replica)`. The SDK's
+calls publish through `publish_tip_statements`, so they end coordinated logs
+as lane L's integration requires. `./scripts/lint` passed, and
+`./scripts/check` passed Clippy, 167 unit and 964 integration checks (716
+workspace and 248 SDK tests) in 137.39 seconds. Kotlin, the shopping check
+and E2E were not run on the merge.
+
+### Open after the merge
+
+- SDK seal and move calls wrap every replica error as `rejected`, not
+  retryable: a seal the coordinator did not confirm is reported `rejected`
+  instead of `coordinator_unavailable`, and one another node ended first
+  loses its `sealed` code. Cut refusals have the same mapping gap.
+- No SDK or Kotlin test seals or moves a bookmark with a coordinated log;
+  lane L's gate tests call `rocky-secure` directly.
+- The SDK cannot grant a trusted identity, so through it only the owner
+  opens tips and moves bookmarks backwards or sideways; the gate's trusted
+  node branch and rollback are proven in `rocky-secure` only.
+- The e2e `a_migration_of_100000_rows_converges_on_every_member` failure from
+  wave 2 was neither rerun alone nor compared with its parent.
+- `devices_never_online_together_converge_via_keyless_custody` remains a
+  load-dependent flake.

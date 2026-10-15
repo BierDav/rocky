@@ -1,92 +1,160 @@
-# Tips and bookmarks
+# Seals, tips and bookmarks
 
-Implemented at the `rocky-credentials` and `rocky-secure` boundaries. The SDK,
-JSON and Kotlin developer APIs and coordinated terminal entries are a separate
-integration step in [phase 14](../features_09/14-seals-and-bookmarks.md).
+A tip is one schema and the frames written to it. A seal ends a tip at a
+frontier and either `continue`s into one successor tip or `close`s it.
+Bookmarks are named, signed pointers to tips; a device writes only the tip its
+followed bookmark points to. Every device holds the whole graph; frames reach
+only devices following their tip. The design is
+[phase 14](../features_09/14-seals-and-bookmarks.md) of
+[generations as sealed forks](../features_09/README.md#generations-as-sealed-forks).
 
-## Select a workspace
+With a [coordinated log](coordinated-log.md) configured, a seal or a move
+off an open tip first ends that tip's log
+([seals and moves](coordinated-writes.md#seals-and-moves)); a seal another node
+ended first, or one the coordinator did not confirm, is refused. Until
+[phase 15](../features_09/15-lazy-compaction.md) a seal compacts nothing and
+the [mergeable horizon](mergeable-horizon.md) still releases evidence; until
+[phase 17](../features_09/17-schema-changes-through-seals.md) schema changes are
+explicit [generations](generations.md), refused once a domain has a graph.
 
-A domain's `TipGraph` contains signed seals, openings and bookmark moves.
-Every admitted peer exchanges the complete graph, including peers following
-other tips. `NativeSession::sync_tip_graph` refreshes it on existing links;
-SDK reconciliation does so before exchanging rows. Row subscriptions do not
-filter this metadata. Statements are
-verified before the union and any resulting workspace switch commit together.
-Invalid statements or a failed switch leave the installed graph and rows intact.
+## Start with a bookmark
 
-The application chooses a bookmark name. The creator signs its initial move
-from `None` to genesis; `main` is a convention, not an implicit Rocky bookmark.
-Genesis is `commitment("rocky.genesis-tip.v1", manifest_digest)`, qualified by
-the graph's domain scope. `EncryptedReplica::follow_bookmark(scope, name)`
-selects it; `followed_bookmark()` and `followed_tip()` report the selection.
-The current implementation supports one live selection per replica file.
+Rocky creates no bookmark. The domain's owner creates the first one on the
+genesis tip and follows it; `main` is a convention. Other devices follow it
+once sync has brought them the graph.
 
-A seal names its source tip, a frontier of global sequence marks per node
-author, and `Continue { schema }` or `Close`. Continue preserves the schema
-until phase 17 and opens the tip whose `TipId` wraps the seal digest. An
-explicit opening starts a branch at a seal's frontier; its tip wraps the
-opening digest and declares its log's minimum in-sync size.
+```kotlin
+val tips = session.tips
+tips.createBookmark("main")          // on the followed tip: genesis
+tips.follow("main")
+// another device, after sync:
+tips.follow("main")
+```
 
-`publish_tip_statements` and `receive_tip_statements` accept these signed
-values. For a configured coordinated log, seals and bookmark moves return an
-expected error until terminal log-entry integration supplies their ordering.
-They never bypass the coordinated log.
+Until a device follows a bookmark, its status has a null `bookmark` and
+sealing is refused. A device follows one bookmark at a time.
 
-## Authority and conflicts
+## Seal
 
-Issuers with whole-domain authority seal tips and move bookmarks forward along
-continue seals. The owner and owner-trusted identities also open tips and
-create, delete or move bookmarks backwards or sideways. Trust comes from
-`Authority::issue_trusted`: an owner-direct credential extension
-`Extended.trusted: Option<Scope>`. A node certificate adds no control rights;
-statements use the identity's signer and authority chain.
+`seal()` seals the followed tip with `continue` and moves its bookmark to the
+successor in one signed batch. Writes continue on the successor; no row
+changes, and adopting a seal costs every device the same small amount
+whatever the domain holds. `seal(close = true)` ends the tip instead; its
+bookmark stays on it and is read-only until moved. Rocky runs no timer.
 
-The lower statement digest wins concurrent seals of one tip or moves of one
-bookmark from the same source. Losing signed histories remain graph evidence.
-A backward or sideways move off an open tip must include its close seal.
-A bookmark at a sealed tip, or one deleted without a replacement, cannot write.
+The seal's frontier holds the last global author position of every write this
+device holds on the followed tip. Writes beyond it that arrive later walk
+`continue` seals to the open tip; behind a `close` they become
+[held changes](held-changes.md). Sealing refuses pruned history, whose author
+positions are gone, and a tip this device does not follow.
 
-## Nodes and row isolation
+## Branches
 
-A node's author log belongs to one continue line. Switching to a branch
-rebuilds rows and existence state from its sealed base plus its own frames.
-`enroll_line_node(identity_provider)` creates a node without an issuer;
-`register_line_node` supplies its credentials and key for that line. Until
-registered, the new workspace is read-only. Returning to a line selects its
-previous node. A node that wrote into a losing continuation needs a new
-node before it can write on the winning fork. Keys stay in the caller's secret store: after reopening a
-branch, supply its saved node again before writing.
+The owner or a trusted identity opens a tip on any seal and points a bookmark
+at it. A branch starts from the seal's state and never takes later frames of
+the line it came from.
 
-Peers declare the followed tip in their authenticated hello. Row offers,
-frontiers, range transfers and remote reads require the same followed tip;
-frames of unrelated tips are refused. Discovering another schema never adopts
-it. Checkpoints must name the selected tip. A switch that needs history already
-compacted away fails with an expected error; target-checkpoint switching is
-not implemented by this slice.
+```kotlin
+val sealed = tips.seal()                                   // main moves on
+val seal = tips.inspect().seals.single { it.id == sealed.tip }.id
+val dev = tips.open(seal, minimumInSync = 1u)
+tips.createBookmark("dev", dev)
+tips.follow("dev")                                         // rebuilds the workspace
+```
 
-`drop_tip(tip)` removes an inactive workspace's retained frames atomically.
-It requires acknowledged custody of local writes and refuses active ancestry,
-retained dependencies, checkpoints or held evidence. It preserves graph, handles
-and line-node reservations; returning to that line must restore its dropped
-original frames before writing.
+`minimumInSync` names the minimum in-sync size of the tip's coordinated log;
+a device cannot know the coordinator's domain minimum, so it is required.
+
+An author log continues along one line of `continue` seals. A device that
+writes on another line does so under another node of its identity, certified
+without an issuer and kept in the secret store (role `tip-nodes`). Rocky
+enrolls it after `follow`, at open and after each sync pass; returning to a
+line, or reopening on it, reuses that line's node. A stored identity's node
+takes the next free number of its [author range](sdk-enrollment.md#node-author-numbers);
+a supplied identity's provider reserves one. Until a node exists the
+workspace refuses writes, and a failed enrollment is recorded as
+`line_node_failed` [activity](activity.md).
+
+`drop(tip)` releases a tip the device no longer follows. It refuses the
+followed tip and its ancestors, and frames other devices do not hold yet.
+
+## Move or delete a bookmark
+
+Issuers move a bookmark forward along `continue` seals. The owner and trusted
+identities also create and delete bookmarks and move them backwards or
+sideways. Such a move off an open tip closes it in the same batch, so it is
+made on a device following that tip. The line's writes since the common seal
+return as held changes on every device holding them. Two moves of one bookmark
+from the same tip resolve to the lower digest. A call whose statements the
+graph would not resolve to, such as a move losing to a lower digest, is
+refused instead of published.
+
+## Status and inspection
+
+| Kotlin | Rust `Session` | JSON `tips` action | Returns |
+| --- | --- | --- | --- |
+| `status()` | `tip_status()` | `status` | `TipStatus` |
+| `inspect()` | `inspect_tips()` | `inspect` | `TipInspection` |
+| `seal(close)` | `seal(close)` | `seal`, `close` | `TipStatus` |
+| `open(seal, minimumInSync)` | `open_tip` | `open`, `seal`, `minimum_in_sync` | `{tip}` |
+| `createBookmark(name, tip?)` | `create_bookmark` | `create`, `name`, `tip` | `TipStatus` |
+| `moveBookmark(name, tip)` | `move_bookmark` | `move`, `name`, `tip` | `TipStatus` |
+| `deleteBookmark(name)` | `delete_bookmark` | `delete`, `name` | `TipStatus` |
+| `follow(name)` | `follow` | `follow`, `name` | `TipStatus` |
+| `drop(tip)` | `drop_tip` | `drop`, `tip` | `TipStatus` |
+
+The JSON request is `{"type": "tips", "action": ...}` in the
+[SDK contract](sdk-contract.md) envelope; Kotlin's `RockyClient.tips` and
+`RockySession.tips` use it. Digests and tips are lowercase hex; counters are
+unsigned.
+
+Status reports the followed `bookmark` and `tip`, `operations_since_seal`
+(writes held locally beyond the last seal) and, per peer, the tip its open
+link claims and its last reported per-scope frontiers. `evidence_releasable`
+stays null until lazy compaction exists.
+
+Inspection is for developers: the genesis tip and schema, every seal with its
+frontier, action and whether it won (`canonical`), openings with their minimum
+in-sync size, bookmarks with their tip and moves, and nodes. A `continue`
+seal's id is its successor tip; an opening's id is its tip. For this device a
+node lists the tips it holds frames of and no kept seals, which arrive with
+[phase 16](../features_09/16-kept-seals-and-views.md); for peers both are null,
+since peers do not report them.
+
+## Replica boundary
+
+`TipGraph` holds a domain's signed seals, openings and bookmark moves.
+Admitted peers exchange the complete graph before rows, on new and open links;
+row subscriptions do not filter it. Statements are verified before the union,
+and the union and any resulting workspace switch commit together; invalid
+statements or a failed switch leave the graph and rows intact. Genesis is
+`commitment("rocky.genesis-tip.v1", manifest_digest)`, qualified by the
+graph's domain scope.
+
+`EncryptedReplica` provides `follow_bookmark`, `followed_bookmark`,
+`followed_tip`, `tip_graph`, `publish_tip_statements`,
+`receive_tip_statements`, `seal_frontier`, `tip_observation`, `tip_nodes`,
+`enroll_line_node`, `register_line_node`, `line_node_needed` and `drop_tip`.
+The caller keeps line-node keys and supplies them again after reopening.
+
+Statements are signed by the identity, never a node. The owner signs with no
+links; trust is an owner-direct grant, `Extended.trusted: Option<Scope>`,
+issued by `Authority::issue_trusted`; issuers sign through their issuer links.
+The SDK offers no call that grants trust yet.
+
+Peers declare their followed tip in the authenticated hello. Row offers,
+frontiers, range transfers and remote reads need the same tip; frames of
+unrelated tips are refused, and discovering another schema never adopts it.
+A link attempt while two peers follow different tips fails and leaves a retry
+backoff. Checkpoints name the selected tip; a switch that needs history
+compacted away fails with an expected error.
 
 ## Late and held writes
 
-Late frames beyond a continue frontier retain their original signatures and
-walk continue seals to the live tip. Fields apply under the installed schema's
-existing removal rules. Branch openings inherit only their seal's prefix and
-take no later writes from the parent line.
-
-A close, or leaving a line through a backward or sideways bookmark move, makes
-its excluded writes [held changes](held-changes.md). Held transfer carries
-original encrypted frames; a relay never signs for their author. Every readable
-holder can offer them through `held_frame_page`; `NativeSession` supplies
-`pull_held_page`, `push_held_page` and bounded `sync_held_changes`, independently
-of followed tips. Ordinary scope sync exchanges these when a tip graph exists.
-Re-authoring writes new frames on the selected tip with the existing held-change
-transaction API.
-
-Adopting a seal or a forward move changes metadata only. Row rebuilding and
-held classification belong to leaving a line or requesting held evidence,
-not to seal receipt. The sealing regression compares unchanged stored rows and
-equal SQLite write counts with 10 and 10,000 rows.
+Late frames keep their original signatures and apply field by field under the
+installed schema's removal rules. A relay serves held frames with
+`held_frame_page`; `NativeSession` supplies `pull_held_page`, `push_held_page`
+and bounded `sync_held_changes`, independent of followed tips. Re-authoring
+writes new frames on the followed tip with the held-change transaction API.
+Adopting a seal or forward move changes metadata only; the regression compares
+stored rows and SQLite write counts with 10 and 10,000 rows.

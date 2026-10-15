@@ -1,3 +1,7 @@
+[build]
+# Shares compiled dependencies across worktrees; SCCACHE_DIR selects the cache location.
+rustc-wrapper = "sccache"
+
 [profile.test.package.rocky-core]
 opt-level = 3
 [profile.test.package.rocky-credentials]

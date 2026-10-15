@@ -310,6 +310,8 @@ pub(crate) struct Previous {
     pub(super) generation: Generation,
     /// Whether this replica holds its signed manifest.
     pub(super) held: bool,
+    /// When the transition out of it was signed, in stamp microseconds.
+    pub(super) ended: u64,
 }
 fn generation(manifest: &ApplicationManifest) -> Generation {
     Generation {
@@ -474,7 +476,7 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn load_generations(&mut self) -> Result<(), Error> {
         let stored = rows(
             &self.conn,
-            "SELECT manifest,schema,signed IS NOT NULL FROM secure_generations ORDER BY schema",
+            "SELECT manifest,schema,signed IS NOT NULL,transition FROM secure_generations ORDER BY schema",
         )
         .await?;
         let mut previous = Vec::new();
@@ -483,17 +485,23 @@ impl<A: RowApplication> Inner<A> {
                 SqlValue::Blob(manifest),
                 SqlValue::Integer(schema),
                 SqlValue::Integer(held),
+                SqlValue::Blob(transition),
             ] = row.as_slice()
             else {
                 return Err(Error::Corrupt("generation record".into()));
             };
             let corrupt = || Error::Corrupt("generation record".into());
+            let ended = SignedTransition::from_bytes(transition)
+                .and_then(|signed| signed.verify(self.config.publisher))
+                .map_err(credential)?
+                .time;
             previous.push(Previous {
                 manifest: manifest.as_slice().try_into().map_err(|_| corrupt())?,
                 generation: Generation {
                     schema: u32::try_from(*schema).map_err(|_| corrupt())?,
                 },
                 held: *held != 0,
+                ended,
             });
         }
         self.previous = previous;

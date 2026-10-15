@@ -155,6 +155,7 @@ impl<A: RowApplication> Inner<A> {
                     .author
                     .ok_or_else(|| denied("node author number missing"))?,
                 extension.author_sequence,
+                operation.header.timestamp,
             )? == tips::FrameReach::Held
                 && self.can_read_key(extension.scope, &self.local_grants(time)?)
                 && self
@@ -321,6 +322,7 @@ impl<A: RowApplication> EncryptedReplica<A> {
                         .author
                         .ok_or_else(|| denied("node author number missing"))?,
                     extension.author_sequence,
+                    operation.header.timestamp,
                 )? != tips::FrameReach::Held
                 {
                     return Err(denied("held transfer names a live or unrelated frame"));

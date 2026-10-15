@@ -115,6 +115,7 @@ impl<A: RowApplication> Inner<A> {
                 .author
                 .ok_or_else(|| denied("node author number missing"))?,
             operation.header.extensions.author_sequence,
+            operation.header.timestamp,
         )?;
         let grants = match if reach == tips::FrameReach::Held {
             self.verify_frame_authority(frame, time)

@@ -516,6 +516,7 @@ impl<A: RowApplication> Inner<A> {
                 .author
                 .ok_or_else(|| denied("node author missing"))?,
             extension.author_sequence,
+            operation.header.timestamp,
         )? != tips::FrameReach::Held
             && let Some(id) = self.find_scope_id(scope).await?
             && let Some(log) = self.log(id, operation.header.public_key).await?

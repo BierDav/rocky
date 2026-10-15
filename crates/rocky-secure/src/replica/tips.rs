@@ -91,6 +91,45 @@ impl<A: RowApplication> Inner<A> {
             .find(|manifest| rocky_credentials::genesis_tip(*manifest) == tip)
             .ok_or_else(|| Error::Incompatible("unknown tip".into()))
     }
+    /// Without a graph, explicit generations replace each other in place:
+    /// a frame of an earlier one this replica records belongs to the
+    /// workspace when it was stamped before the signed transition out of
+    /// its generation. Later frames of that tip are a peer that stayed.
+    pub(crate) fn explicit_frame(&self, tip: TipId, timestamp: u64) -> bool {
+        tip == self.tip
+            || self.previous.iter().any(|previous| {
+                rocky_credentials::genesis_tip(previous.manifest) == tip
+                    && timestamp < previous.ended
+            })
+    }
+    /// Whether a peer is offered this frame. Without a graph, a frame of an
+    /// earlier explicit generation only once its author's log, as held here,
+    /// ends on the followed tip: a write a switch left behind stays local.
+    pub(super) async fn offered(
+        &self,
+        header: &p2panda_core::Header<Extensions>,
+    ) -> Result<bool, Error> {
+        let e = &header.extensions;
+        if e.tip == self.tip || self.graphs.contains_key(&e.scope.domain) {
+            return Ok(true);
+        }
+        let last = collect_rows(
+            self.conn
+                .query(
+                    "SELECT header FROM secure_operations WHERE scope=? AND author=? ORDER BY sequence DESC LIMIT 1",
+                    [encode(&e.scope)?, header.public_key.as_bytes().to_vec()],
+                )
+                .await?,
+        )
+        .await?;
+        match last.first().map(Vec::as_slice) {
+            Some([SqlValue::Blob(bytes)]) => Ok(decode::<p2panda_core::Header<Extensions>>(bytes)?
+                .extensions
+                .tip
+                == self.tip),
+            _ => Ok(false),
+        }
+    }
     pub(crate) fn same_tip_peer(&self, peer: PublicKey) -> Result<(), Error> {
         if self.peer_tip(peer) != Some(self.tip) {
             return Err(denied("peer follows another tip"));
@@ -113,9 +152,10 @@ impl<A: RowApplication> Inner<A> {
         tip: TipId,
         author: u32,
         sequence: u64,
+        timestamp: u64,
     ) -> Result<FrameReach, Error> {
         let Some(graph) = self.graphs.get(&scope) else {
-            return Ok(if tip == self.tip {
+            return Ok(if self.explicit_frame(tip, timestamp) {
                 FrameReach::Live
             } else {
                 FrameReach::Unfollowed
@@ -322,11 +362,23 @@ impl<A: RowApplication> Inner<A> {
     pub(super) async fn tip_frontier(&self, scope: ResourceScope) -> Result<ScopeFrontier, Error> {
         let mut positions = BTreeMap::<PublicKey, BTreeMap<u64, bool>>::new();
         let records=collect_rows(self.conn.query("SELECT header,status FROM secure_operations WHERE scope=?1 UNION ALL SELECT header,'applied' FROM secure_voids WHERE scope=?1",[encode(&scope)?]).await?).await?;
+        let mut headers = Vec::with_capacity(records.len());
+        // Each author's last held position and its tip.
+        let mut last = BTreeMap::<PublicKey, (u64, TipId)>::new();
         for record in records {
             let [SqlValue::Blob(bytes), SqlValue::Text(status)] = record.as_slice() else {
                 return Err(Error::Corrupt("frontier header".into()));
             };
             let header: p2panda_core::Header<Extensions> = decode(bytes)?;
+            let entry = last
+                .entry(header.public_key)
+                .or_insert((header.seq_num, header.extensions.tip));
+            if header.seq_num >= entry.0 {
+                *entry = (header.seq_num, header.extensions.tip);
+            }
+            headers.push((header, status.clone()));
+        }
+        for (header, status) in headers {
             let e = &header.extensions;
             let visible = match self.graphs.get(&scope.domain) {
                 Some(graph) => self.visible_frame(
@@ -336,7 +388,11 @@ impl<A: RowApplication> Inner<A> {
                     e.author_sequence,
                     self.tip,
                 )?,
-                None => e.tip == self.tip,
+                None => {
+                    self.explicit_frame(e.tip, header.timestamp)
+                        && (e.tip == self.tip
+                            || last.get(&header.public_key).map(|(_, tip)| *tip) == Some(self.tip))
+                }
             };
             if visible && (status != "held" || self.graphs.contains_key(&scope.domain)) {
                 positions.entry(header.public_key).or_default().insert(
@@ -771,7 +827,7 @@ impl<A: RowApplication> Inner<A> {
                 e.author_sequence,
                 self.tip,
             ),
-            None => Ok(e.tip == self.tip),
+            None => Ok(self.explicit_frame(e.tip, operation.header.timestamp)),
         }
     }
     pub(super) fn visible_held_in_workspace(

@@ -728,7 +728,9 @@ impl<A: RowApplication> Inner<A> {
 
                 // Every frame of a revoked author is refused, so none is
                 // sent.
-                if !self.visible_in_workspace(&frame.operation()?)?
+                let operation = frame.operation()?;
+                if !self.visible_in_workspace(&operation)?
+                    || !self.offered(&operation.header).await?
                     || self
                         .config
                         .revocations

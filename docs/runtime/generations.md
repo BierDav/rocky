@@ -205,6 +205,15 @@ Retained generations remain subject to the followed tip's admission rules.
 New admission verifies the original authority plus current revocations, never
 invented current authority.
 
+Without a tip graph an explicit switch replaces the generation in place. A
+frame of an earlier generation the replica records belongs to its workspace
+when it was stamped before the signed transition out of that generation; a
+later one comes from a device that stayed and is refused. Such a frame is
+offered to peers only once its author's log, as the sender holds it, ends on
+the current generation: an issuer's migration bundles signed before its next
+switch still reach every member, while a write a device left behind when it
+switched stays local.
+
 Pending operations preserve exact original bytes and author logs. Retained
 checkpoints keep typed keys/incarnations, tombstones, bundles and signed history;
 rebootstrap accepts only supported generations and authorized dependency closure.
@@ -218,7 +227,8 @@ migrates on two issuers apart (`issuers_that_cannot_reach_each_other_both_migrat
 keeps an issuer without a partition's key at the domain's generation
 (`an_issuer_without_a_partitions_key_keeps_the_households_generation`) and,
 in the e2e tier, fills a required field of 100,000 rows
-(`a_migration_of_100000_rows_converges_on_every_member`). `rocky-secure`
+(`a_migration_of_100000_rows_converges_on_every_member`; its 8-row variant
+`a_two_step_migration_converges_on_every_member` runs in integration). `rocky-secure`
 `tests::sql::publication` commits one transaction as consecutive bundles.
 SDK `tests/generations.rs` also requires a field with a migration while an
 older member keeps its unsynced work across an explicit target schema open

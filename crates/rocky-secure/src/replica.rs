@@ -1421,6 +1421,7 @@ impl<A: RowApplication> Inner<A> {
                 .author
                 .ok_or_else(|| denied("node author missing"))?,
             extension.author_sequence,
+            operation.header.timestamp,
         )?;
         if matches!(reach, tips::FrameReach::Unfollowed) {
             return Err(denied(

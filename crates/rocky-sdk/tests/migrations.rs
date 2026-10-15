@@ -284,6 +284,17 @@ const FILLED_COUNT: &str =
 /// `docs/features_09/07-migrations-at-any-size.md`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Failure> {
+    converges_on_every_member(LARGE).await
+}
+
+/// The member needs the first migration's frames, signed under the
+/// generation before the one both devices open, to apply the second's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_two_step_migration_converges_on_every_member() -> Result<(), Failure> {
+    converges_on_every_member(8).await
+}
+
+async fn converges_on_every_member(large: usize) -> Result<(), Failure> {
     let root = common::identity::small_directory()?;
     let hub = Arc::new(Hub::default());
     let network = |name: &str| Some(Network::Owned(hub.connector(name)));
@@ -303,8 +314,8 @@ async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Fa
     let before = size(&a_dir)?;
     let clock = std::time::Instant::now();
     let (seed, fill) = (
-        SEEDED.replace("100000", &LARGE.to_string()),
-        FILLED.replace("100000", &LARGE.to_string()),
+        SEEDED.replace("100000", &large.to_string()),
+        FILLED.replace("100000", &large.to_string()),
     );
     let a = Device::new(Database::open(open(&a_dir, &seed, network("a")))?)?;
     let seeded = clock.elapsed();
@@ -315,13 +326,13 @@ async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Fa
     let filled = clock.elapsed();
     let status = generation(&a).await;
     assert_eq!(status["current"]["schema"], 3, "{status}");
-    let bundles = LARGE.div_ceil(rocky_secure::MAX_BUNDLE_ROWS) as u64;
+    let bundles = large.div_ceil(rocky_secure::MAX_BUNDLE_ROWS) as u64;
     assert_eq!(
         status["migration"],
         json!({"state": "publishing", "bundles": 2 * bundles, "published": 0})
     );
     let count = |n: usize| json!([[{"type": "integer", "value": n.to_string()}, {"type": "integer", "value": n.to_string()}]]);
-    assert_eq!(rows(&a, FILLED_COUNT).await, count(LARGE));
+    assert_eq!(rows(&a, FILLED_COUNT).await, count(large));
 
     // Explicitly select the signed schema, then pull every retained row.
     b.close().await;
@@ -329,14 +340,14 @@ async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Fa
     let clock = std::time::Instant::now();
     let mut syncs = 0;
     while rows(&b, "SELECT count(*) FROM items").await
-        != json!([[{"type": "integer", "value": LARGE.to_string()}]])
+        != json!([[{"type": "integer", "value": large.to_string()}]])
         || b.call(
             json!({"type": "read", "query": {"sql": FILLED_COUNT, "values": [], "max_rows": 1}}),
         )
         .await
         .ok()
         .map(|page| page["rows"].clone())
-            != Some(count(LARGE))
+            != Some(count(large))
     {
         syncs += 1;
         assert!(syncs <= 64, "the member did not converge");
@@ -349,7 +360,7 @@ async fn a_migration_of_100000_rows_converges_on_every_member() -> Result<(), Fa
         "SELECT count(*), min(position), max(position), sum(length(position)) FROM items";
     assert_eq!(rows(&a, fingerprint).await, rows(&b, fingerprint).await);
     eprintln!(
-        "MEASURED rows={LARGE} seed_open={seeded:?} fill_open={filled:?} file_before={before} file_seeded={between} file_filled={} member_syncs={syncs} member_pull={pulled:?} member_file={}",
+        "MEASURED rows={large} seed_open={seeded:?} fill_open={filled:?} file_before={before} file_seeded={between} file_filled={} member_syncs={syncs} member_pull={pulled:?} member_file={}",
         size(&a_dir)?,
         size(&b_dir)?,
     );

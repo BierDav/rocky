@@ -1,0 +1,338 @@
+//! Seals, tips and bookmarks through the JSON contract and `Session`. See
+//! `docs/runtime/tips-and-bookmarks.md`.
+mod common;
+use common::{Device, Failure, introduce};
+use rocky_sdk::{Network, transport::memory::Hub};
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+async fn tips(device: &Device, action: &str, body: Value) -> Result<Value, Value> {
+    let mut request = json!({"type": "tips", "action": action});
+    for (key, value) in body.as_object().into_iter().flatten() {
+        request[key] = value.clone();
+    }
+    device.call(request).await
+}
+async fn ok(device: &Device, action: &str, body: Value) -> Value {
+    tips(device, action, body)
+        .await
+        .unwrap_or_else(|error| panic!("{action} failed: {error}"))
+}
+fn message(error: Value) -> String {
+    error["message"].as_str().unwrap_or_default().to_owned()
+}
+/// The owner's first bookmark, on the genesis tip, followed.
+async fn main(device: &Device) -> Value {
+    ok(device, "create", json!({"name": "main"})).await;
+    ok(device, "follow", json!({"name": "main"})).await
+}
+fn seal_of(inspection: &Value, tip: &str) -> Value {
+    inspection["seals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|seal| seal["tip"] == tip && seal["canonical"] == true)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continue_seal_moves_the_bookmark_and_keeps_every_row() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    let before = ok(&a, "status", json!({})).await;
+    assert_eq!(before["bookmark"], Value::Null);
+    assert!(message(tips(&a, "seal", json!({})).await.unwrap_err()).contains("follow"));
+    let genesis = main(&a).await["tip"].clone();
+    assert_eq!(genesis, before["tip"]);
+    a.add(1, "milk").await;
+    a.add(2, "eggs").await;
+    let written = ok(&a, "status", json!({})).await;
+    assert_eq!(written["bookmark"], "main");
+    assert_eq!(written["operations_since_seal"], 2);
+    assert_eq!(written["evidence_releasable"], Value::Null);
+
+    let sealed = ok(&a, "seal", json!({})).await;
+    assert_ne!(sealed["tip"], genesis);
+    assert_eq!(sealed["bookmark"], "main");
+    assert_eq!(sealed["operations_since_seal"], 0);
+    assert_eq!(a.titles().await, ["eggs", "milk"]);
+    a.add(3, "bread").await;
+    assert_eq!(
+        ok(&a, "status", json!({})).await["operations_since_seal"],
+        1
+    );
+
+    let inspection = ok(&a, "inspect", json!({})).await;
+    assert_eq!(inspection["genesis"], genesis);
+    let seal = seal_of(&inspection, genesis.as_str().ok_or("tip")?);
+    assert_eq!(seal["action"], "continue");
+    assert_eq!(seal["id"], sealed["tip"]);
+    assert_eq!(seal["frontier"].as_array().ok_or("frontier")?.len(), 1);
+    let main = &inspection["bookmarks"][0];
+    assert_eq!(
+        (main["name"].clone(), main["tip"].clone()),
+        (json!("main"), sealed["tip"].clone())
+    );
+    assert_eq!(main["moves"].as_array().ok_or("moves")?.len(), 2);
+    let local = &inspection["nodes"][0];
+    assert_eq!(local["followed_tip"], sealed["tip"]);
+    assert_eq!(local["kept_seals"], json!([]));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_close_seal_makes_the_bookmark_read_only() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    let tip = main(&a).await["tip"].clone();
+    a.add(1, "milk").await;
+    let closed = ok(&a, "seal", json!({"close": true})).await;
+    assert_eq!(closed["tip"], tip);
+    let write = a
+        .call(json!({
+            "type": "mutate",
+            "handle": vec![2; 32],
+            "payload": json!({"type": "create", "collection": "items", "values": {"title": "eggs", "completed": false}}).to_string().into_bytes(),
+            "entity": null,
+            "baseline": null,
+        }))
+        .await;
+    assert!(write.is_err(), "a closed tip took a write");
+    assert_eq!(a.titles().await, ["milk"]);
+    let inspection = ok(&a, "inspect", json!({})).await;
+    assert_eq!(
+        seal_of(&inspection, tip.as_str().ok_or("tip")?)["action"],
+        "close"
+    );
+    assert!(message(tips(&a, "seal", json!({})).await.unwrap_err()).contains("sealed"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_and_authority_are_checked() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    main(&a).await;
+    let sealed = ok(&a, "seal", json!({})).await;
+    b.sync().await.expect("sync");
+    ok(&b, "follow", json!({"name": "main"})).await;
+    assert_eq!(ok(&b, "status", json!({})).await["tip"], sealed["tip"]);
+
+    // A writer neither seals nor moves bookmarks.
+    for (action, body) in [
+        ("seal", json!({})),
+        ("create", json!({"name": "mine"})),
+        ("delete", json!({"name": "main"})),
+    ] {
+        let refused = message(tips(&b, action, body).await.unwrap_err());
+        assert!(refused.contains("only the owner"), "{action}: {refused}");
+    }
+
+    // An issuer seals and moves forward, but opens no tip and moves nothing back.
+    let c = Device::join(
+        &root.path().join("c"),
+        &a.invite_as(json!({"kind": "issuer"})).await,
+        Network::Owned(hub.connector("c")),
+    )?;
+    introduce(&a, &c).await;
+    c.sync().await.expect("issuer sync");
+    ok(&c, "follow", json!({"name": "main"})).await;
+    c.add(1, "issued").await;
+    let resealed = ok(&c, "seal", json!({})).await;
+    assert_ne!(resealed["tip"], sealed["tip"]);
+    let issued = ok(&c, "inspect", json!({})).await;
+    let reseal = seal_of(&issued, sealed["tip"].as_str().ok_or("tip")?)["id"].clone();
+    let opened = message(
+        tips(&c, "open", json!({"seal": reseal, "minimum_in_sync": 1}))
+            .await
+            .unwrap_err(),
+    );
+    assert!(opened.contains("trusted"), "{opened}");
+    assert!(
+        tips(&c, "move", json!({"name": "main", "tip": sealed["tip"]}))
+            .await
+            .is_err()
+    );
+    assert_eq!(ok(&c, "status", json!({})).await["tip"], resealed["tip"]);
+    let inspection = ok(&a, "inspect", json!({})).await;
+    let seal = seal_of(
+        &inspection,
+        inspection["genesis"].as_str().ok_or("genesis")?,
+    )["id"]
+        .clone();
+    for (action, body) in [
+        ("unknown", json!({})),
+        ("create", json!({"name": "main"})),
+        ("move", json!({"name": "absent", "tip": sealed["tip"]})),
+        ("move", json!({"name": "main", "tip": sealed["tip"]})),
+        ("open", json!({"seal": seal})),
+        (
+            "open",
+            json!({"seal": "00".repeat(32), "minimum_in_sync": 1}),
+        ),
+        ("drop", json!({"tip": sealed["tip"]})),
+        ("follow", json!({"name": "absent"})),
+        ("seal", json!({"close": "yes"})),
+    ] {
+        assert!(
+            tips(&a, action, body.clone()).await.is_err(),
+            "{action} {body}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_writes_under_its_own_node_and_keeps_it_across_reopen() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
+    a.add(1, "milk").await;
+    let main_tip = ok(&a, "seal", json!({})).await["tip"].clone();
+    let seal = seal_of(&ok(&a, "inspect", json!({})).await, &genesis)["id"].clone();
+    let dev = ok(&a, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
+    ok(&a, "create", json!({"name": "dev", "tip": dev})).await;
+    let followed = ok(&a, "follow", json!({"name": "dev"})).await;
+    assert_eq!(
+        (followed["bookmark"].clone(), followed["tip"].clone()),
+        (json!("dev"), dev.clone())
+    );
+    assert_eq!(a.titles().await, ["milk"]);
+    a.add(2, "dev only").await;
+    a.close().await;
+
+    let a = Device::open(root.path(), None)?;
+    assert_eq!(ok(&a, "status", json!({})).await["tip"], dev);
+    a.add(3, "after reopen").await;
+    assert_eq!(a.titles().await, ["after reopen", "dev only", "milk"]);
+
+    ok(&a, "follow", json!({"name": "main"})).await;
+    assert_eq!(a.titles().await, ["milk"]);
+    a.add(4, "main again").await;
+    assert!(tips(&a, "drop", json!({"tip": main_tip})).await.is_err());
+    // Dropping would lose writes no other device holds yet.
+    let unsent = message(tips(&a, "drop", json!({"tip": dev})).await.unwrap_err());
+    assert!(unsent.contains("evidence"), "{unsent}");
+    let nodes = ok(&a, "inspect", json!({})).await["nodes"].clone();
+    assert!(
+        nodes[0]["kept_tips"]
+            .as_array()
+            .ok_or("kept")?
+            .contains(&dev)
+    );
+    assert_eq!(a.titles().await, ["main again", "milk"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_main_back_closes_its_tip_and_holds_the_abandoned_writes() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
+    a.add(1, "kept").await;
+    let continued = ok(&a, "seal", json!({})).await["tip"].clone();
+    a.add(2, "abandoned").await;
+    let seal = seal_of(&ok(&a, "inspect", json!({})).await, &genesis)["id"].clone();
+    let earlier = ok(&a, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
+
+    let moved = ok(&a, "move", json!({"name": "main", "tip": earlier})).await;
+    assert_eq!(moved["tip"], earlier);
+    let inspection = ok(&a, "inspect", json!({})).await;
+    assert_eq!(
+        seal_of(&inspection, continued.as_str().ok_or("tip")?)["action"],
+        "close"
+    );
+    assert_eq!(a.titles().await, ["kept"]);
+    assert_eq!(a.ok(json!({"type": "held_changes"})).await["count"], 1);
+    a.add(3, "rewritten").await;
+    assert_eq!(a.titles().await, ["kept", "rewritten"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_on_main_never_receive_a_branch_frames() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let hub = Arc::new(Hub::default());
+    let a = Device::create(
+        &root.path().join("a"),
+        Some(Network::Owned(hub.connector("a"))),
+    )?;
+    let b = Device::join(
+        &root.path().join("b"),
+        &a.invite().await,
+        Network::Owned(hub.connector("b")),
+    )?;
+    introduce(&a, &b).await;
+    let genesis = main(&a).await["tip"].as_str().ok_or("tip")?.to_owned();
+    a.add(1, "shared").await;
+    // Peers exchange frames only while they follow the same tip.
+    b.sync().await.expect("graph sync");
+    ok(&b, "follow", json!({"name": "main"})).await;
+    let sealed = ok(&a, "seal", json!({})).await;
+    b.sync().await.expect("seal sync");
+    assert_eq!(ok(&b, "status", json!({})).await["tip"], sealed["tip"]);
+    let seal = seal_of(&ok(&a, "inspect", json!({})).await, &genesis)["id"].clone();
+    let dev = ok(&a, "open", json!({"seal": seal, "minimum_in_sync": 1})).await["tip"].clone();
+    ok(&a, "create", json!({"name": "dev", "tip": dev})).await;
+    ok(&a, "follow", json!({"name": "dev"})).await;
+    a.add(2, "dev only").await;
+    b.add(3, "main only").await;
+    b.sync().await.expect("sync");
+    assert_eq!(b.titles().await, ["main only", "shared"]);
+    assert_eq!(a.titles().await, ["dev only", "shared"]);
+    let names: Vec<_> = ok(&b, "inspect", json!({})).await["bookmarks"]
+        .as_array()
+        .ok_or("bookmarks")?
+        .iter()
+        .map(|bookmark| bookmark["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("dev"), json!("main")]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_session_api_follows_the_json_contract() -> Result<(), Failure> {
+    let root = tempfile::tempdir()?;
+    let a = Device::create(root.path(), None)?;
+    let session = a.database.session();
+    let genesis = session.create_bookmark("main", None).await?.tip;
+    assert_eq!(
+        session.follow("main").await?.bookmark.as_deref(),
+        Some("main")
+    );
+    let sealed = session.seal(false).await?;
+    let inspection = session.inspect_tips().await?;
+    let seal = inspection
+        .seals
+        .iter()
+        .find(|seal| seal.tip == genesis)
+        .ok_or("seal")?;
+    assert_eq!(seal.id, sealed.tip);
+    let dev = session.open_tip(&seal.id, 1).await?;
+    session.create_bookmark("dev", Some(&dev)).await?;
+    // Off an open tip this device does not follow, a sideways move is refused.
+    assert!(session.move_bookmark("dev", &sealed.tip).await.is_err());
+    session.create_bookmark("release", Some(&genesis)).await?;
+    let release = session.move_bookmark("release", &sealed.tip).await?;
+    assert_eq!(release.tip, sealed.tip);
+    assert_eq!(session.delete_bookmark("dev").await?.tip, sealed.tip);
+    let bookmarks = session.inspect_tips().await?.bookmarks;
+    assert_eq!(
+        bookmarks.iter().find(|b| b.name == "dev").ok_or("dev")?.tip,
+        None
+    );
+    assert!(session.drop_tip(&dev).await.is_ok());
+    assert_eq!(session.tip_status().await?.tip, sealed.tip);
+    Ok(())
+}

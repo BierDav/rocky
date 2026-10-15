@@ -25,6 +25,7 @@ mod status;
 mod sync;
 #[cfg(test)]
 mod test_directory;
+mod tips;
 pub mod transport;
 mod typed;
 
@@ -46,6 +47,7 @@ pub use rollout::{RemovalImpact, RolloutConfirmationRequired, RolloutImpact};
 pub use secrets::{FileSecretStore, SecretStore};
 pub use service::{Network, ServiceError};
 pub use status::*;
+pub use tips::*;
 pub use typed::{Access, Located, MAX_OBSERVED, TypedApp, TypedError, TypedRow};
 pub type Failure = Box<dyn std::error::Error + Send + Sync>;
 /// Rocky's handlers for an application-owned iroh endpoint, and the iroh

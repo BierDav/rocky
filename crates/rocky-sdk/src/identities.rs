@@ -125,6 +125,17 @@ impl Settings {
             _ if self.stored_identity => numbers.first,
             _ => identity.reserve_author(numbers)?,
         };
+        self.certify_node(&*identity, links, domain, (node, author))
+    }
+    /// Certifies `node` with `author` under `links`, with an issuer
+    /// identity's grants, and verifies the chain.
+    pub(crate) fn certify_node(
+        &self,
+        identity: &dyn IdentityProvider,
+        links: CredentialChain,
+        domain: &Domain,
+        (node, author): (PublicKey, u32),
+    ) -> Result<CredentialChain, Failure> {
         let issues = links
             .0
             .last()
@@ -134,9 +145,9 @@ impl Settings {
         let chain = if issues {
             let grants = crate::enrollment::grants_of(&rocky_credentials::Profile::Issuer, domain)?;
             let partitions = crate::enrollment::whole_partitions(domain, &grants);
-            links.certify_with(&*identity, (node, author), (grants, partitions))?
+            links.certify_with(identity, (node, author), (grants, partitions))?
         } else {
-            links.certify(&*identity, node, author)?
+            links.certify(identity, node, author)?
         };
         chain.verify_selectors(
             self.publisher,

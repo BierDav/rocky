@@ -559,6 +559,54 @@ impl Session {
             .await
             .map(drop)
     }
+    async fn tips<T: serde::de::DeserializeOwned>(&self, mut request: Value) -> Result<T, Failure> {
+        request["type"] = json!("tips");
+        Ok(serde_json::from_value(self.request(request).await?)?)
+    }
+    /// The followed bookmark and tip; see `docs/runtime/tips-and-bookmarks.md`.
+    pub async fn tip_status(&self) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"status"})).await
+    }
+    /// The domain's graph and what each node follows or keeps.
+    pub async fn inspect_tips(&self) -> Result<crate::TipInspection, Failure> {
+        self.tips(json!({"action":"inspect"})).await
+    }
+    /// Seals the followed tip: `continue` moves its bookmark to the
+    /// successor, `close` leaves the bookmark read-only.
+    pub async fn seal(&self, close: bool) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"seal","close":close})).await
+    }
+    /// Opens a tip on `seal` and returns it.
+    pub async fn open_tip(&self, seal: &str, minimum_in_sync: u32) -> Result<String, Failure> {
+        let opened: Value = self
+            .tips(json!({"action":"open","seal":seal,"minimum_in_sync":minimum_in_sync}))
+            .await?;
+        Ok(opened["tip"].as_str().ok_or("missing opened tip")?.into())
+    }
+    /// Creates `name` on `tip`, by default the followed tip.
+    pub async fn create_bookmark(
+        &self,
+        name: &str,
+        tip: Option<&str>,
+    ) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"create","name":name,"tip":tip}))
+            .await
+    }
+    pub async fn move_bookmark(&self, name: &str, tip: &str) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"move","name":name,"tip":tip}))
+            .await
+    }
+    pub async fn delete_bookmark(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"delete","name":name})).await
+    }
+    /// Follows `name`: writes go to its tip from now on.
+    pub async fn follow(&self, name: &str) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"follow","name":name})).await
+    }
+    /// Drops the local frames of a tip this device no longer follows.
+    pub async fn drop_tip(&self, tip: &str) -> Result<crate::TipStatus, Failure> {
+        self.tips(json!({"action":"drop","tip":tip})).await
+    }
 
     pub async fn call(&self, request: String) -> Result<String, Failure> {
         if self.closed.load(Ordering::SeqCst) {
@@ -1236,7 +1284,9 @@ async fn run(
     node.coordinate(log);
     if let Err(error) = async {
         node.complete_revocation().await?;
-        node.refresh_importing().await
+        node.refresh_importing().await?;
+        node.try_ensure_tip_node().await;
+        Ok::<_, Failure>(())
     }
     .await
     {

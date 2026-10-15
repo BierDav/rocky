@@ -1,0 +1,473 @@
+//! Seals, tips and bookmarks: the developer calls over the replica's tip
+//! graph. See `docs/runtime/tips-and-bookmarks.md`.
+use super::*;
+use crate::tips::{
+    Bookmark, BookmarkMove, TipAuthorMark, TipDevice, TipFrontierLog, TipInspection, TipNode,
+    TipOpening, TipScopeFrontier, TipSeal, TipStatus,
+};
+use rocky_core::{Scope, TipId};
+use rocky_credentials::{
+    BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, CredentialChain, IdentityProvider, SEAL_FORMAT,
+    SealAction, SealStatement, SignedBookmarkMove, SignedSeal, SignedTipOpening,
+    TIP_OPENING_FORMAT, TipGraph, TipOpeningStatement,
+};
+use rocky_secure::TipStatement;
+
+fn hex(digest: &rocky_core::Commitment) -> String {
+    HEXLOWER.encode(digest)
+}
+fn digest(request: &Value, name: &str) -> Result<rocky_core::Commitment, Failure> {
+    request[name]
+        .as_str()
+        .and_then(|hex| HEXLOWER.decode(hex.as_bytes()).ok())
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| refused(format!("{name} must be a hex digest")))
+}
+fn text<'a>(request: &'a Value, name: &str) -> Result<&'a str, Failure> {
+    request[name]
+        .as_str()
+        .ok_or_else(|| refused(format!("{name} must be a string")))
+}
+
+/// Who signs tip statements: the identity and the links its authority
+/// comes through.
+struct Signer {
+    identity: Arc<dyn IdentityProvider>,
+    links: CredentialChain,
+}
+
+impl Node {
+    pub(super) async fn tips(&self, request: &Value) -> Result<Value, Failure> {
+        let action = request["action"].as_str().unwrap_or_default();
+        let scope = self.domain().scope;
+        match action {
+            "status" => {}
+            "inspect" => return Ok(serde_json::to_value(self.inspect_tips(scope).await?)?),
+            "seal" => {
+                let close = match &request["close"] {
+                    Value::Null => false,
+                    Value::Bool(close) => *close,
+                    _ => return Err(refused("close must be a boolean")),
+                };
+                self.seal_followed(scope, close).await?;
+            }
+            "open" => {
+                let minimum = request["minimum_in_sync"]
+                    .as_u64()
+                    .and_then(|minimum| u32::try_from(minimum).ok())
+                    .ok_or_else(|| refused("minimum_in_sync must be a positive number"))?;
+                let tip = self
+                    .open_tip(scope, digest(request, "seal")?, minimum)
+                    .await?;
+                return Ok(json!({"tip": hex(&tip.0)}));
+            }
+            "create" => {
+                let tip = match request.get("tip") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(TipId(digest(request, "tip")?)),
+                };
+                self.create_bookmark(scope, text(request, "name")?, tip)
+                    .await?;
+            }
+            "move" => {
+                let tip = TipId(digest(request, "tip")?);
+                self.move_bookmark(scope, text(request, "name")?, Some(tip))
+                    .await?;
+            }
+            "delete" => {
+                self.move_bookmark(scope, text(request, "name")?, None)
+                    .await?;
+            }
+            "follow" => {
+                self.replica
+                    .follow_bookmark(scope, text(request, "name")?)
+                    .await
+                    .map_err(refused)?;
+                self.ensure_tip_node().await?;
+                self.observations.touch();
+            }
+            "drop" => {
+                self.replica
+                    .drop_tip(TipId(digest(request, "tip")?))
+                    .await
+                    .map_err(refused)?;
+                self.observations.touch();
+            }
+            _ => return Err(refused("unknown tips action")),
+        }
+        Ok(serde_json::to_value(self.tip_status(scope).await?)?)
+    }
+
+    async fn tip_status(&self, scope: Scope) -> Result<TipStatus, Failure> {
+        let observed = self.replica.tip_observation(scope).await?;
+        Ok(TipStatus {
+            bookmark: observed.bookmark,
+            tip: hex(&observed.tip.0),
+            operations_since_seal: observed.operations_since_seal,
+            evidence_releasable: None,
+            devices: observed
+                .devices
+                .into_iter()
+                .map(|device| {
+                    Ok(TipDevice {
+                        node: device.node.to_hex(),
+                        tip: device.tip.map(|tip| hex(&tip.0)),
+                        frontiers: device
+                            .frontiers
+                            .into_iter()
+                            .map(|frontier| {
+                                Ok(TipScopeFrontier {
+                                    scope: serde_json::to_string(&frontier.scope)?,
+                                    logs: frontier
+                                        .logs
+                                        .into_iter()
+                                        .map(|log| TipFrontierLog {
+                                            author: log.author.to_hex(),
+                                            held: log.held,
+                                            applied: log.applied,
+                                        })
+                                        .collect(),
+                                })
+                            })
+                            .collect::<Result<_, Failure>>()?,
+                    })
+                })
+                .collect::<Result<_, Failure>>()?,
+        })
+    }
+
+    async fn inspect_tips(&self, scope: Scope) -> Result<TipInspection, Failure> {
+        let graph = self.replica.tip_graph(scope).await?;
+        let seals = graph
+            .seals
+            .iter()
+            .map(|seal| {
+                let statement = &seal.statement;
+                Ok(TipSeal {
+                    id: hex(&seal.id()?),
+                    tip: hex(&statement.tip.0),
+                    frontier: statement
+                        .frontier
+                        .iter()
+                        .map(|mark| TipAuthorMark {
+                            author: mark.author,
+                            sequence: mark.sequence,
+                        })
+                        .collect(),
+                    action: match statement.action {
+                        SealAction::Continue { .. } => "continue",
+                        SealAction::Close => "close",
+                    }
+                    .into(),
+                    schema: match statement.action {
+                        SealAction::Continue { schema } => Some(hex(&schema)),
+                        SealAction::Close => None,
+                    },
+                    canonical: graph.seal(statement.tip)? == Some(seal),
+                })
+            })
+            .collect::<Result<_, Failure>>()?;
+        let openings = graph
+            .openings
+            .iter()
+            .map(|opening| {
+                Ok(TipOpening {
+                    id: hex(&opening.id()?),
+                    seal: hex(&opening.statement.seal),
+                    minimum_in_sync: opening.statement.minimum_in_sync,
+                })
+            })
+            .collect::<Result<_, Failure>>()?;
+        let names = graph
+            .moves
+            .iter()
+            .map(|movement| movement.statement.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let bookmarks = names
+            .into_iter()
+            .map(|name| {
+                Ok(Bookmark {
+                    tip: graph.bookmark(&name)?.map(|tip| hex(&tip.0)),
+                    moves: graph
+                        .moves
+                        .iter()
+                        .filter(|movement| movement.statement.name == name)
+                        .map(|movement| {
+                            Ok(BookmarkMove {
+                                id: hex(&movement.id()?),
+                                from: movement.statement.from.map(|tip| hex(&tip.0)),
+                                to: movement.statement.to.map(|tip| hex(&tip.0)),
+                            })
+                        })
+                        .collect::<Result<_, Failure>>()?,
+                    name,
+                })
+            })
+            .collect::<Result<_, Failure>>()?;
+        let nodes = self
+            .replica
+            .tip_nodes(scope)
+            .await?
+            .into_iter()
+            .map(|node| TipNode {
+                node: node.node.to_hex(),
+                followed_tip: node.followed_tip.map(|tip| hex(&tip.0)),
+                kept_tips: node
+                    .kept_tips
+                    .map(|tips| tips.iter().map(|tip| hex(&tip.0)).collect()),
+                kept_seals: node.kept_seals.map(|seals| seals.iter().map(hex).collect()),
+            })
+            .collect();
+        Ok(TipInspection {
+            scope: serde_json::to_string(&scope)?,
+            genesis: hex(&graph.genesis().0),
+            schema: hex(&graph.genesis_schema),
+            seals,
+            openings,
+            bookmarks,
+            nodes,
+        })
+    }
+
+    /// The owner signs as itself, a trusted identity through its trusted
+    /// grant and an issuer through its issuer links.
+    async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
+        let settings = self.settings.lock().await.clone();
+        let identity = settings.identity(&self.vault)?;
+        let links = settings.identity_links();
+        let trusted =
+            links.0.len() == 1 && links.0[0].capability.extended()?.trusted == Some(scope);
+        let links = if settings.owner() {
+            CredentialChain::default()
+        } else if trusted {
+            links
+        } else if settings.issuer() {
+            settings.issuer_links()
+        } else {
+            return Err(refused(
+                "only the owner, a trusted identity or an issuer signs tip statements",
+            ));
+        };
+        Ok(Signer { identity, links })
+    }
+
+    /// Publishes `statements` once they have the effect `expected` checks
+    /// on the graph they extend; a statement that would lose to a lower
+    /// digest is refused rather than published.
+    async fn publish_tips(
+        &self,
+        scope: Scope,
+        statements: Vec<TipStatement>,
+        expected: impl FnOnce(&TipGraph) -> Result<(), Failure>,
+    ) -> Result<(), Failure> {
+        let mut graph = self.replica.tip_graph(scope).await?;
+        for statement in &statements {
+            match statement {
+                TipStatement::Seal(seal) => graph.seals.push(seal.clone()),
+                TipStatement::Opening(opening) => graph.openings.push(opening.clone()),
+                TipStatement::Bookmark(movement) => graph.moves.push(movement.clone()),
+            }
+        }
+        expected(&graph)?;
+        self.replica
+            .publish_tip_statements(&statements)
+            .await
+            .map_err(refused)?;
+        // A move of the followed bookmark may have switched lines.
+        self.ensure_tip_node().await?;
+        self.observations.touch();
+        Ok(())
+    }
+
+    fn bookmark_move(
+        signer: &Signer,
+        scope: Scope,
+        name: &str,
+        from: Option<TipId>,
+        to: Option<TipId>,
+    ) -> Result<TipStatement, Failure> {
+        Ok(TipStatement::Bookmark(SignedBookmarkMove::endorse(
+            BookmarkMoveStatement {
+                format: BOOKMARK_MOVE_FORMAT,
+                scope,
+                name: name.into(),
+                from,
+                to,
+            },
+            &*signer.identity,
+            &signer.links,
+        )?))
+    }
+
+    /// Seals the followed tip at its locally known frontier. The tip
+    /// leaving through the move, `tip`, must be the followed one.
+    async fn seal_statement(
+        &self,
+        signer: &Signer,
+        scope: Scope,
+        tip: TipId,
+        close: bool,
+    ) -> Result<SignedSeal, Failure> {
+        let graph = self.replica.tip_graph(scope).await?;
+        if self.replica.followed_tip().await != tip {
+            return Err(refused(
+                "only a device following a tip seals it; follow its bookmark first",
+            ));
+        }
+        if graph.seal(tip)?.is_some() {
+            return Err(refused("this tip is already sealed"));
+        }
+        let action = if close {
+            SealAction::Close
+        } else {
+            SealAction::Continue {
+                schema: graph.schema(tip)?,
+            }
+        };
+        let frontier = self.replica.seal_frontier(scope).await.map_err(refused)?;
+        Ok(SignedSeal::endorse(
+            SealStatement {
+                format: SEAL_FORMAT,
+                scope,
+                tip,
+                frontier,
+                action,
+            },
+            &*signer.identity,
+            &signer.links,
+        )?)
+    }
+
+    /// `continue` seals the followed tip and moves its bookmark on, in one
+    /// batch; `close` ends it and leaves the bookmark read-only.
+    async fn seal_followed(&self, scope: Scope, close: bool) -> Result<(), Failure> {
+        let (followed, name) = self
+            .replica
+            .followed_bookmark()
+            .await
+            .filter(|(followed, _)| *followed == scope)
+            .ok_or_else(|| refused("follow a bookmark before sealing"))?;
+        let tip = self.replica.followed_tip().await;
+        if self.replica.tip_graph(followed).await?.bookmark(&name)? != Some(tip) {
+            return Err(refused(
+                "the followed bookmark no longer points to the followed tip",
+            ));
+        }
+        let signer = self.tip_signer(scope).await?;
+        let seal = self.seal_statement(&signer, scope, tip, close).await?;
+        let mut statements = vec![TipStatement::Seal(seal.clone())];
+        let successor = seal.successor()?;
+        if let Some(next) = successor {
+            statements.push(Self::bookmark_move(
+                &signer,
+                scope,
+                &name,
+                Some(tip),
+                Some(next),
+            )?);
+        }
+        self.publish_tips(scope, statements, |graph| {
+            if graph.bookmark(&name)? != successor.or(Some(tip)) {
+                return Err(refused("another move of this bookmark takes precedence"));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Opens a tip on `seal`; only the owner and trusted identities may.
+    async fn open_tip(
+        &self,
+        scope: Scope,
+        seal: rocky_core::Commitment,
+        minimum_in_sync: u32,
+    ) -> Result<TipId, Failure> {
+        self.replica
+            .tip_graph(scope)
+            .await?
+            .seal_by_id(seal)
+            .map_err(refused)?;
+        let signer = self.tip_signer(scope).await?;
+        let opening = SignedTipOpening::endorse(
+            TipOpeningStatement {
+                format: TIP_OPENING_FORMAT,
+                scope,
+                seal,
+                minimum_in_sync,
+            },
+            &*signer.identity,
+            &signer.links,
+        )?;
+        let tip = opening.tip()?;
+        self.publish_tips(scope, vec![TipStatement::Opening(opening)], |_| Ok(()))
+            .await?;
+        Ok(tip)
+    }
+
+    /// Creates `name` on `tip`, by default the followed tip.
+    async fn create_bookmark(
+        &self,
+        scope: Scope,
+        name: &str,
+        tip: Option<TipId>,
+    ) -> Result<(), Failure> {
+        let graph = self.replica.tip_graph(scope).await?;
+        if graph.bookmark(name)?.is_some() {
+            return Err(refused("this bookmark exists; move it instead"));
+        }
+        let tip = match tip {
+            Some(tip) => tip,
+            None => self.replica.followed_tip().await,
+        };
+        let target = graph.canonical_tip(tip).map_err(refused)?;
+        let signer = self.tip_signer(scope).await?;
+        let statement = Self::bookmark_move(&signer, scope, name, None, Some(tip))?;
+        self.publish_tips(scope, vec![statement], |graph| {
+            if graph.bookmark(name)? != Some(target) {
+                return Err(refused(
+                    "this bookmark name was used before; choose another name",
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Moves `name` to `to`, or deletes it. Moving backward or sideways
+    /// off an open tip closes that tip in the same batch.
+    async fn move_bookmark(
+        &self,
+        scope: Scope,
+        name: &str,
+        to: Option<TipId>,
+    ) -> Result<(), Failure> {
+        let graph = self.replica.tip_graph(scope).await?;
+        let from = graph
+            .bookmark(name)?
+            .ok_or_else(|| refused("this bookmark does not exist"))?;
+        let target = to
+            .map(|tip| graph.canonical_tip(tip))
+            .transpose()
+            .map_err(refused)?;
+        if target == Some(from) {
+            return Err(refused("the bookmark already points to this tip"));
+        }
+        let signer = self.tip_signer(scope).await?;
+        let mut statements = Vec::new();
+        if let Some(to) = to
+            && !graph.continues_any(from, to)?
+            && graph.seal(from)?.is_none()
+        {
+            let close = self.seal_statement(&signer, scope, from, true).await?;
+            statements.push(TipStatement::Seal(close));
+        }
+        statements.push(Self::bookmark_move(&signer, scope, name, Some(from), to)?);
+        self.publish_tips(scope, statements, |graph| {
+            if graph.bookmark(name)? != target {
+                return Err(refused("another move of this bookmark takes precedence"));
+            }
+            Ok(())
+        })
+        .await
+    }
+}

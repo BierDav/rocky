@@ -97,7 +97,7 @@ impl<A: RowApplication> Inner<A> {
         }
         Ok(())
     }
-    fn scope_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
+    pub(super) fn scope_graph(&self, scope: Scope) -> Result<TipGraph, Error> {
         if scope.app != self.definition.app || !self.domains.contains(&scope.domain) {
             return Err(denied("tip graph belongs to another domain"));
         }

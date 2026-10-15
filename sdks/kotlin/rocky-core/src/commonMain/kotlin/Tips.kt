@@ -1,0 +1,151 @@
+package rocky
+
+import kotlinx.serialization.json.*
+
+/** Sealed history and the application bookmarks that devices follow. IDs are lowercase hex digests. */
+class Tips internal constructor(private val client: RockyClient) {
+    private suspend fun call(action: String, body: JsonObjectBuilder.() -> Unit = {}): JsonObject = client.call(
+        request("tips") {
+            put("action", action)
+            body()
+        },
+    )
+
+    suspend fun status(): TipStatus = TipStatus.decode(call("status"))
+    suspend fun inspect(): TipInspection = TipInspection.decode(call("inspect"))
+
+    /** Continues the followed tip and advances its bookmark, or closes it when [close] is true. */
+    suspend fun seal(close: Boolean = false): TipStatus = TipStatus.decode(call("seal") { put("close", close) })
+
+    /** Opens a separate line on [seal]; [minimumInSync] is the domain's coordinated-log minimum, which a device cannot infer. */
+    suspend fun open(seal: String, minimumInSync: UInt): String {
+        require(minimumInSync > 0u) { "minimumInSync must be positive" }
+        return call("open") {
+            put("seal", seal)
+            put("minimum_in_sync", minimumInSync.toLong())
+        }.getValue("tip").jsonPrimitive.content
+    }
+
+    /** Creates [name] on [tip], or on the followed tip when omitted. */
+    suspend fun createBookmark(name: String, tip: String? = null): TipStatus = TipStatus.decode(
+        call("create") {
+            put("name", name)
+            tip?.let { put("tip", it) }
+        },
+    )
+    suspend fun moveBookmark(name: String, tip: String): TipStatus = TipStatus.decode(
+        call("move") {
+            put("name", name)
+            put("tip", tip)
+        },
+    )
+    suspend fun deleteBookmark(name: String): TipStatus = TipStatus.decode(call("delete") { put("name", name) })
+
+    /** Rebuilds the local workspace at [name]; writes then belong to that bookmark's line. */
+    suspend fun follow(name: String): TipStatus = TipStatus.decode(call("follow") { put("name", name) })
+
+    /** Releases local frames of an unfollowed tip when no retained evidence depends on them. */
+    suspend fun drop(tip: String): TipStatus = TipStatus.decode(call("drop") { put("tip", tip) })
+}
+
+/** A per-author sequence through which a device or seal has seen operations. */
+data class TipAuthorMark(val author: UInt, val sequence: ULong)
+
+/** Evidence below a seal that a future compaction could release; this call does not compact. */
+data class TipEvidence(val operations: ULong, val bytes: ULong)
+
+/** The last frontier this device has seen from a node. */
+data class TipLogFrontier(val author: String, val held: ULong, val applied: ULong)
+
+/** One resource scope, as its JSON encoding, and per-author log positions. */
+data class TipScopeFrontier(val scope: String, val logs: List<TipLogFrontier>)
+data class TipDeviceFrontier(val node: String, val tip: String?, val frontiers: List<TipScopeFrontier>)
+
+data class TipStatus(
+    val bookmark: String?,
+    val tip: String,
+    val operationsSinceSeal: ULong,
+    val evidenceReleasable: TipEvidence?,
+    val devices: List<TipDeviceFrontier>,
+) {
+    internal companion object {
+        fun decode(value: JsonObject) = TipStatus(
+            value.nullableText("bookmark"),
+            value.text("tip"),
+            value.unsigned("operations_since_seal"),
+            (value.getValue("evidence_releasable") as? JsonObject)?.let { TipEvidence(it.unsigned("operations"), it.unsigned("bytes")) },
+            value.objects("devices").map { device ->
+                TipDeviceFrontier(
+                    device.text("node"),
+                    device.nullableText("tip"),
+                    device.objects("frontiers").map { frontier ->
+                        TipScopeFrontier(
+                            frontier.text("scope"),
+                            frontier.objects("logs").map { TipLogFrontier(it.text("author"), it.unsigned("held"), it.unsigned("applied")) },
+                        )
+                    },
+                )
+            },
+        )
+    }
+}
+
+sealed interface TipSealAction {
+    data class Continue(val schema: String) : TipSealAction
+    data object Close : TipSealAction
+}
+
+/** A seal; [canonical] is false for a concurrent seal of the same tip that lost. */
+data class TipSeal(val id: String, val tip: String, val frontier: List<TipAuthorMark>, val action: TipSealAction, val canonical: Boolean)
+data class TipOpening(val id: String, val seal: String, val minimumInSync: UInt)
+data class BookmarkMove(val id: String, val from: String?, val to: String?)
+data class TipBookmark(val name: String, val tip: String?, val moves: List<BookmarkMove>)
+data class TipNode(val node: String, val followedTip: String?, val keptTips: List<String>?, val keptSeals: List<String>?)
+
+/** The complete verified graph and locally known node holdings, for developer inspection. */
+data class TipInspection(
+    val scope: String,
+    val genesis: String,
+    val schema: String,
+    val seals: List<TipSeal>,
+    val openings: List<TipOpening>,
+    val bookmarks: List<TipBookmark>,
+    val nodes: List<TipNode>,
+) {
+    internal companion object {
+        fun decode(value: JsonObject) = TipInspection(
+            value.text("scope"),
+            value.text("genesis"),
+            value.text("schema"),
+            value.objects("seals").map {
+                TipSeal(
+                    it.text("id"),
+                    it.text("tip"),
+                    it.frontier(),
+                    when (val action = it.text("action")) {
+                        "continue" -> TipSealAction.Continue(it.text("schema"))
+                        "close" -> TipSealAction.Close
+                        else -> throw IllegalArgumentException("unknown tip seal action $action")
+                    },
+                    it.getValue("canonical").jsonPrimitive.boolean,
+                )
+            },
+            value.objects("openings").map { TipOpening(it.text("id"), it.text("seal"), it.text("minimum_in_sync").toUInt()) },
+            value.objects("bookmarks").map {
+                TipBookmark(
+                    it.text("name"),
+                    it.nullableText("tip"),
+                    it.objects("moves").map { move -> BookmarkMove(move.text("id"), move.nullableText("from"), move.nullableText("to")) },
+                )
+            },
+            value.objects("nodes").map { TipNode(it.text("node"), it.nullableText("followed_tip"), it.nullableStrings("kept_tips"), it.nullableStrings("kept_seals")) },
+        )
+    }
+}
+
+private fun JsonObject.text(name: String): String = getValue(name).jsonPrimitive.content
+private fun JsonObject.nullableText(name: String): String? = getValue(name).jsonPrimitive.contentOrNull
+private fun JsonObject.unsigned(name: String): ULong = text(name).toULong()
+private fun JsonObject.objects(name: String): List<JsonObject> = getValue(name).jsonArray.map { it.jsonObject }
+private fun JsonObject.nullableStrings(name: String): List<String>? = (getValue(name) as? JsonArray)?.map { it.jsonPrimitive.content }
+private fun JsonObject.frontier(): List<TipAuthorMark> = objects("frontier").map { TipAuthorMark(it.text("author").toUInt(), it.unsigned("sequence")) }

@@ -13,6 +13,8 @@ mod partition;
 mod registry;
 mod shared;
 mod status;
+mod tip_nodes;
+mod tips;
 use crate::{
     Failure,
     domain::Domain,
@@ -821,6 +823,7 @@ impl Node {
                 Ok(json!({"open": self.settings.lock().await.invitation_open(uri)?}))
             }
             "generation" => self.generation().await,
+            "tips" => self.tips(request).await,
             "held_changes" => self.held_changes().await,
             "coordinated" => self.coordinated_status().await,
             "drop_held" => self.drop_held(request).await,

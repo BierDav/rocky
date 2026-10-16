@@ -1,6 +1,8 @@
 # 15. Lazy compaction
 
-Status: proposed; not started.
+Status: proposed; not started. Blocked on the README's open question
+[how members see a final seal](README.md#open-questions); a
+[proposal](#proposal-final-seals) awaits the user's decision.
 Owner: `rocky-secure` finalization, existence bases, checkpoints and
 pruning; `rocky-sdk` maintenance. Depends on
 [phase 14](14-seals-and-bookmarks.md). Follow the
@@ -81,9 +83,86 @@ and the mergeable horizon is gone.
 - Sealing after changes to one table leaves every other table's base,
   observers and sessions untouched.
 - A seal committed in its tip's log is compacted at once. Without a log, a
-  device compacts with one seal left uncompacted, a concurrent seal with a
-  lower digest arrives, and the device ends on it without rebootstrapping;
+  device compacts with one seal left uncompacted, a concurrent seal that
+  wins (higher authority, or among equals the lower digest) arrives, and the
+  device ends on it without rebootstrapping;
   with none left, it rebootstraps from an issuer's checkpoint listed in the
   graph, and without one by replaying frames.
 - Inspection shows each seal's checkpoints with their signers.
 - No horizon code, format or SDK operation remains.
+
+## Proposal: final seals
+
+Today members cannot tell a final seal from one that can still lose. The
+coordinator commits a terminal entry at once, without acknowledgments, and
+signs nothing a device can carry; in-sync nodes' signed requests stay in its
+Raft state. Members receive only the `SignedSeal`, identical whether or not
+it ended the log, and they verify no coordinated entry: trusted nodes check
+`EntryPeers::committed` evidence against the coordinator's `LogHead`.
+
+**Evidence.** After a terminal commits, each trusted node that was in the
+log's in-sync set reads `LogHead::terminal` and signs a terminal
+acknowledgment: the tip's log `(scope, tip)`, the terminal's position and
+running hash, the seal digest and the continuation. A node signs at most one
+per log. It submits it to the coordinator, which keeps the acknowledgments
+with the terminal as it keeps an owner-signed cut. Any trusted node that
+holds enough of them publishes a seal finality record, a new graph statement
+naming the seal and carrying the acknowledgments with their signers'
+certificate chains. A member verifies, with no coordinator call, that every
+signer is a distinct, unrevoked node of an identity holding the domain's
+trusted grant, that each signed the same seal, and that their number reaches
+the line's signed minimum: the opening's `minimum_in_sync`, or for the
+genesis line a minimum the owner signs into the domain's credentials. A seal
+with a verified record is final.
+
+**The owner's seal.** Resolution becomes: a final seal, then the owner's,
+then a trusted identity's, then an issuer's, then the lower digest. The
+coordinator commits one terminal per log and trusted nodes acknowledge only
+the committed one, so two final seals of one tip need trusted nodes to sign
+falsely. That is a fault the owner answers by revocation, which removes
+their acknowledgments and so the finality. An owner seal is admitted as a
+terminal like any other. Phase 19's recovery seal stays the one terminal the
+coordinator commits without the in-sync set; trusted nodes acknowledge it
+lazily as they return, and it becomes final then. An owner seal that arrives
+after another seal ended the log was never committed: publishing it fails
+`sealed`, received it stays in the graph as a losing seal, and the owner
+moves the bookmark off the final seal's continuation instead. Until a
+record arrives, the graph resolves by authority as today, so a device
+compacts such a tip only within its count of seals left uncompacted. Owner seals
+outrank every seal except a final one; phase 19's brief needs that wording.
+
+**Formats.** A new tip statement (finality record) changes the graph's
+statement set, so the link (v7) and replica file (v23) versions move. The
+coordinator's `LogHead::terminal` carries acknowledgments and its Raft store
+(format 8) moves; `rocky-core`'s `LogTerminal` and `DomainLog` gain the
+acknowledgment action. The genesis line's minimum is a new field of the
+owner-signed domain credentials. `SealStatement`, frames and existence
+records do not change.
+
+**Alternative, not proposed.** A coordinator-signed commit would need one
+signature, but would make the coordinator an authority members trust, which
+the domain model avoids.
+
+## Prerequisites checked
+
+Checked against code on 2026-10-16:
+
+- **Seals and the tip graph** hold: `SealStatement` (format 1) and
+  `TipGraph`, persisted in `secure_tip_statements`, now resolved by
+  authority. No statement marks a seal final.
+- **Frames name their tip** (row frame 10, `Extensions.tip`), checked on
+  receipt.
+- **Existence logs name tips** for records (existence record 4,
+  `Statement.tip`). Existence bases name a tip only through the
+  `SignedHorizon` they depend on, which this phase removes; slice 2 must give
+  them a seal.
+- **Checkpoints name tips** (`CheckpointStatement.tip`, checkpoint 13), but
+  not a seal: their frontier is per-author log positions, they still carry
+  the horizon and coordinated cut bindings, and no checkpoint record is a
+  graph statement. Slice 3's work.
+- **Fails: switching to another line's tip needs retained history.**
+  `rebuild_tip_workspace` refuses a device with pruned history or a registry
+  imported from a checkpoint, which includes every SDK issuer device. Slice 3's
+  rebootstrap from a checkpoint at a seal is the remedy; it is recorded as
+  open in [phase 14](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
+- **Fails: no final seal evidence**, the proposal above.

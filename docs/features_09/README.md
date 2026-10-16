@@ -291,6 +291,14 @@ stay and are compacted at seals.
   acknowledgments of the terminal entry, and a rule for an owner seal that
   arrives after it. Settle this before phase 15's first slice.
 
+  Proposed ([details](15-lazy-compaction.md#proposal-final-seals)): trusted
+  nodes sign an acknowledgment of the terminal the coordinator reports
+  committed, and a graph record carrying enough of them makes a seal final.
+  A final seal beats every other seal of its tip, the owner's included; the
+  coordinator commits one terminal per log, so an owner seal is final only
+  when it is that terminal, and loses only when it was never committed. The
+  owner then moves the bookmark instead. Awaiting the user's decision.
+
 ## Agent execution contract
 
 Give an agent this README and one phase brief. Read root `AGENTS.md`,

@@ -60,6 +60,8 @@ pub struct LogHead {
     /// Encoded `rocky_credentials::TerminalAck`s of the terminal entry, one
     /// per trusted node, as the coordinator keeps them; devices verify them.
     pub acknowledgments: Vec<Vec<u8>>,
+    /// The owner closed the domain: the log takes no further write.
+    pub closed: bool,
 }
 /// An owner-signed cut as the coordinator retains it: the encoded signed
 /// record, whose digest is its entry hash, and the owner's credential chain

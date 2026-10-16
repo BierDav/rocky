@@ -101,6 +101,8 @@ pub struct Head {
     pub terminal: Option<LogTerminal>,
     /// Encoded terminal acknowledgments, one per node, in arrival order.
     pub acknowledgments: Vec<Acknowledgment>,
+    /// Set as read: the owner closed the domain, so the log takes no write.
+    pub closed: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Acknowledgment {
@@ -172,6 +174,7 @@ impl Log {
                 cut: None,
                 terminal: None,
                 acknowledgments: Vec::new(),
+                closed: false,
             },
             retries: Vec::new(),
             minute: 0,
@@ -888,6 +891,7 @@ impl Head {
                 .iter()
                 .map(|ack| ack.record.clone())
                 .collect(),
+            closed: self.closed,
         }
     }
 }

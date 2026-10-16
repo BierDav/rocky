@@ -845,7 +845,10 @@ impl Metadata {
         &self,
         log: TipLog,
     ) -> Result<crate::coordinated::Head, CoordinationError> {
-        Ok(self.state.find(log.scope)?.coordinated.head(log.tip))
+        let domain = self.state.find(log.scope)?;
+        let mut head = domain.coordinated.head(log.tip);
+        head.closed = !domain.open();
+        Ok(head)
     }
     fn coordinated(
         &mut self,

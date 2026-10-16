@@ -219,8 +219,12 @@ fn closed_domains_never_take_entries_or_reopen_and_keep_a_marker() {
             .is_err()
         );
     }
-    // Long after closure the marker and its log head remain.
-    assert_eq!(mesh.head(&mut metadata, scope, t + 8 * DAY), head);
+    // Long after closure the marker and its log head remain, marked closed.
+    let closed = crate::coordinated::Head {
+        closed: true,
+        ..head
+    };
+    assert_eq!(mesh.head(&mut metadata, scope, t + 8 * DAY), closed);
     assert_eq!(metadata.retention().domains, 1);
 }
 

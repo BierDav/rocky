@@ -1,4 +1,5 @@
 //! Issuer-declared mergeable cuts; `docs/runtime/mergeable-horizon.md`.
+use crate::existence_base::{ExistenceBase, HorizonCut, HorizonLog};
 use crate::{
     CredentialChain, Endorsement, Error, IdentityProvider, PrivateKey, PublicKey, Signature,
     decode_bounded, denied, encode, signing_bytes,
@@ -9,33 +10,6 @@ use serde::{Deserialize, Serialize};
 pub const HORIZON_FORMAT: u32 = 7;
 pub const HORIZON_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HorizonLog {
-    pub signer: PublicKey,
-    pub sequence: u64,
-    pub head: Commitment,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HorizonCut {
-    pub scope: ResourceScope,
-    pub logs: Vec<HorizonLog>,
-    pub state: Commitment,
-}
-/// Identity sequences survive existence-record pruning, per scope and author.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExistenceIdentity {
-    pub author: u32,
-    pub signer: PublicKey,
-    pub sequence: u32,
-}
-/// Compact live existence state authenticated by the issuer's horizon signature.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExistenceBase {
-    pub scope: ResourceScope,
-    pub rows: u64,
-    pub digest: Commitment,
-    pub identities: Vec<ExistenceIdentity>,
-}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HorizonPeer {
     pub node: crate::PeerId,

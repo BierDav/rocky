@@ -70,7 +70,10 @@ impl NativeSession {
         let ExistenceMessage::Base { attachment } = self.reply::<ExistenceMessage>().await? else {
             return Err(denied("unexpected existence base response"));
         };
-        let Some(attachment) = attachment else {
+        // A peer's own fold at a seal is unsigned: never imported.
+        let Some(attachment) =
+            attachment.filter(|attachment| !matches!(attachment.basis, ExistenceBasis::Local(_)))
+        else {
             return if expected.is_some() {
                 Err(denied("checkpoint existence attachment is unavailable"))
             } else {
@@ -141,7 +144,7 @@ impl NativeSession {
             return Err(denied("unexpected existence base response"));
         };
         if let Some(held) = held {
-            if held.id()? == base.id()? {
+            if held.id()? == base.id()? || held.covers(&base)? {
                 return Ok(true);
             }
             if !held.cut()?.logs.iter().all(|previous| {

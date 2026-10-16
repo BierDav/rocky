@@ -160,6 +160,7 @@ async fn widening_delegations_are_refused_at_every_admitting_boundary() {
                 author_sequence: 0,
                 row_format: crate::wire::ROW_FORMAT,
                 partition: None,
+                existence: 0,
                 tip: rocky_credentials::genesis_tip(f.app().definition().hash()),
                 scope: f.public,
                 generation: rocky_core::KeyEpoch::new(1, &[11; 32]),

@@ -184,6 +184,8 @@ impl<A: RowApplication> Inner<A> {
         let mut witnesses = BTreeMap::new();
         let mut releases = BTreeSet::new();
         let mut previous: BTreeSet<Hash> = dependencies.iter().copied().collect();
+        // Rows behind a finalized horizon that the commit leaves untouched.
+        let mut absent = BTreeSet::new();
         for change in writes.iter().map(|write| &write.change) {
             let held = self
                 .row(scope, self.storage_row(change)?)
@@ -211,6 +213,9 @@ impl<A: RowApplication> Inner<A> {
             };
             if !equal && !(finalized && held.is_none() && change.before.is_some()) {
                 return Err(Error::Conflict);
+            }
+            if finalized && held.is_none() && change.before.is_some() {
+                absent.insert(change.row);
             }
             if change.before.is_none() && finalized {
                 for (hash, known) in self.protection_dependencies(change).await? {
@@ -287,9 +292,23 @@ impl<A: RowApplication> Inner<A> {
                 );
             }
         }
+        let logged = |writes: &[RowWrite]| {
+            writes
+                .iter()
+                .filter(|write| {
+                    write.change.before.is_some() != write.change.after.is_some()
+                        && !absent.contains(&write.change.row)
+                })
+                .count()
+        };
+        let existence = match self.existence_table(scope) {
+            true => logged(writes),
+            false => 0,
+        };
         let frame = author(
             signing_key,
             Extensions {
+                existence: u32::try_from(existence).map_err(|_| denied("mutation quota"))?,
                 author: signer.map(|author| author.number),
                 author_sequence: self
                     .reserve_author_sequence(signing_key.public_key())
@@ -336,6 +355,11 @@ impl<A: RowApplication> Inner<A> {
             })
             .cloned()
             .collect();
+        // The header counts the records signed below; a write the commit
+        // did not apply would leave it wrong.
+        if existence != 0 && logged(&effective) != existence {
+            return Err(denied("a logged creation or deletion did not apply"));
+        }
         Box::pin(self.author_existence(
             scope,
             &effective,

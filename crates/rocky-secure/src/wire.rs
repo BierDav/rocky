@@ -39,10 +39,13 @@ pub(crate) struct Extensions {
     pub row_format: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<rocky_core::PartitionTuple>,
+    /// Existence records the commit signed in this scope's log: a seal's
+    /// holders know from frames alone when they hold every record.
+    pub existence: u32,
 }
 
-/// The current row frame format: the header names its chain by digest.
-pub(crate) const ROW_FORMAT: u8 = 10;
+/// The current row frame format: the header counts its existence records.
+pub(crate) const ROW_FORMAT: u8 = 11;
 /// The refusal of a frame whose credential chain the receiver lacks.
 pub(crate) const INCOMPLETE_FRAME: &str = "incomplete frame: its credential chain is unknown";
 

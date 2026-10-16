@@ -1324,7 +1324,7 @@ async fn horizon_checkpoint_fences_missing_declaration_and_preserves_declaration
             .unwrap()
             .0
     };
-    assert_eq!(identity, "rocky.encrypted-replica.v24");
+    assert_eq!(identity, "rocky.encrypted-replica.v25");
     drop(fresh);
     let reopened = erp.open(&fresh_path, &fresh_node, 3, &TABLES).await;
     assert_eq!(
@@ -2889,3 +2889,5 @@ async fn horizon_old_inserts_stay_dropped_across_successors_and_future_frames_wa
         holder.replica.audit(scope).await.unwrap();
     }
 }
+
+mod seals;

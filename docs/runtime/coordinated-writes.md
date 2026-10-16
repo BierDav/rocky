@@ -187,8 +187,8 @@ The SDK sends entries only over open live links: a trusted node without one
 to a member of the set leaves the set at the deadline. Kotlin uses a coordination service, or attaches `DevelopmentLog` for
 in-process development. A development log loses its ledger at process exit.
 
-The encrypted file identity is `rocky.encrypted-replica.v24` and the live
-link handshake `rocky.link.v8`; entries, catch-up requests and cut counts name
+The encrypted file identity is `rocky.encrypted-replica.v25` and the live
+link handshake `rocky.link.v9`; entries, catch-up requests and cut counts name
 their tip's log. Other versions are refused.
 
 ## Limits

@@ -60,12 +60,49 @@ failed before this phase).
 
 ### Open in slice 1
 
-- Domains with existence-log tables do not finalize; slice 2.
+- Domains with existence-log tables do not finalize; slice 2 lifts this.
 - Scopes pruned under arbitrary-cut checkpoints before the graph cannot
   finalize until a checkpoint at a seal replaces them; slice 3.
-- Partial holders never finalize locally; slice 2's and 3's issuer bases.
 - Change detection is per table, not per partition.
 - `seal_waits` scans every stored header on each maintenance step while a
   seal waits.
 - In a graph domain the SDK's checkpoint-first join finds a checkpoint only
   after a compaction.
+
+## Slice 2: existence logs at seals
+
+See [existence logs](../runtime/lazy-compaction.md#existence-logs). Row frame
+11 counts each commit's existence records; a holder of the scope key refuses
+a frame claiming more than its creations and deletions. Compacting folds the
+records a seal includes into a base at the seal and releases dead rows and
+their records. The SDK signs that fold after `compact` when the device may
+sign tip statements (`SignedExistenceBase`, format 1), and child-only or late
+devices import it through the existing base transfer. The existence base
+types moved out of the horizon credentials. Replica file
+`rocky.encrypted-replica.v25` and link `rocky.link.v9` refuse earlier frames
+and base encodings.
+
+| Gate item | Test and result |
+| --- | --- |
+| Plateau without existence records | `a_holder_folds_the_existence_log_at_a_seal_and_a_child_holder_imports_its_signed_base` (`rocky-secure` `tests::existence::seals`): after two lists, four create/delete cycles and a deleted list, compacting leaves no records and one liveness row, the live list's. The dead ids stay retired |
+| A child-only device imports the issuer's base and resolves the same orphans as a holder of the parent | The same test: C joins after the records were released, imports the owner-signed base in pages of two and shows the same items as A and B; the item of the deleted list stays an orphan. Later records continue every log past the base |
+| A seal waits for the records its frames count | `a_holder_waits_for_every_record_its_frames_count`: a list holder without records reports `missing existence records`; after the records arrive it compacts and keeps none |
+
+An unsigned fold is never offered: `existence_base_offer` returns none until
+it is signed, a peer's fold is never imported, and a pusher skips a peer
+whose base already covers its own.
+
+### Verification, 2026-10-16
+
+- `./scripts/lint`: passed.
+- `./scripts/check`: passed; 167 unit tests and 998 integration tests within
+  their budgets.
+- `cargo test -p rocky-secure -p rocky-credentials -p rocky-sdk`: passed.
+- The Kotlin check and the shopping check were not rerun for this slice.
+
+### Open in slice 2
+
+- The SDK signs folds only in its `compact` action; no SDK test covers a
+  domain with existence logs, since the SDK test schemas declare none.
+- An existence fold at a seal that later loses a race is not rebuilt; with
+  the rows' compaction it waits for slice 3's rebootstrap.

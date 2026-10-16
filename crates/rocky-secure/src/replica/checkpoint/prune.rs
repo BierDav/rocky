@@ -74,7 +74,9 @@ impl<A: RowApplication> EncryptedReplica<A> {
                     transaction!(inner, |inner| {
                         for descriptor in &finalized.statement.bases {
                             let expected = super::super::existence::ExistenceBaseAttachment {
-                                horizon: finalized.clone(),
+                                basis: super::super::existence::ExistenceBasis::Horizon(
+                                    finalized.clone(),
+                                ),
                                 scope: descriptor.scope,
                             };
                             if inner

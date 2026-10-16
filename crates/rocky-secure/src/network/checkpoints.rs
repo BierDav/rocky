@@ -111,7 +111,7 @@ impl NativeSession {
         if let Some(finalized) = &signed.statement.finalized {
             for base in &finalized.statement.bases {
                 let expected = ExistenceBaseAttachment {
-                    horizon: finalized.clone(),
+                    basis: ExistenceBasis::Horizon(finalized.clone()),
                     scope: base.scope,
                 };
                 if !self
@@ -242,7 +242,7 @@ impl NativeSession {
         if let Some(finalized) = &signed.statement.finalized {
             for base in &finalized.statement.bases {
                 let expected = ExistenceBaseAttachment {
-                    horizon: finalized.clone(),
+                    basis: ExistenceBasis::Horizon(finalized.clone()),
                     scope: base.scope,
                 };
                 if !self

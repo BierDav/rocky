@@ -115,9 +115,9 @@ the node's own running hash to `h_c`, checked before any of them applies.
 
 | Format | Identity |
 | --- | --- |
-| Encrypted replica | `rocky.encrypted-replica.v24` |
+| Encrypted replica | `rocky.encrypted-replica.v25` |
 | Checkpoint statement | 10 |
-| Live link | `rocky.link.v8` |
+| Live link | `rocky.link.v9` |
 | Cut statement | `rocky.coordinated-cut.v2`, naming its tip's log |
 | Coordinator store and snapshot | 8 |
 

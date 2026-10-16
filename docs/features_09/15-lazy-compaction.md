@@ -1,7 +1,7 @@
 # 15. Lazy compaction
 
 Status: in progress. The [final-seal proposal](#proposal-final-seals) was
-accepted and is implemented; slice 1 is implemented. See the
+accepted and is implemented; slices 1 and 2 are implemented. See the
 [evidence](15-lazy-compaction-evidence.md) and the
 [guide](../runtime/lazy-compaction.md).
 Owner: `rocky-secure` finalization, existence bases, checkpoints and

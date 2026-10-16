@@ -107,6 +107,17 @@ impl<A: RowApplication> Inner<A> {
         seals.reverse();
         Ok(seals)
     }
+    /// Where `seal` lies on the followed path; none off it.
+    pub(super) fn path_index(
+        &self,
+        domain: Scope,
+        seal: Commitment,
+    ) -> Result<Option<usize>, Error> {
+        Ok(self
+            .path_seals(domain)?
+            .iter()
+            .position(|known| known.id().is_ok_and(|id| id == seal)))
+    }
     async fn finalized(&self, domain: Scope) -> Result<Vec<Finalized>, Error> {
         let records = collect_rows(
             self.conn
@@ -296,16 +307,6 @@ impl<A: RowApplication> Inner<A> {
         previous: Option<&SignedSeal>,
         scopes: &[(ResourceScope, i64)],
     ) -> Result<Option<String>, Error> {
-        if self.typed.as_ref().is_some_and(|typed| {
-            typed
-                .rows
-                .schema()
-                .tables
-                .iter()
-                .any(|table| table.existence_log)
-        }) {
-            return Ok(Some("existence logs are not compacted at seals yet".into()));
-        }
         if self.cut_pending(self.tip_log(domain)).await? {
             return Ok(Some("a cut of the tip's log is rolling back".into()));
         }
@@ -331,6 +332,14 @@ impl<A: RowApplication> Inner<A> {
         let mut held = BTreeMap::<u32, BTreeSet<u64>>::new();
         let mut last = BTreeMap::<(i64, u32), u64>::new();
         let ids: BTreeMap<ResourceScope, i64> = scopes.iter().copied().collect();
+        // Per held logged scope and node: frames' positions and the
+        // existence records each counts.
+        let logged: BTreeSet<ResourceScope> = scopes
+            .iter()
+            .map(|(scope, _)| *scope)
+            .filter(|scope| self.existence_table(*scope))
+            .collect();
+        let mut counted = BTreeMap::<(ResourceScope, u32), BTreeMap<u64, u64>>::new();
         for record in rows(
             &self.conn,
             "SELECT header FROM secure_operations WHERE status<>'pending' UNION ALL SELECT header FROM secure_voids",
@@ -347,6 +356,12 @@ impl<A: RowApplication> Inner<A> {
             }
             let Some(author) = e.author else { continue };
             held.entry(author).or_default().insert(e.author_sequence);
+            if e.existence != 0 && logged.contains(&e.scope) {
+                counted
+                    .entry((e.scope, author))
+                    .or_default()
+                    .insert(e.author_sequence, u64::from(e.existence));
+            }
             if let Some(id) = ids.get(&e.scope) {
                 let mark = last.entry((*id, author)).or_insert(e.author_sequence);
                 *mark = (*mark).max(e.author_sequence);
@@ -376,6 +391,43 @@ impl<A: RowApplication> Inner<A> {
                 {
                     return Ok(Some(format!(
                         "missing frames of author {} through the seal's frontier",
+                        mark.author
+                    )));
+                }
+            }
+        }
+        // Every existence record the frames through the frontier count,
+        // unless a base at this seal or a later one folded them.
+        let at = self.path_index(domain, seal.id().map_err(credential)?)?;
+        for scope in &logged {
+            if let Some(base) = self.existence_base(*scope).await?
+                && let Some(folded) = base.seal()
+                && self.path_index(domain, folded)? >= at
+            {
+                continue;
+            }
+            let records = self.existence_positions(*scope).await?;
+            for mark in &seal.statement.frontier {
+                let from = previous
+                    .and_then(|previous| {
+                        previous
+                            .statement
+                            .frontier
+                            .iter()
+                            .find(|known| known.author == mark.author)
+                    })
+                    .map_or(0, |known| known.sequence.saturating_add(1));
+                if from > mark.sequence {
+                    continue;
+                }
+                let sum = |counts: Option<&BTreeMap<u64, u64>>| -> u64 {
+                    counts.map_or(0, |counts| {
+                        counts.range(from..=mark.sequence).map(|(_, n)| n).sum()
+                    })
+                };
+                if sum(records.get(&mark.author)) < sum(counted.get(&(*scope, mark.author))) {
+                    return Ok(Some(format!(
+                        "missing existence records of author {} through the seal's frontier",
                         mark.author
                     )));
                 }
@@ -911,8 +963,13 @@ impl<A: RowApplication> Inner<A> {
         (target, seal): &(Finalized, SignedSeal),
     ) -> Result<(), Error> {
         for (scope, id) in self.domain_scopes(domain).await? {
+            let logged = self.existence_table(scope);
             transaction!(self, |inner| {
-                inner.compact_scope(scope, id, target, seal).await
+                inner.compact_scope(scope, id, target, seal).await?;
+                if logged {
+                    inner.fold_existence(scope, seal).await?;
+                }
+                Ok(())
             })?;
             let commit = self.commit;
             self.verified_at.insert(id, commit);

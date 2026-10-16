@@ -125,7 +125,9 @@ position is wrong. A gap returns `PendingDependencies` and is not stored.
 
 ## Limits
 
-- Logs keep every record until a [mergeable horizon](mergeable-horizon.md)
+- Logs keep every record until a holder compacts at a seal
+  ([lazy compaction](lazy-compaction.md#existence-logs)) or, without a tip
+  graph, a [mergeable horizon](mergeable-horizon.md)
   seals them into an existence base.
 - Partitioned children may reference an unpartitioned logged parent. Partitioned
   existence logs and references between different partition groups remain deferred.

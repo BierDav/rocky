@@ -64,8 +64,8 @@ pub use coordinated::{
 };
 pub use evict::EvictReport;
 pub use existence::{
-    EXISTENCE_FORMAT, ExistenceBaseAttachment, ExistenceBasePage, ExistenceEvent, ExistencePage,
-    ExistenceRecord, MAX_EXISTENCE_PAGE,
+    EXISTENCE_FORMAT, ExistenceBaseAttachment, ExistenceBasePage, ExistenceBasis, ExistenceEvent,
+    ExistencePage, ExistenceRecord, MAX_EXISTENCE_PAGE,
 };
 pub use generation::{GenerationStatus, GenerationStep, MAX_GENERATIONS, Upgrade};
 pub use held::{CurrentValue, HeldChange, HeldField, HeldKind, HeldRow, SignedVoid};

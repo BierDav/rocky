@@ -322,7 +322,7 @@ fn incompatible(reason: impl Into<String>) -> Error {
     Error::Incompatible(reason.into())
 }
 /// The one encrypted replica file format; files of another are refused.
-pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v24";
+pub(super) const FILE_IDENTITY: &str = "rocky.encrypted-replica.v25";
 /// The file identity of `tip` at `node`.
 pub(super) fn identity(tip: rocky_core::TipId, node: PublicKey) -> Result<Vec<u8>, Error> {
     encode(&(FILE_IDENTITY, tip, node))

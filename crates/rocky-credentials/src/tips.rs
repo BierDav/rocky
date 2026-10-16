@@ -213,6 +213,7 @@ macro_rules! signed_statement {
         }
     };
 }
+pub(crate) use signed_statement;
 signed_statement!(
     SignedSeal,
     SealStatement,
@@ -462,7 +463,7 @@ impl TipGraph {
     pub fn genesis(&self) -> TipId {
         genesis_tip(self.genesis_schema)
     }
-    fn check_scope(&self, scope: Scope) -> Result<(), Error> {
+    pub(crate) fn check_scope(&self, scope: Scope) -> Result<(), Error> {
         if scope != self.scope {
             return Err(denied("tip statement names another domain"));
         }

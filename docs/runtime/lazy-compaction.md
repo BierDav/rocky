@@ -48,6 +48,31 @@ base are released under the usual [retention](retention-holds.md) rules.
 not final can still lose a race. A final seal is compacted at `keep = 0`
 without that risk.
 
+## Existence logs
+
+A replica that holds a logged table's scope compacts its
+[existence logs](existence-logs.md) with the rows. Each row frame counts
+the existence records its commit signed (`Extensions.existence`), and holders
+of the scope key refuse a frame that claims more than its creations and
+deletions. A seal waits until, for every node, the records held between the
+previous seal's mark and the frontier reach what that node's frames count.
+
+Compacting folds every record whose author position the frontier includes
+into a base at the seal: per signer the last folded position and hash,
+per author the highest created identity, and the rows evidenced by only a
+creation or only a deletion. Rows with both are dead at the seal; their
+records and liveness rows are released, and the identity marks keep their
+ids retired. Records beyond the frontier stay and continue each log.
+
+A replica's own fold is never offered to peers. After `compact`, an SDK
+device that may sign tip statements (the owner, a trusted identity or an
+issuer) signs it as a `SignedExistenceBase` naming the seal
+(`EncryptedReplica::unsigned_existence_bases`,
+`install_signed_existence_base`). Devices that hold only a child, or join
+after records were released, fetch that base through the existing base
+transfer: it is verified against the graph and must sit at a seal on their
+followed path. A base at a seal or later already counts as complete.
+
 ## Races
 
 After graph admission, a revocation or a bookmark move, finalized seals off
@@ -59,12 +84,15 @@ frames. That rebootstrap is phase 15's slice 3.
 
 ## Limits
 
-- Domains with [existence logs](existence-logs.md) wait; the next slice
-  compacts their records at seals.
+- A replica holding a child only keeps its records until a signed base
+  arrives; it never folds a log whose frames it cannot count.
+- A creation the frontier excludes whose id is below its author's mark in
+  the base is refused as retired, as under a horizon: an id reserved before
+  a seal and committed after a later one.
 - Scopes pruned under a checkpoint at an arbitrary cut before the graph
   existed wait for a checkpoint at a seal.
-- Replicas that hold part of the domain never finalize locally; issuer
-  checkpoints at seals will serve them.
+- Replicas finalize and compact only the scopes they hold; issuer
+  checkpoints at seals will serve joiners.
 - Change detection is per table, not per partition.
 - A [mergeable horizon](mergeable-horizon.md) is refused in a domain with a
   tip graph.
@@ -75,5 +103,8 @@ frames. That rebootstrap is phase 15's slice 3.
 | Boundary | Current |
 | --- | --- |
 | Encrypted checkpoint | Format 14: names the seal it sits at, if any |
+| Row frame | 11: counts its existence records |
+| Existence base | Format 1, signed `rocky.existence-base.v1` |
+| Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
 
-Row frames, seals and existence records do not change.
+Seals and existence records do not change.

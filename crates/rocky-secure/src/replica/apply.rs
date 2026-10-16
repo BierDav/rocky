@@ -30,6 +30,17 @@ impl<A: RowApplication> Inner<A> {
                 ));
             }
         }
+        let logged = match self.existence_table(scope) {
+            true => writes
+                .iter()
+                .filter(|write| write.change.before.is_some() != write.change.after.is_some())
+                .count(),
+            false => 0,
+        };
+        // Fewer only where the author's rows were absent behind a horizon.
+        if operation.header.extensions.existence as usize > logged {
+            return Err(denied("frame miscounts its existence records"));
+        }
         let current: Vec<RowWrite> = writes
             .iter()
             .filter_map(|write| self.names.current(write, operation.header.timestamp))

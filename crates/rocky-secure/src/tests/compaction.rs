@@ -5,8 +5,8 @@ use super::*;
 use crate::TipStatement;
 use rocky_core::{SqlValue, TipId, TypedRows};
 use rocky_credentials::{
-    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction, SealStatement,
-    SignedBookmarkMove, SignedSeal,
+    AuthorMark, BOOKMARK_MOVE_FORMAT, BookmarkMoveStatement, SEAL_FORMAT, SealAction,
+    SealStatement, SignedBookmarkMove, SignedSeal,
 };
 
 type Replica = EncryptedReplica<TypedRows>;

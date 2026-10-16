@@ -9,6 +9,7 @@ mod cut;
 mod delivery;
 mod discovery;
 mod enroll;
+mod existence_base;
 mod extension;
 mod finality;
 mod group;
@@ -34,6 +35,10 @@ pub use enroll::{
     Admission, Exchange, IdentityAnswer, IdentityRequest, Invitation, PairRequest, RenewRequest,
     Renewal, open_enrollment, seal_enrollment,
 };
+pub use existence_base::{
+    EXISTENCE_BASE_FORMAT, ExistenceBase, ExistenceBaseStatement, ExistenceIdentity, HorizonCut,
+    HorizonLog, MAX_EXISTENCE_BASE_LOGS, SignedExistenceBase,
+};
 pub use extension::{AuthorRange, Extended, Extension, MAX_AUTHOR};
 pub use finality::{
     MAX_FINALITY_ACKS, MAX_FINALITY_BYTES, MAX_TERMINAL_ACK_BYTES, SEAL_FINALITY_FORMAT,
@@ -41,8 +46,7 @@ pub use finality::{
 };
 pub use group::{GROUP_SECRET_LEN, GroupSecretEnvelope, derive_table_key};
 pub use horizon::{
-    ExistenceBase, ExistenceIdentity, HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonCut,
-    HorizonLog, HorizonPeer, HorizonStatement, SignedHorizon,
+    HORIZON_FORMAT, HORIZON_WAIT_SECONDS, HorizonAck, HorizonPeer, HorizonStatement, SignedHorizon,
 };
 pub use identity::{
     CoordinatorControl, ExternalLogin, FileIdentityProvider, Identity, IdentityProvider,

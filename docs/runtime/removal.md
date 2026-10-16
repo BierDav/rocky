@@ -58,7 +58,7 @@ The [projection plan](generations.md#plan-backfill-and-switch) then
 recreates the tables, indexes and constraints of the new schema from the
 stored rows. Stored rows stay a replay of the checkpoint base and the frames
 after it, which the open-time audit checks. File identity
-`rocky.encrypted-replica.v24` (including [held changes](held-changes.md) and
+`rocky.encrypted-replica.v25` (including [held changes](held-changes.md) and
 [coordinated writes](coordinated-writes.md)).
 
 ## Frames and checkpoint pages

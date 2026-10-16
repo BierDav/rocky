@@ -62,7 +62,8 @@ async fn unsupported_replica_and_checkpoint_formats_refuse_before_writes() {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     for version in [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        26,
     ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("replica.sqlite");
@@ -133,7 +134,7 @@ async fn unsupported_frames_leave_operation_projection_and_revision_unchanged() 
     )
     .await
     .unwrap();
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12] {
         let mut operation = frame.operation().unwrap();
         operation.header.extensions.row_format = version;
         operation.header.sign(&node);
@@ -205,6 +206,7 @@ async fn unsupported_payload_formats_refuse_before_custody_writes() {
         author_sequence: 0,
         row_format: crate::wire::ROW_FORMAT,
         partition: None,
+        existence: 0,
     };
     for (envelope_version, body_version, message) in [
         (0, 5, "unsupported creation witness format"),

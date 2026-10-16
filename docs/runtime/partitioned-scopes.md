@@ -257,7 +257,7 @@ SQL authorizer continues to deny protocol tables, DDL and unrelated domains.
 | Definition/descriptor | Definition format 6, descriptor format 5, including partition groups, optional `partition_by` and views; others are refused before installation writes |
 | Group address | Domain, group name and normalized slot values in declaration order under `rocky.partition-group.v1`; at most 1 KiB |
 | Group secret envelope | Version 2, one secret per recipient, bound to manifest, group address, epoch identity and revocation IDs ([0050](../decisions/0050-concurrent-key-epochs.md)) |
-| Frame | Row format 8 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
+| Frame | Row format 11 (`Extensions.row_format`) with the tuple in the signed header and the encryption associated data |
 | Checkpoint | Authenticates the tuple and keeps per-scope identity marks; format 7 has independent optional partition and horizon fields ([encrypted checkpoints](encrypted-checkpoints.md)) |
 | Bundle | Body version 3 ([row moves](row-moves.md)); each opening commits to its frame header and tuple |
 

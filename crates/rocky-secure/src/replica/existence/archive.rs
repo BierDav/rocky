@@ -52,7 +52,7 @@ impl<A: RowApplication> Inner<A> {
             let signed = SignedCheckpoint::from_bytes(bytes)?;
             if let Some(horizon) = signed.statement.finalized {
                 for descriptor in &horizon.statement.bases {
-                    keep.insert(ExistenceBaseAttachment { horizon: horizon.clone(), scope: descriptor.scope }.id()?);
+                    keep.insert(ExistenceBaseAttachment { basis: ExistenceBasis::Horizon(horizon.clone()), scope: descriptor.scope }.id()?);
                 }
             }
         }
@@ -71,7 +71,7 @@ impl<A: RowApplication> Inner<A> {
             for descriptor in &horizon.statement.bases {
                 keep.insert(
                     ExistenceBaseAttachment {
-                        horizon: Box::new(horizon.clone()),
+                        basis: ExistenceBasis::Horizon(Box::new(horizon.clone())),
                         scope: descriptor.scope,
                     }
                     .id()?,

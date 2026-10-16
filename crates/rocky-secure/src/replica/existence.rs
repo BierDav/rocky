@@ -4,8 +4,9 @@
 //! `docs/runtime/existence-logs.md`.
 mod archive;
 mod base;
+mod seal;
 use super::*;
-pub use base::{ExistenceBaseAttachment, ExistenceBasePage};
+pub use base::{ExistenceBaseAttachment, ExistenceBasePage, ExistenceBasis};
 use p2panda_core::Signature;
 use rocky_core::RowIdentity;
 

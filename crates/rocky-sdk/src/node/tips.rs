@@ -66,6 +66,7 @@ impl Node {
                         .ok_or_else(|| refused("keep must be a non-negative number"))?,
                 };
                 let report = self.replica.compact(scope, keep).await?;
+                self.sign_existence_bases(scope).await?;
                 self.observations.touch();
                 let blocked = report
                     .blocked
@@ -360,6 +361,27 @@ impl Node {
 
     /// The owner signs as itself, a trusted identity through its trusted
     /// grant and an issuer through its issuer links.
+    /// Signs this device's own existence folds when it may sign tip
+    /// statements, so devices holding part of the data can fetch them.
+    async fn sign_existence_bases(&self, scope: Scope) -> Result<(), Failure> {
+        let unsigned = self.replica.unsigned_existence_bases(scope).await?;
+        if unsigned.is_empty() {
+            return Ok(());
+        }
+        let Ok(signer) = self.tip_signer(scope).await else {
+            return Ok(());
+        };
+        for statement in unsigned {
+            let signed = rocky_credentials::SignedExistenceBase::endorse(
+                statement,
+                &*signer.identity,
+                &signer.links,
+            )?;
+            self.replica.install_signed_existence_base(signed).await?;
+        }
+        Ok(())
+    }
+
     async fn tip_signer(&self, scope: Scope) -> Result<Signer, Failure> {
         let settings = self.settings.lock().await.clone();
         let identity = settings.identity(&self.vault)?;

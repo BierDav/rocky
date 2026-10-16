@@ -1,37 +1,75 @@
 //! Issuer-authenticated live existence bases and bounded, resumable transfer.
 use super::*;
-use rocky_credentials::{ExistenceBase, ExistenceIdentity, HorizonCut, SignedHorizon};
+use rocky_credentials::{
+    ExistenceBase, ExistenceBaseStatement, ExistenceIdentity, HorizonCut, SignedExistenceBase,
+    SignedHorizon,
+};
 const LIVE: &str = "rocky.existence-base-live.v1";
+
+/// What authenticates an existence base.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExistenceBasis {
+    Horizon(Box<SignedHorizon>),
+    /// This replica's own fold at a seal; never offered to peers.
+    Local(Box<ExistenceBaseStatement>),
+    /// A fold at a seal signed by the owner, a trusted identity or an issuer.
+    Signed(Box<SignedExistenceBase>),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExistenceBaseAttachment {
-    pub horizon: Box<SignedHorizon>,
+    pub basis: ExistenceBasis,
     pub scope: ResourceScope,
 }
 impl ExistenceBaseAttachment {
+    /// The fold at a seal, if this base is one.
+    pub fn statement(&self) -> Option<&ExistenceBaseStatement> {
+        match &self.basis {
+            ExistenceBasis::Horizon(_) => None,
+            ExistenceBasis::Local(statement) => Some(statement),
+            ExistenceBasis::Signed(signed) => Some(&signed.statement),
+        }
+    }
+    /// The seal a fold sits at.
+    pub fn seal(&self) -> Option<Commitment> {
+        self.statement().map(|statement| statement.seal)
+    }
     pub fn descriptor(&self) -> Result<&ExistenceBase, Error> {
-        self.horizon
-            .statement
-            .bases
-            .iter()
-            .find(|base| base.scope == self.scope)
-            .ok_or_else(|| denied("horizon has no authenticated existence base"))
+        match (&self.basis, self.statement()) {
+            (ExistenceBasis::Horizon(horizon), _) => horizon
+                .statement
+                .bases
+                .iter()
+                .find(|base| base.scope == self.scope)
+                .ok_or_else(|| denied("horizon has no authenticated existence base")),
+            (_, Some(statement)) if statement.base.scope == self.scope => Ok(&statement.base),
+            _ => Err(denied("existence base names another scope")),
+        }
     }
     pub fn cut(&self) -> Result<&HorizonCut, Error> {
-        self.horizon
-            .statement
-            .existence
-            .iter()
-            .find(|cut| cut.scope == self.scope)
-            .ok_or_else(|| denied("horizon has no existence cut"))
+        match (&self.basis, self.statement()) {
+            (ExistenceBasis::Horizon(horizon), _) => horizon
+                .statement
+                .existence
+                .iter()
+                .find(|cut| cut.scope == self.scope)
+                .ok_or_else(|| denied("horizon has no existence cut")),
+            (_, Some(statement)) if statement.cut.scope == self.scope => Ok(&statement.cut),
+            _ => Err(denied("existence base names another scope")),
+        }
     }
     pub fn covers(&self, previous: &Self) -> Result<bool, Error> {
         if self.cut()?.logs == previous.cut()?.logs {
             let same = self.descriptor()? == previous.descriptor()?
                 && self.cut()?.state == previous.cut()?.state;
-            let authoritative = self.horizon.statement.scope == self.scope
-                && (previous.horizon.statement.scope != self.scope
-                    || self.horizon.statement.sequence > previous.horizon.statement.sequence);
+            let authoritative = match (&self.basis, &previous.basis) {
+                (ExistenceBasis::Horizon(new), ExistenceBasis::Horizon(old)) => {
+                    new.statement.scope == self.scope
+                        && (old.statement.scope != self.scope
+                            || new.statement.sequence > old.statement.sequence)
+                }
+                _ => false,
+            };
             if !same && !authoritative {
                 return Ok(false);
             }
@@ -56,16 +94,24 @@ impl ExistenceBaseAttachment {
                 })
             }))
     }
+    /// Equal for a local fold and its signed copy.
     pub fn id(&self) -> Result<Commitment, Error> {
-        Ok(rocky_core::commitment(
-            "rocky.existence-base.id.v1",
-            &encode(&(
-                self.horizon.statement.tip,
-                self.horizon.statement.revocations,
-                self.cut()?,
-                self.descriptor()?,
-            ))?,
-        ))
+        match (&self.basis, self.statement()) {
+            (ExistenceBasis::Horizon(horizon), _) => Ok(rocky_core::commitment(
+                "rocky.existence-base.id.v1",
+                &encode(&(
+                    horizon.statement.tip,
+                    horizon.statement.revocations,
+                    self.cut()?,
+                    self.descriptor()?,
+                ))?,
+            )),
+            (_, Some(statement)) => Ok(rocky_core::commitment(
+                "rocky.existence-base.id.v2",
+                &encode(statement)?,
+            )),
+            _ => Err(corrupt()),
+        }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,10 +158,29 @@ impl<A: RowApplication> Inner<A> {
         &self,
         base: &ExistenceBaseAttachment,
     ) -> Result<(), Error> {
-        base.horizon
-            .verify(self.config.publisher)
-            .map_err(credential)?;
-        self.admits(self.manifest_of_tip(base.horizon.statement.tip)?)?;
+        let tip = match &base.basis {
+            ExistenceBasis::Horizon(horizon) => {
+                horizon.verify(self.config.publisher).map_err(credential)?;
+                horizon.statement.tip
+            }
+            ExistenceBasis::Local(_) => {
+                return Err(denied("a local existence base is never imported"));
+            }
+            ExistenceBasis::Signed(signed) => {
+                let graph = self.graph_for(base.scope.domain)?;
+                signed
+                    .verify(self.config.publisher, graph)
+                    .map_err(credential)?;
+                // Only a seal the followed tip's state passes through.
+                let path = self.path_seals(base.scope.domain)?;
+                let seal = path
+                    .iter()
+                    .find(|seal| seal.id().is_ok_and(|id| id == signed.statement.seal))
+                    .ok_or_else(|| denied("existence base of a seal off the followed path"))?;
+                seal.statement.tip
+            }
+        };
+        self.admits(self.manifest_of_tip(tip)?)?;
         if !self.existence_table(base.scope) {
             return Err(denied("existence base context is not admitted"));
         }
@@ -302,7 +367,7 @@ impl<A: RowApplication> Inner<A> {
     ) -> Result<(), Error> {
         for cut in &horizon.statement.existence {
             let attachment = ExistenceBaseAttachment {
-                horizon: Box::new(horizon.clone()),
+                basis: ExistenceBasis::Horizon(Box::new(horizon.clone())),
                 scope: cut.scope,
             };
             self.verify_existence_base(&attachment)?;
@@ -387,7 +452,10 @@ impl<A: RowApplication> EncryptedReplica<A> {
     ) -> Result<Option<ExistenceBaseAttachment>, Error> {
         let mut inner = self.inner.lock().await;
         inner.authorize_domain_peer(peer, credentials, scope)?;
-        let base = inner.existence_base(scope).await?;
+        let base = inner
+            .existence_base(scope)
+            .await?
+            .filter(|base| !matches!(base.basis, ExistenceBasis::Local(_)));
         inner.flush()?;
         Ok(base)
     }

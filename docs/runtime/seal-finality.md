@@ -65,7 +65,7 @@ Inspection reports `final` for each seal and the genesis line's minimum.
 | Finality record | Format 1, at most 32 acknowledgments ordered by signer |
 | Genesis line statement | Format 1, owner-signed `rocky.genesis-line.v1` |
 | Coordinator store | Format 9: ended heads keep their acknowledgments |
-| Live link / replica file | `rocky.link.v8` / `rocky.encrypted-replica.v24` |
+| Live link / replica file | `rocky.link.v9` / `rocky.encrypted-replica.v25` |
 
 Seals, frames and existence records do not change.
 

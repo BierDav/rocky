@@ -6,8 +6,10 @@ implemented, with [accepted limitations](#accepted-limitations) and
 evidence records its verification. Phase 10 is partial: collection and owner-signed
 cuts work in `rocky-coordinator` and `rocky-secure`, without the SDK, Kotlin
 API or guides ([evidence](10-stuck-recovery-evidence.md));
-[phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phase 12 is
-and 18 are skipped. Phase 14 is in progress. Phases 14–17, 19 and 20 replace
+[phase 19](19-recovery-as-a-bookmark-move.md) replaces its cuts. Phases 12
+and 18 are skipped. Phase 14 is in progress: all slices are implemented, and
+[two gate gaps remain](14-seals-and-bookmarks-evidence.md#what-remains-before-phase-14-is-implemented).
+Phases 14–17, 19 and 20 replace
 generations' transitions, the mergeable horizon and recovery cuts with
 [sealed forks](#generations-as-sealed-forks).
 [features_08](../features_08/README.md) is history, not a competing next-work

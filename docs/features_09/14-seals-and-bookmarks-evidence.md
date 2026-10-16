@@ -406,21 +406,26 @@ and E2E were not run on the merge.
 
 ### Open after the merge
 
-- SDK seal and move calls wrap every replica error as `rejected`, not
-  retryable: a seal the coordinator did not confirm is reported `rejected`
-  instead of `coordinator_unavailable`, and one another node ended first
-  loses its `sealed` code. Cut refusals have the same mapping gap.
-- No SDK or Kotlin test seals or moves a bookmark with a coordinated log;
-  lane L's gate tests call `rocky-secure` directly.
-- The SDK cannot grant a trusted identity, so through it only the owner
-  opens tips and moves bookmarks backwards or sideways; the gate's trusted
-  node branch and rollback are proven in `rocky-secure` only.
-- The e2e `a_migration_of_100000_rows_converges_on_every_member` fails alone
-  ("the member did not converge" within 64 syncs) on the merge and at
-  `znpwrnrx`, and passes at `xlsrtkrk`: lane S wave 1 regressed it. The test
-  uses an explicit generation upgrade without a tip graph.
-- `devices_never_online_together_converge_via_keyless_custody` remains a
-  load-dependent flake.
+Each item as of the [completion gate rerun](#completion-gate-rerun):
+
+- Resolved by `qrywyunt`: SDK tips calls keep the replica's `sealed` (not
+  retryable) and `coordinator_unavailable` (retryable) codes and cut refusal
+  codes; the [SDK contract](../runtime/sdk-contract.md) lists them.
+- Resolved by `kvmvuxry`: `rocky-sdk --test tips` `coordinated::` seals with
+  a coordinated log configured: one ends its tip's log, one loses to another
+  node's seal and fails `sealed`, and with the coordinator unreachable seals
+  and a backward move fail `coordinator_unavailable`, publish nothing and
+  succeed once it answers. The JSON contract did not change, so no Kotlin test
+  was added; Kotlin pins the codes since `qrywyunt`.
+- Resolved by `nkvnxwty`: the owner grants, a device installs and the owner
+  revokes a trusted grant through the SDK, JSON and Kotlin; `trusted::` tests
+  prove the gate's branch and rollback through the SDK.
+- Resolved by `wutvrxtz`: without a tip graph, frames of the previous
+  generation stamped before an explicit switch belong to the workspace, so an
+  issuer's migration bundles apply and the member converges. The e2e test
+  passed alone in 477 s on the closing stack.
+- Open: `devices_never_online_together_converge_via_keyless_custody` remains a
+  load-dependent flake; it did not fail in this stack's `./scripts/check` runs.
 
 ## Slice 7: resolution by authority
 
@@ -467,3 +472,48 @@ checkpoint is [phase 15](15-lazy-compaction.md)'s rebootstrap.
 checks in 148.81 s against the 300 s budget. The two SDK race tests take
 1.22 s and 1.81 s alone against the 2 s budget. `sdks/kotlin/gradlew -p
 sdks/kotlin check` passed.
+
+## Completion gate rerun
+
+On 2026-10-16, on `lmwqtytp` (slice 7):
+
+| Gate item | Result |
+| --- | --- |
+| Adopting a seal changes no row, 10 and 10,000 rows | passes: `tests::tips::adopting_a_seal_changes_no_row_and_writes_the_same_metadata_with_ten_or_ten_thousand_rows` |
+| Offline across two `continue` seals; across a `close`, held everywhere and one re-authoring converges | passes: `offline_writes_cross_two_continue_seals_without_changing_their_author`, `offline_across_close_is_held_and_relayed_unchanged_by_every_holder_and_reauthoring_converges` |
+| Two issuers seal one tip at once | passes: `concurrent_issuer_seals_choose_the_lower_continuation_on_every_device` and the slice 7 test |
+| An issuer's forward move against the owner's backward move; `main/1`; revoking an issuer whose seal won | passes in `rocky-secure` with issuers and through the SDK with trusted identities; **fails through the SDK with an issuer device**, which cannot switch to the owner's tip (below) |
+| A trusted node opens `dev` on `main`'s latest seal; devices on `main` get none of its frames; one returns to `main` and its writes apply | passes through the SDK: `trusted::a_trusted_identity_opens_a_branch_that_devices_on_main_never_see`; in `rocky-secure`: `two_branch_devices_sync_without_main_and_switching_back_drops_branch_frames` |
+| A trusted node moves `main` back; abandoned writes held; same rows everywhere | passes through the SDK: `trusted::a_trusted_identity_moves_main_back_and_the_abandoned_writes_are_held`; same limit for issuer devices |
+| Coordinated writes on `dev` and across a seal | passes: lane L's tests in `tests::coordinated::{seals,tips}` |
+
+`cargo test -p rocky-secure --lib` over `tests::tips`,
+`tests::coordinated::seals` and `tests::coordinated::tips` passed 23 tests;
+`rocky-sdk --test tips` 15, `rocky-credentials --test tips` 8 and
+`rocky-coordinator` `tip_tests` 5. The e2e
+`a_migration_of_100000_rows_converges_on_every_member` passed alone in 477 s,
+within the e2e tier's 10-minute test limit. `./scripts/lint`, `./scripts/check`
+and `sdks/kotlin/gradlew -p sdks/kotlin check` passed (see slice 7).
+
+### What remains before phase 14 is implemented
+
+- **Issuer devices cannot leave their line.** An SDK device enrolled as an
+  issuer imports the domain registry from a checkpoint, so
+  `rebuild_tip_workspace` refuses every switch to another line's tip
+  ("switching tips needs retained history or a target checkpoint"). Graph
+  admission and the switch commit together, so its link fails and it keeps
+  the losing tip. A device past a retention window has the same limit. Every
+  backward or sideways move, and a revocation that changes the winner, leaves
+  such devices behind. Rebuilding at a seal from a checkpoint is
+  [phase 15](15-lazy-compaction.md)'s rebootstrap; until then, the fix is to
+  import a target checkpoint during the switch or to give issuers retained
+  history.
+- **The shopping example's `SchemaUpgradeTest` fails.**
+  `./examples/shoppinglist-app/check`, after `publishToMavenLocal`, fails
+  `a trusted device migrates version 6 and a version 6 member keeps syncing`:
+  the member's database stays at version 6 (`current`, not `behind`), because
+  slice 2 removed adoption on discovery. Phase 17 makes a schema change a
+  seal; until then the example, and the
+  [generations guide](../runtime/generations.md)'s claim about it, describe
+  behavior this phase removed. The other shopping tests passed.
+- The custody flake above.
